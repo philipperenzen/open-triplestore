@@ -119,7 +119,7 @@ nothing. No two datasets share inferred triples; `mode: off` clears the graph.
 Queries opt in per request:
 
 ```
-GET /sparql?query=…&entailment_dataset=<id>            # the configured regime
+GET /sparql?query=…&entailment_dataset=<id>            # the configured regime, else the stored rules' graph
 GET /sparql?query=…&entailment_dataset=<id>&entailment=owl2-rl
 POST /sparql  (application/sparql-query with the same query parameters,
                or application/x-www-form-urlencoded fields)
@@ -142,9 +142,51 @@ so after a write an `owl2-dl` dataset is not re-materialised inside the write.
 A background run starts once no write has arrived for `OTS_DL_DEBOUNCE_MS`
 (default 2000), and writes during a run queue one more. The entailment graph
 is therefore eventually consistent: `status` shows `queued` or `running` until
-the run catches up. A `PUT` of the setting still runs at once. The global `?entailment=<regime>` (the shared
+the run catches up. A `PUT` of the setting still runs at once. The record also carries the
+dataset's SWRL rules: rules stored with a dataset always run with it, joining
+the regime's fixed point (see
+[Rules stored with a dataset](#rules-stored-with-a-dataset)). The global `?entailment=<regime>` (the shared
 `urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
 keeps working unchanged.
+
+### The `skos` regime
+
+`{"regime": "skos"}` is SKOS-aware inferencing: the OWL 2 RL rules run over
+the dataset's conformance layer with the SKOS RDF schema (the W3C file,
+bundled as `vocab/skos.ttl` and loaded into `urn:system:entailment:skos-premise`)
+as an extra premise. The dataset's entailment graph `urn:entailment:skos:<id>`
+then holds what the SKOS data model implies for the dataset's concepts:
+
+- `skos:narrower` for every `skos:broader` (and back), the same for
+  `skos:broadMatch` / `skos:narrowMatch` and `skos:topConceptOf` /
+  `skos:hasTopConcept`;
+- `skos:broaderTransitive` / `skos:narrowerTransitive` closures of the
+  hierarchy;
+- the symmetric `skos:related`, `skos:relatedMatch`, `skos:closeMatch` and
+  `skos:exactMatch`, and `skos:exactMatch`'s transitivity;
+- the super-properties: `rdfs:label` for every `skos:prefLabel`,
+  `skos:altLabel` and `skos:hiddenLabel`, `skos:semanticRelation`,
+  `skos:mappingRelation`, `skos:note`, `skos:inScheme`.
+
+What the schema implies about itself (`skos:broader rdfs:subPropertyOf
+skos:semanticRelation` and the like) is true of every SKOS dataset, so it is
+pruned from the dataset's graph. Query it like any other regime:
+
+```
+GET /sparql?query=…&entailment_dataset=<id>
+```
+
+The integrity conditions of the SKOS Reference are checked by the built-in
+**SKOS integrity** shape graph (`urn:system:shapes:skos-integrity`, in the
+SHACL Library): S9 and S37 (concept schemes, concepts and collections are
+disjoint), S13 (`skos:prefLabel`, `skos:altLabel` and `skos:hiddenLabel` are
+pairwise disjoint), S14 (one `skos:prefLabel` per language tag; two untagged
+ones count as a clash too), S27 (`skos:related` is disjoint with
+`skos:broaderTransitive`), S36 (every item of a `skos:memberList` is a
+`skos:member`) and S46 (`skos:exactMatch` is disjoint with `skos:broadMatch`
+and `skos:relatedMatch`). The checks follow inverse and symmetric forms
+themselves, so they hold without materialising first; select the shape graph
+in a validation pipeline, or bind it to the dataset, to use it as a profile.
 
 ## Identity policy — what happens with `owl:sameAs`
 
@@ -190,8 +232,10 @@ service"`; a BIM delivery, in the same dataset's linkset graph, says
 
 **Where it is set.** Per organisation (every dataset the organisation owns
 inherits it) and per dataset (overrides the organisation's setting); a dataset
-with neither uses the built-in default. Everything an organisation or dataset
-administrator needs is in the settings endpoints:
+with neither uses the built-in default. In the web UI it is the *Identity
+policy (owl:sameAs)* card on the dataset page (dataset editors change it) and
+on the organisation page (organisation admins change it; members see it). The
+same settings endpoints serve scripts:
 
 ```bash
 # What applies to a dataset, and why (setting on the dataset, its organisation, or the default)
@@ -216,13 +260,41 @@ reads whatever graphs it is given.
 
 ## SWRL rules
 
-Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`.
+Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`. [SWRL Rules](/docs/swrl) has the full reference: every atom, the §8 built-ins and their binding modes, data ranges, class expressions and the semantics.
 
-Rules are given as `"format": "text"` (`http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)`; absolute IRIs, no built-ins) or `"format": "xml"` (OWL/XML `DLSafeRule` elements, as written by the OWL API and Protégé). Derived triples go to `target_graph`, an absolute IRI, or to the default graph when it is omitted. Every rule is checked before any runs, and one the server cannot run as written refuses the whole request with `400`, so nothing is written:
+Rules come in six syntaxes, chosen with `format`:
 
-- an element the OWL/XML reader does not understand: class-expression atoms, `DataRangeAtom` and prefixed names are not supported yet;
-- an unsafe rule: a head variable the body does not bind, or a built-in variable only a built-in mentions (built-ins check values but cannot bind them);
-- a built-in in the head, or one outside the supported `swrlb:` comparisons, arithmetic, `stringConcat`, `contains` and `matches`;
+| `format` | Syntax | Notes |
+|---|---|---|
+| `text` (default) | `http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)` | Absolute IRIs only; no built-ins, data ranges or class expressions. |
+| `xml` (or `owlxml`) | OWL/XML `DLSafeRule`, as the OWL API and Protégé write it | `Prefix` declarations, `abbreviatedIRI`, `xml:base`, every `Literal` form. |
+| `rdf` | The SWRL RDF syntax (`swrl:Imp`, `swrl:body`/`swrl:head` lists) | Any RDF serialisation: `rdf_format` is `turtle` (default), `ntriples`, `nquads`, `trig`, `rdfxml`, `jsonld`, `n3` or a media type. `base_iri` resolves relative IRIs. |
+| `functional` | OWL 2 functional-syntax `DLSafeRule`, inside an `Ontology(…)` or on its own | `Prefix(…)` declarations; other axioms are skipped. |
+| `swrlapi` | The SWRLAPI human-readable syntax: `ex:Person(?p) ^ swrlb:greaterThan(?age, 17) -> ex:Adult(?p)` | Prefixes from the request's `prefixes` (`""` is the default prefix, for bare names), then the server's prefix registry. |
+| `ruleml` | The SWRL §4 XML concrete syntax (`ruleml:imp`, `swrlx:*Atom`) | DTD entities such as `&swrlb;` are not expanded: write full IRIs. |
+
+The text form and the SWRLAPI syntax have no property declarations, so a property atom whose second argument is a variable matches individuals and literals alike. A literal there makes it a data property atom, and an individual an object property atom.
+
+Rule bodies read the unnamed default graph, unless the request names a `dataset`, `source_graphs`, or both. Then they read those graphs, with the read checks of `/api/reasoning/materialize`: only the dataset graphs the caller may read, and every explicit graph must be readable. Derived triples go to `target_graph`, an absolute IRI the caller may write. Without one, a dataset run writes to the dataset's inference graph, which only its writers may fill, and any other run writes to the default graph. That inference graph is rebuilt after writes to the dataset, so a one-off run's results last until the next write; to keep a rule, store it with the dataset (below).
+
+Every rule is checked before any runs, and one the server cannot run as written refuses the whole request with `400`, so nothing is written:
+
+- an element or atom the reader does not understand, or an anonymous individual;
+- an unsafe rule: a head variable that occurs nowhere in the body;
+- a built-in in the head, a built-in outside the `swrlb:` built-ins of SWRL §8 (all of which are supported), or one whose unbound arguments have infinitely many solutions (`swrlb:add(?z, ?x, ?y)` with two unbound operands);
+- a data range over a datatype the server does not know, or in the head;
+- a class-expression atom without a `regime` to compute its members;
 - a literal where an individual belongs, or the other way round.
 
-The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), and `converged` with its `stop_reason`: `fixpoint`, `max_iterations` or `timeout`. Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.
+Built-ins bind variables: `swrlb:add(?next, ?age, 1)` computes `?next`, constructors such as `swrlb:dateTime` split a value into its components, and `swrlb:tokenize` or `swrlb:member` bind one value per solution. A `regime` field runs the rules and that regime to one joint fixed point in the target graph; class-expression atoms need it, since the regime materialises who belongs to the expression.
+
+The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), `converged` with its `stop_reason` (`fixpoint`, `max_iterations` or `timeout`), `target_graph`, and `sources`, the graphs rule bodies read (`null` for the default graph); with a `regime`, also `rounds` and `regime_triples`. Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.
+
+### Rules stored with a dataset
+
+`swrl:Imp` rules in the SWRL RDF syntax that a dataset keeps always run. They are read from the dataset's `entailment`- and `model`-role graphs and from the graphs of the model version it conforms to. They read the same reasoning sources as the dataset's regime, and they re-run after every write to one of the dataset's graphs, the rule graphs included:
+
+- **The dataset has a regime in `materialize` mode.** The rules and the regime run to one joint fixed point in the regime's graph (`urn:entailment:<regime>:<dataset>`). Each sees what the other derives.
+- **It has none.** The rules run on their own into `urn:entailment:swrl:<dataset>`.
+
+Either graph is the dataset's inference graph, which `?entailment_dataset=<id>` adds to a query. `GET /api/datasets/{id}/entailment` reports it as `inference_graph`, along with `rules`: the graphs read, the number of rules (or why they cannot be read), and the last run (`rounds`, `triples_inferred`, `converged`). The rule-reading needs the `swrl` feature.

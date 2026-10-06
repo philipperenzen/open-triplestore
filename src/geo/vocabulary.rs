@@ -17,6 +17,10 @@ pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
 /// GeoJSON literal datatype IRI (GeoSPARQL 1.1; an RFC 7946 geometry object).
 pub const GEOJSON_LITERAL: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
 
+/// KML literal datatype IRI (GeoSPARQL 1.1; an OGC KML 2.2 geometry element,
+/// always CRS84).
+pub const KML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#kmlLiteral";
+
 // ─── Geometry serialisation properties ───
 
 /// `geo:asWKT`
@@ -25,18 +29,22 @@ pub const AS_WKT_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asWKT";
 pub const AS_GML_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGML";
 /// `geo:asGeoJSON`
 pub const AS_GEOJSON_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGeoJSON";
+/// `geo:asKML`
+pub const AS_KML_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asKML";
+
+// ─── Geometry type vocabularies (`geof:geometryType` results) ───
+
+/// The Simple Features geometry class namespace (`sf:Point`, `sf:Polygon`, …).
+pub const SF_NS: &str = "http://www.opengis.net/ont/sf#";
+/// The GML geometry class namespace (`gml:Surface`, `gml:Envelope`, …).
+pub const GML_NS: &str = "http://www.opengis.net/ont/gml#";
 
 // ─── 3D / volumetric datatypes (additive; spec §3.3) ───
-// Canonical datatype IRIs the platform defines and advertises; emitted by the
-// CityJSON converter (which inlines the same string) and consumed by external
-// clients, so they are allow(dead_code) for internal-usage analysis.
+// The datatype IRI the platform defines for embedded CityJSON; the CityJSON
+// converter emits it.
 
 /// A CityJSON geometry object embedded as a JSON literal (loss-free 3D BAG).
-#[allow(dead_code)]
 pub const CITYJSON_LITERAL: &str = "https://open-triplestore.org/def/cityjsonGeometryLiteral";
-/// A base64 glTF/GLB fragment or a URI to one (render-ready).
-#[allow(dead_code)]
-pub const GLTF_LITERAL: &str = "https://open-triplestore.org/def/gltfGeometryLiteral";
 
 // ─── ots-geof: 3D function IRIs (additive; spec §3.4) ───
 // Namespace https://open-triplestore.org/def/function/geo3d/ — never collides
@@ -130,6 +138,10 @@ pub const ENVELOPE: &str = "http://www.opengis.net/def/function/geosparql/envelo
 pub const INTERSECTION: &str = "http://www.opengis.net/def/function/geosparql/intersection";
 pub const SYM_DIFFERENCE: &str = "http://www.opengis.net/def/function/geosparql/symDifference";
 pub const UNION: &str = "http://www.opengis.net/def/function/geosparql/union";
+pub const BOUNDING_CIRCLE: &str = "http://www.opengis.net/def/function/geosparql/boundingCircle";
+pub const CENTROID: &str = "http://www.opengis.net/def/function/geosparql/centroid";
+pub const CONCAVE_HULL: &str = "http://www.opengis.net/def/function/geosparql/concaveHull";
+pub const GEOMETRY_N: &str = "http://www.opengis.net/def/function/geosparql/geometryN";
 
 // ─── Scalar function IRIs ───
 
@@ -138,6 +150,28 @@ pub const GET_SRID: &str = "http://www.opengis.net/def/function/geosparql/getSRI
 pub const AREA: &str = "http://www.opengis.net/def/function/geosparql/area";
 pub const RELATE: &str = "http://www.opengis.net/def/function/geosparql/relate";
 pub const TRANSFORM: &str = "http://www.opengis.net/def/function/geosparql/transform";
+pub const LENGTH: &str = "http://www.opengis.net/def/function/geosparql/length";
+pub const PERIMETER: &str = "http://www.opengis.net/def/function/geosparql/perimeter";
+
+// ─── Geometry property function IRIs (GeoSPARQL 1.1) ───
+
+pub const COORDINATE_DIMENSION: &str =
+    "http://www.opengis.net/def/function/geosparql/coordinateDimension";
+pub const DIMENSION: &str = "http://www.opengis.net/def/function/geosparql/dimension";
+pub const SPATIAL_DIMENSION: &str =
+    "http://www.opengis.net/def/function/geosparql/spatialDimension";
+pub const GEOMETRY_TYPE: &str = "http://www.opengis.net/def/function/geosparql/geometryType";
+pub const IS_3D: &str = "http://www.opengis.net/def/function/geosparql/is3D";
+pub const IS_EMPTY: &str = "http://www.opengis.net/def/function/geosparql/isEmpty";
+pub const IS_MEASURED: &str = "http://www.opengis.net/def/function/geosparql/isMeasured";
+pub const IS_SIMPLE: &str = "http://www.opengis.net/def/function/geosparql/isSimple";
+pub const NUM_GEOMETRIES: &str = "http://www.opengis.net/def/function/geosparql/numGeometries";
+pub const MAX_X: &str = "http://www.opengis.net/def/function/geosparql/maxX";
+pub const MAX_Y: &str = "http://www.opengis.net/def/function/geosparql/maxY";
+pub const MAX_Z: &str = "http://www.opengis.net/def/function/geosparql/maxZ";
+pub const MIN_X: &str = "http://www.opengis.net/def/function/geosparql/minX";
+pub const MIN_Y: &str = "http://www.opengis.net/def/function/geosparql/minY";
+pub const MIN_Z: &str = "http://www.opengis.net/def/function/geosparql/minZ";
 
 // ─── Metric function IRIs (GeoSPARQL 1.1): metres on the WGS84 ellipsoid ───
 
@@ -150,10 +184,22 @@ pub const METRIC_BUFFER: &str = "http://www.opengis.net/def/function/geosparql/m
 // ─── Serialisation function IRIs ───
 
 pub const AS_GEOJSON: &str = "http://www.opengis.net/def/function/geosparql/asGeoJSON";
+pub const AS_WKT: &str = "http://www.opengis.net/def/function/geosparql/asWKT";
+pub const AS_GML: &str = "http://www.opengis.net/def/function/geosparql/asGML";
+pub const AS_KML: &str = "http://www.opengis.net/def/function/geosparql/asKML";
 
 // ─── Aggregate function IRIs (GeoSPARQL 1.1) ───
 
 pub const AGG_UNION: &str = "http://www.opengis.net/def/function/geosparql/aggUnion";
+pub const AGG_BOUNDING_BOX: &str = "http://www.opengis.net/def/function/geosparql/aggBoundingBox";
+pub const AGG_BOUNDING_CIRCLE: &str =
+    "http://www.opengis.net/def/function/geosparql/aggBoundingCircle";
+pub const AGG_CENTROID: &str = "http://www.opengis.net/def/function/geosparql/aggCentroid";
+pub const AGG_CONCAVE_HULL: &str = "http://www.opengis.net/def/function/geosparql/aggConcaveHull";
+pub const AGG_CONVEX_HULL: &str = "http://www.opengis.net/def/function/geosparql/aggConvexHull";
+
+/// The `geof:` function namespace, which every IRI above but the 3D ones shares.
+pub const GEOF_NS: &str = "http://www.opengis.net/def/function/geosparql/";
 
 // ─── Spatial Measure Units ───
 

@@ -34,11 +34,18 @@
 //! level is nothing but a sub-select that does not project the variable — a
 //! query SHACL forbids under pre-binding — where the seed binds it at the top
 //! level and the rewrite alone left it unbound there.
+//!
+//! A value that is no blank node is bound through `VALUES` instead of the
+//! function ([`prepare`] swaps the one for the other): a custom function's
+//! result goes through the evaluator's *value* of the term, so a literal the
+//! store keeps as written (`"05"^^xsd:integer`, `"5"^^xsd:int`) would come
+//! back as `5` and no longer join with the seed or the stored term — a
+//! constraint on such a focus node would find no solution and pass.
 
 use oxigraph::model::{NamedNode, Term};
 use oxigraph::sparql::{PreparedSparqlQuery, SparqlEvaluator};
 use spargebra::algebra::{Expression, Function, GraphPattern};
-use spargebra::term::{NamedNodePattern, Variable};
+use spargebra::term::{GroundTerm, NamedNodePattern, Variable};
 use spargebra::Query;
 
 /// The namespace of the functions that return pre-bound values.
@@ -111,9 +118,27 @@ pub fn prepare(
     query: Query,
     bindings: &[(&str, &Term)],
 ) -> Result<PreparedSparqlQuery, String> {
+    let mut query = query;
     for (name, term) in bindings {
-        let term = (*term).clone();
-        evaluator = evaluator.with_custom_function(function(name), move |_| Some(term.clone()));
+        match GroundTerm::try_from((*term).clone()) {
+            Ok(ground) => {
+                let variable =
+                    Variable::new(*name).map_err(|e| format!("pre-bound variable ${name}: {e}"))?;
+                let f = function(name);
+                let pattern = match &mut query {
+                    Query::Select { pattern, .. }
+                    | Query::Construct { pattern, .. }
+                    | Query::Describe { pattern, .. }
+                    | Query::Ask { pattern, .. } => pattern,
+                };
+                bind_by_values(pattern, &f, &variable, &ground);
+            }
+            Err(_) => {
+                let term = (*term).clone();
+                evaluator =
+                    evaluator.with_custom_function(function(name), move |_| Some(term.clone()));
+            }
+        }
     }
     let mut prepared = evaluator.for_query(query);
     for (name, term) in bindings {
@@ -122,6 +147,146 @@ pub fn prepare(
         prepared = prepared.substitute_variable(variable, (*term).clone());
     }
     Ok(prepared)
+}
+
+/// Replace every `BIND(f() AS ?var)` the [`rewrite`] put in `pattern` with a
+/// join of what it extends and `VALUES ?var { value }`, which binds the term
+/// exactly as given (see the module docs).
+fn bind_by_values(pattern: &mut GraphPattern, f: &NamedNode, var: &Variable, value: &GroundTerm) {
+    let is_table = matches!(
+        pattern,
+        GraphPattern::Extend { variable, expression: Expression::FunctionCall(Function::Custom(g), args), .. }
+            if variable == var && g == f && args.is_empty()
+    );
+    if is_table {
+        let GraphPattern::Extend { inner, .. } = std::mem::replace(
+            pattern,
+            GraphPattern::Bgp {
+                patterns: Vec::new(),
+            },
+        ) else {
+            unreachable!("checked above")
+        };
+        let mut inner = *inner;
+        bind_by_values(&mut inner, f, var, value);
+        *pattern = GraphPattern::Join {
+            left: Box::new(inner),
+            right: Box::new(GraphPattern::Values {
+                variables: vec![var.clone()],
+                bindings: vec![vec![Some(value.clone())]],
+            }),
+        };
+        return;
+    }
+    let each_expression = |e: &mut Expression| bind_in_expression(e, f, var, value);
+    match pattern {
+        GraphPattern::Bgp { .. } | GraphPattern::Path { .. } | GraphPattern::Values { .. } => {}
+        GraphPattern::Join { left, right }
+        | GraphPattern::Lateral { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            bind_by_values(left, f, var, value);
+            bind_by_values(right, f, var, value);
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            bind_by_values(left, f, var, value);
+            bind_by_values(right, f, var, value);
+            if let Some(e) = expression {
+                each_expression(e);
+            }
+        }
+        GraphPattern::Filter { expr, inner } => {
+            bind_by_values(inner, f, var, value);
+            each_expression(expr);
+        }
+        GraphPattern::Extend {
+            inner, expression, ..
+        } => {
+            bind_by_values(inner, f, var, value);
+            each_expression(expression);
+        }
+        GraphPattern::OrderBy { inner, expression } => {
+            bind_by_values(inner, f, var, value);
+            for e in expression {
+                match e {
+                    spargebra::algebra::OrderExpression::Asc(e)
+                    | spargebra::algebra::OrderExpression::Desc(e) => each_expression(e),
+                }
+            }
+        }
+        GraphPattern::Group {
+            inner, aggregates, ..
+        } => {
+            bind_by_values(inner, f, var, value);
+            for (_, aggregate) in aggregates {
+                if let spargebra::algebra::AggregateExpression::FunctionCall { expr, .. } =
+                    aggregate
+                {
+                    each_expression(expr);
+                }
+            }
+        }
+        GraphPattern::Graph { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Service { inner, .. } => bind_by_values(inner, f, var, value),
+    }
+}
+
+/// [`bind_by_values`] inside the `EXISTS` patterns of an expression.
+fn bind_in_expression(
+    expression: &mut Expression,
+    f: &NamedNode,
+    var: &Variable,
+    value: &GroundTerm,
+) {
+    match expression {
+        Expression::Exists(pattern) => bind_by_values(pattern, f, var, value),
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            bind_in_expression(a, f, var, value);
+            bind_in_expression(b, f, var, value);
+        }
+        Expression::In(a, list) => {
+            bind_in_expression(a, f, var, value);
+            for e in list {
+                bind_in_expression(e, f, var, value);
+            }
+        }
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => {
+            bind_in_expression(a, f, var, value)
+        }
+        Expression::If(a, b, c) => {
+            bind_in_expression(a, f, var, value);
+            bind_in_expression(b, f, var, value);
+            bind_in_expression(c, f, var, value);
+        }
+        Expression::Coalesce(list) | Expression::FunctionCall(_, list) => {
+            for e in list {
+                bind_in_expression(e, f, var, value);
+            }
+        }
+        Expression::NamedNode(_)
+        | Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::Bound(_) => {}
+    }
 }
 
 fn join_table(pattern: &mut GraphPattern, table: &GraphPattern) {

@@ -1,12 +1,23 @@
 //! Term-map evaluation, shared by the file-based and the relational executor.
 //!
-//! One row in, one RDF term out — serialised in N-Triples form so a caller can
-//! concatenate terms into a document and stream it into the store.
+//! One logical iteration in, RDF terms out — serialised in N-Triples form so a
+//! caller can concatenate terms into a document and stream it into the store.
+//!
+//! **Multi-valued references.** A relational row or a CSV row has one value
+//! per column, but a JSONPath or XPath reference can select several values
+//! from one iteration (RML-Core §expressions). A term map then generates one
+//! term per value, a template one per element of the n-ary cartesian product
+//! of its references' values, and a literal with a language or datatype map
+//! one per value × tag (or datatype). An iteration is read through
+//! [`Record`], which a relational row ([`Cells`]) answers with at most one
+//! value per column and a file iteration ([`Iteration`]) with as many as the
+//! expression selected.
 //!
 //! Two things beyond plain templating live here because both executors need
 //! them: the **natural datatype** rule (R2RML §10.2 — a column with no
-//! `rr:datatype` takes the XSD type its SQL type implies) and the **FNML
-//! function** used for enumerations.
+//! `rr:datatype` takes the XSD type its SQL type implies; RML-IO: a JSON
+//! number is an `xsd:integer` or `xsd:double`) and the **FNML function** used
+//! for enumerations.
 //!
 //! How a value becomes a term depends on the mapping's [`Semantics`]: the
 //! encoding of template values and the scope of blank nodes changed when this
@@ -39,6 +50,127 @@ pub const FN_MAP_VALUE: &str = "https://w3id.org/open-triplestore/fn#mapValue";
 /// cannot say.
 pub const FN_MINT_IRI: &str = "https://w3id.org/open-triplestore/fn#mintIri";
 
+/// One source row: column name → lexical value. A NULL — a SQL NULL, a JSON
+/// `null` or absent key, a value the logical source lists under `rml:null` —
+/// is "no key", so a term map over one produces no term and therefore no
+/// triple. An empty string is a value (RML-IO), except under
+/// [`Semantics::Legacy`], where an empty value produces no term either.
+pub type Row = HashMap<String, String>;
+/// Per-column generic types, when the source reports them (relational only).
+pub type Kinds = HashMap<String, ValueKind>;
+
+/// One value a reference expression selected, with the generic type the
+/// source gave it when it has types (a SQL column, a JSON number).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Val {
+    pub lex: String,
+    pub kind: Option<ValueKind>,
+}
+
+impl Val {
+    pub fn text(lex: impl Into<String>) -> Self {
+        Self {
+            lex: lex.into(),
+            kind: None,
+        }
+    }
+}
+
+/// The values a reference expression evaluates to over one logical
+/// iteration, in the order the source produced them. Empty: NULL.
+#[derive(Debug, Clone, Copy)]
+pub enum Values<'a> {
+    Empty,
+    One(&'a str, Option<ValueKind>),
+    Many(&'a [Val]),
+}
+
+impl<'a> Values<'a> {
+    pub fn len(&self) -> usize {
+        match self {
+            Values::Empty => 0,
+            Values::One(..) => 1,
+            Values::Many(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `i`-th value; `i` must be below [`Values::len`].
+    pub fn get(&self, i: usize) -> (&'a str, Option<ValueKind>) {
+        match self {
+            Values::One(v, k) => (v, *k),
+            Values::Many(v) => (v[i].lex.as_str(), v[i].kind),
+            Values::Empty => unreachable!("no values"),
+        }
+    }
+
+    pub fn first(&self) -> Option<&'a str> {
+        (!self.is_empty()).then(|| self.get(0).0)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = (&'a str, Option<ValueKind>)> {
+        (0..self.len()).map(move |i| self.get(i))
+    }
+}
+
+/// A logical iteration, as term maps read it.
+pub trait Record {
+    /// The values `reference` evaluates to. A reference the iteration does
+    /// not answer is NULL.
+    fn values(&self, reference: &str) -> Values<'_>;
+}
+
+/// A relational (or CSV) row: one value per column, with the column types
+/// the connector reported.
+#[derive(Debug, Clone, Copy)]
+pub struct Cells<'a> {
+    pub row: &'a Row,
+    pub kinds: Option<&'a Kinds>,
+}
+
+impl Record for Cells<'_> {
+    fn values(&self, reference: &str) -> Values<'_> {
+        match self.row.get(reference) {
+            Some(v) => Values::One(v, self.kinds.and_then(|k| k.get(reference).copied())),
+            None => Values::Empty,
+        }
+    }
+}
+
+/// A file source's logical iteration: the values every reference the
+/// triples map reads evaluated to, by the expression as the mapping wrote
+/// it. A reference that selected nothing is absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Iteration {
+    pub values: HashMap<String, Vec<Val>>,
+}
+
+impl Iteration {
+    /// Drop the values that count as NULL (`rml:null`, `csvw:null`).
+    pub fn drop_nulls(&mut self, nulls: &[String]) {
+        if nulls.is_empty() {
+            return;
+        }
+        self.values.retain(|_, vals| {
+            vals.retain(|v| !nulls.contains(&v.lex));
+            !vals.is_empty()
+        });
+    }
+}
+
+impl Record for Iteration {
+    fn values(&self, reference: &str) -> Values<'_> {
+        match self.values.get(reference) {
+            Some(v) if v.len() == 1 => Values::One(&v[0].lex, v[0].kind),
+            Some(v) if !v.is_empty() => Values::Many(v),
+            _ => Values::Empty,
+        }
+    }
+}
+
 /// A value as an ASCII slug: lower-case letters and digits, runs of anything
 /// else folded to one hyphen, no hyphen at either end. `"Rolling Stock (2024)"`
 /// becomes `rolling-stock-2024`.
@@ -62,45 +194,45 @@ pub fn slug(value: &str) -> String {
 /// Expand a template whose placeholders may be `{column}` (encoded for an
 /// IRI) or `{column_slug}` (slugged). A placeholder the row cannot supply
 /// yields `None`, and so no term.
+#[cfg(test)]
 pub fn expand_slug_template(template: &str, row: &Row, semantics: Semantics) -> Option<String> {
+    expand_slug_template_in(template, &Cells { row, kinds: None }, semantics)
+}
+
+fn expand_slug_template_in<R: Record + ?Sized>(
+    template: &str,
+    rec: &R,
+    semantics: Semantics,
+) -> Option<String> {
     let mut result = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    result.push(next);
-                }
-            }
-            '{' => {
-                let mut name = String::new();
-                for inner in chars.by_ref() {
-                    if inner == '}' {
-                        break;
-                    }
-                    name.push(inner);
-                }
-                let piece = match row.get(&name) {
+    for piece in parse_template(template) {
+        match piece {
+            Piece::Text(t) => result.push_str(&t),
+            Piece::Ref(name) => {
+                let value = match rec.values(&name).first() {
                     Some(v) => Encoding::iri(semantics).apply(v),
                     None => {
                         let base = name.strip_suffix("_slug")?;
-                        let slugged = slug(row.get(base)?);
+                        let slugged = slug(rec.values(base).first()?);
                         // A value that slugs to nothing names nothing.
                         (!slugged.is_empty()).then_some(slugged)?
                     }
                 };
-                result.push_str(&piece);
+                result.push_str(&value);
             }
-            _ => result.push(c),
         }
     }
     Some(result)
 }
 
 /// `otsfn:mintIri`: an IRI from `otsfn:template` over the current row.
-fn mint_iri(f: &FunctionMap, row: &Row, gen: &mut TermGen) -> Result<Option<String>, String> {
+fn mint_iri<R: Record + ?Sized>(
+    f: &FunctionMap,
+    rec: &R,
+    gen: &mut TermGen,
+) -> Result<Option<String>, String> {
     let semantics = gen.semantics;
-    let template = arg_value(f.first(&format!("{FN_NS}template")), row).ok_or_else(|| {
+    let template = arg_value(f.first(&format!("{FN_NS}template")), rec).ok_or_else(|| {
         format!("{FN_LABEL}:mintIri needs {FN_LABEL}:template with an absolute IRI template")
     })?;
     if !(template.contains("://") || template.starts_with("urn:")) {
@@ -109,7 +241,7 @@ fn mint_iri(f: &FunctionMap, row: &Row, gen: &mut TermGen) -> Result<Option<Stri
              prefix would put IRIs in a namespace nobody owns"
         ));
     }
-    let Some(filled) = expand_slug_template(&template, row, semantics) else {
+    let Some(filled) = expand_slug_template_in(&template, rec, semantics) else {
         return Ok(None);
     };
     // An IRI the template cannot make well-formed is a data error, as it is
@@ -126,15 +258,6 @@ fn mint_iri(f: &FunctionMap, row: &Row, gen: &mut TermGen) -> Result<Option<Stri
     }
 }
 
-/// One source row: column name → lexical value. A NULL — a SQL NULL, a JSON
-/// `null` or absent key, a value the logical source lists under `rml:null` —
-/// is "no key", so a term map over one produces no term and therefore no
-/// triple. An empty string is a value (RML-IO), except under
-/// [`Semantics::Legacy`], where an empty value produces no term either.
-pub type Row = HashMap<String, String>;
-/// Per-column generic types, when the source reports them (relational only).
-pub type Kinds = HashMap<String, ValueKind>;
-
 /// Term-generation state for one execution: the rules it runs under, and the
 /// blank-node labelling that keeps two runs' nodes apart.
 ///
@@ -150,6 +273,9 @@ pub struct TermGen {
     counter: u64,
     /// Legacy only: the nodes minted for the current row, by value.
     row: HashMap<String, String>,
+    /// The fresh blank node of the current iteration, for a blank-node term
+    /// map with no expression (RML-Core).
+    fresh: Option<String>,
     /// Data errors (R2RML §4.3) met since the caller last took them.
     errors: Vec<String>,
 }
@@ -161,13 +287,14 @@ impl TermGen {
             prefix: prefix.into(),
             counter: 0,
             row: HashMap::new(),
+            fresh: None,
             errors: Vec::new(),
         }
     }
 
     /// Record a data error: a value that cannot become the term its map asks
     /// for. The term is not generated; whether the run goes on is the
-    /// caller's decision ([`OnDataError`]).
+    /// caller's decision ([`OnDataError`](super::checks::OnDataError)).
     pub fn data_error(&mut self, message: String) {
         self.errors.push(message);
     }
@@ -186,13 +313,23 @@ impl TermGen {
         }
     }
 
+    /// [`TermGen::apply_nulls`] for a file iteration, `csvw:null` included.
+    pub fn apply_nulls_to(&self, source: &LogicalSource, it: &mut Iteration) {
+        if self.semantics == Semantics::R2rml {
+            it.drop_nulls(&source.nulls);
+            it.drop_nulls(&source.access.dialect.nulls);
+        }
+    }
+
     pub fn semantics(&self) -> Semantics {
         self.semantics
     }
 
-    /// A new source row begins. Legacy blank nodes do not outlive it.
+    /// A new source row begins. Legacy blank nodes do not outlive it, and
+    /// neither does the iteration's fresh blank node.
     pub fn start_row(&mut self) {
         self.row.clear();
+        self.fresh = None;
     }
 
     fn blank_node(&mut self, value: String, graph: Option<&str>) -> String {
@@ -209,6 +346,18 @@ impl TermGen {
             }
         }
     }
+
+    /// The fresh blank node of the current iteration: every blank-node term
+    /// map with no expression in it denotes the same new node.
+    fn fresh_blank_node(&mut self) -> String {
+        if let Some(f) = &self.fresh {
+            return f.clone();
+        }
+        self.counter += 1;
+        let label = format!("_:{}f{}", self.prefix, self.counter);
+        self.fresh = Some(label.clone());
+        label
+    }
 }
 
 /// Where a term is generated: the base IRI a relative IRI resolves against,
@@ -223,10 +372,13 @@ pub struct At<'a> {
 /// How a template value is written into the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Encoding {
-    /// As it is (R2RML: a template that does not generate an IRI).
+    /// As it is (R2RML: a template that does not generate an IRI; RML-Core:
+    /// `rml:UnsafeIRI`, `rml:UnsafeURI`).
     None,
     /// The IRI-safe version (R2RML §7.3).
     IriSafe,
+    /// The URI-safe version (RML-Core: `rml:URI`).
+    UriSafe,
     /// Every byte but `[A-Za-z0-9]` percent-encoded, in every template — what
     /// this engine did before, kept for legacy mapping versions.
     Legacy,
@@ -237,6 +389,7 @@ impl Encoding {
         match (semantics, term_type) {
             (Semantics::Legacy, _) => Encoding::Legacy,
             (Semantics::R2rml, TermType::IRI) => Encoding::IriSafe,
+            (Semantics::R2rml, TermType::URI) => Encoding::UriSafe,
             (Semantics::R2rml, _) => Encoding::None,
         }
     }
@@ -249,6 +402,7 @@ impl Encoding {
         match self {
             Encoding::None => value.to_string(),
             Encoding::IriSafe => iri::iri_safe(value),
+            Encoding::UriSafe => iri::uri_safe(value),
             Encoding::Legacy => legacy_percent_encode(value),
         }
     }
@@ -271,10 +425,12 @@ pub fn natural_datatype(kind: ValueKind) -> Option<&'static str> {
     })
 }
 
-/// Evaluate a term map against a row.
+/// Evaluate a term map against a relational row: its first term.
 ///
 /// Returns the term in N-Triples syntax (`<iri>`, `"lex"^^<dt>`, `_:b1`), or
-/// `None` when the row does not supply what the term map needs.
+/// `None` when the row does not supply what the term map needs. A row has
+/// one value per column, so it generates at most one term unless the term
+/// map has a language or datatype map.
 pub fn eval_term(
     tm: &TermMap,
     row: &Row,
@@ -282,48 +438,104 @@ pub fn eval_term(
     gen: &mut TermGen,
     at: At<'_>,
 ) -> Option<String> {
-    let raw_value = match &tm.kind {
+    let mut out = Vec::with_capacity(1);
+    eval_terms(tm, &Cells { row, kinds }, gen, at, &mut out);
+    out.into_iter().next()
+}
+
+/// Evaluate a term map against a logical iteration, appending every term it
+/// generates to `out` (RML-Core §term generation rules): one per value of a
+/// reference, one per element of a template's cartesian product, times the
+/// language tags or datatypes of a language or datatype map. Nothing for a
+/// NULL, and nothing for a value that raises a data error (which is
+/// recorded on `gen`).
+pub fn eval_terms<R: Record + ?Sized>(
+    tm: &TermMap,
+    rec: &R,
+    gen: &mut TermGen,
+    at: At<'_>,
+    out: &mut Vec<String>,
+) {
+    match &tm.kind {
         // A constant is the term the mapping wrote, datatype and language
         // included (R2RML §7.4).
-        TermMapKind::Constant(term) => return render_constant(term),
-        TermMapKind::Template(template) => expand_template_encoded(
-            template,
-            row,
-            Encoding::for_term(gen.semantics, &tm.term_type),
-        )?,
-        TermMapKind::Reference(col) => row.get(col)?.clone(),
-    };
+        TermMapKind::Constant(term) => out.extend(render_constant(term)),
+        TermMapKind::Fresh => out.push(gen.fresh_blank_node()),
+        TermMapKind::Template(template) => {
+            let encoding = Encoding::for_term(gen.semantics, &tm.term_type);
+            for value in expand_template_all(template, rec, encoding) {
+                render_value(tm, value, None, rec, gen, at, out);
+            }
+        }
+        TermMapKind::Reference(col) => {
+            for (value, kind) in rec.values(col).iter() {
+                let value = natural_lexical(value, kind).into_owned();
+                render_value(tm, value, kind, rec, gen, at, out);
+            }
+        }
+    }
+}
 
+/// The natural RDF lexical form of a typed source value (R2RML §10.2): an
+/// SQL timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL
+/// boolean written as a number or a letter becomes `true` / `false`. Every
+/// other value is already its own lexical form.
+fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match kind {
+        Some(ValueKind::DateTime) if value.len() > 10 && value.as_bytes()[10] == b' ' => {
+            Cow::Owned(format!("{}T{}", &value[..10], &value[11..]))
+        }
+        Some(ValueKind::Boolean) => match value {
+            "1" | "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
+            "0" | "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
+            _ => Cow::Borrowed(value),
+        },
+        _ => Cow::Borrowed(value),
+    }
+}
+
+/// One value of a term map as the term its term type asks for.
+fn render_value<R: Record + ?Sized>(
+    tm: &TermMap,
+    raw_value: String,
+    kind: Option<ValueKind>,
+    rec: &R,
+    gen: &mut TermGen,
+    at: At<'_>,
+    out: &mut Vec<String>,
+) {
     // An empty value is a value (RML-IO: nothing is NULL unless the source
     // says so). Before, it produced no term, which a legacy version keeps.
     if raw_value.is_empty() && gen.semantics == Semantics::Legacy {
-        return None;
+        return;
     }
 
-    Some(match tm.term_type {
+    match tm.term_type {
         // Build the IRI through oxrdf so it is validated and serialised, not
         // pasted between angle brackets. A `rml:reference`/`rr:column` value
         // with `rr:termType rr:IRI` went in raw: a value containing a space
         // produced invalid Turtle and failed the WHOLE mapping, and one
         // containing `>` could terminate the IRI and inject further triples.
         // A value that is not absolute is appended to the base IRI (§11.2).
-        TermType::IRI => match iri::absolute_iri(&raw_value, at.base) {
-            Some(n) => n.to_string(),
-            None => {
-                gen.data_error(format!(
-                    "{} generates {}, which is not a valid IRI{}",
+        TermType::IRI | TermType::URI | TermType::UnsafeIRI | TermType::UnsafeURI => {
+            let uri = matches!(tm.term_type, TermType::URI | TermType::UnsafeURI);
+            match iri::absolute_iri(&raw_value, at.base).filter(|n| !uri || n.as_str().is_ascii()) {
+                Some(n) => out.push(n.to_string()),
+                None => gen.data_error(format!(
+                    "{} generates {}, which is not a valid {}{}",
                     describe(tm),
                     quoted(&raw_value),
+                    if uri { "URI" } else { "IRI" },
                     if at.base.is_some() {
                         " (relative to the base IRI either)"
                     } else {
                         ""
                     }
-                ));
-                return None;
+                )),
             }
-        },
-        TermType::BlankNode => gen.blank_node(raw_value, at.graph),
+        }
+        TermType::BlankNode => out.push(gen.blank_node(raw_value, at.graph)),
         // Likewise for literals: hand-escaping only `\` and `"` left raw
         // newlines, carriage returns and tabs in the output, which Turtle's
         // STRING_LITERAL_QUOTE forbids — so one multi-line CSV field made the
@@ -332,29 +544,101 @@ pub fn eval_term(
         TermType::Literal => {
             if let Some(ref lang) = tm.language {
                 // The parser has checked the tag, so this cannot fail on it.
-                Literal::new_language_tagged_literal(&raw_value, lang)
-                    .ok()?
-                    .to_string()
-            } else if let Some(dt) = &tm.datatype {
-                // A datatype-override literal that is ill-typed is a data error
-                // (R2RML §10.3); a natural one is well-typed by construction.
-                if let Some(why) = super::xsd::ill_typed(&raw_value, dt) {
-                    gen.data_error(format!(
-                        "{} generates {} as <{dt}>, which is {why}",
-                        describe(tm),
-                        quoted(&raw_value)
-                    ));
-                    return None;
+                out.extend(
+                    Literal::new_language_tagged_literal(&raw_value, lang)
+                        .ok()
+                        .map(|l| l.to_string()),
+                );
+            } else if let Some(lm) = &tm.language_map {
+                // RML-Core: every value × every tag the language map
+                // generates, each a well-formed BCP 47 tag or a data error.
+                for tag in expression_values(lm, rec, gen) {
+                    match Literal::new_language_tagged_literal(&raw_value, &tag)
+                        .ok()
+                        .filter(|_| super::parser::valid_language_tag(&tag))
+                    {
+                        Some(l) => out.push(l.to_string()),
+                        None => gen.data_error(format!(
+                            "{} generates the language tag {}, which is not a valid BCP 47 \
+                             language tag",
+                            describe(lm),
+                            quoted(&tag)
+                        )),
+                    }
                 }
-                Literal::new_typed_literal(&raw_value, NamedNode::new(dt).ok()?).to_string()
-            } else if let Some(dt) = natural_datatype_for(tm, kinds) {
-                Literal::new_typed_literal(&raw_value, NamedNode::new(format!("{XSD}{dt}")).ok()?)
-                    .to_string()
+            } else if let Some(dt) = &tm.datatype {
+                out.extend(typed_literal(tm, &raw_value, dt, gen));
+            } else if let Some(dm) = &tm.datatype_map {
+                let mut datatypes = Vec::new();
+                eval_terms(
+                    dm,
+                    rec,
+                    gen,
+                    At {
+                        base: at.base,
+                        graph: None,
+                    },
+                    &mut datatypes,
+                );
+                for dt in datatypes {
+                    let Some(dt) = dt.strip_prefix('<').and_then(|d| d.strip_suffix('>')) else {
+                        continue;
+                    };
+                    out.extend(typed_literal(tm, &raw_value, dt, gen));
+                }
+            } else if let Some(dt) = natural_datatype_for(tm, kind) {
+                out.extend(
+                    NamedNode::new(format!("{XSD}{dt}"))
+                        .ok()
+                        .map(|n| Literal::new_typed_literal(&raw_value, n).to_string()),
+                );
             } else {
-                Literal::new_simple_literal(&raw_value).to_string()
+                out.push(Literal::new_simple_literal(&raw_value).to_string());
             }
         }
-    })
+    }
+}
+
+/// A datatype-override literal (R2RML §10.3): a data error when the value is
+/// not in the datatype's lexical space.
+fn typed_literal(tm: &TermMap, raw_value: &str, dt: &str, gen: &mut TermGen) -> Option<String> {
+    if let Some(why) = super::xsd::ill_typed(raw_value, dt) {
+        gen.data_error(format!(
+            "{} generates {} as <{dt}>, which is {why}",
+            describe(tm),
+            quoted(raw_value)
+        ));
+        return None;
+    }
+    Some(Literal::new_typed_literal(raw_value, NamedNode::new(dt).ok()?).to_string())
+}
+
+/// The plain string values an expression map (a language map) evaluates
+/// to: a constant's lexical form, a reference's values, a template's
+/// product — no term types, no encoding.
+fn expression_values<R: Record + ?Sized>(m: &TermMap, rec: &R, gen: &mut TermGen) -> Vec<String> {
+    match &m.kind {
+        TermMapKind::Constant(Term::Literal(l)) => vec![l.value().to_string()],
+        TermMapKind::Constant(Term::NamedNode(n)) => vec![n.as_str().to_string()],
+        TermMapKind::Constant(_) | TermMapKind::Fresh => Vec::new(),
+        TermMapKind::Reference(c) => rec
+            .values(c)
+            .iter()
+            .map(|(v, _)| v.to_string())
+            .filter(|v| !(v.is_empty() && gen.semantics == Semantics::Legacy))
+            .collect(),
+        TermMapKind::Template(t) => expand_template_all(t, rec, Encoding::None),
+    }
+}
+
+/// The values one side of a join condition evaluates to: a reference's
+/// values, a template's product (as it is, unencoded), or a constant.
+pub fn join_side_values<R: Record + ?Sized>(side: &JoinSide, rec: &R) -> Vec<String> {
+    match side {
+        JoinSide::Reference(c) => rec.values(c).iter().map(|(v, _)| v.to_string()).collect(),
+        JoinSide::Template(t) => expand_template_all(t, rec, Encoding::None),
+        JoinSide::Constant(c) => vec![c.clone()],
+    }
 }
 
 /// A term map as an error message names it.
@@ -363,6 +647,7 @@ fn describe(tm: &TermMap) -> String {
         TermMapKind::Template(t) => format!("rr:template \"{t}\""),
         TermMapKind::Reference(c) => format!("column \"{c}\""),
         TermMapKind::Constant(c) => format!("rr:constant {c}"),
+        TermMapKind::Fresh => "a blank-node term map".to_string(),
     }
 }
 
@@ -384,14 +669,14 @@ fn render_constant(term: &Term) -> Option<String> {
     }
 }
 
-/// The natural datatype for a direct column reference with no declared one.
-/// Only a plain reference gets it: a template composes text, and a constant
-/// is whatever the mapping author wrote.
-fn natural_datatype_for(tm: &TermMap, kinds: Option<&Kinds>) -> Option<&'static str> {
-    let TermMapKind::Reference(col) = &tm.kind else {
+/// The natural datatype for a direct reference with no declared one. Only a
+/// plain reference gets it: a template composes text, and a constant is
+/// whatever the mapping author wrote.
+fn natural_datatype_for(tm: &TermMap, kind: Option<ValueKind>) -> Option<&'static str> {
+    if !matches!(tm.kind, TermMapKind::Reference(_)) {
         return None;
-    };
-    natural_datatype(*kinds?.get(col)?)
+    }
+    natural_datatype(kind?)
 }
 
 /// Evaluate a join parent's subject from columns carried on a child row.
@@ -418,56 +703,132 @@ pub fn eval_parent_subject(
 /// Whether a subject term map generates the same term for the same values
 /// wherever it is evaluated. See [`eval_parent_subject`].
 pub fn position_independent(tm: &TermMap, semantics: Semantics) -> bool {
+    if matches!(tm.kind, TermMapKind::Fresh) {
+        return false;
+    }
     match tm.term_type {
-        TermType::IRI => true,
         TermType::BlankNode => semantics == Semantics::R2rml,
         TermType::Literal => false,
+        _ => true,
     }
 }
 
-/// Evaluate a term map that must yield an IRI, returning it without the angle
-/// brackets (for a graph name, or a run's target graph).
-pub fn eval_iri(
+/// Evaluate a term map that must yield IRIs, returning them without the
+/// angle brackets (for graph names).
+pub fn eval_iris<R: Record + ?Sized>(
     tm: &TermMap,
-    row: &Row,
-    kinds: Option<&Kinds>,
+    rec: &R,
     gen: &mut TermGen,
     base: Option<&str>,
-) -> Option<String> {
-    let rendered = eval_term(tm, row, kinds, gen, At { base, graph: None })?;
+) -> Vec<String> {
+    let mut rendered = Vec::new();
+    eval_terms(tm, rec, gen, At { base, graph: None }, &mut rendered);
     rendered
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .map(str::to_string)
+        .into_iter()
+        .filter_map(|r| {
+            r.strip_prefix('<')
+                .and_then(|s| s.strip_suffix('>'))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
-/// Expand an `rr:template`: replace `{column}` with the row's value, encoded
-/// as `encoding` says. `\{` and `\}` are literal braces. A column the row
-/// does not supply yields `None`, which skips the term (and so the triple).
-fn expand_template_encoded(template: &str, row: &Row, encoding: Encoding) -> Option<String> {
-    let mut result = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
+/// One part of a parsed string template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Piece {
+    Text(String),
+    Ref(String),
+}
+
+/// Split a template into its text and its `{reference}` placeholders. A
+/// backslash escapes the next character, inside a placeholder as well as
+/// outside it (RML-Core §template).
+fn parse_template(template: &str) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut chars = template.chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' => {
                 if let Some(next) = chars.next() {
-                    result.push(next);
+                    text.push(next);
                 }
             }
             '{' => {
-                let mut col = String::new();
-                for inner in chars.by_ref() {
-                    if inner == '}' {
-                        break;
+                let mut name = String::new();
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '\\' => {
+                            if let Some(next) = chars.next() {
+                                name.push(next);
+                            }
+                        }
+                        '}' => break,
+                        other => name.push(other),
                     }
-                    col.push(inner);
                 }
-                result.push_str(&encoding.apply(row.get(&col)?));
+                if !text.is_empty() {
+                    out.push(Piece::Text(std::mem::take(&mut text)));
+                }
+                out.push(Piece::Ref(name));
             }
-            _ => result.push(c),
+            other => text.push(other),
         }
     }
-    Some(result)
+    if !text.is_empty() {
+        out.push(Piece::Text(text));
+    }
+    out
+}
+
+/// Expand a template: every element of the cartesian product of its
+/// references' values, each value written in as `encoding` says. Empty when
+/// any reference is NULL.
+fn expand_template_all<R: Record + ?Sized>(
+    template: &str,
+    rec: &R,
+    encoding: Encoding,
+) -> Vec<String> {
+    let pieces = parse_template(template);
+    let mut results = vec![String::with_capacity(template.len())];
+    for piece in &pieces {
+        match piece {
+            Piece::Text(t) => results.iter_mut().for_each(|r| r.push_str(t)),
+            Piece::Ref(name) => {
+                let values = rec.values(name);
+                match values.len() {
+                    0 => return Vec::new(),
+                    1 => {
+                        let (v, kind) = values.get(0);
+                        let v = encoding.apply(&natural_lexical(v, kind));
+                        results.iter_mut().for_each(|r| r.push_str(&v));
+                    }
+                    _ => {
+                        let encoded: Vec<String> = values
+                            .iter()
+                            .map(|(v, kind)| encoding.apply(&natural_lexical(v, kind)))
+                            .collect();
+                        results = results
+                            .into_iter()
+                            .flat_map(|r| encoded.iter().map(move |v| format!("{r}{v}")))
+                            .collect();
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Expand an `rr:template` over a relational row: replace `{column}` with the
+/// row's value, encoded as `encoding` says. `\{` and `\}` are literal
+/// braces. A column the row does not supply yields `None`, which skips the
+/// term (and so the triple).
+#[cfg(test)]
+fn expand_template_encoded(template: &str, row: &Row, encoding: Encoding) -> Option<String> {
+    expand_template_all(template, &Cells { row, kinds: None }, encoding)
+        .into_iter()
+        .next()
 }
 
 /// The percent-encoding this engine applied to every template value before
@@ -491,16 +852,27 @@ pub enum UnmappedPolicy {
     Template(String),
 }
 
-/// Evaluate an FNML function to an N-Triples term.
+/// Evaluate an FNML function over a relational row to an N-Triples term.
+#[cfg(test)]
 pub fn eval_function(
     f: &FunctionMap,
     row: &Row,
     kinds: Option<&Kinds>,
     gen: &mut TermGen,
 ) -> Result<Option<String>, String> {
+    eval_function_in(f, &Cells { row, kinds }, gen)
+}
+
+/// Evaluate an FNML function over a logical iteration to an N-Triples term.
+/// A parameter that reads a reference takes the reference's first value.
+pub fn eval_function_in<R: Record + ?Sized>(
+    f: &FunctionMap,
+    rec: &R,
+    gen: &mut TermGen,
+) -> Result<Option<String>, String> {
     let semantics = gen.semantics;
     if f.function == FN_MINT_IRI {
-        return mint_iri(f, row, gen);
+        return mint_iri(f, rec, gen);
     }
     if f.function != FN_MAP_VALUE {
         return Err(format!(
@@ -508,7 +880,7 @@ pub fn eval_function(
             f.function
         ));
     }
-    let Some(raw) = arg_value(f.first(&format!("{FN_NS}value")), row) else {
+    let Some(raw) = arg_value(f.first(&format!("{FN_NS}value")), rec) else {
         // No input value (a NULL column) → no triple, like any term map.
         return Ok(None);
     };
@@ -517,12 +889,12 @@ pub fn eval_function(
     }
 
     let normalize =
-        arg_value(f.first(&format!("{FN_NS}normalize")), row).unwrap_or_else(|| "none".to_string());
+        arg_value(f.first(&format!("{FN_NS}normalize")), rec).unwrap_or_else(|| "none".to_string());
     let key = normalize_value(&raw, &normalize)?;
 
     let mut table: HashMap<String, String> = HashMap::new();
     for entry in f.all(&format!("{FN_NS}mapping")) {
-        let Some(text) = arg_value(Some(entry), row) else {
+        let Some(text) = arg_value(Some(entry), rec) else {
             continue;
         };
         let (k, v) = text.split_once('=').ok_or_else(|| {
@@ -538,7 +910,7 @@ pub fn eval_function(
         return Ok(Some(iri.to_string()));
     }
 
-    match unmapped_policy(f, row)? {
+    match unmapped_policy(f, rec)? {
         UnmappedPolicy::Omit => Ok(None),
         UnmappedPolicy::Literal => {
             // The ORIGINAL value, not the normalised key: the report should
@@ -549,7 +921,9 @@ pub fn eval_function(
                 let FunctionArg::Reference(col) = f.first(&format!("{FN_NS}value"))? else {
                     return None;
                 };
-                natural_datatype(*kinds?.get(col)?).map(|d| format!("{XSD}{d}"))
+                let values = rec.values(col);
+                let (_, kind) = (!values.is_empty()).then(|| values.get(0))?;
+                natural_datatype(kind?).map(|d| format!("{XSD}{d}"))
             });
             let term = match declared {
                 Some(dt) => Literal::new_typed_literal(
@@ -562,7 +936,10 @@ pub fn eval_function(
         }
         UnmappedPolicy::Template(t) => {
             let encoding = Encoding::iri(semantics);
-            let expanded = expand_template_encoded(&t, row, encoding).unwrap_or_default();
+            let expanded = expand_template_all(&t, rec, encoding)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
             let filled = if expanded.contains("{value}") || t.contains("{value}") {
                 expanded
             } else {
@@ -578,15 +955,15 @@ pub fn eval_function(
     }
 }
 
-fn unmapped_policy(f: &FunctionMap, row: &Row) -> Result<UnmappedPolicy, String> {
-    let policy = arg_value(f.first(&format!("{FN_NS}unmapped")), row)
+fn unmapped_policy<R: Record + ?Sized>(f: &FunctionMap, rec: &R) -> Result<UnmappedPolicy, String> {
+    let policy = arg_value(f.first(&format!("{FN_NS}unmapped")), rec)
         .unwrap_or_else(|| "literal".to_string());
     match policy.trim().to_ascii_lowercase().as_str() {
         "literal" | "" => Ok(UnmappedPolicy::Literal),
         "omit" | "skip" => Ok(UnmappedPolicy::Omit),
         "template" | "mint" => {
             let t =
-                arg_value(f.first(&format!("{FN_NS}unmappedTemplate")), row).ok_or_else(|| {
+                arg_value(f.first(&format!("{FN_NS}unmappedTemplate")), rec).ok_or_else(|| {
                     format!(
                         "{FN_LABEL}:unmapped 'template' needs {FN_LABEL}:unmappedTemplate with \
                          an absolute IRI template"
@@ -606,10 +983,10 @@ fn unmapped_policy(f: &FunctionMap, row: &Row) -> Result<UnmappedPolicy, String>
     }
 }
 
-fn arg_value(arg: Option<&FunctionArg>, row: &Row) -> Option<String> {
+fn arg_value<R: Record + ?Sized>(arg: Option<&FunctionArg>, rec: &R) -> Option<String> {
     match arg? {
         FunctionArg::Constant(c) => Some(c.clone()),
-        FunctionArg::Reference(col) => row.get(col).cloned(),
+        FunctionArg::Reference(col) => rec.values(col).first().map(str::to_string),
     }
 }
 
@@ -645,12 +1022,7 @@ mod tests {
     }
 
     fn term(kind: TermMapKind, tt: TermType) -> TermMap {
-        TermMap {
-            kind,
-            term_type: tt,
-            datatype: None,
-            language: None,
-        }
+        TermMap::new(kind, tt)
     }
 
     fn eval(tm: &TermMap, r: &Row, kinds: Option<&Kinds>) -> Option<String> {
@@ -660,6 +1032,134 @@ mod tests {
     fn eval_as(s: Semantics, tm: &TermMap, r: &Row, kinds: Option<&Kinds>) -> Option<String> {
         let mut g = TermGen::new(s, "b");
         eval_term(tm, r, kinds, &mut g, At::default())
+    }
+
+    fn iteration(pairs: &[(&str, &[&str])]) -> Iteration {
+        Iteration {
+            values: pairs
+                .iter()
+                .map(|(k, vs)| (k.to_string(), vs.iter().map(|v| Val::text(*v)).collect()))
+                .collect(),
+        }
+    }
+
+    fn all(tm: &TermMap, it: &Iteration) -> Vec<String> {
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let mut out = Vec::new();
+        eval_terms(tm, it, &mut g, At::default(), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_multi_valued_reference_makes_a_term_per_value() {
+        let it = iteration(&[("tags", &["a", "b"])]);
+        assert_eq!(
+            all(
+                &term(TermMapKind::Reference("tags".into()), TermType::Literal),
+                &it
+            ),
+            vec!["\"a\"", "\"b\""]
+        );
+    }
+
+    #[test]
+    fn a_template_is_the_cartesian_product_of_its_references() {
+        // RML-Core §template value: the n-ary cartesian product.
+        let it = iteration(&[("x", &["1", "2"]), ("y", &["a", "b", "c"]), ("z", &["Z"])]);
+        let tm = term(
+            TermMapKind::Template("http://e/{x}/{y}/{z}".into()),
+            TermType::IRI,
+        );
+        let terms = all(&tm, &it);
+        assert_eq!(terms.len(), 6);
+        assert!(terms.contains(&"<http://e/2/c/Z>".to_string()));
+        // A reference with no value leaves no term at all.
+        let none = iteration(&[("x", &["1"])]);
+        assert!(all(&tm, &none).is_empty());
+    }
+
+    #[test]
+    fn language_and_datatype_maps_multiply_the_values() {
+        let it = iteration(&[("v", &["x"]), ("l", &["en", "nl"]), ("bad", &["not a tag"])]);
+        let mut tm = term(TermMapKind::Reference("v".into()), TermType::Literal);
+        tm.language_map = Some(Box::new(term(
+            TermMapKind::Reference("l".into()),
+            TermType::Literal,
+        )));
+        assert_eq!(all(&tm, &it), vec!["\"x\"@en", "\"x\"@nl"]);
+        tm.language_map = Some(Box::new(term(
+            TermMapKind::Reference("bad".into()),
+            TermType::Literal,
+        )));
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let mut out = Vec::new();
+        eval_terms(&tm, &it, &mut g, At::default(), &mut out);
+        assert!(out.is_empty());
+        assert!(g.take_errors()[0].contains("BCP 47"));
+        let mut typed = term(TermMapKind::Reference("v".into()), TermType::Literal);
+        typed.datatype_map = Some(Box::new(term(
+            TermMapKind::Template("http://example.org/dt/{l}".into()),
+            TermType::IRI,
+        )));
+        assert_eq!(
+            all(&typed, &it),
+            vec![
+                "\"x\"^^<http://example.org/dt/en>",
+                "\"x\"^^<http://example.org/dt/nl>"
+            ]
+        );
+    }
+
+    #[test]
+    fn sql_timestamps_and_booleans_take_their_natural_lexical_form() {
+        // R2RML §10.2: a timestamp's space becomes T; a boolean is true/false.
+        let r = row(&[("ts", "2009-10-10 12:12:22"), ("b", "0")]);
+        let kinds: Kinds = HashMap::from([
+            ("ts".to_string(), ValueKind::DateTime),
+            ("b".to_string(), ValueKind::Boolean),
+        ]);
+        assert_eq!(
+            eval(
+                &term(TermMapKind::Reference("ts".into()), TermType::Literal),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
+            format!("\"2009-10-10T12:12:22\"^^<{XSD}dateTime>")
+        );
+        assert_eq!(
+            eval(
+                &term(TermMapKind::Reference("b".into()), TermType::Literal),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
+            format!("\"false\"^^<{XSD}boolean>")
+        );
+        assert_eq!(
+            eval(
+                &term(TermMapKind::Template("http://x/{ts}".into()), TermType::IRI),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
+            "<http://x/2009-10-10T12%3A12%3A22>"
+        );
+    }
+
+    #[test]
+    fn a_fresh_blank_node_is_one_per_iteration() {
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let tm = term(TermMapKind::Fresh, TermType::BlankNode);
+        let it = Iteration::default();
+        let mut a = Vec::new();
+        eval_terms(&tm, &it, &mut g, At::default(), &mut a);
+        eval_terms(&tm, &it, &mut g, At::default(), &mut a);
+        assert_eq!(a[0], a[1], "the same iteration, the same node");
+        g.start_row();
+        let mut b = Vec::new();
+        eval_terms(&tm, &it, &mut g, At::default(), &mut b);
+        assert_ne!(a[0], b[0], "a new iteration, a new node");
     }
 
     #[test]
@@ -707,6 +1207,7 @@ mod tests {
             query: None,
             table_name: None,
             nulls: vec!["".into(), "NULL".into()],
+            access: Access::default(),
         };
         let mut r = row(&[("a", ""), ("b", "NULL"), ("c", "x")]);
         TermGen::new(Semantics::R2rml, "b").apply_nulls(&source, &mut r);

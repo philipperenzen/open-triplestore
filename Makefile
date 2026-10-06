@@ -7,10 +7,13 @@ PORT ?= 7878
 # default; override to the legacy v1 binary with `make DOCKER_COMPOSE=docker-compose`.
 DOCKER_COMPOSE ?= docker compose
 
-# Every standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, SAML, full-text
-# search) is behind a Cargo feature; `full` turns them all on so the running
-# server matches the documented capabilities. The SAML feature needs libxml2 +
-# xmlsec1 + openssl present (macOS: `brew install libxml2 libxmlsec1 openssl`).
+# Every standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search)
+# is behind a Cargo feature; `full` turns them all on so the running server
+# matches the documented capabilities. SAML 2.0 sign-in is the `saml` feature:
+# in the Docker image but not in `full`, because it needs libxml2 + xmlsec1 +
+# openssl, pkg-config and libclang (macOS: `brew install libxml2 libxmlsec1
+# openssl`, then see the libxml2 note in docs/development.md). Build it with
+# `make dev FEATURES=full,saml`.
 FEATURES ?= full
 
 ## Start containers in the background

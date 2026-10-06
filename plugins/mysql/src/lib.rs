@@ -33,6 +33,9 @@ use ots_plugin_api::sources::{
 };
 use ots_plugin_api::Plugin;
 
+/// The driver, for a host's tests that set up a server of their own.
+pub use mysql;
+
 /// The plugin: no routes, one connector.
 #[derive(Default)]
 pub struct MysqlPlugin;

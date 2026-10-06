@@ -81,6 +81,7 @@ pub(crate) fn report_for_writer(
             source_shape: String::new(),
             source_constraint: "withheld".to_string(),
             source_constraint_component: String::new(),
+            annotations: Vec::new(),
             terms: Default::default(),
             message: format!(
                 "The write does not conform to the shapes that gate this graph ({} result(s)). \
@@ -152,6 +153,7 @@ pub(crate) fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
             source_shape: String::new(),
             source_constraint: "gate-evaluation-failure".to_string(),
             source_constraint_component: String::new(),
+            annotations: Vec::new(),
             terms: Default::default(),
             message,
         }],
@@ -1233,6 +1235,7 @@ mod tests {
             source_shape: "http://example.org/S".to_string(),
             source_constraint: "minCount".to_string(),
             source_constraint_component: String::new(),
+            annotations: Vec::new(),
             terms: Default::default(),
             message: format!("missing name {n}"),
         };

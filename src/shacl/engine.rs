@@ -547,11 +547,15 @@ fn load_targets(
         targets.push(Target::TargetObjectsOf(p));
     }
 
-    // Implicit class target: if the shape itself is also an rdfs:Class
+    // Implicit class target (SHACL §2.1.3.3): the shape is a SHACL instance of
+    // rdfs:Class in the shapes graph, through rdf:type/rdfs:subClassOf*, so
+    // `ex:Person a owl:Class` counts when the graph says owl:Class is one.
     let is_class = ask(
         store,
         &format!(
-            "ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> a <http://www.w3.org/2000/01/rdf-schema#Class> }} }}"
+            "ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> \
+             <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>/<http://www.w3.org/2000/01/rdf-schema#subClassOf>* \
+             <http://www.w3.org/2000/01/rdf-schema#Class> }} }}"
         ),
     );
     if is_class {
@@ -631,7 +635,7 @@ fn load_target_type(
         let path = single_value(store, shapes_graph, &param, &format!("{SH}path"))
             .ok_or_else(|| format!("type <{target_type}>: a sh:parameter has no sh:path"))?;
         let optional = single_value(store, shapes_graph, &param, &format!("{SH}optional"))
-            .is_some_and(|v| v == "true" || v == "1");
+            .is_some_and(|v| v == "true");
         let name = path.rsplit(['#', '/']).next().unwrap_or(&path).to_string();
         let var = oxigraph::sparql::Variable::new(&name)
             .map_err(|e| format!("type <{target_type}>: parameter `{name}`: {e}"))?;
@@ -948,11 +952,14 @@ fn load_constraints(
             super::constraints::check_sparql_constraint(&select).map_err(|e| {
                 format!("shape <{shape_iri}>: sh:sparql constraint does not parse: {e}")
             })?;
+            let annotations = load_result_annotations(store, shapes_graph, &sparql_node)
+                .map_err(|e| format!("shape <{shape_iri}>: sh:sparql {e}"))?;
             constraints.push(Constraint::SparqlConstraint {
                 node: sparql_node.clone(),
                 select,
                 message,
                 severity,
+                annotations,
             });
         }
     }
@@ -1038,6 +1045,7 @@ fn load_constraints(
                 validator: validator.query.clone(),
                 // SHACL §5.3.2: the validator's sh:message, else the component's.
                 message: validator.message.clone().or_else(|| comp.message.clone()),
+                annotations: validator.annotations.clone(),
             })));
         }
     }
@@ -1062,7 +1070,11 @@ fn load_constraints(
             ),
             _ => None,
         };
-        constraints.push(Constraint::Expression { expr, message });
+        constraints.push(Constraint::Expression {
+            node: expr_node,
+            expr,
+            message,
+        });
     }
 
     Ok(constraints)
@@ -1241,6 +1253,7 @@ struct ComponentParameter {
 struct ComponentValidator {
     query: CustomValidator,
     message: Option<String>,
+    annotations: Vec<super::shapes::ResultAnnotation>,
 }
 
 /// A `sh:ConstraintComponent` (or an instance of a subclass) declared in the
@@ -1328,7 +1341,7 @@ fn constraint_components(
                 .unwrap_or(path.as_str())
                 .to_string();
             let optional = single_value(store, shapes_graph, &pnode, &format!("{SH}optional"))
-                .is_some_and(|v| v == "true" || v == "1");
+                .is_some_and(|v| v == "true");
             parameters.push(ComponentParameter {
                 path,
                 name,
@@ -1367,7 +1380,16 @@ fn constraint_components(
                     "constraint component <{iri}>: sh:{pred} carries neither sh:ask nor sh:select"
                 ));
                 };
-            Ok((Some(ComponentValidator { query, message }), false))
+            let annotations = load_result_annotations(store, shapes_graph, &vnode)
+                .map_err(|e| format!("constraint component <{iri}>: sh:{pred} {e}"))?;
+            Ok((
+                Some(ComponentValidator {
+                    query,
+                    message,
+                    annotations,
+                }),
+                false,
+            ))
         };
         let (validator, validator_deactivated) = load_validator("validator")?;
         let (node_validator, node_validator_deactivated) = load_validator("nodeValidator")?;
@@ -1390,6 +1412,79 @@ fn constraint_components(
     COMPONENTS.with(|c| {
         *c.borrow_mut() = Some((shapes_graph.to_string(), instance, generation, out.clone()));
     });
+    Ok(out)
+}
+
+/// The `sh:resultAnnotation`s of `node`, the subject of a SPARQL constraint's
+/// or validator's `sh:select` / `sh:ask` (SHACL-AF §4). A declaration that
+/// breaks the Note's syntax rules fails the shapes graph: an annotation that
+/// is not an IRI or blank node, one without exactly one IRI as
+/// `sh:annotationProperty`, or with more than one `sh:annotationVarName` or a
+/// variable name that is not a string.
+fn load_result_annotations(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+) -> Result<Vec<super::shapes::ResultAnnotation>, String> {
+    let mut out = Vec::new();
+    for ann in store.objects_for_subject_in_graph(
+        node,
+        &format!("{SH}resultAnnotation"),
+        Some(shapes_graph),
+    ) {
+        if matches!(ann, Term::Literal(_)) {
+            return Err(format!(
+                "sh:resultAnnotation {ann} is a literal, not an IRI or blank node"
+            ));
+        }
+        let ann = term_to_lexical(&ann);
+        let objects = |p: &str| {
+            store.objects_for_subject_in_graph(&ann, &format!("{SH}{p}"), Some(shapes_graph))
+        };
+        let property = match objects("annotationProperty").as_slice() {
+            [Term::NamedNode(p)] => p.clone(),
+            [] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has no sh:annotationProperty"
+                ))
+            }
+            [_] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann}: sh:annotationProperty must be an IRI"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has more than one sh:annotationProperty"
+                ))
+            }
+        };
+        const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+        let var_name = match objects("annotationVarName").as_slice() {
+            [] => property
+                .as_str()
+                .rsplit(['#', '/', ':'])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            [Term::Literal(l)] if l.datatype().as_str() == XSD_STRING => l.value().to_string(),
+            [_] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann}: sh:annotationVarName must be an xsd:string literal"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has more than one sh:annotationVarName"
+                ))
+            }
+        };
+        out.push(super::shapes::ResultAnnotation {
+            property,
+            var_name: var_name.trim_start_matches(['?', '$']).to_string(),
+            defaults: objects("annotationValue"),
+        });
+    }
     Ok(out)
 }
 
@@ -2422,18 +2517,17 @@ fn walk_rdf_list(store: &TripleStore, shapes_graph: &str, head: Term) -> Vec<Ter
     values
 }
 
-/// Whether `node` carries `sh:deactivated true` (SHACL §2.1.6). The store
-/// returns `"1"^^xsd:boolean` as `true` (native boolean storage), so that
-/// form deactivates too — a documented deviation, refused at upload by
-/// [`super::lint`].
+/// Whether `node` carries `sh:deactivated true` (SHACL §2.1.6): the literal
+/// `true` only. The store keeps `"1"^^xsd:boolean` as written, and like
+/// every other activation flag (W3C core/property/uniqueLang-002) that form
+/// does not deactivate.
 fn is_deactivated(store: &TripleStore, shapes_graph: &str, node: &str) -> bool {
     store
         .objects_for_subject_in_graph(node, &format!("{SH}deactivated"), Some(shapes_graph))
         .iter()
         .any(|t| {
             matches!(t, Term::Literal(l)
-                if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN
-                    && matches!(l.value(), "true" | "1"))
+                if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN && l.value() == "true")
         })
 }
 

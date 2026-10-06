@@ -18,6 +18,8 @@
 //   3. /registry discovery  — live, opt-in (LD_DISCOVERY) cross-app SSE resolution.
 //   4. DEFAULTS             — localhost dev ports.
 
+import { withBase } from './basePath';
+
 export type ServiceName =
   | 'triplestore' | 'form-service' | 'form-app' | 'validation-api' | 'validation-app'
   | 'viewer-app' | 'llm-gateway' | 'llm-backend' | 'ollama' | 'lm-studio'
@@ -37,7 +39,7 @@ const DEFAULTS: Record<ServiceName, string> = {
 
 // Same-origin path the registry is reachable at (proxied by Vite in dev / nginx in prod), so no
 // cross-origin registry host is baked into the bundle and there is no CORS to configure.
-const REGISTRY_BASE = '/registry'
+const REGISTRY_BASE = withBase('/registry')
 
 export const SERVICE_CHANGE_EVENT = 'ldapps-service-change'
 

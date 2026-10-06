@@ -1,14 +1,29 @@
 //! SWRL rule evaluation engine.
 //!
-//! Translates SWRL rules to SPARQL INSERT WHERE queries and executes them
-//! in a fixed-point loop until no new triples are inferred.
+//! A rule without built-ins or data ranges is translated to one SPARQL
+//! `INSERT … WHERE …` update. A rule with them runs natively: its class,
+//! property and individual atoms become a SPARQL `SELECT`, the built-in and
+//! data-range atoms are evaluated in Rust over each solution
+//! ([`super::builtins`], [`super::datarange`]) — so a built-in can bind a
+//! variable, split a value into its components or enumerate solutions — and
+//! the head triples are written in one batch. Either way the rules run in a
+//! fixed-point loop until an iteration derives nothing new.
 //!
-//! Translation ([`compile_rules`]) refuses, with a message, every rule it
+//! A class-expression atom (`ObjectSomeValuesFrom(p B)(?x)`) is replaced by a
+//! class atom over an auxiliary named class `urn:ots:swrl:aux:<hash>`, and
+//! `aux owl:equivalentClass <expression>` joins the target graph, which the
+//! regime the rules run with reads: the regime materialises who belongs to the
+//! expression ([`super::expr::AuxClass`]). Such rules need a regime.
+//!
+//! Translation ([`compile_rules_for_regime`]) refuses, with a message, every rule it
 //! cannot run as written:
-//! - an unsafe rule: a variable in the head, or in a built-in, that no body
-//!   atom binds (SWRL §2–3 safety; built-ins cannot bind variables yet);
-//! - a built-in in the head;
-//! - a built-in it cannot translate;
+//! - an unsafe rule: a variable in the head that occurs nowhere in the body
+//!   (SWRL §2–3 safety);
+//! - a built-in in the head, or a data range in the head;
+//! - a built-in outside `swrlb:` §8, or with the wrong number of arguments;
+//! - a built-in or data range no order of the body can evaluate: one whose
+//!   unbound arguments have infinitely many solutions (`add(?z, ?x, ?y)` with
+//!   only `?z`… bound by nothing);
 //! - a constant in the wrong kind of position (a literal where an individual
 //!   belongs, or the other way round), and a variable used as both.
 //!
@@ -20,10 +35,15 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use oxigraph::model::{Literal, NamedNode};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term,
+};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
+use super::builtins::{self, EvalCtx, ListSource, Step, StepArg, StepKind};
+use super::datarange;
+use super::expr::{AuxClass, ClassExpr, DataRange};
 use crate::store::TripleStore;
 
 /// A SWRL rule with antecedent (body) and consequent (head).
@@ -40,6 +60,8 @@ pub struct SwrlRule {
 pub enum Atom {
     /// Class membership: Class(?x) → ?x rdf:type Class
     ClassAtom { class_iri: String, arg: SwrlArg },
+    /// Membership in a class expression: `ObjectSomeValuesFrom(p B)(?x)`.
+    ClassExpressionAtom { expr: ClassExpr, arg: SwrlArg },
     /// Object property: prop(?x, ?y) → ?x prop ?y, where ?y is an individual
     ObjectPropertyAtom {
         property: String,
@@ -64,7 +86,9 @@ pub enum Atom {
     SameIndividualAtom { arg1: SwrlArg, arg2: SwrlArg },
     /// owl:differentFrom assertion
     DifferentIndividualsAtom { arg1: SwrlArg, arg2: SwrlArg },
-    /// Built-in predicate (math, string, comparison)
+    /// Membership of a data value in a data range: `xsd:integer(?v)`.
+    DataRangeAtom { range: DataRange, arg: SwrlArg },
+    /// Built-in predicate (SWRL §8)
     BuiltinAtom { builtin: String, args: Vec<SwrlArg> },
 }
 
@@ -82,10 +106,6 @@ pub enum SwrlArg {
         language: Option<String>,
     },
 }
-
-/// The SWRL built-in namespace. Only built-ins in it are translated: a
-/// same-named function in another namespace means something else.
-const SWRLB: &str = "http://www.w3.org/2003/11/swrlb#";
 
 /// What a variable is bound to, by the positions it occurs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,24 +203,33 @@ impl RuleScope {
             other => constant_to_sparql(other),
         }
     }
+
+    /// An argument as a step argument: a generated variable name (without
+    /// `?`) or a constant term.
+    fn step_arg(&mut self, arg: &SwrlArg) -> Result<StepArg, String> {
+        Ok(match arg {
+            SwrlArg::Variable(v) => StepArg::Var(self.var(v)?.trim_start_matches('?').to_string()),
+            other => StepArg::Const(constant_term(other)?),
+        })
+    }
 }
 
-/// Render a constant argument (individual or literal) as a SPARQL term.
-fn constant_to_sparql(arg: &SwrlArg) -> Result<String, String> {
+/// A constant argument (individual or literal) as an RDF term.
+pub(crate) fn constant_term(arg: &SwrlArg) -> Result<Term, String> {
     match arg {
         SwrlArg::Variable(v) => Err(format!("'{v}' is a variable, not a constant")),
         SwrlArg::Individual(iri) => {
             let trimmed = iri.trim_start_matches('<').trim_end_matches('>');
-            let node = NamedNode::new(trimmed)
-                .map_err(|e| format!("Invalid SWRL individual IRI '{trimmed}': {e}"))?;
-            Ok(node.to_string())
+            NamedNode::new(trimmed)
+                .map(Term::NamedNode)
+                .map_err(|e| format!("Invalid SWRL individual IRI '{trimmed}': {e}"))
         }
         SwrlArg::Literal {
             value,
             language: Some(lang),
             ..
         } => Literal::new_language_tagged_literal(value.as_str(), lang.as_str())
-            .map(|l| l.to_string())
+            .map(Term::Literal)
             .map_err(|e| format!("Invalid SWRL literal language tag '{lang}': {e}")),
         SwrlArg::Literal {
             value,
@@ -209,12 +238,15 @@ fn constant_to_sparql(arg: &SwrlArg) -> Result<String, String> {
         } => {
             let dt_node = NamedNode::new(dt.as_str())
                 .map_err(|e| format!("Invalid SWRL literal datatype '{dt}': {e}"))?;
-            Ok(Literal::new_typed_literal(value.as_str(), dt_node).to_string())
+            Ok(Literal::new_typed_literal(value.as_str(), dt_node).into())
         }
-        SwrlArg::Literal { value, .. } => {
-            Ok(Literal::new_simple_literal(value.as_str()).to_string())
-        }
+        SwrlArg::Literal { value, .. } => Ok(Literal::new_simple_literal(value.as_str()).into()),
     }
+}
+
+/// Render a constant argument (individual or literal) as a SPARQL term.
+fn constant_to_sparql(arg: &SwrlArg) -> Result<String, String> {
+    constant_term(arg).map(|t| t.to_string())
 }
 
 /// Check that a class or property predicate is an absolute IRI.
@@ -281,46 +313,277 @@ pub struct SwrlExecutionResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct RuleResult {
     pub rule_name: String,
+    /// The SPARQL the rule runs: its `INSERT … WHERE …`, or for a rule with
+    /// built-ins the `SELECT` over its body atoms followed by the built-ins
+    /// evaluated natively (as comments).
     pub sparql: String,
     pub success: bool,
     pub error: Option<String>,
 }
 
+/// What a head triple's object may be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectKind {
+    Individual,
+    Data,
+    Either,
+}
+
+/// One head atom as a triple template.
+#[derive(Debug, Clone)]
+struct HeadTriple {
+    subject: StepArg,
+    predicate: NamedNode,
+    object: StepArg,
+    object_kind: ObjectKind,
+}
+
+/// A rule evaluated natively: a SELECT over its body atoms, built-in steps,
+/// head templates.
+#[derive(Debug, Clone)]
+struct NativeRule {
+    select: String,
+    steps: Vec<Step>,
+    head: Vec<HeadTriple>,
+}
+
+#[derive(Debug, Clone)]
+enum Plan {
+    Insert(String),
+    Native(NativeRule),
+}
+
+#[derive(Debug, Clone)]
+struct CompiledRule {
+    name: String,
+    /// The rule's SPARQL, as reported.
+    sparql: String,
+    plan: Plan,
+}
+
 /// Rules translated to SPARQL, ready to run.
 #[derive(Debug, Clone)]
 pub struct CompiledRules {
-    rules: Vec<(String, String)>,
+    rules: Vec<CompiledRule>,
     target: Option<NamedNode>,
+    /// The graphs rule bodies read, the target included; `None` reads the
+    /// default graph.
+    scope: Option<Vec<String>>,
+    /// Class expressions the rules use, named by auxiliary classes.
+    aux: Vec<AuxClass>,
+}
+
+impl CompiledRules {
+    /// Write `aux owl:equivalentClass <expression>` for every auxiliary class
+    /// the target graph does not define yet, so the regime reasons over it.
+    /// Returns the number of triples written.
+    pub fn install_aux(&self, store: &TripleStore) -> Result<usize, String> {
+        if self.aux.is_empty() {
+            return Ok(0);
+        }
+        let Some(target) = self.target.as_ref() else {
+            return Err("class-expression atoms need a target graph".to_string());
+        };
+        let eqc = NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#equivalentClass");
+        let mut quads = Vec::new();
+        for aux in &self.aux {
+            let node = NamedNode::new_unchecked(aux.iri.as_str());
+            let present = store
+                .store()
+                .quads_for_pattern(
+                    Some(node.as_ref().into()),
+                    Some(eqc),
+                    None,
+                    Some(GraphNameRef::NamedNode(target.as_ref())),
+                )
+                .next()
+                .is_some();
+            if present {
+                continue;
+            }
+            for t in aux.axioms() {
+                quads.push(Quad::new(
+                    t.subject,
+                    t.predicate,
+                    t.object,
+                    GraphName::NamedNode(target.clone()),
+                ));
+            }
+        }
+        let n = quads.len();
+        if n > 0 {
+            store
+                .insert_quads(quads)
+                .map_err(|e| format!("writing the auxiliary class axioms: {e}"))?;
+        }
+        Ok(n)
+    }
 }
 
 /// Translate every rule, refusing the whole set if any rule cannot run as
 /// written. Running the rest would hand back a closure the caller did not
 /// ask for, so the error names each refused rule and nothing runs.
-pub fn compile_rules(
+///
+/// Rule bodies read the default graph, or with `sources` the merge of those
+/// graphs plus the target graph, so a rule sees what earlier iterations
+/// derived. A scoped run must name its target: the default graph cannot be
+/// part of a scope.
+///
+/// With `regime` (the rules run jointly with it) class-expression atoms are
+/// accepted, as the regime materialises the auxiliary classes standing for
+/// them ([`CompiledRules::install_aux`]); without one they are refused, as
+/// nothing would compute who belongs to the expression.
+pub fn compile_rules_for_regime(
     rules: &[SwrlRule],
     target_graph: Option<&str>,
+    sources: Option<&[String]>,
+    regime: Option<&str>,
 ) -> Result<CompiledRules, String> {
     let target = target_graph.map(validate_target_graph).transpose()?;
+    let scope = match sources {
+        None => None,
+        Some(sources) => {
+            let Some(t) = target.as_ref() else {
+                return Err(
+                    "a run scoped to named graphs needs a target_graph: what it derives \
+                     must be readable by its next iteration"
+                        .to_string(),
+                );
+            };
+            let mut scope = Vec::with_capacity(sources.len() + 1);
+            for g in sources {
+                NamedNode::new(g.as_str())
+                    .map_err(|e| format!("Invalid source graph '{g}': {e}"))?;
+                if !scope.contains(g) {
+                    scope.push(g.clone());
+                }
+            }
+            if !scope.iter().any(|g| g == t.as_str()) {
+                scope.push(t.as_str().to_string());
+            }
+            Some(scope)
+        }
+    };
     let mut compiled = Vec::with_capacity(rules.len());
     let mut errors = Vec::new();
+    let mut aux: Vec<AuxClass> = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
         let name = rule
             .name
             .clone()
             .unwrap_or_else(|| format!("rule_{}", i + 1));
-        match rule_to_sparql(rule, target.as_ref()) {
-            Ok(sparql) => compiled.push((name, sparql)),
+        let outcome = lower_class_expressions(rule, &mut aux, regime)
+            .and_then(|lowered| compile_rule(&lowered, target.as_ref()));
+        match outcome {
+            Ok((sparql, plan)) => compiled.push(CompiledRule { name, sparql, plan }),
             Err(e) => errors.push(format!("rule '{name}': {e}")),
         }
     }
     if !errors.is_empty() {
         return Err(format!("SWRL rules refused: {}", errors.join("; ")));
     }
+    if !aux.is_empty() && target.is_none() {
+        return Err(
+            "SWRL rules refused: class-expression atoms need a target_graph, where the \
+             auxiliary class axioms are written for the regime"
+                .to_string(),
+        );
+    }
     Ok(CompiledRules {
         rules: compiled,
         target,
+        scope,
+        aux,
     })
 }
+
+/// Replace each class-expression atom by a class atom over its auxiliary
+/// class (a named class stays a plain class atom).
+fn lower_class_expressions(
+    rule: &SwrlRule,
+    aux: &mut Vec<AuxClass>,
+    regime: Option<&str>,
+) -> Result<SwrlRule, String> {
+    let mut lower = |atoms: &[Atom]| -> Result<Vec<Atom>, String> {
+        atoms
+            .iter()
+            .map(|a| match a {
+                Atom::ClassExpressionAtom {
+                    expr: ClassExpr::Named(c),
+                    arg,
+                } => Ok(Atom::ClassAtom {
+                    class_iri: c.clone(),
+                    arg: arg.clone(),
+                }),
+                Atom::ClassExpressionAtom { expr, arg } => {
+                    expr.validate()?;
+                    if regime.is_none() {
+                        return Err(format!(
+                            "the class-expression atom {expr}: who belongs to a class \
+                             expression is computed by an entailment regime. Run the rules \
+                             with \"regime\" (owl2-rl, or owl2-dl with a DL backend) or store \
+                             them with a dataset whose regime is in materialize mode"
+                        ));
+                    }
+                    let a = AuxClass::new(expr.clone());
+                    let class_iri = a.iri.clone();
+                    if !aux.iter().any(|x| x.iri == a.iri) {
+                        aux.push(a);
+                    }
+                    Ok(Atom::ClassAtom {
+                        class_iri,
+                        arg: arg.clone(),
+                    })
+                }
+                other => Ok(other.clone()),
+            })
+            .collect()
+    };
+    Ok(SwrlRule {
+        name: rule.name.clone(),
+        body: lower(&rule.body)?,
+        head: lower(&rule.head)?,
+    })
+}
+
+/// Reads list cells from the graphs a rule reads.
+struct StoreLists<'a> {
+    store: &'a oxigraph::store::Store,
+    /// `None`: the default graph.
+    graphs: Option<Vec<NamedNode>>,
+}
+
+impl ListSource for StoreLists<'_> {
+    fn cell(&self, node: &Term) -> Option<(Term, Term)> {
+        let subject: NamedOrBlankNode = match node {
+            Term::NamedNode(n) => n.clone().into(),
+            Term::BlankNode(b) => b.clone().into(),
+            _ => return None,
+        };
+        let first = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#first");
+        let rest = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#rest");
+        let graphs: Vec<GraphNameRef<'_>> = match &self.graphs {
+            Some(gs) => gs
+                .iter()
+                .map(|g| GraphNameRef::NamedNode(g.as_ref()))
+                .collect(),
+            None => vec![GraphNameRef::DefaultGraph],
+        };
+        let object = |p: NamedNodeRef<'_>| -> Option<Term> {
+            graphs.iter().find_map(|g| {
+                self.store
+                    .quads_for_pattern(Some(subject.as_ref()), Some(p), None, Some(*g))
+                    .filter_map(Result::ok)
+                    .map(|q| q.object)
+                    .next()
+            })
+        };
+        Some((object(first)?, object(rest)?))
+    }
+}
+
+/// The most bindings one native rule may produce in one iteration.
+const MAX_BINDINGS: usize = 1_000_000;
 
 /// Run compiled rules until an iteration derives nothing new, `max_iterations`
 /// iterations have run, or `deadline` passes (checked before each rule).
@@ -346,13 +609,23 @@ pub fn execute_compiled(
     };
     let expired = || deadline.is_some_and(|d| Instant::now() >= d);
 
+    let lists = StoreLists {
+        store: store.store(),
+        graphs: compiled.scope.as_ref().map(|s| {
+            s.iter()
+                .map(|g| NamedNode::new_unchecked(g.as_str()))
+                .collect()
+        }),
+    };
+    let mut ctx = EvalCtx::new(&lists);
+
     let start_count = count()?;
     let mut rule_results: Vec<RuleResult> = compiled
         .rules
         .iter()
-        .map(|(name, sparql)| RuleResult {
-            rule_name: name.clone(),
-            sparql: sparql.clone(),
+        .map(|r| RuleResult {
+            rule_name: r.name.clone(),
+            sparql: r.sparql.clone(),
             success: true,
             error: None,
         })
@@ -367,20 +640,28 @@ pub fn execute_compiled(
         }
         iterations += 1;
         let count_before = count()?;
-        for ((name, sparql), result) in compiled.rules.iter().zip(rule_results.iter_mut()) {
+        for (rule, result) in compiled.rules.iter().zip(rule_results.iter_mut()) {
             if expired() {
                 stop_reason = StopReason::Timeout;
                 break 'fixpoint;
             }
-            // Through `TripleStore::update`, not a raw `parse_update(..).execute()`
-            // on the inner store: the store's write guard (mirror, query cache)
-            // and per-graph count maintenance must see these writes like any
-            // other update.
-            if let Err(e) = store.update(sparql) {
-                warn!("Rule {} failed: {}", name, e);
+            let outcome = match &rule.plan {
+                // Through `TripleStore::update`, not a raw `parse_update(..).execute()`
+                // on the inner store: the store's write guard (mirror, query cache)
+                // and per-graph count maintenance must see these writes like any
+                // other update.
+                Plan::Insert(sparql) => match &compiled.scope {
+                    Some(scope) => store.update_scoped(sparql, scope),
+                    None => store.update(sparql),
+                }
+                .map_err(|e| e.to_string()),
+                Plan::Native(native) => run_native(store, compiled, native, &mut ctx),
+            };
+            if let Err(e) = outcome {
+                warn!("Rule {} failed: {}", rule.name, e);
                 if result.success {
                     result.success = false;
-                    result.error = Some(e.to_string());
+                    result.error = Some(e);
                 }
             }
         }
@@ -414,6 +695,113 @@ pub fn execute_compiled(
     })
 }
 
+/// One pass of a native rule: SELECT the body's solutions, run the steps over
+/// each, write the head triples (and the cells of lists minted for them).
+fn run_native(
+    store: &TripleStore,
+    compiled: &CompiledRules,
+    rule: &NativeRule,
+    ctx: &mut EvalCtx<'_>,
+) -> Result<(), String> {
+    let results = match &compiled.scope {
+        Some(scope) => store.query_scoped(&rule.select, scope),
+        None => store.query(&rule.select),
+    }
+    .map_err(|e| e.to_string())?;
+    let oxigraph::sparql::QueryResults::Solutions(solutions) = results else {
+        return Err("the rule body query returned no solutions table".to_string());
+    };
+    let mut bindings: Vec<HashMap<String, Term>> = Vec::new();
+    for solution in solutions {
+        let solution = solution.map_err(|e| e.to_string())?;
+        let mut b = HashMap::new();
+        for (var, term) in solution.iter() {
+            b.insert(var.as_str().to_string(), term.clone());
+        }
+        bindings.push(b);
+        if bindings.len() > MAX_BINDINGS {
+            return Err(format!(
+                "the rule body has more than {MAX_BINDINGS} solutions in one iteration"
+            ));
+        }
+    }
+    for step in &rule.steps {
+        let mut next = Vec::new();
+        for b in &bindings {
+            next.extend(step.eval(b, ctx));
+            if next.len() > MAX_BINDINGS {
+                return Err(format!(
+                    "{} produced more than {MAX_BINDINGS} solutions in one iteration",
+                    step.label
+                ));
+            }
+        }
+        bindings = next;
+        if bindings.is_empty() {
+            return Ok(());
+        }
+    }
+
+    let graph = match &compiled.target {
+        Some(t) => GraphName::NamedNode(t.clone()),
+        None => GraphName::DefaultGraph,
+    };
+    let resolve = |a: &StepArg, b: &HashMap<String, Term>| -> Option<Term> {
+        match a {
+            StepArg::Const(t) => Some(t.clone()),
+            StepArg::Var(v) => b.get(v).cloned(),
+        }
+    };
+    let mut quads: HashSet<Quad> = HashSet::new();
+    let mut minted_used: HashSet<String> = HashSet::new();
+    for b in &bindings {
+        for h in &rule.head {
+            let (Some(s), Some(o)) = (resolve(&h.subject, b), resolve(&h.object, b)) else {
+                continue;
+            };
+            let subject: NamedOrBlankNode = match &s {
+                Term::NamedNode(n) => n.clone().into(),
+                Term::BlankNode(n) => n.clone().into(),
+                // A literal cannot be a subject: no triple to assert.
+                _ => continue,
+            };
+            let fits = match h.object_kind {
+                ObjectKind::Individual => !matches!(o, Term::Literal(_)),
+                ObjectKind::Data => matches!(o, Term::Literal(_)),
+                ObjectKind::Either => true,
+            };
+            if !fits {
+                continue;
+            }
+            for t in [&s, &o] {
+                if let Term::NamedNode(n) = t {
+                    if ctx.minted.contains_key(n.as_str()) {
+                        minted_used.insert(n.as_str().to_string());
+                    }
+                }
+            }
+            quads.insert(Quad::new(subject, h.predicate.clone(), o, graph.clone()));
+        }
+    }
+    let mut cells = Vec::new();
+    for node in &minted_used {
+        builtins::minted_cells(ctx, node, &mut cells);
+    }
+    for (s, p, o) in cells {
+        if let Term::NamedNode(s) = s {
+            quads.insert(Quad::new(s, NamedNode::new_unchecked(p), o, graph.clone()));
+        }
+    }
+    let fresh: Vec<Quad> = quads
+        .into_iter()
+        .filter(|q| !store.store().contains(q).unwrap_or(false))
+        .collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    store.insert_quads(fresh).map_err(|e| e.to_string())
+}
+
 /// The variables an argument list mentions.
 fn variables<'a>(args: impl IntoIterator<Item = &'a SwrlArg>) -> impl Iterator<Item = &'a str> {
     args.into_iter().filter_map(|a| match a {
@@ -425,7 +813,9 @@ fn variables<'a>(args: impl IntoIterator<Item = &'a SwrlArg>) -> impl Iterator<I
 /// The arguments of an atom, in order.
 fn atom_args(atom: &Atom) -> Vec<&SwrlArg> {
     match atom {
-        Atom::ClassAtom { arg, .. } => vec![arg],
+        Atom::ClassAtom { arg, .. }
+        | Atom::ClassExpressionAtom { arg, .. }
+        | Atom::DataRangeAtom { arg, .. } => vec![arg],
         Atom::ObjectPropertyAtom { arg1, arg2, .. }
         | Atom::DataPropertyAtom { arg1, arg2, .. }
         | Atom::PropertyAtom { arg1, arg2, .. }
@@ -439,7 +829,10 @@ fn atom_args(atom: &Atom) -> Vec<&SwrlArg> {
 fn check_positions(scope: &mut RuleScope, atom: &Atom, place: &str) -> Result<(), String> {
     use Sort::*;
     let (name, sorts): (&str, &[Option<Sort>]) = match atom {
-        Atom::ClassAtom { .. } => ("ClassAtom", &[Some(Individual)]),
+        Atom::ClassAtom { .. } | Atom::ClassExpressionAtom { .. } => {
+            ("ClassAtom", &[Some(Individual)])
+        }
+        Atom::DataRangeAtom { .. } => ("DataRangeAtom", &[Some(Data)]),
         Atom::ObjectPropertyAtom { .. } => {
             ("ObjectPropertyAtom", &[Some(Individual), Some(Individual)])
         }
@@ -453,8 +846,8 @@ fn check_positions(scope: &mut RuleScope, atom: &Atom, place: &str) -> Result<()
             "DifferentIndividualsAtom",
             &[Some(Individual), Some(Individual)],
         ),
-        // Built-in arguments are not given a sort here: built-ins in use
-        // compare individuals as well as data values.
+        // Built-in arguments are not given a sort here: built-ins compare
+        // individuals as well as data values, and list built-ins take lists.
         Atom::BuiltinAtom { .. } => return Ok(()),
     };
     for (i, (arg, sort)) in atom_args(atom).into_iter().zip(sorts).enumerate() {
@@ -469,16 +862,14 @@ fn check_positions(scope: &mut RuleScope, atom: &Atom, place: &str) -> Result<()
     Ok(())
 }
 
-/// Refuse an unsafe rule: every variable in the head or in a body built-in
-/// must occur in a body atom that binds it (any atom but a built-in, since no
-/// built-in binds a variable yet). Without the check, a head-only variable made
-/// the INSERT skip silently, and a built-in-only one made its FILTER fail on
-/// every binding.
+/// Refuse an unsafe rule (SWRL §2–3): every variable in the head must occur
+/// in the body. Without the check a head-only variable made the INSERT skip
+/// silently. Whether the body can bind every variable its built-ins use is
+/// decided when the steps are ordered ([`builtins::plan`]).
 fn check_safety(rule: &SwrlRule) -> Result<(), String> {
     let bound: HashSet<&str> = rule
         .body
         .iter()
-        .filter(|a| !matches!(a, Atom::BuiltinAtom { .. }))
         .flat_map(|a| variables(atom_args(a)))
         .collect();
     for atom in &rule.head {
@@ -487,17 +878,6 @@ fn check_safety(rule: &SwrlRule) -> Result<(), String> {
                 "unsafe rule: head variable '{v}' does not occur in the body \
                  (every head variable must be bound by a body atom)"
             ));
-        }
-    }
-    for atom in &rule.body {
-        if let Atom::BuiltinAtom { builtin, args } = atom {
-            if let Some(v) = variables(args).find(|v| !bound.contains(v)) {
-                return Err(format!(
-                    "unsafe rule: variable '{v}' of built-in '{builtin}' is bound by no \
-                     class, property or individual atom in the body (built-ins cannot \
-                     bind variables yet)"
-                ));
-            }
         }
     }
     Ok(())
@@ -537,13 +917,78 @@ fn atom_pattern(scope: &mut RuleScope, atom: &Atom) -> Result<String, String> {
         Atom::DifferentIndividualsAtom { arg1, arg2 } => {
             (scope.term(arg1)?, owl("differentFrom"), scope.term(arg2)?)
         }
-        Atom::BuiltinAtom { .. } => unreachable!("built-ins are not triple patterns"),
+        Atom::ClassExpressionAtom { .. } => {
+            unreachable!("class expressions are lowered before translation")
+        }
+        Atom::BuiltinAtom { .. } | Atom::DataRangeAtom { .. } => {
+            unreachable!("built-ins and data ranges are not triple patterns")
+        }
     };
     Ok(format!("  {s} {p} {o} ."))
 }
 
-/// Translate a SWRL rule to a SPARQL INSERT WHERE query.
-fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&NamedNode>) -> Result<String, String> {
+/// One head atom as a triple template.
+fn head_triple(scope: &mut RuleScope, atom: &Atom) -> Result<HeadTriple, String> {
+    let owl =
+        |local: &str| NamedNode::new_unchecked(format!("http://www.w3.org/2002/07/owl#{local}"));
+    Ok(match atom {
+        Atom::ClassAtom { class_iri, arg } => HeadTriple {
+            subject: scope.step_arg(arg)?,
+            predicate: NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+            object: StepArg::Const(validate_predicate_iri(class_iri, "class")?.into()),
+            object_kind: ObjectKind::Individual,
+        },
+        Atom::ObjectPropertyAtom {
+            property,
+            arg1,
+            arg2,
+        }
+        | Atom::DataPropertyAtom {
+            property,
+            arg1,
+            arg2,
+        }
+        | Atom::PropertyAtom {
+            property,
+            arg1,
+            arg2,
+        } => HeadTriple {
+            subject: scope.step_arg(arg1)?,
+            predicate: validate_predicate_iri(property, "property")?,
+            object: scope.step_arg(arg2)?,
+            object_kind: match atom {
+                Atom::ObjectPropertyAtom { .. } => ObjectKind::Individual,
+                Atom::DataPropertyAtom { .. } => ObjectKind::Data,
+                _ => ObjectKind::Either,
+            },
+        },
+        Atom::SameIndividualAtom { arg1, arg2 } | Atom::DifferentIndividualsAtom { arg1, arg2 } => {
+            HeadTriple {
+                subject: scope.step_arg(arg1)?,
+                predicate: owl(if matches!(atom, Atom::SameIndividualAtom { .. }) {
+                    "sameAs"
+                } else {
+                    "differentFrom"
+                }),
+                object: scope.step_arg(arg2)?,
+                object_kind: ObjectKind::Individual,
+            }
+        }
+        Atom::ClassExpressionAtom { .. } => {
+            unreachable!("class expressions are lowered before translation")
+        }
+        Atom::BuiltinAtom { .. } | Atom::DataRangeAtom { .. } => {
+            unreachable!("refused in the head before translation")
+        }
+    })
+}
+
+/// Translate a SWRL rule (class expressions already lowered) to the SPARQL
+/// it runs and its plan.
+fn compile_rule(
+    rule: &SwrlRule,
+    target_graph: Option<&NamedNode>,
+) -> Result<(String, Plan), String> {
     if rule.head.is_empty() {
         return Err("Rule has no head atoms".to_string());
     }
@@ -554,6 +999,16 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&NamedNode>) -> Result<S
     {
         return Err(format!(
             "built-in '{builtin}' in the rule head: SWRL allows built-ins only in the body"
+        ));
+    }
+    if let Some(Atom::DataRangeAtom { range, .. }) = rule
+        .head
+        .iter()
+        .find(|a| matches!(a, Atom::DataRangeAtom { .. }))
+    {
+        return Err(format!(
+            "the data range {range} in the rule head: a data range can be tested in the body, \
+             but there is no triple that asserts it"
         ));
     }
     check_safety(rule)?;
@@ -571,34 +1026,61 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&NamedNode>) -> Result<S
     // Variables in a body object position could bind to either kind of term;
     // a typed variable there gets a filter so it binds only to its own kind.
     let mut object_vars: Vec<&str> = Vec::new();
+    let mut pattern_vars: Vec<String> = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
 
     for atom in &rule.body {
         match atom {
             Atom::BuiltinAtom { builtin, args } => {
-                // A builtin we cannot translate is a hard error, not a skip.
-                // Dropping the FILTER left the rest of the rule intact and
-                // firing — so `Person(?x) ^ stringLength(?n, ?len) ^
-                // greaterThan(?len, 5) -> LongName(?x)` lost its guard entirely
-                // and asserted the head for every binding. Silently unsound
-                // inference is worse than a refused rule.
-                let rendered = args
+                // A built-in the engine cannot evaluate is a hard error, not
+                // a skip: dropping its condition would assert the head for
+                // every binding the rest of the body allows.
+                let local = builtins::resolve(builtin, args.len())?;
+                let step_args = args
                     .iter()
-                    .map(|a| scope.term(a))
+                    .map(|a| scope.step_arg(a))
                     .collect::<Result<Vec<_>, _>>()?;
-                match builtin_to_filter(builtin, &rendered) {
-                    Some(filter) => filters.push(filter),
-                    None => {
-                        return Err(format!(
-                            "Unsupported SWRL builtin '{builtin}' with {} argument(s): refusing \
-                             to run the rule, because dropping its condition would assert the \
-                             head unconditionally",
-                            args.len()
-                        ))
-                    }
-                }
+                let consts: Vec<Option<Term>> = step_args
+                    .iter()
+                    .map(|a| match a {
+                        StepArg::Const(t) => Some(t.clone()),
+                        StepArg::Var(_) => None,
+                    })
+                    .collect();
+                builtins::check_constants(&local, &consts)?;
+                let label = format!(
+                    "swrlb:{local}({})",
+                    step_args
+                        .iter()
+                        .map(step_arg_text)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                steps.push(Step {
+                    kind: StepKind::Builtin(local),
+                    args: step_args,
+                    label,
+                });
+            }
+            Atom::DataRangeAtom { range, arg } => {
+                range.validate()?;
+                datarange::check_range(range)?;
+                let a = scope.step_arg(arg)?;
+                let label = format!("DataRangeAtom({range} {})", step_arg_text(&a));
+                steps.push(Step {
+                    kind: StepKind::Range(range.clone()),
+                    args: vec![a],
+                    label,
+                });
             }
             other => {
                 where_patterns.push(atom_pattern(&mut scope, other)?);
+                for v in variables(atom_args(other)) {
+                    let g = scope.var(v)?;
+                    if !pattern_vars.contains(&g) {
+                        pattern_vars.push(g);
+                    }
+                }
                 if let [_, SwrlArg::Variable(v)] = atom_args(other).as_slice() {
                     object_vars.push(v.as_str());
                 }
@@ -621,18 +1103,6 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&NamedNode>) -> Result<S
         });
     }
 
-    let insert_patterns = rule
-        .head
-        .iter()
-        .map(|atom| atom_pattern(&mut scope, atom))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let graph_clause = if let Some(g) = target_graph {
-        format!("GRAPH {g} {{\n{}\n  }}", insert_patterns.join("\n"))
-    } else {
-        insert_patterns.join("\n")
-    };
-
     let mut where_clause = where_patterns.join("\n");
     if !filters.is_empty() {
         where_clause.push('\n');
@@ -641,53 +1111,70 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&NamedNode>) -> Result<S
         }
     }
 
-    Ok(format!(
-        "INSERT {{\n{}\n}} WHERE {{\n{}\n}}",
-        graph_clause, where_clause
+    if steps.is_empty() {
+        let insert_patterns = rule
+            .head
+            .iter()
+            .map(|atom| atom_pattern(&mut scope, atom))
+            .collect::<Result<Vec<_>, _>>()?;
+        let graph_clause = if let Some(g) = target_graph {
+            format!("GRAPH {g} {{\n{}\n  }}", insert_patterns.join("\n"))
+        } else {
+            insert_patterns.join("\n")
+        };
+        let sparql = format!(
+            "INSERT {{\n{}\n}} WHERE {{\n{}\n}}",
+            graph_clause, where_clause
+        );
+        return Ok((sparql.clone(), Plan::Insert(sparql)));
+    }
+
+    let mut bound: HashSet<String> = pattern_vars
+        .iter()
+        .map(|v| v.trim_start_matches('?').to_string())
+        .collect();
+    let steps = builtins::plan(steps, &mut bound)?;
+    let head = rule
+        .head
+        .iter()
+        .map(|atom| head_triple(&mut scope, atom))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projection = if pattern_vars.is_empty() {
+        "*".to_string()
+    } else {
+        pattern_vars.join(" ")
+    };
+    let select = format!("SELECT DISTINCT {projection} WHERE {{\n{where_clause}\n}}");
+    let mut shown = select.clone();
+    for s in &steps {
+        shown.push_str(&format!("\n# then {}", s.label));
+    }
+    Ok((
+        shown,
+        Plan::Native(NativeRule {
+            select,
+            steps,
+            head,
+        }),
     ))
 }
 
-/// Translate a SWRL built-in predicate, its arguments already rendered as
-/// SPARQL terms, to a SPARQL FILTER expression. `None` means the built-in is
-/// not one of the supported ones (or not with this many arguments); the
-/// caller must treat that as a rule-level failure — see the `BuiltinAtom` arm
-/// of [`rule_to_sparql`].
-fn builtin_to_filter(builtin: &str, a: &[String]) -> Option<String> {
-    let Some(local) = builtin.strip_prefix(SWRLB) else {
-        debug!("SWRL builtin outside the swrlb namespace: {}", builtin);
-        return None;
-    };
-    let binary = |op: &str| format!("{} {op} {}", a[0], a[1]);
-    let arithmetic = |op: &str| format!("{} = {} {op} {}", a[0], a[1], a[2]);
-    Some(match (local, a.len()) {
-        ("equal", 2) => binary("="),
-        ("notEqual", 2) => binary("!="),
-        ("lessThan", 2) => binary("<"),
-        ("lessThanOrEqual", 2) => binary("<="),
-        ("greaterThan", 2) => binary(">"),
-        ("greaterThanOrEqual", 2) => binary(">="),
-        ("add", 3) => arithmetic("+"),
-        ("subtract", 3) => arithmetic("-"),
-        ("multiply", 3) => arithmetic("*"),
-        ("divide", 3) => arithmetic("/"),
-        // stringConcat(?r, ?a, ?b, …) holds when ?r is the concatenation of
-        // the rest. A bare `CONCAT(…)` as the FILTER was true for every
-        // non-empty result, so the condition never excluded anything.
-        ("stringConcat", n) if n >= 2 => format!("{} = CONCAT({})", a[0], a[1..].join(", ")),
-        ("contains", 2) => format!("CONTAINS({}, {})", a[0], a[1]),
-        // matches(?s, pattern) or matches(?s, pattern, flags); any other count
-        // is refused rather than truncated.
-        ("matches", 2 | 3) => format!("REGEX({})", a.join(", ")),
-        _ => {
-            debug!("Unsupported SWRL builtin: {}", builtin);
-            return None;
-        }
-    })
+fn step_arg_text(a: &StepArg) -> String {
+    match a {
+        StepArg::Var(v) => format!("?{v}"),
+        StepArg::Const(t) => t.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SWRLB: &str = "http://www.w3.org/2003/11/swrlb#";
+
+    fn rule_to_sparql(rule: &SwrlRule, target: Option<&NamedNode>) -> Result<String, String> {
+        compile_rule(rule, target).map(|(sparql, _)| sparql)
+    }
 
     #[test]
     fn test_rule_to_sparql() {
@@ -717,30 +1204,44 @@ mod tests {
         assert!(sparql.contains("http://example.org/knows"));
     }
 
+    /// A rule with a built-in runs natively: a SELECT over its other body
+    /// atoms, then the built-in, which may bind a variable the head uses.
     #[test]
-    fn test_builtin_to_filter() {
-        let args = vec!["?x".to_string(), "?y".to_string()];
-        assert_eq!(
-            builtin_to_filter("http://www.w3.org/2003/11/swrlb#greaterThan", &args),
-            Some("?x > ?y".to_string())
+    fn builtins_compile_to_a_native_plan() {
+        let rule = SwrlRule {
+            name: None,
+            body: vec![
+                Atom::DataPropertyAtom {
+                    property: "http://ex/age".to_string(),
+                    arg1: SwrlArg::Variable("?x".to_string()),
+                    arg2: SwrlArg::Variable("?a".to_string()),
+                },
+                Atom::BuiltinAtom {
+                    builtin: format!("{SWRLB}add"),
+                    args: vec![
+                        SwrlArg::Variable("?n".to_string()),
+                        SwrlArg::Variable("?a".to_string()),
+                        SwrlArg::Literal {
+                            value: "1".to_string(),
+                            datatype: Some("http://www.w3.org/2001/XMLSchema#integer".to_string()),
+                            language: None,
+                        },
+                    ],
+                },
+            ],
+            head: vec![Atom::DataPropertyAtom {
+                property: "http://ex/nextAge".to_string(),
+                arg1: SwrlArg::Variable("?x".to_string()),
+                arg2: SwrlArg::Variable("?n".to_string()),
+            }],
+        };
+        let (sparql, plan) = compile_rule(&rule, None).unwrap();
+        assert!(
+            sparql.starts_with("SELECT DISTINCT ?v0_x ?v1_a"),
+            "{sparql}"
         );
-        // A same-named function outside swrlb: is not swrlb:greaterThan.
-        assert_eq!(builtin_to_filter("http://ex/fn#greaterThan", &args), None);
-        // stringConcat is an equation on its first argument, not a bare CONCAT.
-        let args = vec!["?r".to_string(), "?a".to_string(), "?b".to_string()];
-        assert_eq!(
-            builtin_to_filter("http://www.w3.org/2003/11/swrlb#stringConcat", &args),
-            Some("?r = CONCAT(?a, ?b)".to_string())
-        );
-        // matches takes two or three arguments; a fourth is refused, not cut off.
-        let four: Vec<String> = ["?s", "\"a\"", "\"i\"", "\"x\""]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            builtin_to_filter("http://www.w3.org/2003/11/swrlb#matches", &four),
-            None
-        );
+        assert!(sparql.contains("# then swrlb:add(?v2_n, ?v1_a"), "{sparql}");
+        assert!(matches!(plan, Plan::Native(_)));
     }
 
     #[test]
@@ -921,7 +1422,7 @@ mod tests {
                     arg2: SwrlArg::Variable("?len".to_string()),
                 },
                 Atom::BuiltinAtom {
-                    builtin: "http://www.w3.org/2003/11/swrlb#stringLength".to_string(),
+                    builtin: "http://example.org/fn#stringLength".to_string(),
                     args: vec![
                         SwrlArg::Variable("?n".to_string()),
                         SwrlArg::Variable("?len".to_string()),
@@ -975,13 +1476,30 @@ mod tests {
                 class("http://ex/A", var("?x")),
                 Atom::BuiltinAtom {
                     builtin: format!("{SWRLB}add"),
-                    args: vec![var("?z"), var("?x"), var("?x")],
+                    args: vec![var("?z"), var("?w"), var("?x")],
                 },
             ],
             head: vec![class("http://ex/B", var("?x"))],
         };
         let err = rule_to_sparql(&builtin_only, None).unwrap_err();
-        assert!(err.contains("unsafe rule") && err.contains("'?z'"), "{err}");
+        assert!(
+            err.contains("infinitely many") && err.contains("swrlb:add"),
+            "{err}"
+        );
+
+        // add(?z, ?x, ?x) binds ?z from ?x: safe now that built-ins bind.
+        let binds = SwrlRule {
+            name: None,
+            body: vec![
+                class("http://ex/A", var("?x")),
+                Atom::BuiltinAtom {
+                    builtin: format!("{SWRLB}add"),
+                    args: vec![var("?z"), var("?x"), var("?x")],
+                },
+            ],
+            head: vec![class("http://ex/B", var("?x"))],
+        };
+        assert!(rule_to_sparql(&binds, None).is_ok());
     }
 
     /// Typed positions: constants of the wrong kind and variables used as both

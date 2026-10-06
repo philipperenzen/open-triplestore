@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { onMount, onDestroy, tick } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
@@ -239,7 +240,7 @@
       await llmSetMemory(memory.instructions, memory.enabled);
       memorySaved = true;
     } catch (e) {
-      alert(e?.message || 'Could not save');
+      toastError(e?.message || 'Could not save');
     } finally {
       memorySaving = false;
     }

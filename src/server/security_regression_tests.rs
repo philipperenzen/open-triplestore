@@ -47,6 +47,7 @@ mod tests {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            serve_frontend: true,
             trusted_proxies: crate::server::client_ip::TrustedProxies::default(),
             browse_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             expensive_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
@@ -290,6 +291,87 @@ mod tests {
                 c.contains("SameSite=Strict"),
                 "session cookie must be SameSite=Strict (mirror-mode CORS safety depends on \
                  it); got: {c}"
+            );
+        }
+    }
+
+    // ─── Sub-path deploys: session cookies follow the proxy's path prefix ────
+
+    async fn login_cookie_paths(state: AppState, prefix: Option<&str>) -> Vec<(String, String)> {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/login")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(p) = prefix {
+            req = req.header("x-forwarded-prefix", p);
+        }
+        let resp = test_app(state)
+            .oneshot(
+                req.body(Body::from(
+                    r#"{"username":"alice","password":"correct-horse-battery"}"#,
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "valid login should succeed");
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter(|c| c.starts_with("access_token=") || c.starts_with("refresh_token="))
+            .map(|c| {
+                let name = c.split('=').next().unwrap().to_string();
+                let path = c
+                    .split(';')
+                    .find_map(|a| a.trim().strip_prefix("Path="))
+                    .unwrap_or("")
+                    .to_string();
+                (name, path)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_cookies_are_scoped_below_a_forwarded_prefix() {
+        // Behind a proxy that serves the instance at /ots/ and strips the prefix,
+        // the browser refreshes at /ots/api/auth/refresh: a refresh cookie scoped
+        // to /api/auth would never come back and the session would die at the
+        // first access-token expiry.
+        let state = test_state();
+        create_user_with_password(
+            &state,
+            "u1",
+            "alice",
+            "correct-horse-battery",
+            SystemRole::User,
+        );
+        let mut paths = login_cookie_paths(state.clone(), Some("/ots/")).await;
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                ("access_token".to_string(), "/ots".to_string()),
+                ("refresh_token".to_string(), "/ots/api/auth".to_string()),
+            ]
+        );
+
+        // No header, or one that is not a plain path, keeps the root paths: the
+        // header can never smuggle cookie attributes in.
+        for prefix in [
+            None,
+            Some("/ots; Domain=evil.example"),
+            Some("//evil.example"),
+        ] {
+            let mut paths = login_cookie_paths(state.clone(), prefix).await;
+            paths.sort();
+            assert_eq!(
+                paths,
+                vec![
+                    ("access_token".to_string(), "/".to_string()),
+                    ("refresh_token".to_string(), "/api/auth".to_string()),
+                ],
+                "{prefix:?}"
             );
         }
     }

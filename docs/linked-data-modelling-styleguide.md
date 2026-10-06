@@ -505,7 +505,7 @@ Response (JSON):
     { "graph_iri": "urn:shapes:…",
       "target_classes": ["https://example.org/ont/Book", …],
       "turtle":  "@prefix sh: <…> .\n…",
-      "shaclc":  "shape <…> { … }"      // best-effort SHACL Compact Syntax
+      "shaclc":  "shape <…> { … }"      // W3C SHACL Compact Syntax; null when it cannot carry the graph losslessly
     }
   ],
   "target_classes": [ /* union across all attached shapes */ ],
@@ -603,16 +603,17 @@ When shipping instances alongside their catalogue/provenance, keep them in separ
 
 ## 7. Dataset, catalogue and organisation metadata (DCAT / VoID / ADMS / ORG)
 
-This is how we describe **a dataset, an organisation, or a service** in linked data — the metadata *about* the data. The triplestore generates a full **W3C DCAT 2** catalogue (with embedded **VoID** statistics, **ADMS** status, **ORG/FOAF** publishers, and a **SPARQL service description**) automatically from the dataset registry. You author the metadata as dataset fields; the store renders the RDF. See [`dcat.md`](dcat.md) for the endpoint reference.
+This is how we describe **a dataset, an organisation, or a service** in linked data — the metadata *about* the data. The triplestore generates a full **W3C DCAT 3** catalogue (with embedded **VoID** statistics, **ADMS** status, **ORG/FOAF** publishers, DCAT 3 versions, data services and a **SPARQL service description**) automatically from the dataset registry, optionally under the DCAT-AP 3 or DCAT-AP-NL 3 application profile. You author the metadata as dataset fields; the store renders the RDF. See [`dcat.md`](dcat.md) for the endpoint reference.
 
 ### 7.1 Where the catalogue lives
 
 | Endpoint | Returns |
 |---|---|
 | `/.well-known/void` | the full catalogue, content-negotiated (Turtle, JSON-LD, N-Triples, RDF/XML; `?format=` override) |
-| `{base}/{org-slug}/catalog` | a catalogue scoped to one organisation |
+| `/{org-slug}/.well-known/void` | a catalogue scoped to one organisation (`{base}/{org-slug}/catalog`) |
+| `/api/catalog` | the model registry's catalogue: published data models and vocabularies with their versions |
 
-Statistics are computed live via SPARQL `COUNT` at request time.
+Statistics cover the graphs the caller may read and are cached until the next write.
 
 ### 7.2 Describing a dataset
 
@@ -639,6 +640,8 @@ A registered dataset is emitted as both `dcat:Dataset` and `void:Dataset`. Autho
     dcat:theme <http://publications.europa.eu/resource/authority/data-theme/EDUC> ;
     dcat:keyword "books"@en , "boeken"@nl ;
     dct:spatial <https://sws.geonames.org/2750405/> ;
+    dct:temporal [ a dct:PeriodOfTime ; dcat:startDate "2025-01-01"^^xsd:date ] ;
+    dct:accrualPeriodicity <http://publications.europa.eu/resource/authority/frequency/MONTHLY> ;
     adms:status <http://purl.org/adms/status/UnderDevelopment> ;
     adms:versionNotes "Added 2025 Q1 acquisitions." ;
     dcat:contactPoint [
@@ -720,11 +723,11 @@ Model internal structure with `org:hasUnit` / `org:OrganizationalUnit`, and peop
 
 ### 7.7 ADMS status
 
-Lifecycle status of a dataset/asset uses the ADMS status scheme (`http://purl.org/adms/status/…`): `UnderDevelopment`, `Completed`, `Deprecated`, `Withdrawn`. This is distinct from the *version* lifecycle of a model (§8), which governs Draft→Published.
+Lifecycle status of a dataset/asset uses the ADMS status scheme (`http://purl.org/adms/status/…`): `UnderDevelopment`, `Completed`, `Deprecated`, `Withdrawn`, or the EU dataset-status table (`http://publications.europa.eu/resource/authority/dataset-status/…`: `COMPLETED`, `DEVELOP`, `DEPRECATED`, `DISCONT`, `WITHDRAWN`). A code given through the API (`completed`, `under development`) becomes its EU dataset-status IRI. This is distinct from the *version* lifecycle of a model (§8), which governs Draft→Published.
 
 ### 7.8 SPARQL service description
 
-The endpoint is self-describing via `sd:`:
+The endpoint is self-describing via `sd:`: `GET /sparql` without a query (and `GET /` for an RDF client) returns the SPARQL 1.1 Service Description, which the catalogue names as the endpoint's `dcat:endpointDescription`.
 
 ```turtle
 @prefix sd: <http://www.w3.org/ns/sparql-service-description#> .
@@ -733,6 +736,34 @@ The endpoint is self-describing via `sd:`:
     sd:endpoint <https://triplestore.example.com/sparql> ;
     sd:supportedLanguage sd:SPARQL11Query , sd:SPARQL11Update .
 ```
+
+### 7.9 Versions (DCAT 3 §11)
+
+A dataset's (and a data model's) **released** versions — published or deprecated, never drafts — are `dcat:Dataset`s of their own at `{base}/dataset/{id}/version/{semver}`:
+
+```turtle
+<https://triplestore.example.com/dataset/abc123>
+    dcat:hasVersion <https://triplestore.example.com/dataset/abc123/version/1.0.0> ,
+                    <https://triplestore.example.com/dataset/abc123/version/1.1.0> ;
+    dcat:hasCurrentVersion <https://triplestore.example.com/dataset/abc123/version/1.1.0> .
+
+<https://triplestore.example.com/dataset/abc123/version/1.1.0>
+    a dcat:Dataset ;
+    dcat:isVersionOf <https://triplestore.example.com/dataset/abc123> ;
+    dcat:version "1.1.0" ;
+    dcat:previousVersion <https://triplestore.example.com/dataset/abc123/version/1.0.0> ;
+    dct:issued "2025-03-01T09:00:00Z"^^xsd:dateTime ;
+    adms:versionNotes "Added 2025 Q1 acquisitions." ;
+    adms:status <http://publications.europa.eu/resource/authority/dataset-status/COMPLETED> ;
+    dcat:distribution [ dcat:downloadURL <https://triplestore.example.com/api/datasets/abc123/versions/1.1.0/data> ;
+                        dcat:mediaType <https://www.iana.org/assignments/media-types/application/trig> ] .
+```
+
+The live dataset is the working copy and carries no `dcat:version` of its own. `dcat:DatasetSeries` is not used: a dataset's versions are versions, not members of a series, and the product has no series concept.
+
+### 7.10 Data services and range typing
+
+The SPARQL endpoint (and, when a dataset has geometry, the OGC API) is a `dcat:DataService` with `dcat:servesDataset`, `dcat:endpointURL`, `dcat:endpointDescription`, publisher, contact point, access rights and — under a profile — identifier, language and licence. Every object is typed with the class its property's range names (`dct:LicenseDocument`, `dct:MediaType`, `dct:LinguisticSystem`, `dct:RightsStatement`, `dct:Standard`, `foaf:Document`, `dct:Location`, `dct:Frequency`, …), and themes, statuses and agent types are `skos:Concept`s with their `skos:prefLabel`. Nothing is invented to satisfy a profile: a missing theme, contact point or licence is logged as a profile warning (see [`dcat.md`](dcat.md#fallbacks-and-profile-warnings)).
 
 ---
 
@@ -1036,16 +1067,18 @@ How dataset registry fields render in the DCAT catalogue ([`src/dcat/catalog.rs`
 | `description` | `dct:description` |
 | `created_at` / `updated_at` | `dct:issued` / `dct:modified` (`xsd:dateTime`) |
 | `visibility` | `dct:accessRights` (EU authority URI — §7.3) |
-| owner (org) | `dct:publisher → {base}/org/{id}` |
-| owner (user) | `dct:creator → {base}/user/{id}` |
+| owner (org / user / group) | `dct:publisher` and `dct:creator → {base}/org/{id}`, `{base}/user/{id}`, `{base}/group/{id}` |
 | `license` | `dct:license` (IRI) |
-| `themes` | `dcat:theme` (one per IRI) |
-| `keywords` | `dcat:keyword` (`@en`) |
+| `themes` | `dcat:theme` (one per IRI, a labelled `skos:Concept`) |
+| `keywords` | `dcat:keyword` (tagged with the catalogue language) |
 | `contact_name`/`email`/`url` | `dcat:contactPoint` → `vcard:Organization` (`vcard:fn`, `vcard:hasEmail`, `vcard:hasURL`) |
-| `adms_status` | `adms:status` (IRI) |
+| `adms_status` | `adms:status` (IRI; a code becomes its EU dataset-status IRI) |
 | `version_notes` | `adms:versionNotes` |
 | `spatial` | `dct:spatial` (IRI) |
 | `landing_page` | `dcat:landingPage` |
+| `temporal_start` / `temporal_end` | `dct:temporal` → `dct:PeriodOfTime` (`dcat:startDate` / `dcat:endDate`, `xsd:date` or `xsd:dateTime`) |
+| `accrual_periodicity` | `dct:accrualPeriodicity` (EU frequency IRI, a `dct:Frequency`) |
+| released versions | `dcat:hasVersion` / `dcat:hasCurrentVersion` (§7.9) |
 | `shapes_graph_iri` (when `shacl_on_write`) | `dct:conformsTo` |
 | `conforms_to_model` + `conforms_to_version` | `dct:conformsTo → …/data-model/{id}/version/{semver}` |
 | registered graphs | `void:subset` + per-graph `ots:graphRole` |

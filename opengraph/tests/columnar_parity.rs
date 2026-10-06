@@ -305,6 +305,43 @@ fn ask_construct_graphs_and_paths() {
     }
 }
 
+/// Several `FROM` graphs make one default graph, their RDF merge: `ex:p1
+/// ex:city "Paris"` is in both `ex:g1` and `ex:g2` and matches once, in the
+/// engine and in the copy alike (and so counts once).
+#[test]
+fn a_multi_from_default_graph_is_a_set() {
+    let (store, c) = stores();
+    for (q, rows) in [
+        (
+            "SELECT ?s ?c FROM ex:g1 FROM ex:g2 WHERE { ?s ex:city ?c }",
+            3,
+        ),
+        // The same graph twice is the same graph.
+        (
+            "SELECT ?s ?c FROM ex:g1 FROM ex:g1 WHERE { ?s ex:city ?c }",
+            2,
+        ),
+        // A join over the merge: each side matches the shared triple once.
+        (
+            "SELECT ?s ?c ?d FROM ex:g1 FROM ex:g2 WHERE { ?s ex:city ?c . ?s ex:city ?d }",
+            3,
+        ),
+    ] {
+        let q = format!("{P}{q}");
+        assert_eq!(engine(&store, &q).1.len(), rows, "engine: {q}");
+        let (_, cr, _) = columnar(&c, &q).unwrap_or_else(|| panic!("declined: {q}"));
+        assert_eq!(cr.len(), rows, "columnar: {q}");
+    }
+    let q = format!("{P}SELECT (COUNT(*) AS ?n) FROM ex:g1 FROM ex:g2 WHERE {{ ?s ex:city ?c }}");
+    assert_same(&q, false);
+    assert_eq!(
+        engine(&store, &q).1,
+        vec![vec![Some(
+            "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        )]]
+    );
+}
+
 #[test]
 fn what_is_not_implemented_is_declined() {
     for q in [
@@ -312,6 +349,12 @@ fn what_is_not_implemented_is_declined() {
         "SELECT ?a ?b WHERE { ?a ex:knows* ?b }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?s ex:nick ?k } }",
+        // `GRAPH ?g` around an operator SPARQL evaluates per graph, with `?g`
+        // out of scope inside (W3C negation#graph-minus): carrying `?g` into
+        // both sides of the MINUS would make them share it.
+        "SELECT ?s WHERE { GRAPH ?g { ?s ex:city ?c MINUS { ?x ex:city ?c } } }",
+        "SELECT ?g ?n WHERE { GRAPH ?g { SELECT (COUNT(*) AS ?n) WHERE { ?s ex:city ?c } } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ex:city ?c } LIMIT 1 } }",
         "SELECT ?s (NOW() AS ?t) WHERE { ?s ex:name ?n }",
         "SELECT ?s (MD5(?n) AS ?h) WHERE { ?s ex:name ?n }",
         "SELECT ?s (xsd:integer(?a) AS ?i) WHERE { ?s ex:age ?a }",

@@ -41,6 +41,12 @@
 //!   Req 28: Metric – geof:area
 //!   Req 29: Constructive – spatial set operations
 //!   Req 30: Aggregate – geof:getSRID, geometry properties
+//!
+//! Tests added since are named by the OGC requirement they pin: `ogc_req<N>_…`
+//! for 22-047r1 (GeoSPARQL 1.1), `ogc10_r<N>_…` for 11-052r4 (GeoSPARQL 1.0),
+//! `rdfs_ent_req<N>_…` (RDFS Entailment Extension, Req 47–49 / R25–R27) and
+//! `query_rewrite_req<N>_…` (Query Rewrite Extension, Req 50–52 / R28–R30).
+//! `docs/conformance/geosparql.md` maps every OGC requirement to its tests.
 
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
@@ -3563,11 +3569,25 @@ fn ogc_req39_transform_accepts_any_uri_and_keeps_z() {
         "{out}"
     );
     assert_eq!(nums[2], 12.5, "Z passes through unchanged: {out}");
-    // A GML literal's srsName is the source CRS.
-    let gml = geof_opt(
+    // A GML literal's srsName is the source CRS, and the result is GML again,
+    // with the target as its srsName.
+    let as_gml = geof_opt(
         &s,
         &format!(
             "geof:transform({}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>)",
+            gml_point("EPSG:28992", "187420 428470")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        as_gml.contains("gmlLiteral")
+            && as_gml.contains("srsName=\\\"http://www.opengis.net/def/crs/OGC/1.3/CRS84\\\""),
+        "{as_gml}"
+    );
+    let gml = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT(geof:transform({}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>))",
             gml_point("EPSG:28992", "187420 428470")
         ),
     )
@@ -3592,7 +3612,7 @@ fn ogc_req39_transform_accepts_any_uri_and_keeps_z() {
 }
 
 // Req 39 constructive functions and Req 42 aggUnion keep a GML operand's srsName: the
-// result is a WKT literal in that CRS, not relabelled CRS84.
+// result is a GML literal in that CRS, not relabelled CRS84.
 #[test]
 fn ogc_req39_buffer_and_agg_union_keep_a_gml_srs_name() {
     let s = ts();
@@ -3711,5 +3731,1744 @@ fn ogc_req39_unknown_or_incompatible_units_are_unbound() {
     assert_eq!(
         geof_num(&s, &format!("geof:distance({ra}, {rb}, uom:unity)")),
         5.0
+    );
+}
+
+// ─── GML profile, serialisation functions and KML (OGC GeoSPARQL 1.1 Req 19–34) ────
+//
+// Named by OGC requirement, as above: `ogc_req24_…` is
+// /req/geometry-extension/asGML-function.
+
+/// A `geo:gmlLiteral` (attributes single-quoted inside the SPARQL string).
+fn gml_lit(body: &str) -> String {
+    format!("\"{body}\"^^geo:gmlLiteral")
+}
+
+/// A `geo:kmlLiteral`.
+fn kml_lit(body: &str) -> String {
+    format!("\"{body}\"^^geo:kmlLiteral")
+}
+
+/// The datatype local name of a result term (`gmlLiteral`, `wktLiteral`, …).
+fn datatype_of(r: &Option<String>) -> String {
+    r.as_deref()
+        .and_then(|t| t.rsplit_once("^^<"))
+        .and_then(|(_, dt)| dt.strip_suffix('>'))
+        .and_then(|dt| dt.rsplit_once('#'))
+        .map(|(_, local)| local.to_string())
+        .unwrap_or_default()
+}
+
+fn ring(coords: &str) -> String {
+    format!("<gml:LinearRing><gml:posList>{coords}</gml:posList></gml:LinearRing>")
+}
+
+fn patch(coords: &str) -> String {
+    format!(
+        "<gml:PolygonPatch><gml:exterior>{}</gml:exterior></gml:PolygonPatch>",
+        ring(coords)
+    )
+}
+
+// Req 20 /req/geometry-extension/gml-literal: every element of the documented GML
+// profile reads as the geometry it describes — measured by area and length.
+#[test]
+fn ogc_req20_gml_profile_elements() {
+    let s = ts();
+    let area = |body: &str| geof_num(&s, &format!("geof:area({})", gml_lit(body)));
+    let length = |body: &str| {
+        geof_num(
+            &s,
+            &format!(
+                "geof:distance({}, {})",
+                gml_lit(body),
+                wkt("POINT(100 100)")
+            ),
+        )
+    };
+    // Envelope: the rectangle between its corners.
+    assert_eq!(
+        area("<gml:Envelope><gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>2 3</gml:upperCorner></gml:Envelope>"),
+        6.0
+    );
+    // A Surface of two patches is both of them, not one with a hole.
+    let surface = format!(
+        "<gml:Surface><gml:patches>{}{}</gml:patches></gml:Surface>",
+        patch("0 0 2 0 2 2 0 2 0 0"),
+        patch("5 5 6 5 6 6 5 6 5 5")
+    );
+    assert_eq!(area(&surface), 5.0);
+    // A Ring of linear curve members.
+    let ring_poly = "<gml:Polygon><gml:exterior><gml:Ring>\
+        <gml:curveMember><gml:LineString><gml:posList>0 0 4 0 4 4</gml:posList></gml:LineString></gml:curveMember>\
+        <gml:curveMember><gml:LineString><gml:posList>4 4 0 4 0 0</gml:posList></gml:LineString></gml:curveMember>\
+        </gml:Ring></gml:exterior></gml:Polygon>";
+    assert_eq!(area(ring_poly), 16.0);
+    // Triangle, Tin, PolyhedralSurface, CompositeSurface.
+    let tri = |c: &str| {
+        format!(
+            "<gml:Triangle><gml:exterior>{}</gml:exterior></gml:Triangle>",
+            ring(c)
+        )
+    };
+    assert_eq!(area(&tri("0 0 2 0 0 2 0 0")), 2.0);
+    let tin = format!(
+        "<gml:Tin><gml:patches>{}{}</gml:patches></gml:Tin>",
+        tri("0 0 2 0 0 2 0 0"),
+        tri("2 0 2 2 0 2 2 0")
+    );
+    assert_eq!(area(&tin), 4.0);
+    let phs = format!(
+        "<gml:PolyhedralSurface><gml:polygonPatches>{}</gml:polygonPatches></gml:PolyhedralSurface>",
+        patch("0 0 3 0 3 3 0 3 0 0")
+    );
+    assert_eq!(area(&phs), 9.0);
+    let composite = format!(
+        "<gml:CompositeSurface><gml:surfaceMember><gml:Polygon><gml:exterior>{}</gml:exterior></gml:Polygon></gml:surfaceMember></gml:CompositeSurface>",
+        ring("0 0 1 0 1 1 0 1 0 0")
+    );
+    assert_eq!(area(&composite), 1.0);
+    // A CompositeCurve and a Curve of LineStringSegments reach (100 100) like the
+    // line they are; a standalone LinearRing is a closed line.
+    let curve = "<gml:Curve><gml:segments><gml:LineStringSegment><gml:posList>0 0 100 0</gml:posList></gml:LineStringSegment>\
+        <gml:LineStringSegment><gml:posList>100 0 100 100</gml:posList></gml:LineStringSegment></gml:segments></gml:Curve>";
+    assert_eq!(length(curve), 0.0);
+    let cc = "<gml:CompositeCurve><gml:curveMember><gml:LineString><gml:posList>0 0 100 0</gml:posList></gml:LineString></gml:curveMember>\
+        <gml:curveMember><gml:LineString><gml:posList>100 0 100 100</gml:posList></gml:LineString></gml:curveMember></gml:CompositeCurve>";
+    assert_eq!(length(cc), 0.0);
+    assert_eq!(length(&ring("0 0 100 0 100 100 0 0")), 0.0);
+    // gml:coordinates with cs/ts/decimal.
+    let coords = "<gml:Polygon><gml:exterior><gml:LinearRing><gml:coordinates cs=' ' ts=';' decimal=','>0 0;1,5 0;1,5 2;0 2;0 0</gml:coordinates></gml:LinearRing></gml:exterior></gml:Polygon>";
+    assert_eq!(area(coords), 3.0);
+}
+
+// Req 20/22: what the profile leaves out — arcs and other curved segments, solids —
+// is not a geometry, so functions over it are unbound rather than computed on a
+// straight-line reading of the control points.
+#[test]
+fn ogc_req20_gml_outside_the_profile_is_unbound() {
+    let s = ts();
+    for body in [
+        "<gml:Curve><gml:segments><gml:Arc><gml:posList>0 0 1 1 2 0</gml:posList></gml:Arc></gml:segments></gml:Curve>",
+        "<gml:Solid><gml:exterior><gml:Shell/></gml:exterior></gml:Solid>",
+        "<gml:LineString srsDimension='4'><gml:posList>0 0 0 0 1 1 1 1</gml:posList></gml:LineString>",
+        "<gml:LineString><gml:posList>0 0 1</gml:posList></gml:LineString>",
+    ] {
+        let r = geof_opt(&s, &format!("geof:asWKT({})", gml_lit(body)));
+        assert!(r.is_none(), "{body} must be unbound, got {r:?}");
+    }
+}
+
+// Req 20: srsDimension 3 is kept as Z.
+#[test]
+fn ogc_req20_gml_srs_dimension_3_keeps_z() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gml_lit("<gml:LineString srsName='EPSG:28992' srsDimension='3'><gml:posList>155000 463000 1.5 155010 463000 2.5</gml:posList></gml:LineString>")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        out.contains("EPSG/0/28992") && out.contains("Z") && out.contains("2.5"),
+        "{out}"
+    );
+}
+
+// Req 22 /req/geometry-extension/gml-profile: the supported GML profile is documented.
+#[test]
+fn ogc_req22_gml_profile_is_documented() {
+    let doc = include_str!("../docs/geosparql.md");
+    let section = doc
+        .split("## Supported GML profile")
+        .nth(1)
+        .expect("docs/geosparql.md documents the GML profile");
+    for element in [
+        "Envelope",
+        "LinearRing",
+        "PolygonPatch",
+        "Ring",
+        "CompositeCurve",
+        "Triangle",
+        "Tin",
+        "PolyhedralSurface",
+        "srsDimension",
+        "cs",
+    ] {
+        assert!(section.contains(element), "the profile names {element}");
+    }
+}
+
+// Req 19 /req/geometry-extension/asWKT-function: geof:asWKT keeps the SRS (a GML
+// srsName becomes the WKT prefix) and Z.
+#[test]
+fn ogc_req19_as_wkt_keeps_the_srs_and_z() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gml_lit("<gml:Point srsName='urn:ogc:def:crs:EPSG::28992'><gml:pos>155000 463000 4</gml:pos></gml:Point>")
+        ),
+    );
+    assert_eq!(datatype_of(&out), "wktLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT Z"),
+        "{out}"
+    );
+    // GeoJSON is CRS84: no prefix needed.
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gj(r#"{"type":"Point","coordinates":[5,52]}"#)
+        ),
+    )
+    .unwrap_or_default();
+    assert!(!out.contains("> POINT") && out.contains("\"POINT"), "{out}");
+    let eq = geof_opt(
+        &s,
+        &format!(
+            "geof:sfEquals(geof:asWKT({}), {})",
+            rd("POINT(1 2)"),
+            rd("POINT(1 2)")
+        ),
+    );
+    assert!(is_true(eq));
+}
+
+// Req 24 /req/geometry-extension/asGML-function: geof:asGML writes GML 3.2 with the
+// SRS as srsName and srsDimension for Z; the GML reads back as the same geometry,
+// so WKT → GML → WKT round-trips.
+#[test]
+fn ogc_req24_as_gml_round_trips() {
+    let s = ts();
+    let poly = rd("POLYGON((155000 463000, 155010 463000, 155010 463010, 155000 463000), (155002 463001, 155008 463001, 155008 463007, 155002 463001))");
+    let out = geof_opt(&s, &format!("geof:asGML({poly})"));
+    assert_eq!(datatype_of(&out), "gmlLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("http://www.opengis.net/gml/3.2")
+            && out.contains("srsName=\\\"http://www.opengis.net/def/crs/EPSG/0/28992\\\""),
+        "{out}"
+    );
+    for expr in [
+        format!("geof:sfEquals(geof:asGML({poly}), {poly})"),
+        format!("geof:sfEquals(geof:asWKT(geof:asGML({poly})), {poly})"),
+        format!("geof:sfEquals(geof:asGML({poly}, \"GML3.2\"), {poly})"),
+        format!(
+            "geof:sfEquals(geof:asGML({}), {})",
+            wkt("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))"),
+            wkt("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))")
+        ),
+    ] {
+        assert!(is_true(geof_opt(&s, &expr)), "{expr}");
+    }
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:asGML({poly}))")).unwrap_or_default();
+    assert!(srid.contains("EPSG/0/28992"), "{srid}");
+    // CRS84 is written out; Z is srsDimension 3.
+    let z = geof_opt(&s, &format!("geof:asGML({})", wkt("POINT Z (5 52 7)"))).unwrap_or_default();
+    assert!(
+        z.contains("OGC/1.3/CRS84") && z.contains("srsDimension=\\\"3\\\"") && z.contains("5 52 7"),
+        "{z}"
+    );
+    let back = geof_opt(
+        &s,
+        &format!("geof:asWKT(geof:asGML({}))", wkt("POINT Z (5 52 7)")),
+    )
+    .unwrap_or_default();
+    assert!(back.contains("POINT Z") && back.contains('7'), "{back}");
+}
+
+// Req 25 /req/geometry-extension/geojson-literal: a GeoJSON position's altitude is Z,
+// and geof:asGeoJSON writes it back.
+#[test]
+fn ogc_req25_geojson_literal_keeps_altitude() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gj(r#"{"type":"Point","coordinates":[5,52,12.5]}"#)
+        ),
+    )
+    .unwrap_or_default();
+    assert!(out.contains("POINT Z") && out.contains("12.5"), "{out}");
+    let json = geof_opt(
+        &s,
+        &format!("geof:asGeoJSON({})", wkt("POINT Z (5 52 12.5)")),
+    )
+    .unwrap_or_default();
+    assert!(
+        json.contains("[5.0,52.0,12.5]") || json.contains("[5,52,12.5]"),
+        "{json}"
+    );
+}
+
+// Req 30 /req/geometry-extension/kml-literal: a KML geometry is a geometry like WKT.
+#[test]
+fn ogc_req30_kml_literal_is_a_geometry() {
+    let s = ts();
+    let point = kml_lit("<Point><coordinates>0.5,0.5</coordinates></Point>");
+    let square = kml_lit(
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 2,0 2,2 0,2 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+    );
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfWithin({point}, {square})")
+    )));
+    assert_eq!(geof_num(&s, &format!("geof:area({square})")), 4.0);
+    let multi = kml_lit(
+        "<MultiGeometry><Point><coordinates>1,1</coordinates></Point><Point><coordinates>9,9</coordinates></Point></MultiGeometry>",
+    );
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfIntersects({multi}, {square})")
+    )));
+    // Malformed KML, and elements outside the profile, are unbound.
+    for bad in [
+        "<Point><coordinates>1</coordinates></Point>",
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 1,0 1,1 0,1</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+        "<Model><Location><longitude>1</longitude></Location></Model>",
+        "not xml <",
+    ] {
+        let r = geof_opt(&s, &format!("geof:sfIntersects({}, {square})", kml_lit(bad)));
+        assert!(r.is_none(), "{bad} must be unbound, got {r:?}");
+    }
+}
+
+// Req 31 /req/geometry-extension/kml-literal-default-srs: KML is CRS84, and harmonises
+// with a projected operand.
+#[test]
+fn ogc_req31_kml_literal_is_crs84() {
+    let s = ts();
+    let k = kml_lit("<Point><coordinates>4.8997,52.3735,3</coordinates></Point>");
+    let srid = geof_opt(&s, &format!("geof:getSRID({k})")).unwrap_or_default();
+    assert!(srid.contains("CRS84"), "{srid}");
+    let near = geof_num(
+        &s,
+        &format!(
+            "geof:distance({}, {k}, uom:metre)",
+            rd("POINT(121800 487400)")
+        ),
+    );
+    assert!(near < 200.0, "one point in RD New and in KML: {near}");
+}
+
+// Req 32 /req/geometry-extension/kml-literal-empty: an empty KML literal is the empty
+// geometry.
+#[test]
+fn ogc_req32_kml_literal_empty_is_the_empty_geometry() {
+    let s = ts();
+    let empty = "\"\"^^geo:kmlLiteral";
+    assert!(is_false(geof_opt(
+        &s,
+        &format!("geof:sfIntersects({empty}, {})", wkt("POINT(0 0)"))
+    )));
+    let w = geof_opt(&s, &format!("geof:asWKT({empty})")).unwrap_or_default();
+    assert!(w.contains("EMPTY"), "{w}");
+}
+
+// Req 33 /req/geometry-extension/geometry-as-kml-literal: geo:asKML links a geometry to
+// its KML serialisation, which queries find like any other.
+#[test]
+fn ogc_req33_geometry_as_kml_literal_is_queryable() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:in geo:hasGeometry [ geo:asKML "<Point><coordinates>0.5,0.5</coordinates></Point>"^^geo:kmlLiteral ] .
+        ex:out geo:hasGeometry [ geo:asKML "<Point><coordinates>5,5</coordinates></Point>"^^geo:kmlLiteral ] .
+    "#,
+    );
+    let r = sel(
+        &s,
+        "SELECT ?f WHERE { ?f geo:hasGeometry/geo:asKML ?k .
+           FILTER(geof:sfWithin(?k, \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral)) }",
+    );
+    assert_eq!(r, vec![vec!["<http://example.org/in>".to_string()]]);
+}
+
+// Req 34 /req/geometry-extension/asKML-function: geof:asKML writes CRS84 KML,
+// reprojecting the operand, Z as altitude; it reads back as the same geometry.
+#[test]
+fn ogc_req34_as_kml_reprojects_and_round_trips() {
+    let s = ts();
+    let out = geof_opt(&s, &format!("geof:asKML({})", rd("POINT(121800 487400)")));
+    assert_eq!(datatype_of(&out), "kmlLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("<coordinates>4.89") && out.contains(",52.37"),
+        "{out}"
+    );
+    for g in [
+        wkt("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0), (1 1, 2 1, 2 2, 1 1))"),
+        wkt("MULTIPOINT((1 2), (3 4))"),
+        wkt("LINESTRING Z (0 0 1, 1 1 2)"),
+    ] {
+        assert!(
+            is_true(geof_opt(
+                &s,
+                &format!("geof:sfEquals(geof:asKML({g}), {g})")
+            )),
+            "{g}"
+        );
+    }
+    let z = geof_opt(&s, &format!("geof:asKML({})", wkt("POINT Z (5 52 7)"))).unwrap_or_default();
+    assert!(z.contains("5,52,7"), "{z}");
+    // A CRS this build cannot reproject is unbound, not mislabelled.
+    let lambert =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral";
+    assert!(geof_opt(&s, &format!("geof:asKML({lambert})")).is_none());
+}
+
+// GeoSPARQL 1.1 §10.9.1 (Req 39): a geometry result is in the first operand's
+// serialisation and SRS.
+#[test]
+fn ogc_req39_geometry_results_follow_the_first_operand() {
+    let s = ts();
+    let gml_rd = gml_point("EPSG:28992", "155000 463000");
+    let square_gj = gj(r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#);
+    let square_kml = kml_lit(
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>1,1 3,1 3,3 1,3 1,1</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+    );
+    for (expr, datatype) in [
+        (format!("geof:buffer({gml_rd}, 10)"), "gmlLiteral"),
+        (format!("geof:envelope({gml_rd})"), "gmlLiteral"),
+        (
+            format!("geof:union({square_gj}, {})", wkt("POINT(5 5)")),
+            "geoJSONLiteral",
+        ),
+        (
+            format!("geof:intersection({square_kml}, {square_gj})"),
+            "kmlLiteral",
+        ),
+        (format!("geof:convexHull({square_kml})"), "kmlLiteral"),
+        (
+            format!("geof:difference({}, {square_gj})", wkt("POINT(5 5)")),
+            "wktLiteral",
+        ),
+        (format!("geof:boundary({square_gj})"), "geoJSONLiteral"),
+        // GeoJSON cannot be in RD New: transformed out of CRS84 it is WKT.
+        (
+            format!("geof:transform({square_gj}, <http://www.opengis.net/def/crs/EPSG/0/3857>)"),
+            "wktLiteral",
+        ),
+    ] {
+        let r = geof_opt(&s, &expr);
+        assert_eq!(datatype_of(&r), datatype, "{expr} -> {r:?}");
+    }
+    // The GML result keeps the srsName as written, and measures the same.
+    let buffered = geof_opt(&s, &format!("geof:buffer({gml_rd}, 10)")).unwrap_or_default();
+    assert!(
+        buffered.contains("srsName=\\\"EPSG:28992\\\""),
+        "{buffered}"
+    );
+    let area = geof_num(&s, &format!("geof:area(geof:buffer({gml_rd}, 10))"));
+    assert!((area - 312.0).abs() < 3.0, "{area}");
+    // A group of GML literals unions into GML.
+    load(
+        &s,
+        "ex:a geo:asGML \"<gml:Point srsName='EPSG:28992'><gml:pos>155000 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n\
+         ex:b geo:asGML \"<gml:Point srsName='EPSG:28992'><gml:pos>155010 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n",
+    );
+    let r = sel(
+        &s,
+        "SELECT (geof:aggUnion(?g) AS ?u) WHERE { ?f geo:asGML ?g }",
+    );
+    assert_eq!(datatype_of(&r[0].first().cloned()), "gmlLiteral", "{r:?}");
+}
+
+// ═══════════════════════════════════════════════════════════
+// RDFS Entailment Extension — 11-052r4 R25–R27, 22-047r1 Req 47–49
+// (/req/rdfs-entailment-extension/bgp-rdfs-ent, wkt-geometry-types,
+// gml-geometry-types)
+// ═══════════════════════════════════════════════════════════
+
+/// The premise graphs, loaded from the bundled files the server seeds.
+#[cfg(feature = "rdfs-entailment")]
+const ENT_ONTOLOGY: &str = "http://example.org/premise/geosparql";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_SF: &str = "http://example.org/premise/sf";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_GML: &str = "http://example.org/premise/gml";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_DATA: &str = "http://example.org/geo-data";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_TARGET: &str = "urn:entailment:rdfs:geo-test";
+
+/// A store holding `data` (Turtle, in [`ENT_DATA`]) and the three premise
+/// vocabularies, materialised under RDFS over all four.
+#[cfg(feature = "rdfs-entailment")]
+fn entailed(data: &str) -> open_triplestore::store::TripleStore {
+    use open_triplestore::data_models::vocab_files as vf;
+    use open_triplestore::reasoning::rdfs::RdfsMaterializer;
+    let s = ts();
+    for (g, f) in [
+        (ENT_ONTOLOGY, &vf::GEOSPARQL),
+        (ENT_SF, &vf::SF),
+        (ENT_GML, &vf::GML_GEOMETRIES),
+    ] {
+        s.load_str(f.ttl, RdfFormat::Turtle, Some(g)).unwrap();
+    }
+    s.load_str(
+        &format!("{TTL_PREFIXES}@prefix gml: <http://www.opengis.net/ont/gml#> .\n{data}"),
+        RdfFormat::Turtle,
+        Some(ENT_DATA),
+    )
+    .unwrap();
+    RdfsMaterializer::with_target(&s, ENT_TARGET)
+        .with_sources(vec![
+            ENT_DATA.to_string(),
+            ENT_ONTOLOGY.to_string(),
+            ENT_SF.to_string(),
+            ENT_GML.to_string(),
+        ])
+        .materialize()
+        .unwrap();
+    s
+}
+
+/// An ASK over the data plus its entailments, as a query with the
+/// entailment graph in its default graph sees them.
+#[cfg(feature = "rdfs-entailment")]
+fn entails(s: &open_triplestore::store::TripleStore, pattern: &str) -> bool {
+    ask_geo(
+        s,
+        &format!(
+            "PREFIX gml: <http://www.opengis.net/ont/gml#>\n\
+             ASK FROM <{ENT_DATA}> FROM <{ENT_TARGET}> {{ {pattern} }}"
+        ),
+    )
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req47_feature_and_geometry_from_the_ontology() {
+    let s = entailed(
+        "ex:f geo:hasDefaultGeometry ex:g .\n\
+         ex:g geo:asWKT \"POINT(1 2)\"^^geo:wktLiteral .",
+    );
+    // Domain and range of geo:hasDefaultGeometry, and its super-property.
+    assert!(entails(&s, "ex:f a geo:Feature"));
+    assert!(entails(&s, "ex:g a geo:Geometry"));
+    assert!(entails(&s, "ex:f geo:hasGeometry ex:g"));
+    // geo:Feature and geo:Geometry are spatial objects.
+    assert!(entails(
+        &s,
+        "ex:f a geo:SpatialObject . ex:g a geo:SpatialObject"
+    ));
+    // geo:asWKT is a geo:hasSerialization.
+    assert!(entails(
+        &s,
+        "ex:g geo:hasSerialization \"POINT(1 2)\"^^geo:wktLiteral"
+    ));
+    // Nothing is said about what the data does not state.
+    assert!(!entails(&s, "ex:f a geo:Geometry"));
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req47_basic_graph_patterns_match_entailed_triples() {
+    let s = entailed(
+        "ex:a geo:hasGeometry ex:ga . ex:b geo:hasDefaultGeometry ex:gb .\n\
+         ex:c a ex:Thing .",
+    );
+    let rows = sel(
+        &s,
+        &format!("SELECT ?f FROM <{ENT_DATA}> FROM <{ENT_TARGET}> WHERE {{ ?f a geo:Feature }} ORDER BY ?f"),
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec!["<http://example.org/a>".to_string()],
+            vec!["<http://example.org/b>".to_string()]
+        ]
+    );
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req48_simple_features_geometry_types() {
+    let s = entailed(
+        "ex:p a sf:Polygon . ex:t a sf:Triangle . ex:tin a sf:TIN .\n\
+         ex:r a sf:LinearRing . ex:mp a sf:MultiPolygon .",
+    );
+    for (x, class) in [
+        ("ex:p", "sf:Surface"),
+        ("ex:p", "sf:Geometry"),
+        ("ex:p", "geo:Geometry"),
+        ("ex:p", "geo:SpatialObject"),
+        ("ex:t", "sf:Polygon"),
+        ("ex:tin", "sf:PolyhedralSurface"),
+        ("ex:tin", "sf:Surface"),
+        ("ex:r", "sf:LineString"),
+        ("ex:r", "sf:Curve"),
+        ("ex:mp", "sf:MultiSurface"),
+        ("ex:mp", "sf:GeometryCollection"),
+    ] {
+        assert!(entails(&s, &format!("{x} a {class}")), "{x} a {class}");
+    }
+    assert!(!entails(&s, "ex:p a sf:Curve"));
+    assert!(!entails(&s, "ex:mp a sf:Polygon"));
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req49_gml_geometry_types() {
+    let s = entailed(
+        "ex:p a gml:Polygon . ex:tin a gml:Tin . ex:lr a gml:LinearRing .\n\
+         ex:ms a gml:MultiSurface . ex:cs a gml:CompositeSolid .",
+    );
+    for (x, class) in [
+        // gml:Polygon substitutes for gml:AbstractSurface in the GML 3.2.1
+        // schema (not gml:SurfacePatch, as the 1.0 text's example has it).
+        ("ex:p", "gml:AbstractSurface"),
+        ("ex:p", "gml:AbstractGeometricPrimitive"),
+        ("ex:p", "gml:AbstractGeometry"),
+        ("ex:p", "geo:Geometry"),
+        ("ex:tin", "gml:TriangulatedSurface"),
+        ("ex:tin", "gml:Surface"),
+        ("ex:lr", "gml:AbstractRing"),
+        ("ex:lr", "gml:AbstractCurve"),
+        ("ex:ms", "gml:AbstractGeometricAggregate"),
+        ("ex:cs", "gml:AbstractSolid"),
+    ] {
+        assert!(entails(&s, &format!("{x} a {class}")), "{x} a {class}");
+    }
+    assert!(!entails(&s, "ex:p a gml:AbstractCurve"));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Query Rewrite Extension — 11-052r4 R28–R30, 22-047r1 Req 50–52
+// (/req/query-rewrite-extension/sf-query-rewrite, eh-query-rewrite,
+// rcc8-query-rewrite)
+// ═══════════════════════════════════════════════════════════
+
+/// Features and geometries for the rewrite tests. `ex:city` has two
+/// serialisations of one polygon (WKT and GML); `ex:park` lies strictly
+/// inside it; `ex:far` is away from both; `ex:lake` lies inside the city but
+/// has its geometry only through `geo:hasGeometry`, which the spec-strict
+/// rules do not follow; `ex:told` has no geometry and an asserted relation.
+const REWRITE_DATA: &str = r#"
+ex:city geo:hasDefaultGeometry ex:cityGeom .
+ex:cityGeom geo:asWKT "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"^^geo:wktLiteral ;
+    geo:asGML "<gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>0 0 10 0 10 10 0 10 0 0</gml:posList></gml:LinearRing></gml:exterior></gml:Polygon>"^^geo:gmlLiteral .
+ex:park a ex:Park ; geo:hasDefaultGeometry ex:parkGeom .
+ex:parkGeom geo:asWKT "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"^^geo:wktLiteral .
+ex:far a ex:Park ; geo:hasDefaultGeometry ex:farGeom .
+ex:farGeom geo:asGeoJSON "{\"type\":\"Polygon\",\"coordinates\":[[[20,20],[21,20],[21,21],[20,21],[20,20]]]}"^^geo:geoJSONLiteral .
+ex:lake geo:hasGeometry ex:lakeGeom .
+ex:lakeGeom geo:asWKT "POLYGON((3 3, 4 3, 4 4, 3 4, 3 3))"^^geo:wktLiteral .
+ex:told geo:sfWithin ex:city .
+"#;
+
+fn rewrite_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    load(&s, REWRITE_DATA);
+    s
+}
+
+/// For one relation that holds between the park and the city: all four rule
+/// shapes (feature–feature, feature–geometry, geometry–feature,
+/// geometry–geometry) match, and the same relation to the far feature does not.
+fn assert_four_rule_shapes(s: &open_triplestore::store::TripleStore, rel: &str) {
+    for (a, b) in [
+        ("ex:park", "ex:city"),
+        ("ex:park", "ex:cityGeom"),
+        ("ex:parkGeom", "ex:city"),
+        ("ex:parkGeom", "ex:cityGeom"),
+    ] {
+        assert!(
+            ask_geo(s, &format!("ASK {{ {a} geo:{rel} {b} }}")),
+            "{a} {rel} {b}"
+        );
+    }
+    assert!(
+        !ask_geo(s, &format!("ASK {{ ex:far geo:{rel} ex:city }}")),
+        "far {rel}"
+    );
+}
+
+#[test]
+fn query_rewrite_req50_sf_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "sfWithin");
+    assert_four_rule_shapes(&s, "sfIntersects");
+    assert!(ask_geo(&s, "ASK { ex:city geo:sfContains ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:sfDisjoint ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:city geo:sfEquals ex:cityGeom }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfOverlaps ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfTouches ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfCrosses ex:city }"));
+}
+
+#[test]
+fn query_rewrite_req51_eh_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "ehInside");
+    assert!(ask_geo(&s, "ASK { ex:city geo:ehContains ex:park }"));
+    // Covering needs boundary contact (TFF*TFT**); the park is strictly inside.
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehCoveredBy ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:city geo:ehCovers ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:ehDisjoint ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:cityGeom geo:ehEquals ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehMeet ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehOverlap ex:city }"));
+}
+
+#[test]
+fn query_rewrite_req52_rcc8_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "rcc8ntpp");
+    assert!(ask_geo(&s, "ASK { ex:city geo:rcc8ntppi ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:rcc8dc ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:city geo:rcc8eq ex:cityGeom }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8tpp ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8ec ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8po ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:city geo:rcc8tppi ex:park }"));
+}
+
+/// Every one of the 24 relations is rewritten to its own function: on two
+/// identical polygons exactly the relations that hold for equal regions match.
+#[test]
+fn query_rewrite_every_relation_uses_its_own_function() {
+    let s = ts();
+    load(
+        &s,
+        r#"ex:a geo:hasDefaultGeometry [ geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ] .
+           ex:b geo:hasDefaultGeometry [ geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ] ."#,
+    );
+    for rel in [
+        "sfEquals",
+        "sfDisjoint",
+        "sfIntersects",
+        "sfTouches",
+        "sfCrosses",
+        "sfWithin",
+        "sfContains",
+        "sfOverlaps",
+        "ehEquals",
+        "ehDisjoint",
+        "ehMeet",
+        "ehOverlap",
+        "ehCovers",
+        "ehCoveredBy",
+        "ehInside",
+        "ehContains",
+        "rcc8eq",
+        "rcc8dc",
+        "rcc8ec",
+        "rcc8po",
+        "rcc8tppi",
+        "rcc8tpp",
+        "rcc8ntpp",
+        "rcc8ntppi",
+    ] {
+        let got = ask_geo(&s, &format!("ASK {{ ex:a geo:{rel} ex:b }}"));
+        let direct = bind_fn(
+            &s,
+            &format!(
+                "geof:{rel}(\"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral, \
+                 \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral)"
+            ),
+        );
+        assert_eq!(
+            got,
+            direct.contains("true"),
+            "{rel}: rewrite {got}, function {direct}"
+        );
+        if rel.ends_with("quals") || rel == "rcc8eq" {
+            assert!(got, "{rel} holds for equal regions");
+        }
+        if rel.ends_with("isjoint") || rel == "rcc8dc" {
+            assert!(!got, "{rel} fails for equal regions");
+        }
+    }
+}
+
+/// Every serialisation the rules read: WKT, GML and GeoJSON geometries are
+/// related to each other through the rewrite.
+#[test]
+fn query_rewrite_reads_every_serialisation() {
+    let s = rewrite_store();
+    // GML-only geometry (city via its GML, too) and a GeoJSON-only geometry.
+    load(
+        &s,
+        r#"ex:gmlOnly geo:hasDefaultGeometry [ geo:asGML "<gml:Point><gml:pos>5 5</gml:pos></gml:Point>"^^geo:gmlLiteral ] .
+           ex:jsonOnly geo:hasDefaultGeometry [ geo:asGeoJSON "{\"type\":\"Point\",\"coordinates\":[6,6]}"^^geo:geoJSONLiteral ] ."#,
+    );
+    assert!(ask_geo(&s, "ASK { ex:gmlOnly geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:jsonOnly geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:sfDisjoint ex:jsonOnly }"));
+}
+
+/// Spec-strict: a feature is related through its default geometry only. Its
+/// geometry itself is still related.
+#[test]
+fn query_rewrite_follows_default_geometry_only() {
+    let s = rewrite_store();
+    assert!(!ask_geo(&s, "ASK { ex:lake geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:lakeGeom geo:sfWithin ex:city }"));
+}
+
+/// An asserted relation still matches, with no geometry behind it; an
+/// asserted and derived pair, and a pair related through two serialisations
+/// (the city's WKT and GML), each match once: set semantics, as if the
+/// relation were materialised.
+#[test]
+fn query_rewrite_keeps_asserted_triples_and_set_semantics() {
+    let s = rewrite_store();
+    assert!(ask_geo(&s, "ASK { ex:told geo:sfWithin ex:city }"));
+    load(&s, "ex:park geo:sfWithin ex:city .");
+    let rows = sel(
+        &s,
+        "SELECT ?f (COUNT(*) AS ?n) WHERE { ?f geo:sfWithin ex:city } GROUP BY ?f ORDER BY ?f",
+    );
+    let n = |f: &str| {
+        rows.iter()
+            .find(|r| r[0] == format!("<http://example.org/{f}>"))
+            .map(|r| extract_f64(&r[1]) as usize)
+    };
+    assert_eq!(n("park"), Some(1), "{rows:?}");
+    assert_eq!(n("told"), Some(1), "{rows:?}");
+    assert_eq!(n("parkGeom"), Some(1), "{rows:?}");
+    assert_eq!(n("far"), None, "{rows:?}");
+    // The city is within itself (sfWithin is reflexive on equal geometries),
+    // once, though it has two serialisations.
+    assert_eq!(n("city"), Some(1), "{rows:?}");
+    assert_eq!(n("cityGeom"), Some(1), "{rows:?}");
+}
+
+/// A constant subject or object, a join with other patterns, OPTIONAL and
+/// FILTER EXISTS all see derived relations.
+#[test]
+fn query_rewrite_in_joins_and_nested_patterns() {
+    let s = rewrite_store();
+    let rows = sel(
+        &s,
+        "SELECT ?p WHERE { ?p a ex:Park . ?p geo:sfWithin ex:city }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/park>".to_string()]]);
+
+    let rows = sel(
+        &s,
+        "SELECT ?x WHERE { ex:city geo:sfContains ?x . ?x a ex:Park }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/park>".to_string()]]);
+
+    let rows = sel(
+        &s,
+        "SELECT ?p ?c WHERE { ?p a ex:Park OPTIONAL { ?p geo:sfWithin ?c FILTER(?c = ex:city) } } ORDER BY ?p",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec!["<http://example.org/far>".to_string(), String::new()],
+            vec![
+                "<http://example.org/park>".to_string(),
+                "<http://example.org/city>".to_string()
+            ],
+        ]
+    );
+
+    let rows = sel(
+        &s,
+        "SELECT ?p WHERE { ?p a ex:Park FILTER NOT EXISTS { ?p geo:sfWithin ex:city } }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/far>".to_string()]]);
+
+    // A blank node in the pattern joins like the variable it stands for.
+    assert!(ask_geo(
+        &s,
+        "ASK { _:x geo:sfWithin ex:city . _:x a ex:Park }"
+    ));
+}
+
+/// Inside GRAPH the rule reads that graph only: both geometries must be in it.
+#[test]
+fn query_rewrite_stays_inside_the_graph() {
+    let s = ts();
+    let ttl = format!(
+        "{TTL_PREFIXES}\
+         GRAPH ex:g1 {{ ex:a geo:hasDefaultGeometry [ geo:asWKT \"POINT(1 1)\"^^geo:wktLiteral ] .\n\
+                       ex:b a ex:Region ; geo:hasDefaultGeometry [ geo:asWKT \"POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))\"^^geo:wktLiteral ] }}\n\
+         GRAPH ex:g2 {{ ex:c a ex:Region ; geo:hasDefaultGeometry [ geo:asWKT \"POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))\"^^geo:wktLiteral ] }}"
+    );
+    s.load_str(&ttl, RdfFormat::TriG, None).unwrap();
+    let rows = sel(
+        &s,
+        "SELECT ?g ?o WHERE { GRAPH ?g { ex:a geo:sfWithin ?o . ?o a ex:Region } }",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            "<http://example.org/g1>".to_string(),
+            "<http://example.org/b>".to_string()
+        ]]
+    );
+    assert!(!ask_geo(
+        &s,
+        "ASK { GRAPH ex:g2 { ex:a geo:sfWithin ex:c } }"
+    ));
+    assert!(!ask_geo(&s, "ASK { GRAPH ?g { ex:a geo:sfWithin ex:c } }"));
+}
+
+/// The rewrite applies in the WHERE clause of an update, so a derived
+/// relation can be materialised; through `update` and `batch_update` alike.
+#[test]
+fn query_rewrite_applies_to_update_where_clauses() {
+    let s = rewrite_store();
+    s.update(&format!(
+        "{GEO_PFX}\nINSERT {{ GRAPH ex:rel {{ ?p geo:sfWithin ?c }} }} \
+         WHERE {{ ?p a ex:Park . ?p geo:sfWithin ?c . FILTER(?c = ex:city) }}"
+    ))
+    .unwrap();
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel { ex:park geo:sfWithin ex:city } }"
+    ));
+    assert!(!ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel { ex:far geo:sfWithin ex:city } }"
+    ));
+
+    let out = s
+        .batch_update(&[format!(
+            "{GEO_PFX}\nINSERT {{ GRAPH ex:rel2 {{ ?c geo:rcc8ntppi ?p }} }} \
+             WHERE {{ ?p a ex:Park . ?c geo:rcc8ntppi ?p . FILTER(?c = ex:city) }}"
+        )])
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel2 { ex:city geo:rcc8ntppi ex:park } }"
+    ));
+}
+
+/// Scoped queries, scoped updates and confined CONSTRUCTs are rewritten too.
+#[test]
+fn query_rewrite_on_scoped_and_confined_paths() {
+    let s = ts();
+    let g = "http://example.org/scoped";
+    s.load_str(
+        &format!("{TTL_PREFIXES}{REWRITE_DATA}"),
+        RdfFormat::Turtle,
+        Some(g),
+    )
+    .unwrap();
+    let scope = vec![g.to_string()];
+    match s
+        .query_scoped(
+            &format!("{GEO_PFX}\nASK {{ ex:park geo:sfWithin ex:city }}"),
+            &scope,
+        )
+        .unwrap()
+    {
+        QueryResults::Boolean(b) => assert!(b, "scoped query"),
+        _ => panic!("expected ASK"),
+    }
+    s.update_scoped(
+        &format!(
+            "{GEO_PFX}\nINSERT {{ GRAPH ex:out {{ ?p geo:sfWithin ex:city }} }} \
+             WHERE {{ ?p a ex:Park . ?p geo:sfWithin ex:city }}"
+        ),
+        &scope,
+    )
+    .unwrap();
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:out { ex:park geo:sfWithin ex:city } }"
+    ));
+
+    let q = open_triplestore::sparql::parser()
+        .parse_query(&format!(
+            "{GEO_PFX}\nCONSTRUCT {{ ?p geo:sfWithin ex:city }} WHERE {{ ?p a ex:Park . ?p geo:sfWithin ex:city }}"
+        ))
+        .unwrap();
+    // The store's evaluator: the rewrite expands to geof: functions.
+    let triples = s
+        .construct_confined(s.query_options(), &q, &scope, &[])
+        .unwrap();
+    assert_eq!(triples.len(), 1, "{triples:?}");
+    assert_eq!(triples[0].subject.to_string(), "<http://example.org/park>");
+}
+
+/// The accelerated paths and the engine answer a rewritten query alike, and a
+/// repeated query is served from the cache with the same answer.
+#[test]
+fn query_rewrite_takes_every_query_path() {
+    let fast = accelerated();
+    load(&fast, REWRITE_DATA);
+    let plain = engine_only();
+    load(&plain, REWRITE_DATA);
+    let _ = fast.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1").unwrap();
+    for q in [
+        "SELECT ?a ?b WHERE { ?a geo:sfWithin ?b }",
+        "SELECT (COUNT(*) AS ?n) WHERE { ?a geo:ehInside ?b }",
+        "SELECT ?p WHERE { ?p a ex:Park . ?p geo:rcc8ntpp ex:city }",
+    ] {
+        let q = format!("{GEO_PFX}\n{q}");
+        let mut a = solutions(fast.query(&q).unwrap());
+        let mut b = solutions(plain.query(&q).unwrap());
+        a.sort();
+        b.sort();
+        assert!(!a.is_empty(), "{q}");
+        assert_eq!(a, b, "accelerated vs engine: {q}");
+    }
+    let cached = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(true, 16, 1000)
+        .with_parallel_query(false, 1, 0);
+    load(&cached, REWRITE_DATA);
+    let q = format!("{GEO_PFX}\nSELECT ?a WHERE {{ ?a geo:sfWithin ex:city }} ORDER BY ?a");
+    let first = solutions(cached.query(&q).unwrap());
+    let second = solutions(cached.query(&q).unwrap());
+    assert_eq!(first, second);
+    assert!(first.len() >= 4, "{first:?}");
+}
+
+/// `OTS_GEOSPARQL_QUERY_REWRITE=off` (here the store's builder): only
+/// asserted relations match.
+#[test]
+fn query_rewrite_can_be_switched_off() {
+    let s = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_geosparql_query_rewrite(false);
+    load(&s, REWRITE_DATA);
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:told geo:sfWithin ex:city }"));
+}
+
+// ═══════════════════════════════════════════════════════════
+// GeoSPARQL 1.0 core, topology vocabulary and geometry classes —
+// 11-052r4 R2–R9 (22-047r1 Req 2–3, 7–13): the vocabulary is usable in
+// graph patterns. Any SPARQL store satisfies these; the tests pin it.
+// ═══════════════════════════════════════════════════════════
+
+const VOCAB_DATA: &str = r#"
+ex:f a geo:Feature ; geo:hasGeometry ex:g ; geo:hasDefaultGeometry ex:g .
+ex:g a geo:Geometry , sf:Polygon ;
+    geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ;
+    geo:dimension 2 ; geo:coordinateDimension 2 ; geo:spatialDimension 2 ;
+    geo:isEmpty false ; geo:isSimple true .
+ex:o a geo:SpatialObject .
+ex:a geo:sfTouches ex:b ; geo:ehMeet ex:b ; geo:rcc8ec ex:b .
+"#;
+
+#[test]
+fn ogc10_r02_r03_spatial_object_and_feature_classes() {
+    let s = ts();
+    load(&s, VOCAB_DATA);
+    assert!(ask_geo(&s, "ASK { ex:o a geo:SpatialObject }"));
+    assert!(ask_geo(&s, "ASK { ex:f a geo:Feature }"));
+}
+
+#[test]
+fn ogc10_r04_r05_r06_topology_vocabulary_properties() {
+    // Asserted relation triples are ordinary triples, with or without the
+    // Query Rewrite Extension.
+    for rewrite in [true, false] {
+        let s = open_triplestore::store::TripleStore::in_memory()
+            .unwrap()
+            .with_geosparql_query_rewrite(rewrite);
+        load(&s, VOCAB_DATA);
+        for rel in ["sfTouches", "ehMeet", "rcc8ec"] {
+            assert!(
+                ask_geo(&s, &format!("ASK {{ ex:a geo:{rel} ex:b }}")),
+                "{rel}, rewrite {rewrite}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ogc10_r07_r08_r09_geometry_class_and_properties() {
+    let s = ts();
+    load(&s, VOCAB_DATA);
+    assert!(ask_geo(&s, "ASK { ex:g a geo:Geometry }"));
+    assert!(ask_geo(
+        &s,
+        "ASK { ex:f geo:hasGeometry ex:g ; geo:hasDefaultGeometry ex:g }"
+    ));
+    let rows = sel(
+        &s,
+        "SELECT ?d ?c ?sd ?e ?simple WHERE { ex:g geo:dimension ?d ; geo:coordinateDimension ?c ; \
+         geo:spatialDimension ?sd ; geo:isEmpty ?e ; geo:isSimple ?simple }",
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0][4].contains("true"), "{rows:?}");
+    // geo:hasSerialization is the super-property of the serialisations; data
+    // can also state it directly.
+    load(
+        &s,
+        "ex:g2 geo:hasSerialization \"POINT(1 1)\"^^geo:wktLiteral .",
+    );
+    assert!(ask_geo(&s, "ASK { ex:g2 geo:hasSerialization ?l }"));
+}
+
+// ─── GeoSPARQL 1.1 non-topological functions and aggregates (Req 39, 40, 42) ─────
+
+fn int_of(r: Option<String>) -> i64 {
+    r.as_deref()
+        .and_then(|t| t.split('"').nth(1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MIN)
+}
+
+/// The same geometry in each serialisation the store reads: WKT, GML, GeoJSON, KML.
+fn square_in_every_serialisation() -> [String; 4] {
+    [
+        wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"),
+        gml_lit(&format!(
+            "<gml:Polygon><gml:exterior>{}</gml:exterior></gml:Polygon>",
+            ring("0 0 2 0 2 2 0 2 0 0")
+        )),
+        gj(r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#),
+        kml_lit("<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 2,0 2,2 0,2 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon>"),
+    ]
+}
+
+// Req 39 /req/geometry-extension/query-functions: dimension, coordinateDimension,
+// spatialDimension, is3D, isMeasured, isEmpty and isSimple — on every serialisation.
+#[test]
+fn ogc_req39_geometry_property_functions() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:dimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:coordinateDimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:spatialDimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert!(is_false(geof_opt(&s, &format!("geof:is3D({sq})"))), "{sq}");
+        assert!(
+            is_false(geof_opt(&s, &format!("geof:isMeasured({sq})"))),
+            "{sq}"
+        );
+        assert!(
+            is_false(geof_opt(&s, &format!("geof:isEmpty({sq})"))),
+            "{sq}"
+        );
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:isSimple({sq})"))),
+            "{sq}"
+        );
+    }
+    for (g, dim) in [
+        (wkt("POINT(1 2)"), 0),
+        (wkt("LINESTRING(0 0, 1 1)"), 1),
+        (
+            wkt("GEOMETRYCOLLECTION(POINT(0 0), LINESTRING(0 0, 1 1))"),
+            1,
+        ),
+    ] {
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:dimension({g})"))),
+            dim,
+            "{g}"
+        );
+    }
+    let z = wkt("POINT Z (1 2 3)");
+    let m = wkt("POINT M (1 2 4)");
+    let zm = wkt("POINT ZM (1 2 3 4)");
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({z})"))));
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:spatialDimension({z})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({z})"))),
+        3
+    );
+    assert!(is_true(geof_opt(&s, &format!("geof:isMeasured({m})"))));
+    assert!(is_false(geof_opt(&s, &format!("geof:is3D({m})"))));
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({m})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({zm})"))),
+        4
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:spatialDimension({zm})"))),
+        3
+    );
+    // Z from GML and GeoJSON too.
+    let gml3 = gml_lit("<gml:Point srsDimension='3'><gml:pos>1 2 3</gml:pos></gml:Point>");
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({gml3})"))));
+    let gj3 = gj(r#"{"type":"Point","coordinates":[1,2,3]}"#);
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({gj3})"))));
+    // isEmpty, and isSimple on a self-intersecting bow tie.
+    for empty in [
+        wkt("POINT EMPTY"),
+        "\"\"^^geo:gmlLiteral".to_string(),
+        "\"\"^^geo:kmlLiteral".to_string(),
+    ] {
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:isEmpty({empty})"))),
+            "{empty}"
+        );
+    }
+    assert!(is_false(geof_opt(
+        &s,
+        &format!("geof:isSimple({})", wkt("LINESTRING(0 0, 2 2, 2 0, 0 2)"))
+    )));
+}
+
+// Req 39: geometryType returns the class as an IRI — the GML element for GML, the
+// Simple Features class otherwise.
+#[test]
+fn ogc_req39_geometry_type_is_an_iri() {
+    let s = ts();
+    let [w, g, j, k] = square_in_every_serialisation();
+    for t in [w, j, k] {
+        assert_eq!(
+            geof_opt(&s, &format!("geof:geometryType({t})")).as_deref(),
+            Some("<http://www.opengis.net/ont/sf#Polygon>"),
+            "{t}"
+        );
+    }
+    assert_eq!(
+        geof_opt(&s, &format!("geof:geometryType({g})")).as_deref(),
+        Some("<http://www.opengis.net/ont/gml#Polygon>")
+    );
+    let env = gml_lit("<gml:Envelope><gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>1 1</gml:upperCorner></gml:Envelope>");
+    assert_eq!(
+        geof_opt(&s, &format!("geof:geometryType({env})")).as_deref(),
+        Some("<http://www.opengis.net/ont/gml#Envelope>")
+    );
+    assert_eq!(
+        geof_opt(
+            &s,
+            &format!("geof:geometryType({})", wkt("MULTIPOINT((0 0), (1 1))"))
+        )
+        .as_deref(),
+        Some("<http://www.opengis.net/ont/sf#MultiPoint>")
+    );
+}
+
+// Req 39: centroid, boundingCircle and concaveHull, in the operand's serialisation.
+#[test]
+fn ogc_req39_centroid_bounding_circle_and_concave_hull() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        let c = geof_opt(&s, &format!("geof:asWKT(geof:centroid({sq}))")).unwrap_or_default();
+        assert_eq!(point_body(&c).replace(' ', ""), "11", "{sq}: {c}");
+        assert!(
+            is_true(geof_opt(
+                &s,
+                &format!("geof:sfContains(geof:boundingCircle({sq}), {sq})")
+            )),
+            "{sq}"
+        );
+        assert!(
+            datatype_of(&geof_opt(&s, &format!("geof:boundingCircle({sq})")))
+                == datatype_of(&geof_opt(&s, &format!("geof:envelope({sq})")))
+        );
+    }
+    // The minimum bounding circle of a 2×2 square has radius √2: area ≈ 2π.
+    let a = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:boundingCircle({}))",
+            wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))")
+        ),
+    );
+    assert!((a - 2.0 * std::f64::consts::PI).abs() < 0.02, "{a}");
+    // Three collinear points: the circle on the two outer ones.
+    let a = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:boundingCircle({}))",
+            wkt("MULTIPOINT((0 0), (1 0), (4 0))")
+        ),
+    );
+    assert!((a - 4.0 * std::f64::consts::PI).abs() < 0.05, "{a}");
+    // One point is its own bounding circle.
+    let p =
+        geof_opt(&s, &format!("geof:boundingCircle({})", wkt("POINT(3 4)"))).unwrap_or_default();
+    assert_eq!(point_body(&p).replace(' ', ""), "34", "{p}");
+    // A concave hull of an L of points: smaller than the convex hull, never larger.
+    let l = wkt(
+        "MULTIPOINT((0 0), (1 0), (2 0), (3 0), (3 1), (0 1), (0 2), (0 3), (1 3), (1 1), (1 2))",
+    );
+    let convex = geof_num(&s, &format!("geof:area(geof:convexHull({l}))"));
+    let concave = geof_num(&s, &format!("geof:area(geof:concaveHull({l}, 0.1))"));
+    let one = geof_num(&s, &format!("geof:area(geof:concaveHull({l}, 1))"));
+    let default = geof_num(&s, &format!("geof:area(geof:concaveHull({l}))"));
+    assert!(concave < convex, "{concave} < {convex}");
+    assert!((one - convex).abs() < 1e-9, "ratio 1 is the convex hull");
+    assert!(default <= convex + 1e-9, "{default}");
+    for bad in ["-0.1", "1.5", "\"x\""] {
+        assert!(
+            geof_opt(&s, &format!("geof:concaveHull({l}, {bad})")).is_none(),
+            "{bad}"
+        );
+    }
+}
+
+// Req 40 /req/geometry-extension/query-functions-non-sf: length and perimeter, in
+// units — geodesic for a linear unit on a geographic CRS, planar on a projected CRS.
+#[test]
+fn ogc_req40_length_and_perimeter_with_units() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:perimeter({sq})")), 8.0, "{sq}");
+        assert_eq!(geof_num(&s, &format!("geof:length({sq})")), 8.0, "{sq}");
+    }
+    let line = rd("LINESTRING(155000 463000, 155300 463400)");
+    assert_eq!(
+        geof_num(&s, &format!("geof:length({line}, uom:metre)")),
+        500.0
+    );
+    assert_eq!(
+        geof_num(
+            &s,
+            &format!("geof:length({line}, <http://qudt.org/vocab/unit/KiloM>)")
+        ),
+        0.5
+    );
+    assert_eq!(
+        geof_num(&s, &format!("geof:perimeter({line}, uom:metre)")),
+        500.0
+    );
+    // The equatorial degree, geodesic: 111 319.49 m.
+    let eq = wkt("LINESTRING(0 0, 1 0)");
+    let m = geof_num(&s, &format!("geof:length({eq}, uom:metre)"));
+    assert!((m - 111_319.49).abs() < 0.01, "{m}");
+    assert_eq!(geof_num(&s, &format!("geof:length({eq}, uom:degree)")), 1.0);
+    // An angular unit on a projected CRS, and an unknown unit, are unbound.
+    for expr in [
+        format!("geof:length({line}, uom:degree)"),
+        format!("geof:perimeter({eq}, <http://example.org/furlong>)"),
+    ] {
+        assert!(geof_opt(&s, &expr).is_none(), "{expr}");
+    }
+    // A point has no length.
+    assert_eq!(
+        geof_num(&s, &format!("geof:length({})", wkt("POINT(1 1)"))),
+        0.0
+    );
+}
+
+// Req 40 area(geom, units) on every serialisation.
+#[test]
+fn ogc_req40_area_on_every_serialisation() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:area({sq})")), 4.0, "{sq}");
+        let m2 = geof_num(
+            &s,
+            &format!("geof:area({sq}, <http://qudt.org/vocab/unit/M2>)"),
+        );
+        assert!(
+            m2 > 4.9e10 && m2 < 5.0e10,
+            "geodesic 2°×2° at the equator: {m2}"
+        );
+    }
+}
+
+// Req 40: numGeometries and geometryN (1-based).
+#[test]
+fn ogc_req40_num_geometries_and_geometry_n() {
+    let s = ts();
+    let multi = wkt("MULTIPOINT((1 1), (2 2), (3 3))");
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:numGeometries({multi})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(
+            &s,
+            &format!("geof:numGeometries({})", wkt("POINT(0 0)"))
+        )),
+        1
+    );
+    assert_eq!(
+        int_of(geof_opt(
+            &s,
+            &format!("geof:numGeometries({})", wkt("GEOMETRYCOLLECTION EMPTY"))
+        )),
+        0
+    );
+    let second = geof_opt(&s, &format!("geof:geometryN({multi}, 2)")).unwrap_or_default();
+    assert_eq!(point_body(&second).replace(' ', ""), "22", "{second}");
+    for n in ["0", "4", "-1", "1.5"] {
+        assert!(
+            geof_opt(&s, &format!("geof:geometryN({multi}, {n})")).is_none(),
+            "{n}"
+        );
+    }
+    let point = wkt("POINT(5 6)");
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfEquals(geof:geometryN({point}, 1), {point})")
+    )));
+    // A GML collection's member is GML, with the collection's srsName.
+    let gml = gml_lit("<gml:MultiPoint srsName='EPSG:28992'><gml:pointMember><gml:Point><gml:pos>155000 463000</gml:pos></gml:Point></gml:pointMember><gml:pointMember><gml:Point><gml:pos>155010 463000</gml:pos></gml:Point></gml:pointMember></gml:MultiPoint>");
+    let m = geof_opt(&s, &format!("geof:geometryN({gml}, 2)"));
+    assert_eq!(datatype_of(&m), "gmlLiteral");
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:geometryN({gml}, 2))")).unwrap_or_default();
+    assert!(srid.contains("EPSG/0/28992"), "{srid}");
+}
+
+// Req 40: minX … maxZ; unbound for the empty geometry, and for Z without Z.
+#[test]
+fn ogc_req40_min_and_max_ordinates() {
+    let s = ts();
+    let line = wkt("LINESTRING Z (1 5 -2, 4 2 7, 3 3 1)");
+    for (f, v) in [
+        ("minX", 1.0),
+        ("maxX", 4.0),
+        ("minY", 2.0),
+        ("maxY", 5.0),
+        ("minZ", -2.0),
+        ("maxZ", 7.0),
+    ] {
+        assert_eq!(geof_num(&s, &format!("geof:{f}({line})")), v, "{f}");
+    }
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:maxX({sq})")), 2.0, "{sq}");
+        assert!(
+            geof_opt(&s, &format!("geof:maxZ({sq})")).is_none(),
+            "2D has no Z: {sq}"
+        );
+    }
+    for f in ["minX", "maxY", "minZ"] {
+        assert!(
+            geof_opt(&s, &format!("geof:{f}({})", wkt("POINT EMPTY"))).is_none(),
+            "{f}"
+        );
+    }
+    // A GML literal's ordinates are in its CRS (RD New metres here).
+    let rd_gml = gml_point("EPSG:28992", "155000 463000");
+    assert_eq!(geof_num(&s, &format!("geof:minX({rd_gml})")), 155000.0);
+}
+
+// Req 39/40: a function over a value that is not a geometry is unbound, not a panic.
+#[test]
+fn ogc_req39_40_functions_over_a_non_geometry_are_unbound() {
+    let s = ts();
+    for f in [
+        "dimension",
+        "coordinateDimension",
+        "spatialDimension",
+        "is3D",
+        "isMeasured",
+        "isEmpty",
+        "isSimple",
+        "geometryType",
+        "numGeometries",
+        "centroid",
+        "boundingCircle",
+        "concaveHull",
+        "length",
+        "perimeter",
+        "minX",
+        "maxX",
+        "minY",
+        "maxY",
+        "minZ",
+        "maxZ",
+    ] {
+        for v in ["\"hello\"^^geo:wktLiteral", "42", "<http://example.org/x>"] {
+            assert!(
+                geof_opt(&s, &format!("geof:{f}({v})")).is_none(),
+                "{f}({v})"
+            );
+        }
+    }
+}
+
+// ─── Req 42 /req/geometry-extension/sa-functions: the spatial aggregates ──────────
+
+fn agg_data(s: &open_triplestore::store::TripleStore) {
+    load(
+        s,
+        r#"
+        ex:a ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(0 0)"^^geo:wktLiteral ] .
+        ex:b ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(4 0)"^^geo:wktLiteral ] .
+        ex:c ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(4 4)"^^geo:wktLiteral ] .
+        ex:d ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(0 4)"^^geo:wktLiteral ] .
+        ex:e ex:in ex:south ; geo:hasGeometry [ geo:asWKT "POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))"^^geo:wktLiteral ] .
+    "#,
+    );
+}
+
+fn agg_one(
+    s: &open_triplestore::store::TripleStore,
+    outer: &str,
+    agg: &str,
+) -> Vec<(String, String)> {
+    let r = sel(
+        s,
+        &format!(
+            "SELECT ?r ({outer}(geof:{agg}(?g)) AS ?v) WHERE {{
+                ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g }} GROUP BY ?r ORDER BY ?r"
+        ),
+    );
+    r.into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect()
+}
+
+#[test]
+fn ogc_req42_agg_bounding_box_convex_hull_and_centroid() {
+    let s = ts();
+    agg_data(&s);
+    let areas = |agg: &str| -> Vec<f64> {
+        agg_one(&s, "geof:area", agg)
+            .into_iter()
+            .map(|(_, v)| extract_f64(&v))
+            .collect()
+    };
+    assert_eq!(areas("aggBoundingBox"), vec![16.0, 4.0]);
+    assert_eq!(areas("aggConvexHull"), vec![16.0, 4.0]);
+    let centroids = agg_one(&s, "geof:asWKT", "aggCentroid");
+    assert_eq!(
+        point_body(&centroids[0].1).replace(' ', ""),
+        "22",
+        "{centroids:?}"
+    );
+    assert_eq!(
+        point_body(&centroids[1].1).replace(' ', ""),
+        "1111",
+        "{centroids:?}"
+    );
+    // Without GROUP BY: one group over everything.
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggBoundingBox(?g)) AS ?a) WHERE { ?f geo:hasGeometry/geo:asWKT ?g }",
+    );
+    assert_eq!(extract_f64(&r[0][0]), 144.0, "{r:?}");
+}
+
+#[test]
+fn ogc_req42_agg_bounding_circle_and_concave_hull() {
+    let s = ts();
+    agg_data(&s);
+    let circles = agg_one(&s, "geof:area", "aggBoundingCircle");
+    // The four corners of a 4×4 square: radius 2√2, area 8π.
+    let north = extract_f64(&circles[0].1);
+    assert!(
+        (north - 8.0 * std::f64::consts::PI).abs() < 0.1,
+        "{circles:?}"
+    );
+    let hulls = agg_one(&s, "geof:area", "aggConcaveHull");
+    let north_hull = extract_f64(&hulls[0].1);
+    assert!(north_hull > 0.0 && north_hull <= 16.0 + 1e-9, "{hulls:?}");
+    // Every point lies in its group's bounding circle.
+    assert!(ask_geo(
+        &s,
+        "ASK { { SELECT (geof:aggBoundingCircle(?g) AS ?c) WHERE { ?f ex:in ex:north ; geo:hasGeometry/geo:asWKT ?g } }
+               ex:c geo:hasGeometry/geo:asWKT ?p FILTER(geof:sfIntersects(?c, ?p)) }"
+    ));
+}
+
+// Every aggregate follows aggUnion's rules: the empty group is the empty geometry, a
+// non-geometry makes the group unbound, and the answer does not depend on the order
+// the solutions arrive in.
+#[test]
+fn ogc_req42_aggregates_follow_sparql_aggregate_rules() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:a ex:v "POINT(0 0)"^^geo:wktLiteral .
+        ex:b ex:v "POINT(4 0)"^^geo:wktLiteral .
+        ex:c ex:v "POINT(4 3)"^^geo:wktLiteral .
+        ex:x ex:bad "not a geometry" .
+        ex:x ex:bad "POINT(1 1)"^^geo:wktLiteral .
+    "#,
+    );
+    for agg in [
+        "aggBoundingBox",
+        "aggBoundingCircle",
+        "aggCentroid",
+        "aggConcaveHull",
+        "aggConvexHull",
+    ] {
+        let empty = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:none ?g }}"),
+        );
+        assert!(
+            empty[0][0].contains("EMPTY"),
+            "{agg} of no geometries is the empty geometry: {empty:?}"
+        );
+        let bad = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:bad ?g }}"),
+        );
+        assert_eq!(
+            bad[0][0], "",
+            "{agg} over a non-geometry is unbound: {bad:?}"
+        );
+        let forward = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:v ?g }}"),
+        );
+        let backward = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ {{ SELECT ?g WHERE {{ ?f ex:v ?g }} ORDER BY DESC(?f) }} }}"),
+        );
+        assert_eq!(forward, backward, "{agg} is order-independent");
+        assert!(!forward[0][0].is_empty(), "{agg}: {forward:?}");
+    }
+}
+
+// The aggregates keep the group's CRS and serialisation like aggUnion, and every query
+// path (accelerated, engine-only, scoped, update) answers alike.
+#[test]
+fn ogc_req42_aggregates_keep_crs_and_take_every_query_path() {
+    let data = "@prefix geo: <http://www.opengis.net/ont/geosparql#> .\n\
+        @prefix ex: <http://example.org/> .\n\
+        ex:a ex:v \"<gml:Point srsName='EPSG:28992'><gml:pos>155000 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n\
+        ex:b ex:v \"<gml:Point srsName='EPSG:28992'><gml:pos>155010 463010</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n";
+    let q = format!(
+        "{GEO_PFX}\nSELECT (geof:getSRID(geof:aggBoundingBox(?g)) AS ?srid) (geof:area(geof:aggBoundingBox(?g)) AS ?a)
+           (geof:aggCentroid(?g) AS ?c) WHERE {{ ?f ex:v ?g }}"
+    );
+    let mut answers = Vec::new();
+    for s in [accelerated(), engine_only()] {
+        s.load_str(data, RdfFormat::Turtle, None).unwrap();
+        let rows = solutions(s.query(&q).unwrap());
+        answers.push(rows);
+    }
+    assert_eq!(answers[0], answers[1], "accelerated and engine-only agree");
+    let row = &answers[0][0];
+    assert!(
+        row[0].as_deref().unwrap_or("").contains("EPSG/0/28992"),
+        "{row:?}"
+    );
+    assert_eq!(
+        extract_f64(row[1].as_deref().unwrap_or("")),
+        100.0,
+        "{row:?}"
+    );
+    assert!(
+        row[2].as_deref().unwrap_or("").contains("gmlLiteral"),
+        "{row:?}"
+    );
+}
+
+// ─── Core and geometry vocabulary of GeoSPARQL 1.1 (Req 4–7, 12) ───────────────
+
+const COLLECTIONS: &str = r#"
+ex:fc a geo:FeatureCollection ; rdfs:member ex:f1 , ex:f2 .
+ex:soc a geo:SpatialObjectCollection ; rdfs:member ex:f1 , ex:g1 .
+ex:gc a geo:GeometryCollection ; rdfs:member ex:g1 , ex:g2 .
+ex:f1 a geo:Feature ; geo:hasGeometry ex:g1 ; geo:hasDefaultGeometry ex:g1 ;
+    geo:hasCentroid ex:c1 ; geo:hasBoundingBox ex:b1 ;
+    geo:hasSize "4"^^xsd:double ; geo:hasMetricSize "4"^^xsd:double ;
+    geo:hasArea "4"^^xsd:double ; geo:hasMetricArea "4"^^xsd:double ;
+    geo:hasLength "0"^^xsd:double ; geo:hasMetricLength "0"^^xsd:double ;
+    geo:hasPerimeterLength "8"^^xsd:double ; geo:hasMetricPerimeterLength "8"^^xsd:double ;
+    geo:hasVolume "0"^^xsd:double ; geo:hasMetricVolume "0"^^xsd:double .
+ex:f2 a geo:Feature .
+ex:g1 a geo:Geometry ; geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POLYGON((155000 463000, 155002 463000, 155002 463002, 155000 463002, 155000 463000))"^^geo:wktLiteral .
+ex:g2 a geo:Geometry ; geo:asWKT "POINT(5 52)"^^geo:wktLiteral .
+ex:c1 geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(155001 463001)"^^geo:wktLiteral .
+ex:b1 geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POLYGON((155000 463000, 155002 463000, 155002 463002, 155000 463002, 155000 463000))"^^geo:wktLiteral .
+"#;
+
+fn collections_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    load(
+        &s,
+        &format!("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n{COLLECTIONS}"),
+    );
+    s
+}
+
+// Req 4 /req/core/spatial-object-collection-class and Req 5
+// /req/core/feature-collection-class: collections and their members.
+#[test]
+fn ogc_req04_05_spatial_object_and_feature_collections() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         SELECT ?m WHERE { ?c a geo:FeatureCollection ; rdfs:member ?m } ORDER BY ?m",
+    );
+    assert_eq!(
+        r,
+        vec![
+            vec!["<http://example.org/f1>".to_string()],
+            vec!["<http://example.org/f2>".to_string()]
+        ]
+    );
+    assert!(ask_geo(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         ASK { ex:soc a geo:SpatialObjectCollection ; rdfs:member ex:g1 , ex:f1 }"
+    ));
+}
+
+// Req 6 /req/core/spatial-object-properties: the size properties, which agree with
+// what the functions compute from the geometry.
+#[test]
+fn ogc_req06_spatial_object_properties() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "SELECT ?size ?area ?perimeter ?computedArea ?computedPerimeter WHERE {
+           ex:f1 geo:hasSize ?size ; geo:hasMetricSize ?ms ; geo:hasArea ?area ; geo:hasMetricArea ?ma ;
+                 geo:hasLength ?l ; geo:hasMetricLength ?ml ;
+                 geo:hasPerimeterLength ?perimeter ; geo:hasMetricPerimeterLength ?mp ;
+                 geo:hasVolume ?v ; geo:hasMetricVolume ?mv ;
+                 geo:hasDefaultGeometry/geo:asWKT ?w .
+           BIND(geof:area(?w) AS ?computedArea)
+           BIND(geof:perimeter(?w) AS ?computedPerimeter) }",
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(extract_f64(&r[0][1]), extract_f64(&r[0][3]), "{r:?}");
+    assert_eq!(extract_f64(&r[0][2]), extract_f64(&r[0][4]), "{r:?}");
+}
+
+// Req 7 /req/core/feature-properties: hasGeometry, hasDefaultGeometry, hasCentroid and
+// hasBoundingBox — the centroid and box agree with geof:centroid and geof:envelope.
+#[test]
+fn ogc_req07_feature_properties() {
+    let s = collections_store();
+    assert!(ask_geo(
+        &s,
+        "ASK { ex:f1 geo:hasGeometry ?g ; geo:hasDefaultGeometry ?g ;
+                     geo:hasCentroid/geo:asWKT ?c ; geo:hasBoundingBox/geo:asWKT ?b .
+               ?g geo:asWKT ?w .
+               FILTER(geof:sfEquals(?c, geof:centroid(?w)) && geof:sfEquals(?b, geof:envelope(?w))) }"
+    ));
+}
+
+// Req 12 /req/geometry-extension/geometry-collection-class: a geo:GeometryCollection
+// and its member geometries, which aggregate like any group.
+#[test]
+fn ogc_req12_geometry_collection_class() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         SELECT (COUNT(?g) AS ?n) (geof:aggBoundingBox(?w) AS ?box) WHERE {
+           ex:gc a geo:GeometryCollection ; rdfs:member ?g . ?g geo:asWKT ?w }",
+    );
+    assert!(r[0][0].contains('2'), "{r:?}");
+    assert!(
+        r[0][1].contains("POLYGON"),
+        "two CRSs harmonised into CRS84: {r:?}"
     );
 }

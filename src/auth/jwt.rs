@@ -156,9 +156,6 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// True for well-known default/placeholder JWT secrets (and the empty string) that must never
-/// sign tokens in a real deployment — a public secret makes every session token forgeable.
-/// `main` warns on these and refuses to start when production cookies are enabled.
 /// The configured JWT signing secret (`JWT_SECRET` / `--jwt-secret`), routed
 /// through the secrets module like every other credential: a reference
 /// (`env:NAME`, `file:/path`, `vault:…`) resolves to its value; a raw value is
@@ -172,6 +169,10 @@ pub fn configured_jwt_secret(value: &str) -> anyhow::Result<String> {
     Ok(secret.expose().to_string())
 }
 
+/// True for well-known default/placeholder JWT secrets, the empty string, and anything
+/// shorter than 32 characters — none may sign tokens in a real deployment, since a public or
+/// guessable secret makes every session token forgeable. `main` refuses to start on one in
+/// every mode, not only under `--secure-cookies`.
 pub fn is_weak_jwt_secret(secret: &str) -> bool {
     const WEAK: &[&str] = &[
         "",

@@ -11,19 +11,21 @@ W3C SHACL Recommendation, and W3C has not reviewed or endorsed them. The tests a
 redistributed under the W3C Software and Document License — see
 [`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
 
-## Results (2026-10-02)
+## Results (2026-10-03)
 
 | | core | sparql | total |
 |---|---|---|---|
-| **Pass** (full report equality) | **97** | **22** | **119** |
-| Known-fail (ratcheted) | 1 | 0 | 1 |
+| **Pass** (full report equality) | **98** | **22** | **120** |
+| Known-fail (ratcheted) | 0 | 0 | 0 |
 | Optional feature, unsupported (failure reported as the spec requires) | 0 | 1 | 1 |
 | Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
 | Total files | 113 | 23 | 136 |
 
 *(Until 2026-10-02 the runner compared `sh:conforms` and the focus-node multiset
 only; full report equality, added as a second level, matched it on every case and
-replaced it. Previous baselines: 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
+replaced it. Previous baselines: 2026-10-02: 119 pass / 1 known-fail
+(`core/property/uniqueLang-002`, until the store kept literals as written; see
+"Lexical forms" below); 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
 `shapesGraph-001` counted as a failure; 2026-06-11, core only: 97 pass / 1
 known-fail; 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine refactor"
 below for what closed that gap.)*
@@ -39,18 +41,15 @@ error, and fails them when a report comes back.
 **Comparison.** The runner's test, `w3c_shacl_full_report_equality`, compares
 `sh:conforms` and the multiset of **results**, each on `sh:focusNode`,
 `sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
-`sh:sourceConstraintComponent`, `sh:resultSeverity` and `sh:sourceConstraint` —
-everything except `sh:resultMessage`, whose wording the spec leaves to the
-processor. Our side is the RDF report the engine writes
+`sh:sourceConstraintComponent`, `sh:resultSeverity`, `sh:sourceConstraint` and
+any other property of the result node (since 2026-10-03) — everything except
+`sh:resultMessage`, whose wording the spec leaves to the processor. Our side is the RDF report the engine writes
   (`src/shacl_studio/report_rdf.rs`), loaded back into the store, so the RDF
   serialisation is tested as well. Blank nodes of the data graph (focus nodes,
   values) match any blank node; a blank-node shape or `sh:sparql` node must be the
-  very node of the shapes graph. Literals are compared with their datatype and
-  language tag, after the store has read both sides back (see the storage note
-  under the known failures). Because the expected report goes through the same
-  storage, a canonicalisation that changes both sides alike does not show here:
-  `core/property/datatype-ill-formed` passes because its ill-formed literals are
-  stored as written.
+  very node of the shapes graph. Literals are compared with their lexical form,
+  datatype and language tag, as the store holds them, which is as written on
+  both sides.
 
 **Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` must
 pass, and every listed test must still fail — silent regressions *and* silent fixes
@@ -76,22 +75,24 @@ the processor ever produces a report for it instead.
 
 ## Remaining known failures
 
-- **`core/property/uniqueLang-002.ttl`** — the test asserts that
-  `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the constraint (the spec
-  activates it only for the literal `true`). Oxigraph's storage encodes
-  `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →
-  `"true"`), so the distinction is unrecoverable after loading. This is a storage
-  canonicalisation property, not an engine gap; fixing it would require keeping
-  the original lexical form alongside every stored literal. The same storage
-  property makes `sh:datatype` reject valid values of the derived integer types
-  and `xsd:dateTimeStamp`, which read back as `xsd:integer` / `xsd:dateTime`; no
-  suite case covers that (`datatype-ill-formed` passes because its values are
-  ill-formed anyway). Both are pinned by `pinned_*` tests in
-  `tests/shacl_conformance.rs`, and the dataset and SHACL Studio shapes uploads
-  refuse non-canonical booleans on activation flags (see
-  [shacl.md](../shacl.md#literal-forms-the-engine-cannot-see)).
+None in either section.
 
-## SHACL Advanced Features — TopQuadrant's tests (2026-10-02)
+## Lexical forms (2026-10-03)
+
+**`core/property/uniqueLang-002.ttl`** passes since the store keeps every literal
+as written (the vendored Oxigraph, [`vendor/README.md`](../../vendor/README.md)).
+The test asserts that `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the
+constraint: the spec activates it only for the literal `true`. Oxigraph used to
+store `xsd:boolean` as a value and read `"1"` back as `"true"`, so the shapes
+graph the engine loaded said `true`, and the dataset and SHACL Studio shapes
+uploads refused such flags instead. The same change makes `sh:datatype` accept
+valid values of the types derived from `xsd:integer` and of `xsd:dateTimeStamp`,
+which used to read back as `xsd:integer` / `xsd:dateTime` (no suite case covers
+that; `tests/shacl_conformance.rs` does), and `sh:hasValue` / `sh:in` /
+`sh:equals` compare the terms as written, as SHACL's term equality requires
+([shacl.md](../shacl.md#literal-forms)).
+
+## SHACL Advanced Features — TopQuadrant's tests (2026-10-03)
 
 No W3C test suite covers the SHACL Advanced Features Note (2017), so the
 SHACL-AF tests of TopQuadrant's SHACL API are vendored under
@@ -106,15 +107,26 @@ TopQuadrant has not reviewed them.
 | | expression | function | rules | target | total |
 |---|---|---|---|---|---|
 | **Pass** | **1** | **1** | **7** | 0 | **9** |
-| Known-fail (ratcheted) | 0 | 0 | 0 | 1 | 1 |
+| Expects behaviour outside the spec (failure reported as the spec requires) | 0 | 0 | 0 | 1 | 1 |
+| Known-fail (ratcheted) | 0 | 0 | 0 | 0 | 0 |
 | Cases | 1 | 1 | 7 | 1 | 10 |
+
+*(2026-10-02: 9 pass / 1 known failure, validation cases compared on
+`sh:conforms` and focus nodes only, with `sparqlTarget-001` counted as a
+failure.)*
 
 The tests use TopQuadrant's `dash:` test vocabulary, one self-contained file
 per case (data, shapes and expected outcome in one graph, merged with the
 sibling files it `owl:imports`). Comparison levels:
 
-- **`dash:GraphValidationTestCase`** — `sh:conforms` and the multiset of focus
-  nodes, as for the W3C suite above;
+- **`dash:GraphValidationTestCase`** — `sh:conforms` and the full multiset of
+  results, the same comparison as for the W3C suite above
+  (`tests/common/shacl_report.rs`, shared by both runners): every result
+  property except `sh:resultMessage`, our side being the RDF report the engine
+  writes, data blank nodes as wildcards. The expected report is the
+  `dash:expectedResult` node of the test case, in the file's own graph (the W3C
+  files put it under `mf:result` instead). Any result property beyond the
+  standard ones — a result annotation — is compared too;
 - **`dash:InferencingTestCase`** — the exact set of inferred triples (what the
   rules write, less what the file asserts) against `dash:expectedResult`;
 - **`dash:FunctionTestCase`** — the value of the SPARQL expression in
@@ -122,16 +134,25 @@ sibling files it `owl:imports`). Comparison levels:
   `dash:expectedResult` (term equality).
 
 Same two-way ratchet as above, plus no skips allowed and a floor of 9 passes.
-The one known failure:
+Moving to full report equality found one gap, now fixed: an expression
+constraint's result did not name the node expression as its
+`sh:sourceConstraint`, which SHACL-AF §7 requires (`expression/booleans-001`).
+
+**Expects behaviour outside the spec.** `NON_SPEC_EXPECTATIONS` lists cases
+whose expected outcome rests on TopBraid behaviour the specification does not
+have, where the specification requires a failure. Such a case passes when
+validation fails with that failure, and fails if a report ever comes back.
 
 - **`target/sparqlTarget-001.test.ttl`** — the target's `sh:select` uses the
-  `owl:` prefix, but the ontology its `sh:prefixes` names declares no
-  `sh:declare` for it. TopBraid falls back to the Turtle prefixes of the file
-  it loaded; the SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses)
-  does not, so the shapes graph fails to load here.
+  `owl:` prefix, but the ontology its `sh:prefixes` names has no `sh:declare`
+  for it. TopBraid falls back to the Turtle prefixes of the file it loaded.
+  The SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets)
+  has no such fallback: the query does not parse with the declared prefixes,
+  so the shapes graph is ill-formed, and validation fails with "Prefix not found".
 
-Not covered by these tests and still missing: `sh:resultAnnotation` (§4, it
-needs result properties the report model does not have yet).
+Every SHACL-AF feature is covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs` as well, including the one these tests do
+not reach: result annotations (§4, `result_annotations_*`).
 
 ## Beyond the suite: fail-open gaps (2026-10-01)
 

@@ -158,6 +158,79 @@ fn shacl_xone_exactly_one() {
     );
 }
 
+// SHACL §4.6.1–4.6.4: sh:not, sh:and, sh:or and sh:xone may each have several
+// values on one shape, and every value is a separate constraint. The loader used
+// to read one sh:not and follow one list per predicate, so the other value was
+// silently dropped. Each `*First`/`*Second` node breaks exactly one of the two
+// values, and both must be reported (the store's object order decides which
+// value the old loader kept, so both sides are checked).
+#[test]
+fn shacl_logical_constraints_with_several_values_each_enforce_every_value() {
+    let shapes = r#"
+      ex:LogicShape a sh:NodeShape ; sh:targetClass ex:T ;
+        sh:not [ sh:class ex:A ] ;
+        sh:not [ sh:class ex:B ] ;
+        sh:and ( [ sh:property [ sh:path ex:a1 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:a2 ; sh:minCount 1 ] ] ) ;
+        sh:and ( [ sh:property [ sh:path ex:a3 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:a4 ; sh:minCount 1 ] ] ) ;
+        sh:or  ( [ sh:property [ sh:path ex:o1 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:o2 ; sh:minCount 1 ] ] ) ;
+        sh:or  ( [ sh:property [ sh:path ex:o3 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:o4 ; sh:minCount 1 ] ] ) ;
+        sh:xone ( [ sh:property [ sh:path ex:x1 ; sh:minCount 1 ] ]
+                  [ sh:property [ sh:path ex:x2 ; sh:minCount 1 ] ] ) ;
+        sh:xone ( [ sh:property [ sh:path ex:x3 ; sh:minCount 1 ] ]
+                  [ sh:property [ sh:path ex:x4 ; sh:minCount 1 ] ] ) ."#;
+    // Satisfies all eight constraints: neither class, all four and-properties,
+    // one property per or-list, exactly one per xone-list.
+    let base = "ex:a1 1 ; ex:a2 1 ; ex:a3 1 ; ex:a4 1 ; ex:o1 1 ; ex:o3 1 ; ex:x1 1 ; ex:x3 1";
+    // (node, extra types, properties) — each bad node breaks exactly one value.
+    let nodes: &[(&str, &str, String)] = &[
+        ("ok", "", base.to_string()),
+        ("notFirst", ", ex:A", base.to_string()),
+        ("notSecond", ", ex:B", base.to_string()),
+        ("andFirst", "", base.replace("ex:a1 1 ; ", "")),
+        ("andSecond", "", base.replace("ex:a3 1 ; ", "")),
+        ("orFirst", "", base.replace("ex:o1 1 ; ", "")),
+        ("orSecond", "", base.replace("ex:o3 1 ; ", "")),
+        ("xoneFirst", "", format!("{base} ; ex:x2 1")),
+        ("xoneSecond", "", format!("{base} ; ex:x4 1")),
+    ];
+    let data: String = nodes
+        .iter()
+        .map(|(n, types, props)| format!("ex:{n} a ex:T{types} ; {props} .\n"))
+        .collect();
+    let r = run(shapes, &data);
+
+    let results_for = |node: &str| -> Vec<&str> {
+        let suffix = format!("/{node}");
+        r.results
+            .iter()
+            .filter(|v| v.focus_node.trim_end_matches('>').ends_with(&suffix))
+            .map(|v| v.source_constraint.as_str())
+            .collect()
+    };
+    assert!(results_for("ok").is_empty(), "{:?}", r.results);
+    for (node, component) in [
+        ("notFirst", "sh:not"),
+        ("notSecond", "sh:not"),
+        ("andFirst", "sh:and"),
+        ("andSecond", "sh:and"),
+        ("orFirst", "sh:or"),
+        ("orSecond", "sh:or"),
+        ("xoneFirst", "sh:xone"),
+        ("xoneSecond", "sh:xone"),
+    ] {
+        assert_eq!(
+            results_for(node),
+            vec![component],
+            "{node} breaks one {component} value and must get exactly that one result"
+        );
+    }
+    assert!(!r.conforms);
+}
+
 // hc-01: sh:qualifiedValueShape enforces per-value-shape min/max counts. A valid
 // hand (1 thumb + 4 fingers) conforms; a deficient one violates qualifiedMinCount.
 #[test]
@@ -1679,19 +1752,18 @@ ex:S a sh:NodeShape ;
     );
 }
 
-// ─── Pinned deviations: literal canonicalisation in storage ──────────────────
+// ─── Literal forms: what the store keeps is what the engine sees ─────────────
 //
-// oxigraph stores xsd:boolean, the numerics and the temporals as native
-// values: every derived integer type reads back as xsd:integer, and
-// "1"^^xsd:boolean reads back as true. The engine only ever sees what the
-// store returns. These tests pin today's behaviour so the change is visible
-// when storage keeps lexical forms (plan card 15); flip them then.
+// The store keeps every literal as written (vendor/README.md). Until it did,
+// every derived integer type read back as xsd:integer and "1"^^xsd:boolean
+// as true; the two tests below pinned that and are now flipped.
 
-/// PINNED (wrong per SHACL §4.1.2): a valid `"5"^^xsd:nonNegativeInteger`
-/// violates `sh:datatype xsd:nonNegativeInteger`, because the store hands it
-/// back as `"5"^^xsd:integer`. A write gate answers 422 on valid data.
+/// SHACL §4.1.2: a valid `"5"^^xsd:nonNegativeInteger` conforms to
+/// `sh:datatype xsd:nonNegativeInteger`, because the store hands it back with
+/// its datatype (it used to read back as `"5"^^xsd:integer`, and a write gate
+/// answered 422 on valid data).
 #[test]
-fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
+fn a_derived_integer_type_conforms_to_its_own_sh_datatype() {
     for dt in [
         "nonNegativeInteger",
         "positiveInteger",
@@ -1704,13 +1776,9 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
             "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:{dt} ] ."
         );
         let r = run(&shapes, &format!("ex:a ex:n \"5\"^^xsd:{dt} ."));
-        assert!(
-            !r.conforms,
-            "xsd:{dt}: storage now keeps the derived datatype — flip this pin \
-             and the docs (footnote 6, docs/shacl.md): {:?}",
-            r.results
-        );
-        // The cause: the stored term reads back as xsd:integer.
+        assert!(r.conforms, "xsd:{dt}: {:?}", r.results);
+        // The stored term keeps the datatype; DATATYPE() in a query is the
+        // value's type, xsd:integer, as SPARQL's value semantics have it.
         let store = TripleStore::in_memory().unwrap();
         store
             .load_str(
@@ -1720,25 +1788,23 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
             )
             .unwrap();
         let Ok(oxigraph::sparql::QueryResults::Solutions(mut rows)) =
-            store.query("SELECT (DATATYPE(?o) AS ?d) WHERE { GRAPH <urn:data> { ?s ?p ?o } }")
+            store.query("SELECT ?o WHERE { GRAPH <urn:data> { ?s ?p ?o } }")
         else {
-            panic!("datatype query failed");
+            panic!("query failed");
         };
-        let d = rows.next().unwrap().unwrap().get("d").unwrap().to_string();
+        let o = rows.next().unwrap().unwrap().get("o").unwrap().to_string();
         assert_eq!(
-            d, "<http://www.w3.org/2001/XMLSchema#integer>",
-            "xsd:{dt} reads back as xsd:integer"
+            o,
+            format!("\"5\"^^<http://www.w3.org/2001/XMLSchema#{dt}>"),
+            "xsd:{dt} reads back as written"
         );
     }
-    // xsd:dateTimeStamp reads back as xsd:dateTime the same way.
+    // xsd:dateTimeStamp keeps its datatype the same way.
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:t ; sh:datatype xsd:dateTimeStamp ] .",
         "ex:a ex:t \"2026-10-01T12:00:00Z\"^^xsd:dateTimeStamp .",
     );
-    assert!(
-        !r.conforms,
-        "xsd:dateTimeStamp: storage now keeps it — flip this pin and the docs"
-    );
+    assert!(r.conforms, "xsd:dateTimeStamp: {:?}", r.results);
     // xsd:integer itself is unaffected.
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:integer ] .",
@@ -1747,31 +1813,40 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
     assert!(r.conforms, "{:?}", r.results);
 }
 
-/// PINNED (wrong per SHACL; W3C core/property/uniqueLang-002): only the
-/// literal `true` activates a flag, but the store turns `"1"^^xsd:boolean`
-/// into `true`, so `"1"` activates `sh:uniqueLang` and `sh:deactivated` too.
-/// `put_shapes` and Studio PUT refuse such uploads (see
-/// `tests/shacl_studio_http.rs`); other write paths still store them.
+/// W3C core/property/uniqueLang-002: only the literal `true` activates a
+/// flag. The store keeps `"1"^^xsd:boolean` as written, so it activates
+/// neither `sh:uniqueLang` nor `sh:closed`, nor deactivates a shape (it used
+/// to read back as `true` and do all three).
 #[test]
-fn pinned_a_non_canonical_true_activates_a_flag() {
+fn a_non_canonical_true_activates_no_flag() {
     let r = run(
         "ex:S a sh:PropertyShape ; sh:targetNode ex:i ; sh:path ex:m ; sh:uniqueLang \"1\"^^xsd:boolean .",
         "ex:i ex:m \"HI\"@en, \"Hi\"@en .",
     );
     assert!(
-        !r.conforms,
-        "\"1\" no longer activates sh:uniqueLang — flip this pin and remove \
-         uniqueLang-002 from KNOWN_FAILURES"
+        r.conforms,
+        "\"1\" activates no sh:uniqueLang: {:?}",
+        r.results
     );
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:closed \"1\"^^xsd:boolean .",
+        "ex:i ex:m 1 .",
+    );
+    assert!(r.conforms, "\"1\" closes no shape: {:?}", r.results);
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:class ex:Missing ; sh:deactivated \"1\"^^xsd:boolean .",
         "ex:i ex:m 1 .",
     );
-    assert!(
-        r.conforms,
-        "\"1\" no longer deactivates — flip this pin: {:?}",
-        r.results
-    );
+    assert!(!r.conforms, "\"1\" deactivates nothing");
+    // The literal true does all three.
+    for (shapes, conforms) in [
+        ("ex:S a sh:PropertyShape ; sh:targetNode ex:i ; sh:path ex:m ; sh:uniqueLang true .", false),
+        ("ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:closed true .", false),
+        ("ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:class ex:Missing ; sh:deactivated true .", true),
+    ] {
+        let r = run(shapes, "ex:i ex:m \"HI\"@en, \"Hi\"@en .");
+        assert_eq!(r.conforms, conforms, "{shapes}: {:?}", r.results);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,4 +2153,296 @@ ex:S a sh:NodeShape ; sh:targetNode ex:t ;
     let values: Vec<_> = r.results.iter().filter_map(|x| x.value.clone()).collect();
     assert_eq!(values.len(), 1, "{:?}", r.results);
     assert!(values[0].starts_with("\"2\""), "{:?}", r.results);
+}
+
+// ─── Literals as written (the store keeps lexical forms and datatypes) ────────
+
+/// SHACL §4.1.2: `sh:datatype` holds for a literal whose datatype is the given
+/// IRI and whose lexical form is valid for it. The store keeps the derived
+/// integer types and `xsd:dateTimeStamp` as written, so valid data of those
+/// types conforms, and their range and time-zone rules are checked.
+#[test]
+fn sh_datatype_holds_for_derived_types_as_stored() {
+    let shapes = r#"
+      ex:S a sh:NodeShape ; sh:targetClass ex:Item ;
+        sh:property [ sh:path ex:count ; sh:datatype xsd:nonNegativeInteger ] ;
+        sh:property [ sh:path ex:n ; sh:datatype xsd:int ] ;
+        sh:property [ sh:path ex:small ; sh:datatype xsd:byte ] ;
+        sh:property [ sh:path ex:at ; sh:datatype xsd:dateTimeStamp ] ."#;
+    let data = r#"
+      ex:ok a ex:Item ; ex:count "5"^^xsd:nonNegativeInteger ; ex:n "-7"^^xsd:int ;
+        ex:small "12"^^xsd:byte ; ex:at "2020-01-01T00:00:00+02:00"^^xsd:dateTimeStamp .
+      ex:integer a ex:Item ; ex:count 5 .
+      ex:negative a ex:Item ; ex:count "-5"^^xsd:nonNegativeInteger .
+      ex:range a ex:Item ; ex:small "300"^^xsd:byte .
+      ex:notz a ex:Item ; ex:at "2020-01-01T00:00:00"^^xsd:dateTimeStamp ."#;
+    let r = run(shapes, data);
+    assert!(
+        !violates(&r, "/ok"),
+        "valid derived types conform: {:?}",
+        r.results
+    );
+    for bad in ["/integer", "/negative", "/range", "/notz"] {
+        assert!(
+            violates(&r, bad),
+            "{bad} violates sh:datatype: {:?}",
+            r.results
+        );
+    }
+}
+
+/// `sh:hasValue` and `sh:in` compare RDF terms: the literal as written, not
+/// its value (`"05"^^xsd:integer` is not `5`, `"5"^^xsd:int` is not `5`).
+#[test]
+fn sh_has_value_and_sh_in_compare_terms_as_written() {
+    let shapes = r#"
+      ex:H a sh:NodeShape ; sh:targetClass ex:Item ;
+        sh:property [ sh:path ex:v ; sh:hasValue 5 ] ;
+        sh:property [ sh:path ex:w ; sh:in ( "05"^^xsd:integer ) ] ."#;
+    let data = r#"
+      ex:exact a ex:Item ; ex:v 5 ; ex:w "05"^^xsd:integer .
+      ex:padded a ex:Item ; ex:v "05"^^xsd:integer ; ex:w 5 .
+      ex:derived a ex:Item ; ex:v "5"^^xsd:int ; ex:w "05"^^xsd:integer ."#;
+    let r = run(shapes, data);
+    assert!(!violates(&r, "/exact"), "{:?}", r.results);
+    assert!(violates(&r, "/padded"), "{:?}", r.results);
+    assert!(violates(&r, "/derived"), "{:?}", r.results);
+}
+
+/// SHACL §2.1.3.3: a shape that is a SHACL instance of `rdfs:Class` targets
+/// its instances, also through `rdfs:subClassOf` in the shapes graph.
+#[test]
+fn an_implicit_class_target_follows_subclass_of_rdfs_class() {
+    let shapes = r#"
+      ex:MyClass rdfs:subClassOf rdfs:Class .
+      ex:Person a ex:MyClass , sh:NodeShape ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+    let r = run(shapes, "ex:p a ex:Person .");
+    assert!(violates(&r, "/p"), "{:?}", r.results);
+}
+
+/// A literal focus node is pre-bound as the term it is: `$this` =
+/// `"5"^^xsd:int` (kept as written) finds the triple that holds it, so the
+/// `sh:sparql` constraint reports it. Bound through its value instead, it
+/// would be `5`, find nothing and let the node pass.
+#[test]
+fn a_sparql_constraint_sees_a_literal_focus_node_as_written() {
+    let shapes = r#"
+      ex:S a sh:NodeShape ; sh:targetObjectsOf ex:code ;
+        sh:sparql [ sh:select """
+          SELECT $this WHERE { <http://example.org/a> <http://example.org/code> $this }
+        """ ] ."#;
+    let r = run(
+        shapes,
+        r#"ex:a ex:code "5"^^xsd:int , "05"^^xsd:integer . ex:b ex:code 7 ."#,
+    );
+    let flagged: Vec<&str> = r.results.iter().map(|v| v.focus_node.as_str()).collect();
+    assert_eq!(
+        flagged.len(),
+        2,
+        "both of ex:a's codes violate: {flagged:?}"
+    );
+}
+
+/// The (property, value) display pairs of a result's annotations, sorted.
+fn annotations(r: &open_triplestore::shacl::report::ValidationResult) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = r
+        .annotations
+        .iter()
+        .map(|a| (a.property.clone(), a.value.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// An expression constraint's result names the node expression as its
+/// `sh:sourceConstraint` (SHACL-AF §7), as TopQuadrant's booleans-001 expects.
+#[test]
+fn expression_results_name_the_expression() {
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:expression sh:this ; sh:targetNode true, false .",
+        "",
+    );
+    assert_eq!(r.results.len(), 1, "{:?}", r.results);
+    let res = &r.results[0];
+    assert_eq!(
+        res.source_constraint_component,
+        "http://www.w3.org/ns/shacl#ExpressionConstraintComponent"
+    );
+    assert_eq!(
+        res.terms.source_constraint.as_ref().map(|t| t.to_string()),
+        Some("<http://www.w3.org/ns/shacl#this>".to_string())
+    );
+}
+
+/// A result annotation that breaks the Note's syntax rules fails the shapes
+/// graph instead of being dropped.
+#[test]
+fn ill_formed_result_annotations_fail_the_shapes_graph() {
+    for (annotation, needle) in [
+        ("[ sh:annotationVarName \"x\" ]", "no sh:annotationProperty"),
+        ("[ sh:annotationProperty \"ex:p\" ]", "must be an IRI"),
+        (
+            "[ sh:annotationProperty ex:p , ex:q ]",
+            "more than one sh:annotationProperty",
+        ),
+        (
+            "[ sh:annotationProperty ex:p ; sh:annotationVarName \"a\" , \"b\" ]",
+            "more than one sh:annotationVarName",
+        ),
+        (
+            "[ sh:annotationProperty ex:p ; sh:annotationVarName 7 ]",
+            "xsd:string",
+        ),
+        ("\"ex:p\"", "is a literal"),
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:sparql [ \
+               sh:resultAnnotation {annotation} ; \
+               sh:select \"SELECT $this WHERE {{ }}\" ] ."
+        );
+        match try_run(&shapes, "") {
+            Err(e) => assert!(e.contains(needle), "{annotation}: {e}"),
+            Ok(r) => panic!(
+                "{annotation}: expected a failure, got conforms={}",
+                r.conforms
+            ),
+        }
+    }
+}
+
+/// Result annotations on a constraint component's validators: a SELECT
+/// validator reads its solutions, an ASK validator (which has none) gets the
+/// defaults.
+#[test]
+fn result_annotations_on_component_validators() {
+    let shapes = r#"
+      ex:SelectComponent a sh:ConstraintComponent ;
+        sh:parameter [ sh:path ex:forbidden ] ;
+        sh:validator [
+          a sh:SPARQLSelectValidator ;
+          sh:resultAnnotation [ sh:annotationProperty ex:culprit ; sh:annotationVarName "p" ] ;
+          sh:select """SELECT $this ?p WHERE { $this ?p $forbidden }""" ] .
+      ex:AskComponent a sh:ConstraintComponent ;
+        sh:parameter [ sh:path ex:mustBe ] ;
+        sh:propertyValidator [
+          a sh:SPARQLAskValidator ;
+          sh:resultAnnotation [ sh:annotationProperty ex:hint ; sh:annotationValue "check the value" ] ;
+          sh:ask """ASK { FILTER ($value = $mustBe) }""" ] .
+      ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+        ex:forbidden ex:Bad ;
+        sh:property [ sh:path ex:colour ; ex:mustBe "red" ] ."#;
+    let data = r#"ex:a ex:likes ex:Bad ; ex:colour "blue" ."#;
+    let r = run(shapes, data);
+    let of = |component: &str| {
+        r.results
+            .iter()
+            .find(|v| v.source_constraint_component.ends_with(component))
+            .unwrap_or_else(|| panic!("no {component} result in {:?}", r.results))
+    };
+    assert_eq!(
+        annotations(of("SelectComponent")),
+        vec![(
+            "http://example.org/culprit".into(),
+            "http://example.org/likes".into()
+        )]
+    );
+    assert_eq!(
+        annotations(of("AskComponent")),
+        vec![("http://example.org/hint".into(), "check the value".into())]
+    );
+}
+
+/// After the Note's example: an annotation by variable name, one by the
+/// property's local name, and a default for an unbound variable — in the
+/// JSON result, the typed terms and the RDF report.
+#[test]
+fn result_annotations_on_sparql_constraints() {
+    use open_triplestore::shacl_studio::report_rdf::report_to_turtle;
+    let shapes = r#"
+      ex:AnnotationExample a sh:NodeShape ;
+        sh:targetNode ex:ExampleResource ;
+        sh:sparql [
+          sh:resultAnnotation [ sh:annotationProperty ex:time ; sh:annotationVarName "time" ] ,
+                              [ sh:annotationProperty ex:size ] ,
+                              [ sh:annotationProperty ex:origin ; sh:annotationVarName "nowhere" ;
+                                sh:annotationValue ex:Default , "fallback" ] ;
+          sh:select """
+            SELECT $this ?message ?time ?size
+            WHERE {
+              BIND (CONCAT("The ", "message.") AS ?message) .
+              BIND ("2015-03-27T10:58:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> AS ?time) .
+              BIND (42 AS ?size) .
+            }""" ;
+        ] ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+    let r = run(shapes, "");
+    assert!(!r.conforms);
+    let sparql = r
+        .results
+        .iter()
+        .find(|v| v.source_constraint == "sh:SPARQLConstraint")
+        .expect("the SPARQL constraint's result");
+    assert_eq!(sparql.message, "The message.");
+    assert_eq!(
+        annotations(sparql),
+        vec![
+            ("http://example.org/origin".into(), "fallback".into()),
+            (
+                "http://example.org/origin".into(),
+                "http://example.org/Default".into()
+            ),
+            ("http://example.org/size".into(), "42".into()),
+            (
+                "http://example.org/time".into(),
+                "2015-03-27T10:58:00".into()
+            ),
+        ]
+    );
+    assert_eq!(sparql.terms.annotations.len(), 4);
+    // JSON: present where declared, omitted elsewhere.
+    let json = serde_json::to_value(sparql).unwrap();
+    assert_eq!(
+        json["annotations"].as_array().map(Vec::len),
+        Some(4),
+        "{json}"
+    );
+    let min_count = r
+        .results
+        .iter()
+        .find(|v| v.source_constraint.starts_with("sh:minCount"))
+        .expect("the minCount result");
+    assert!(min_count.annotations.is_empty());
+    let json = serde_json::to_value(min_count).unwrap();
+    assert!(json.get("annotations").is_none(), "{json}");
+    // A result read back from JSON keeps them.
+    let back: open_triplestore::shacl::report::ValidationResult =
+        serde_json::from_value(serde_json::to_value(sparql).unwrap()).unwrap();
+    assert_eq!(annotations(&back), annotations(sparql));
+
+    // The RDF report writes them typed.
+    let ttl = report_to_turtle(&r, "urn:t:report#run");
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(&ttl, RdfFormat::Turtle, Some("urn:t:report"))
+        .unwrap();
+    let ask = |pattern: &str| {
+        matches!(
+            store.query(&format!(
+                "PREFIX sh: <http://www.w3.org/ns/shacl#> PREFIX ex: <http://example.org/> \
+                 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+                 ASK {{ GRAPH <urn:t:report> {{ {pattern} }} }}"
+            )),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(ask(
+        "?res sh:sourceConstraintComponent sh:SPARQLConstraintComponent ; \
+         ex:time \"2015-03-27T10:58:00\"^^xsd:dateTime ; ex:size 42 ; \
+         ex:origin ex:Default , \"fallback\""
+    ));
+    assert!(ask(
+        "?res sh:sourceConstraintComponent sh:MinCountConstraintComponent \
+         FILTER NOT EXISTS { ?res ex:time ?t }"
+    ));
 }

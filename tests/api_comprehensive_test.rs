@@ -61,6 +61,7 @@ mod helpers {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            serve_frontend: true,
             trusted_proxies: open_triplestore::server::client_ip::TrustedProxies::default(),
             browse_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             expensive_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
@@ -965,7 +966,7 @@ mod sparql_protocol {
     }
 
     #[tokio::test]
-    async fn missing_query_param_returns_400() {
+    async fn missing_query_param_returns_the_service_description() {
         let resp = test_app(test_state())
             .oneshot(
                 Request::builder()
@@ -976,11 +977,16 @@ mod sparql_protocol {
             )
             .await
             .unwrap();
-        assert!(
-            resp.status().is_client_error(),
-            "Missing query param must return 4xx, got {}",
-            resp.status()
-        );
+        // SPARQL 1.1 Service Description §2: GET on the endpoint without a
+        // query answers with the service description.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ct.starts_with("text/turtle"), "content type {ct}");
     }
 
     #[tokio::test]
@@ -1946,7 +1952,7 @@ ex:PersonShape a sh:NodeShape ;
 BASE <http://example.org/>
 PREFIX sh: <http://www.w3.org/ns/shacl#>
 shape <PersonShape> -> <Person> {
-    <name> minCount 1 ;
+    <name> [1..*] .
 }
 "#;
         // The parser is authenticated compute now, so an anonymous request would

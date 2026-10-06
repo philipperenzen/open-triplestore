@@ -1924,8 +1924,9 @@ fn ground(
             members.entry(s.clone()).or_default().push(tbox.exists[r]);
             match q.object {
                 Term::Literal(l) => {
-                    // Decided on the value: a stored `xsd:integer` may have
-                    // been written as any integer-derived type.
+                    // Decided on the value: the same number may be written
+                    // as any integer-derived type (and data loaded before the
+                    // store kept lexical forms holds them as `xsd:integer`).
                     if let Some(v) = datatypes::literal_value(&l) {
                         if range.contains(&v) == Some(false) {
                             note(
@@ -1988,7 +1989,12 @@ fn ground(
     let reflexive = !tbox.reflexive.is_empty();
     src.each(None, None, None, |q| {
         if let Term::Literal(l) = &q.object {
-            if datatypes::literal_value(l).is_none() {
+            // Only the QL map's own datatypes are judged: a literal of an
+            // RL-only type (`xsd:double`, `xsd:boolean`, …) is outside the
+            // profile, as its axioms are.
+            if Dt::from_iri(l.datatype().as_str()).is_some()
+                && datatypes::literal_value(l).is_none()
+            {
                 note(
                     &mut clash,
                     "ql-dt-not-type",

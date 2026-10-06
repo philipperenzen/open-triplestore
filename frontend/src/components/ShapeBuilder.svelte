@@ -1,4 +1,5 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   // No-code SHACL builder. Renders the parsed shapes model as editable cards
   // with model-driven pickers (target/path datalists fed by the dataset's real
   // classes + properties) and typed constraint controls. Every edit mutates the
@@ -469,15 +470,15 @@
     <div class="state"><FileCode size={20} /> {$i18nT('system.loading')}</div>
   {:else if model.parseError}
     <div class="state state-warn">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-      <AlertTriangle size={18} /> {@html $i18nT('components.shapeBuilder.parseError')}
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      <AlertTriangle size={18} /> {@html $tHtml('components.shapeBuilder.parseError')}
     </div>
   {:else}
     {#if model.hasUnsupported}
       <div class="banner">
         <Lock size={14} />
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <span>{@html $i18nT('components.shapeBuilder.preservedBanner')}</span>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <span>{@html $tHtml('components.shapeBuilder.preservedBanner')}</span>
       </div>
     {/if}
 

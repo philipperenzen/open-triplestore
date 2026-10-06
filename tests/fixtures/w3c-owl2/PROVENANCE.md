@@ -7,8 +7,9 @@
 The file is byte-identical to the original (Last-Modified 18 Nov 2009, 2,100,744
 bytes): no line-ending, whitespace or content changes. It holds the 355 test
 cases with status `test:Approved` (all syntaxes, profiles and semantics);
-the runner selects those with `test:species test:DL` and
-`test:semantics test:DIRECT`.
+the OWL 2 DL runner selects those with `test:species test:DL` and
+`test:semantics test:DIRECT`, and `tests/w3c_owl2_rl_manifests.rs` those with
+`test:profile test:RL`.
 
 To check it:
 

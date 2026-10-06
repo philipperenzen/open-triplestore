@@ -105,9 +105,11 @@ impl KeyExtractor for SmartIpExtractor {
 /// **is** a real ambient credential. What keeps mirror mode safe is that both session
 /// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
 /// withholds them on every cross-site request — even a credentialed `fetch` to a
-/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
-/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
-/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// mirrored origin. (Two short-lived sign-in nonces are not `Strict`: `oauth_state`
+/// (`SameSite=Lax`, path `/api/auth/oauth`) and `saml_state` (`SameSite=None; Secure`
+/// over HTTPS, because the IdP returns to the ACS with a cross-site POST; path
+/// `/api/auth/saml`). Each only binds a pending sign-in to the browser that started it,
+/// is consumed once, and confers no access; there is no HTTP Basic auth.) A hostile origin therefore cannot make the browser attach a usable
 /// credential, and cannot forge the bearer header — so it gains nothing it could not
 /// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
 /// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
@@ -231,6 +233,11 @@ pub struct AppState {
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
+    /// Whether the bundled web UI is served (`--serve-frontend` /
+    /// `SERVE_FRONTEND`, as clap parsed it). The routes that share a path with
+    /// a client-side route (`/`, `/sparql`) read this rather than the
+    /// environment, so the flag and the variable cannot disagree.
+    pub serve_frontend: bool,
     /// Reverse proxies whose `X-Forwarded-For` is believed (`TRUSTED_PROXY_CIDRS`).
     /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
     /// limiter, the audit log and the LLM guard all derive the client IP alike.
@@ -304,6 +311,7 @@ impl AppState {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            serve_frontend: true,
             trusted_proxies: client_ip::TrustedProxies::default(),
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -361,7 +369,7 @@ impl AppState {
     /// the async-safe entry point.
     #[cfg(feature = "text-search")]
     pub fn sync_text_index_if_dirty(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
         let Some(ref idx) = self.text_index else {
@@ -371,20 +379,47 @@ impl AppState {
             .text_sync_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
-        // Cleared *before* the rebuild: a write landing mid-rebuild must leave
-        // the index dirty afterwards, not have its mark erased by the rebuild
+        // Both taken *before* the work: a write landing mid-sync must leave
+        // the index stale afterwards, not have its record erased by a sync
         // that could not have seen it.
-        self.text_dirty.store(false, Ordering::Relaxed);
-        match idx.reindex_from_store(&self.store) {
-            Ok(n) => tracing::debug!("Text index auto-synced: {} documents", n),
+        let touched = self.store.search_journal().take();
+        let full = self.text_dirty.swap(false, Ordering::Relaxed) || touched.all;
+        let result = if full {
+            idx.reindex_from_store(&self.store)
+        } else {
+            idx.apply_touched(&self.store, &touched)
+        };
+        match result {
+            Ok(n) => tracing::debug!(
+                "Text index auto-synced ({}): {} documents",
+                if full { "rebuild" } else { "touched graphs" },
+                n
+            ),
             Err(e) => {
                 tracing::warn!("Text index auto-sync failed: {}", e);
                 self.text_dirty.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Whether the text index may lag the store: marked dirty, or a store
+    /// write has been recorded in the store's search journal since the last
+    /// sync (see [`crate::store::search_journal`]). Every store write is
+    /// recorded there — LDP, RDF Patch, RML runs, SHACL rule output,
+    /// entailment, replication, LDES and repair included — so no writer has
+    /// to remember the index. Also switches the journal on: the first look
+    /// at the index starts the recording.
+    #[cfg(feature = "text-search")]
+    pub fn text_index_stale(&self) -> bool {
+        if self.text_index.is_none() {
+            return false;
+        }
+        let journal = self.store.search_journal();
+        journal.enable();
+        self.text_dirty.load(Ordering::Relaxed) || journal.has_pending()
     }
 
     /// Run [`AppState::sync_text_index_if_dirty`] on a detached thread.
@@ -396,7 +431,7 @@ impl AppState {
     /// after a write starts one rebuild thread, not one each.
     #[cfg(feature = "text-search")]
     pub fn spawn_text_index_sync(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) || self.text_index.is_none() {
+        if !self.text_index_stale() {
             return;
         }
         if self
@@ -543,7 +578,7 @@ impl AppState {
         let Some(ref idx) = self.text_index else {
             return sparql.to_string();
         };
-        if self.text_dirty.load(Ordering::Relaxed) {
+        if self.text_index_stale() {
             if sparql_fn::mentions_text_search(sparql) {
                 // `text:search` REQUIRES the index — its expansion IS the result
                 // set — so this query waits for the sync.
@@ -1207,8 +1242,52 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         )
         .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
         .route(
+            "/api/datasets/:dataset_id/properties",
+            get(crate::property_states::list_properties),
+        )
+        .route(
             "/api/datasets/:dataset_id/properties/state",
             post(crate::property_states::set_state),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/delete",
+            post(crate::property_states::delete_property),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/restore",
+            post(crate::property_states::restore_property),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/export",
+            get(crate::property_states::export_states),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/import",
+            post(crate::property_states::import_states),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/validate",
+            get(crate::property_states::validate_states),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/calculations",
+            get(crate::property_states::list_calculations)
+                .post(crate::property_states::create_calculation),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/calculations/:calc",
+            get(crate::property_states::get_calculation)
+                .post(crate::property_states::post_calculation)
+                .put(crate::property_states::put_calculation)
+                .delete(crate::property_states::delete_calculation),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/calculations/:calc/outdated",
+            get(crate::property_states::outdated_calculation),
+        )
+        .route(
+            "/api/properties/profile",
+            get(crate::property_states::profile_shapes),
         )
         .route(
             "/api/datasets/:dataset_id/properties/history",
@@ -1253,10 +1332,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/entailment",
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
-        )
-        .route(
-            "/api/datasets/:dataset_id/containers/import",
-            post(crate::containers::import_container),
         )
         .route(
             "/api/datasets/:dataset_id/containers/export",
@@ -1621,6 +1696,27 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // Linked-document containers: import into a dataset, and validate without
+    // storing anything. Archives carry documents, so the body limit is the
+    // RDF-upload one (OTS_MAX_UPLOAD_MB), not the 8 MB default; the unpacker
+    // caps entries and the unpacked total on its own.
+    let container_routes = Router::new()
+        .route(
+            "/api/datasets/:dataset_id/containers/import",
+            post(crate::containers::import_container),
+        )
+        .route(
+            "/api/containers/validate",
+            post(crate::containers::validate_container),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(512)))
+        .with_state(state.clone());
+
     // Triple browsing API (optional auth)
     let browse_routes = Router::new()
         .route("/api/browse/graphs", get(routes::browse_graphs))
@@ -1905,6 +2001,30 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .put(oauth_handlers::admin_update_provider)
                 .delete(oauth_handlers::admin_delete_provider),
         )
+        .route(
+            "/api/admin/oauth/saml-metadata",
+            post(oauth_handlers::admin_read_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml",
+            get(oauth_handlers::admin_saml_overview),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/metadata",
+            get(oauth_handlers::admin_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys",
+            post(oauth_handlers::admin_create_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys/:kid/activate",
+            post(oauth_handlers::admin_activate_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys/:kid",
+            delete(oauth_handlers::admin_delete_saml_key),
+        )
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1936,6 +2056,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::saml_metadata),
         )
         .route("/api/auth/saml/:slug/acs", post(oauth_handlers::saml_acs))
+        .route(
+            "/api/auth/saml/:slug/slo",
+            get(oauth_handlers::saml_slo_redirect).post(oauth_handlers::saml_slo_post),
+        )
         // Inject the OAuth session store as a layer extension
         .layer(axum::Extension(state.oauth_sessions.clone()))
         // Brute-force / DoS limiter on the unauthenticated SSO surface: `authorize`
@@ -2007,6 +2131,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
+        .merge(container_routes)
         .merge(source_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
@@ -2357,6 +2482,10 @@ pub async fn run(
     jwt_config: Arc<JwtConfig>,
     object_store: Arc<ObjectStore>,
     base_url: &str,
+    // Whether `base_url` was configured (`--base-url` / `BASE_URL`) rather than
+    // the built-in default. Federated identity assertions are audience-checked
+    // against it only then, and refused otherwise.
+    base_url_configured: bool,
     addr: &str,
     cors_origins: &str,
     trusted_cidrs: Vec<IpNet>,
@@ -2385,6 +2514,10 @@ pub async fn run(
     // scheduled backup opened a file that does not exist and failed — after
     // writing the RDF dump, leaving no manifest and only a warn! line.
     db_path: std::path::PathBuf,
+    // Where backups go (`BACKUP_DIR`, else `<data-dir>/backups`), resolved once
+    // by main.rs with [`default_backup_dir`] so restore, store recovery and the
+    // scheduled backups cannot disagree.
+    backup_dir: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
     #[cfg(feature = "vocab-search")] vocab_engine: Option<
         Arc<crate::vocab_search::index::VocabSearchEngine>,
@@ -2396,7 +2529,7 @@ pub async fn run(
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
-        let dir = default_backup_dir(&data_dir);
+        let dir = backup_dir;
         let sqlite = db_path.clone();
         let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
             .ok()
@@ -2434,7 +2567,7 @@ pub async fn run(
             );
         }
         match crate::backup::BackupManager::new(
-            std::path::PathBuf::from(&dir),
+            dir,
             sqlite,
             store.clone(),
             audit.clone(),
@@ -2451,7 +2584,9 @@ pub async fn run(
     };
 
     // OIDC resource-server config from the environment (disabled unless OIDC_ISSUER set).
-    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env());
+    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env_with_base_url(
+        base_url_configured.then_some(base_url),
+    ));
     if let Some(verifier) = auth_ext.oidc.as_ref() {
         match crate::auth::oidc_rs::ensure_env_provider(
             &auth_db,
@@ -2481,7 +2616,9 @@ pub async fn run(
     }
 
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
-    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
+    // A client secret goes through the secrets module: a raw one is refused
+    // under OTS_ENV=production, like JWT_SECRET, and stops the start.
+    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret)?;
 
     let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
     match dl_config.backend {
@@ -2521,6 +2658,7 @@ pub async fn run(
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,
+        serve_frontend,
         trusted_proxies: client_ip::TrustedProxies::new(trusted_cidrs.clone()),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -2590,6 +2728,8 @@ pub async fn run(
             loop {
                 tokio::time::sleep(interval).await;
                 crate::auth::oauth::prune_sessions(&sessions);
+                // In-flight SAML requests and the assertion replay cache.
+                crate::auth::saml::prune_state();
             }
         });
     }
@@ -2916,25 +3056,39 @@ mod panic_safety_net_tests {
 /// — in the Docker image that is `/app`, root-owned and read-only for the
 /// service user, so unattended backups were silently disabled on every
 /// default deployment ("backup: disabled — init failed: create backup dir").
-pub(crate) fn default_backup_dir(data_dir: &std::path::Path) -> String {
+///
+/// The one place `BACKUP_DIR` is read (main.rs passes the result on): an
+/// empty or blank value counts as unset everywhere.
+pub fn default_backup_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
     std::env::var("BACKUP_DIR")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| data_dir.join("backups").to_string_lossy().into_owned())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("backups"))
 }
 
 #[cfg(test)]
 mod backup_dir_tests {
     #[test]
     fn backup_dir_defaults_under_the_data_dir() {
+        use std::path::{Path, PathBuf};
         std::env::remove_var("BACKUP_DIR");
-        let d = super::default_backup_dir(std::path::Path::new("/data"));
-        assert_eq!(d, "/data/backups");
+        let d = super::default_backup_dir(Path::new("/data"));
+        assert_eq!(d, PathBuf::from("/data/backups"));
         std::env::set_var("BACKUP_DIR", "/mnt/backups");
         assert_eq!(
-            super::default_backup_dir(std::path::Path::new("/data")),
-            "/mnt/backups"
+            super::default_backup_dir(Path::new("/data")),
+            PathBuf::from("/mnt/backups")
         );
+        // Empty and blank mean unset, for every reader (they used to be the
+        // working directory for restore and store recovery).
+        for blank in ["", "  "] {
+            std::env::set_var("BACKUP_DIR", blank);
+            assert_eq!(
+                super::default_backup_dir(Path::new("/data")),
+                PathBuf::from("/data/backups")
+            );
+        }
         std::env::remove_var("BACKUP_DIR");
     }
 }
@@ -3021,6 +3175,9 @@ pub fn run_boot_seed(
     // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
+    }
+    if let Err(e) = crate::shacl_studio::seed::seed_skos_integrity(store, auth) {
+        tracing::warn!("shacl_studio: SKOS integrity seed failed: {e}");
     }
     // Registrations of model-registry graphs made before the dataset graph
     // gate refused them go first, so the Library adoptions below no longer

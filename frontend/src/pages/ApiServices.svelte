@@ -1,4 +1,6 @@
 <script>
+  import { withBase, stripBase, absoluteUrl } from '../lib/basePath';
+  import { askConfirm } from '../lib/confirm';
   import { onMount } from 'svelte';
   import {
     listSavedQueries, getSavedQuery, createSavedQuery, updateSavedQuery, deleteSavedQuery,
@@ -321,7 +323,7 @@
     let sparql = q.sparql;
     if (!sparql) { try { sparql = (await getSavedQuery(qScope(q), qOwner(q), q.slug)).sparql; } catch {} }
     try { sessionStorage.setItem('ots_sparql_load', sparql ?? ''); } catch {}
-    const ret = `${window.location.pathname}?open=${encodeURIComponent(q.id)}`;
+    const ret = `${stripBase(window.location.pathname)}?open=${encodeURIComponent(q.id)}`;
     const ep = q.scope === 'dataset' ? `/datasets/${q.owner_id}/sparql` : editorPath;
     const sep = ep.includes('?') ? '&' : '?';
     navigate(`${ep}${sep}return=${encodeURIComponent(ret)}&from=${encodeURIComponent(q.name)}`);
@@ -353,7 +355,13 @@
     c.revRev = c.revRev === r.revision ? null : r.revision; cards = cards;
   }
   async function restoreRevision(q, r) {
-    if (!confirm($i18nT('pages.apiServices.restoreConfirm', { values: { revision: r.revision } }))) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.apiServices.restoreConfirm', { values: { revision: r.revision } }),
+      confirmLabel: $i18nT('system.restore'),
+      variant: 'warning',
+    });
+    if (!ok) return;
     try {
       await updateSavedQuery(qScope(q), qOwner(q), q.slug, {
         sparql: formatSparql(r.sparql),
@@ -371,7 +379,12 @@
   }
 
   async function remove(q) {
-    if (!confirm($i18nT('pages.apiServices.deleteConfirm', { values: { name: q.name } }))) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.apiServices.deleteConfirm', { values: { name: q.name } }),
+      confirmLabel: $i18nT('system.delete'),
+    });
+    if (!ok) return;
     try {
       await deleteSavedQuery(qScope(q), qOwner(q), q.slug);
       toastSuccess($i18nT('pages.apiServices.deleted'));
@@ -835,7 +848,7 @@
 
   {#if !canWrite}
     <p class="signin-note">
-      {$i18nT('pages.apiServices.signinBrowse')} <a href="/login">{$i18nT('pages.apiServices.signinLink')}</a> {$i18nT('pages.apiServices.signinRights')}
+      {$i18nT('pages.apiServices.signinBrowse')} <a href={withBase('/login')}>{$i18nT('pages.apiServices.signinLink')}</a> {$i18nT('pages.apiServices.signinRights')}
     </p>
   {/if}
 
@@ -895,7 +908,7 @@
                       <div class="endpoint">
                         <span class="method-chip">GET</span>
                         <code class="endpoint-path">{runPath(q)}</code>
-                        <button class="icon-btn" title={$i18nT('pages.apiServices.copyEndpointUrl')} on:click={() => copyText(window.location.origin + runPath(q))}><Copy size={13} /></button>
+                        <button class="icon-btn" title={$i18nT('pages.apiServices.copyEndpointUrl')} on:click={() => copyText(absoluteUrl(runPath(q)))}><Copy size={13} /></button>
                       </div>
                       {#if paramSpecsFor(q).length}
                         <div class="run-params">

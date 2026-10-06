@@ -844,10 +844,10 @@ mod consistency {
         let (st, body) = materialize(&state, &token, "owl2-rl").await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["consistent"], json!(true), "{body}");
-        // RDFS has no inconsistency rules: it cannot claim consistency.
+        // RDFS checks datatype clashes, so a clean run is consistent too.
         let (st, body) = materialize(&state, &token, "rdfs").await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert!(body["consistent"].is_null(), "{body}");
+        assert_eq!(body["consistent"], json!(true), "{body}");
     }
 
     /// `eq_ref` in the body turns eq-ref on for that run; it is off without it.

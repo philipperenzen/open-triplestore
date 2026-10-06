@@ -306,7 +306,7 @@ See [rml.md](rml.md) for the full RML guide.
 
 | Variable | Default | Description |
 |---|---|---|
-| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#secret-references)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
+| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#credentials-are-references-never-values)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
 | `AUTH_DB_PATH` | `<data-dir>/auth.db` | Path to the SQLite identity database |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRY_DAYS` | `30` | Refresh token lifetime |
@@ -331,16 +331,22 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_REASONER_TIMEOUT_SECS` | `300` | Time limit of one DL backend call; past it the answer is unknown (504). |
 | `OTS_REASONER_MAX_TRIPLES` | `1000000` | Most triples handed to an external DL backend; more is a 413. |
 | `OTS_DL_DEBOUNCE_MS` | `2000` | Quiet period after the last write before an `owl2-dl` dataset's background run starts. |
-| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
+| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). Any other value stops the server at startup. |
 | `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
 | `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
+| `CATALOG_PUBLISHER_TYPE` | unset | The publisher's ADMS publisher type: a code (`LocalAuthority`, `NationalAuthority`, `Company`, …) or an IRI. An unknown code stops the server at startup. |
+| `CATALOG_CONTACT_NAME` / `CATALOG_CONTACT_EMAIL` | unset | Contact point of the catalogue and its data services, and the fallback for datasets without one under a profile (DCAT-AP-NL requires a contact point on each). |
 | `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `OTS_VOID_PARTITION_LIMIT` | `100` | Class and property partitions listed per dataset in the catalogue's VoID (most frequent first). |
+| `OTS_VOID_PARTITION_MAX_TRIPLES` | `5000000` | Datasets larger than this get VoID counts but no partitions (those take a grouping scan). |
 | `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
 | `OTS_SPARQL_FUNCTION_GRAPHS` | unset | Comma-separated graphs whose `sh:SPARQLFunction`s every query sees, `/sparql` included. Only `urn:system:functions` and graphs under `urn:system:functions:` are accepted (no dataset can hold them, so only an admin can write them); any other entry is ignored with a warning. A function at a reserved IRI (`xsd:` casts, GeoSPARQL and the other built-ins) is skipped with a warning. Without it, a function is callable only in runs of the shapes graph that declares it (see [shacl.md](shacl.md#sparql-functions-shsparqlfunction-shacl-af-5)). |
-| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store), 1024 (bulk import) | Request-body limit for RDF uploads; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
-| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
+| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store, container import/validate), 1024 (bulk import) | Request-body limit for RDF uploads and container archives; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`), LDES client sync and remote JSON-LD contexts ([formats.md](formats.md#json-ld-remote-contexts); the bundled W3C contexts need no entry). Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
+| `OTS_ICDD_ONTOLOGY_DIR` | *(unset)* | Directory holding ISO's `Container.rdf` and `Linkset.rdf` (download them from <https://standards.iso.org/iso/21597/-1/ed-1/en/>; this project does not ship them). ICDD exports embed both unchanged in `Ontology resources/`; without them an export carries the `ontology-resource-missing` warning and is not ISO 21597-1 Part 1-conformant. See [containers.md](containers.md). |
+| `OTS_JSONLD_CONTEXT_MAX_BYTES` | `1048576` | Largest remote JSON-LD context the document loader reads; a bigger one fails the parse. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
 | `OTS_REMOTE_MAX_BYTES` | `67108864` (64 MiB) | Response-body limit per outbound request: `SERVICE` results, virtual-datasource queries and snapshots, LDES pages. The body is read as a stream and the request fails as soon as it passes the limit; a `SERVICE` call then fails as described under `OTS_SERVICE_MAX_ROWS`. |
 | `OTS_LDES_RETRIES` | `4` | LDES sync: how many times a page fetch is retried after `408`, `425`, `429`, `500`, `502`, `503` or `504`, with exponential back-off and jitter or the wait `Retry-After` asks for. `0` turns retrying off. |
@@ -353,9 +359,11 @@ See [rml.md](rml.md) for the full RML guide.
 | `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL, import and map/3D viewer quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `OTS_TILES3D_MAX_FEATURES` | `10000` | Most features one 3D Tiles GLB carries. The tileset is a single tile until tiling exists; past the cap it serves the first features in IRI order and flags the cut (`asset.extras.truncated`, `X-Tiles3d-Truncated`). See [geo-3d-platform.md](geo-3d-platform.md#4-3d-tiles--the-binding-contract). |
-| `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
+| `RUST_LOG` | *(unset: the `--log-level` flag, `info`)* | Log filter in `tracing` `EnvFilter` syntax: a level (`debug`), or per-module directives such as `info,open_triplestore::shacl=debug`. Overrides `--log-level` when set; Docker Compose sets `info`. |
+| `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash). Behind a reverse proxy that serves the instance under a path, include the path (`https://example.org/ots`); see [Serving under a path prefix](operations.md#serving-under-a-path-prefix). |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
 | `WRITE_TIMEOUT_SECS` | `120` | Execution timeout for Graph Store `PUT`/`POST`/`DELETE`, data-model `PATCH`/`DELETE` and dataset `DELETE`. An elapsed write answers `503`, but the write itself is not cancelled and may still complete, so re-read before retrying. SPARQL Update runs under `SPARQL_QUERY_TIMEOUT_SECS`; bulk import (`/api/import/bulk`) has no timeout. Also the `--write-timeout-secs` CLI flag. |
+| `OTS_GEOSPARQL_QUERY_REWRITE` | `on` | The GeoSPARQL Query Rewrite Extension: a triple pattern with a topological relation predicate (`geo:sfWithin`, `geo:ehMeet`, `geo:rcc8ntpp`, …) also matches where the geometries imply the relation, in queries and in update `WHERE` clauses. `off`, `0`, `false` or `no` turns it off, so those patterns match asserted triples only (see [geosparql.md](geosparql.md#query-rewrite)). |
 | `OTS_CHANGE_CAPTURE` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`): one row per graph per write with the net delta, exact counts or an honest `unknown`, a sequence number in commit order, and a cursor per consumer. It is what a replication follower tails and what the dataset history and audits read — **turn it on when something reads it**. It is off by default because it is not free and the cost is uneven: a ground `INSERT DATA`/`DELETE DATA` pays 4–13 %, but an `INSERT … WHERE` pays **×2.5** and a `DELETE … WHERE` **×3–4**. A `WHERE` update names its target by pattern, so the only way to know what it changed is to read the target graph before the update, read it again through the transaction, and subtract — a cost proportional to the *graph*, not to the size of the change, so a small `DELETE WHERE` against a large graph is the worst case. A replication leader or cluster member records regardless (its followers tail this log); a follower does not unless set to `on`, since its own log would be partial. Measured table and row format: [versioning.md](versioning.md#what-it-costs). |
 | `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. Lower it to bound what capture can cost a single write, at the price of less precise rows. |
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
@@ -402,7 +410,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
-| `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature) |
+| `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature); without `ALERT_SMTP_HOST` the SMTP channel uses the `SMTP_*` relay — see [Alerting](#alerting) |
 
 ### Recommended production `.env`
 
@@ -423,11 +431,20 @@ MAIL_SENDER_DOMAINS=example.com
 MAIL_HOSTNAME=mail.example.com
 ```
 
-Pass to Docker Compose:
+Put it next to `docker-compose.yml` as `.env` and start the stack:
 
 ```bash
-docker compose --env-file .env up -d
+docker compose up -d
 ```
+
+Compose reads `.env` twice: to fill the `${…}` values in `docker-compose.yml`,
+and through the service's `env_file`, which hands **every** variable in it to the
+server — including settings the compose file does not list by name, such as
+`SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` or `OTS_REMOTE_ALLOWLIST`. A few entries are
+wired by compose itself and ignore `.env`: `AUTH_DB_PATH` and `BACKUP_DIR` (the `/data`
+volume) and the `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` link to the bundled
+MinIO. `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
+`scripts/check_compose_env.py` to keep the compose file and these docs in step.
 
 ---
 
@@ -540,7 +557,19 @@ Two backends, both opt-in via env vars, both no-ops when unset:
 | Channel | Env vars | Build flag |
 |---|---|---|
 | HTTP webhook | `ALERT_WEBHOOK_URL` | always available |
-| SMTP email | `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`, `ALERT_SMTP_FROM`, `ALERT_SMTP_TO` (comma-separated) | `--features alerting` |
+| SMTP email | `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`, `ALERT_SMTP_TLS`, `ALERT_SMTP_FROM`, `ALERT_SMTP_TO` (comma-separated) | `--features alerting` |
+
+`ALERT_SMTP_TLS` is `none`, `starttls` or `implicit`, as for `SMTP_TLS`; unset,
+alerting uses implicit TLS (SMTPS), as it always has. When `ALERT_SMTP_HOST` is
+unset, alerting uses the account-email relay instead, as a whole: `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_TLS` (resolved as for
+account email, so port 465 means implicit TLS and anything else STARTTLS). It
+never mixes the two, so the account relay's credentials are not sent to a
+separate alert host. The sender is `ALERT_SMTP_FROM`, else `SMTP_FROM`.
+Recipients come only from `ALERT_SMTP_TO`, so the fallback sends no ops alert
+until that is set. Saved-query breakage notices, which go to the affected
+dataset's owners rather than `ALERT_SMTP_TO`, use the same relay, so on a
+deployment with only `SMTP_*` configured they are now delivered.
 
 Every successful dispatch is recorded in the audit log as `alert_sent`.
 

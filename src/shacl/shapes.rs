@@ -284,6 +284,8 @@ pub enum Constraint {
         select: String,
         message: Option<String>,
         severity: Option<String>,
+        /// The `sh:resultAnnotation`s of the `sh:sparql` node (SHACL-AF §4).
+        annotations: Vec<ResultAnnotation>,
     },
 
     // SHACL-AF §6: an instance of a constraint component declared in the shapes
@@ -293,11 +295,27 @@ pub enum Constraint {
 
     // SHACL-AF §7: sh:expression — a node expression that must produce exactly
     // `{ true }` with each value node as its focus node. `message` is the
-    // expression node's sh:message.
+    // expression node's sh:message; `node` the expression node itself, every
+    // result's `sh:sourceConstraint`.
     Expression {
+        node: Term,
         expr: super::node_expr::NodeExpr,
         message: Option<String>,
     },
+}
+
+/// A result annotation (SHACL-AF §4), declared with `sh:resultAnnotation` on
+/// the node that carries a SPARQL constraint's or validator's `sh:select` /
+/// `sh:ask`: each result that query produces gets `property` set to the
+/// solution's binding of `var_name`, or to `defaults` when it has none.
+#[derive(Debug, Clone)]
+pub struct ResultAnnotation {
+    /// `sh:annotationProperty`.
+    pub property: oxigraph::model::NamedNode,
+    /// `sh:annotationVarName`, else the local name of `property`.
+    pub var_name: String,
+    /// `sh:annotationValue`.
+    pub defaults: Vec<Term>,
 }
 
 /// A validator of a SHACL-AF constraint component: an ASK evaluated once per
@@ -318,6 +336,8 @@ pub struct CustomConstraint {
     pub params: Vec<(String, Term)>,
     pub validator: CustomValidator,
     pub message: Option<String>,
+    /// The validator's `sh:resultAnnotation`s (SHACL-AF §4).
+    pub annotations: Vec<ResultAnnotation>,
 }
 
 /// sh:nodeKind values.

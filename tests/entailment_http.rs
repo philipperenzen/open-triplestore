@@ -538,3 +538,423 @@ async fn dl_dataset_reruns_in_the_background_after_a_write() {
     }
     assert!(caught_up, "the background owl2-dl run did not finish");
 }
+
+/// The `skos` regime: OWL 2 RL over the dataset with the bundled SKOS schema
+/// as a premise, so the SKOS data model's inverses, symmetric and transitive
+/// properties and label sub-properties are materialised — and the schema's
+/// own closure is not.
+#[cfg(feature = "owl2-rl")]
+#[tokio::test]
+async fn skos_regime_materialises_the_skos_data_model() {
+    const THES: &str = "https://example.org/thes/concepts";
+    const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "thes",
+            "Thesaurus",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("thes", THES).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("thes", THES, Some(GraphKind::Instances))
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!(
+                "@prefix skos: <{SKOS}> . @prefix ex: <{EX}> .\n\
+                 ex:poodle skos:broader ex:dog . ex:dog skos:broader ex:mammal .\n\
+                 ex:cat skos:related ex:mouse .\n\
+                 ex:dog skos:prefLabel \"dog\"@en ."
+            ),
+            RdfFormat::Turtle,
+            Some(THES),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/thes/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "skos", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let graph = "urn:entailment:skos:thes";
+    assert_eq!(v["graph"], graph);
+
+    let ask = |pattern: &str| {
+        matches!(
+            state.store.query(&format!(
+                "PREFIX skos: <{SKOS}> PREFIX ex: <{EX}> \
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+                 ASK {{ GRAPH <{graph}> {{ {pattern} }} }}"
+            )),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(ask("ex:dog skos:narrower ex:poodle"), "owl:inverseOf");
+    assert!(
+        ask("ex:poodle skos:broaderTransitive ex:mammal"),
+        "sub-property of a transitive property"
+    );
+    assert!(
+        ask("ex:mammal skos:narrowerTransitive ex:poodle"),
+        "inverse of the transitive closure"
+    );
+    assert!(ask("ex:mouse skos:related ex:cat"), "owl:SymmetricProperty");
+    assert!(
+        ask("ex:dog rdfs:label \"dog\"@en"),
+        "skos:prefLabel is a sub-property of rdfs:label"
+    );
+    assert!(
+        !ask(&format!(
+            "?s ?p ?o FILTER(isIRI(?s) && STRSTARTS(STR(?s), \"{SKOS}\"))"
+        )),
+        "the SKOS schema's own closure is pruned from the dataset's graph"
+    );
+
+    // Queries opt in as for every other regime.
+    let q = format!("SELECT ?n WHERE {{ <{EX}mammal> <{SKOS}narrowerTransitive> ?n }}");
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/sparql?query={}&entailment_dataset=thes", url_encode(&q)),
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(rows(&v), 2, "dog and poodle: {txt}");
+
+    // A write re-materialises.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(THES)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}puppy> <{SKOS}broader> <{EX}poodle> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert!(ask("ex:puppy skos:broaderTransitive ex:mammal"));
+}
+
+// ─── SWRL rules stored with a dataset ──────────────────────────────────────
+
+#[cfg(feature = "swrl")]
+const RULES: &str = "https://example.org/ent/rules";
+#[cfg(feature = "swrl")]
+const SWRL_TTL_PREFIXES: &str = "@prefix ex: <https://example.org/ent/> . \
+     @prefix swrl: <http://www.w3.org/2003/11/swrl#> . ";
+
+/// A dataset `rul` with an instances graph and an `entailment`-role graph.
+#[cfg(feature = "swrl")]
+fn rules_dataset(state: &open_triplestore::server::AppState, id: &str) {
+    state
+        .auth_db
+        .create_dataset(
+            id,
+            "Rules",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    for (g, role) in [
+        (DATA, GraphKind::Instances),
+        (MODEL, GraphKind::Model),
+        (RULES, GraphKind::Entailment),
+    ] {
+        state.auth_db.add_dataset_graph(id, g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role(id, g, Some(role))
+            .unwrap();
+    }
+}
+
+/// `ex:Asset(?x) -> ex:Inspected(?x)`, in the SWRL RDF syntax.
+#[cfg(feature = "swrl")]
+fn inspected_rule() -> String {
+    format!(
+        "{SWRL_TTL_PREFIXES} ex:x a swrl:Variable . \
+         ex:inspect a swrl:Imp ; \
+           swrl:body ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Asset ; swrl:argument1 ex:x ] ) ; \
+           swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Inspected ; swrl:argument1 ex:x ] ) ."
+    )
+}
+
+#[cfg(feature = "swrl")]
+async fn assets_inspected(app: &Router, token: &str, ds: &str) -> usize {
+    let q = format!("SELECT ?b WHERE {{ ?b a <{EX}Inspected> }}");
+    let (st, v, txt) = req(
+        app,
+        Method::GET,
+        &format!("/sparql?query={}&entailment_dataset={ds}", url_encode(&q)),
+        Some(token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    rows(&v)
+}
+
+/// Stored rules always run (owner decision D13): a dataset with no regime
+/// configured still re-runs its `swrl:Imp` rules after every write, into its
+/// rules graph, rebuilt so a deleted premise drops its conclusion.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn dataset_rules_rerun_after_write() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "rul");
+    state
+        .store
+        .load_str(&inspected_rule(), RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    // A write to the instances graph runs the stored rule.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b1> a <{EX}Asset> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(assets_inspected(&app, &token, "rul").await, 1);
+
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/rul/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["inference_graph"], "urn:entailment:swrl:rul", "{txt}");
+    assert_eq!(v["rules"]["count"], 1, "{txt}");
+    assert_eq!(v["rules"]["last_run"]["converged"], true, "{txt}");
+
+    // Replacing the data rebuilds the conclusions.
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b2> a <{EX}Asset> . <{EX}b3> a <{EX}Asset> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(assets_inspected(&app, &token, "rul").await, 2);
+
+    // A rule the strict reader refuses is reported, not silently skipped.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(RULES)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!(
+            "{SWRL_TTL_PREFIXES} ex:broken a swrl:Imp ; \
+               swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:T ] ) ."
+        ),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/rul/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert!(
+        v["rules"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("swrl:argument1")),
+        "{txt}"
+    );
+}
+
+/// Rules and the regime reach one joint fixed point: OWL 2 RL makes `b1` an
+/// Asset (Bridge ⊑ Asset), the stored rule makes every Asset Inspected, and
+/// RL again makes it Tracked (Inspected ⊑ Tracked). Neither alone gets there.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn swrl_and_rl_reach_joint_fixpoint() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "joint");
+    let sub = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    state
+        .store
+        .load_str(
+            &format!("<{EX}Bridge> <{sub}> <{EX}Asset> . <{EX}Inspected> <{sub}> <{EX}Tracked> ."),
+            RdfFormat::Turtle,
+            Some(MODEL),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}b1> a <{EX}Bridge> ."),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(&inspected_rule(), RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/joint/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["rules"]["converged"], true, "{txt}");
+    assert!(v["rules"]["rounds"].as_u64().unwrap() >= 2, "{txt}");
+    let graph = "urn:entailment:owl2-rl:joint";
+    assert_eq!(v["inference_graph"], graph, "{txt}");
+
+    let q = format!("ASK {{ GRAPH <{graph}> {{ <{EX}b1> a <{EX}Tracked> }} }}");
+    assert!(
+        matches!(
+            state.store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        ),
+        "regime -> rule -> regime: b1 must end up Tracked: {txt}"
+    );
+    // Queries opting in see the joint closure.
+    assert_eq!(assets_inspected(&app, &token, "joint").await, 1);
+}
+
+/// Stored rules use built-ins and class expressions like any other rule:
+/// `swrlb:add` binds a value, and a class-expression body atom
+/// (`ObjectSomeValuesFrom(ex:inspectedBy ex:Engineer)`) becomes an auxiliary
+/// class the dataset's OWL 2 RL regime materialises, to one joint fixed point.
+/// Without a regime the class-expression rule is reported, not skipped.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn dataset_rules_with_builtins_and_class_expressions() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "blt");
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}b1> <{EX}age> 40 ; <{EX}inspectedBy> <{EX}eve> . \
+                 <{EX}eve> a <{EX}Engineer> . <{EX}b2> <{EX}age> 3 ."
+            ),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let rules = format!(
+        "{SWRL_TTL_PREFIXES} @prefix swrlb: <http://www.w3.org/2003/11/swrlb#> . \
+         @prefix owl: <http://www.w3.org/2002/07/owl#> . \
+         ex:x a swrl:Variable . ex:a a swrl:Variable . ex:n a swrl:Variable . \
+         ex:next a swrl:Imp ; \
+           swrl:body ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ; \
+                         swrl:argument1 ex:x ; swrl:argument2 ex:a ] \
+                       [ a swrl:BuiltinAtom ; swrl:builtin swrlb:add ; \
+                         swrl:arguments ( ex:n ex:a 1 ) ] ) ; \
+           swrl:head ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:nextAge ; \
+                         swrl:argument1 ex:x ; swrl:argument2 ex:n ] ) . \
+         ex:checked a swrl:Imp ; \
+           swrl:body ( [ a swrl:ClassAtom ; swrl:argument1 ex:x ; \
+                         swrl:classPredicate [ a owl:Restriction ; owl:onProperty ex:inspectedBy ; \
+                                               owl:someValuesFrom ex:Engineer ] ] ) ; \
+           swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Inspected ; swrl:argument1 ex:x ] ) ."
+    );
+    state
+        .store
+        .load_str(&rules, RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/blt/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["rules"]["converged"], true, "{txt}");
+    let graph = "urn:entailment:owl2-rl:blt";
+    let holds = |q: String| {
+        matches!(
+            state.store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(
+        holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b1> <{EX}nextAge> ?n FILTER(?n = 41) }} }}"
+        )),
+        "swrlb:add binds ?n: {txt}"
+    );
+    assert!(
+        holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b1> a <{EX}Inspected> }} }}"
+        )),
+        "b1 is inspected by an Engineer, which RL derives through the auxiliary class: {txt}"
+    );
+    assert!(
+        !holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b2> a <{EX}Inspected> }} }}"
+        )),
+        "{txt}"
+    );
+
+    // With the regime off, the class-expression rule cannot run: reported.
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/blt/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "off" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        v["rules"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("regime")),
+        "{txt}"
+    );
+}

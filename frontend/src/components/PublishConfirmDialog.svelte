@@ -1,7 +1,7 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { Loader2, CheckCircle, X } from 'lucide-svelte';
 
   export let registryId;
@@ -37,8 +37,8 @@
     </div>
 
     <p class="text-sm text-[var(--ink-500)] mb-4">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- DOMPurify-sanitized -->
-      {@html sanitizeHtml($t('components.publishConfirmDialog.description', { values: { version, registryId } }))}
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      {@html $tHtml('components.publishConfirmDialog.description', { values: { version, registryId } })}
     </p>
 
     {#if error}

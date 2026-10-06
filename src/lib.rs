@@ -49,6 +49,7 @@ pub mod feedback;
 pub mod geo;
 pub mod ifc;
 pub mod imports;
+pub mod jsonld;
 pub mod kind_detector;
 pub mod ldes;
 #[cfg(feature = "ldp")]

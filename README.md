@@ -5,7 +5,7 @@
 <h1 align="center">Open Triplestore</h1>
 
 <p align="center">
-  A fast, <strong>source-available</strong> RDF triplestore — SPARQL&nbsp;1.1&nbsp;&amp;&nbsp;1.2 (RDF-star), GeoSPARQL, OWL&nbsp;2, SHACL, LDP, DCAT&nbsp;&amp;&nbsp;full-text search, with a polished web UI.<br>
+  A fast, <strong>source-available</strong> RDF triplestore — SPARQL&nbsp;1.1&nbsp;&amp;&nbsp;1.2 (RDF&nbsp;1.2), GeoSPARQL, OWL&nbsp;2, SHACL, LDP, DCAT&nbsp;&amp;&nbsp;full-text search, with a polished web UI.<br>
   Built in Rust on <a href="https://github.com/oxigraph/oxigraph">Oxigraph</a> with an <a href="https://github.com/tokio-rs/axum">Axum</a> HTTP layer.
 </p>
 
@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively; OWL 2 DL through the bundled OWL API + HermiT reasoner sidecar, or Konclude, or the incomplete native RL + DL-syntax rules) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), **SHACL Core**, **ShEx 2.1** and **OWL 2** reasoning (RL, EL and QL natively; DL with the bundled OWL API + HermiT reasoner sidecar) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -69,22 +69,22 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
-| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML (documented profile), GeoJSON and KML literals (`asWKT`, `asGML`, `asGeoJSON`, `asKML`), CRS transform for the built-in CRS set, the RDFS Entailment and Query Rewrite extensions. every GeoSPARQL 1.1 query function and all six spatial aggregates. GeoSPARQL 1.0 graded Full; 1.1 Full for every conformance class but the optional DGGS class ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 EL** | Native EL++ saturation engine for the whole profile: classification, realization and the property closure, with nominals, `hasSelf`, keys, equality and the EL datatypes; axioms outside the profile are reported ([docs](docs/owl2-el.md)) |
 | **OWL 2 DL** | Backend chosen with `OTS_DL_BACKEND`: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`, checked in CI against the W3C OWL 2 DL test cases), `konclude`, or `native` RL + DL-syntax rules, sound but incomplete; OWL 2 DL profile check; `POST /api/reasoning/check` for consistency, entailment, satisfiability; background runs ([docs](docs/owl2-dl.md)) |
 | **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
 | **Linked-document containers** | Import and export packaged containers of documents, RDF payloads and link graphs — ISO 21597-1 ICDD as the first profile ([docs](docs/containers.md)) |
-| **Time-evolving properties** | OPM-style property states with validity, reliability and attribution; current value stays a plain triple, history and as-of queries read the chain ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
-| **Spec → SHACL importers** | Generic constraint-specification importer interface; buildingSMART IDS 1.0 → SHACL Core shapes in SHACL Studio ([docs](docs/shacl.md#importing-constraint-specifications-ids)) |
+| **Time-evolving properties** | OPM property states with validity, reliability (incl. required), documentation, attribution and `opm:Deleted` deletion with restore; `opm:Calculation` with derived states on POST/PUT; current value stays a plain triple; history, as-of, per-item/per-property listings and snapshots; canonical OPM export/import and the OPM profile shapes ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
+| **Spec → SHACL importers** | Generic constraint-specification importer interface; buildingSMART IDS 1.0 → SHACL shapes in SHACL Studio over the IFC lift's IDS projection, with IDS XSD and audit checks and lossless export back to IDS ([docs](docs/shacl.md#importing-constraint-specifications-ids)) |
 | **LDES** | Publish any dataset as a Linked Data Event Stream (TREE-fragmented version objects, tombstones) and sync a remote stream into a dataset incrementally ([docs](docs/ldes.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header; per-resource access control with Web Access Control (`.acl`) ([docs](docs/ldp.md)) |
 | **RBAC auth** | `super_admin` › `admin` › `user` role hierarchy; JWT access + refresh tokens; long-lived API keys |
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
 | **SHACL validation** | Validate data on read or write; SHACL-AF rule inference; shapes stored per dataset |
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
-| **SHACL Compact Syntax** | Parse and serialize shapes in a subset of [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc`; the export drops what it cannot write ([docs](docs/shacl.md#what-the-serializer-leaves-out)) |
-| **DCAT catalog** | W3C DCAT 3 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance; optional DCAT-AP 3 / DCAT-AP-NL 3 profiles ([grades & gaps](docs/standards.md)) |
-| **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
+| **SHACL Compact Syntax** | Parse and serialize shapes in the W3C [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/) (CG report grammar, its test cases vendored and passing) via `Content-Type`/`Accept: text/shaclc`; serialization is lossless or a `422` listing what the syntax cannot carry |
+| **DCAT catalog** | W3C DCAT 3 catalog at `/.well-known/void` — per-dataset distributions, versions, data services, VoID statistics, PROV-O provenance; optional DCAT-AP 3 / DCAT-AP-NL 3 profiles ([grades & gaps](docs/standards.md)) |
+| **RML mapping** | [RML-Core / RML-IO](https://w3id.org/rml/core/spec), legacy RML and R2RML — CSV (with CSVW dialects), JSON and JSON Lines (RFC 9535 JSONPath), XML (XPath), compressed or not, and SQL datasources → RDF, with joins across sources |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
 | **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: a catalogue of ~900 vocabularies, each with its licence status (the licence the vocabulary declares or, where it names none, its publisher's published terms); term search and one-click offline install into the registry for those whose licence lets the image ship them (install also works for the others from a dump you supply, privately); CLARIAH-style vocabulary recommender ([docs](docs/vocabulary-search.md)) |
@@ -191,8 +191,10 @@ The walkthrough — including a write on the leader showing up on the follower �
 ### Native (requires Rust 1.94.1+)
 
 System libraries are needed on every OS: **GEOS** 3.11 or later (GeoSPARQL) always, plus
-**libxmlsec1** only for the experimental `saml` feature (not in `full`; see docs/auth.md). On Debian/Ubuntu:
-`apt-get install libgeos-dev libxmlsec1-dev`; on macOS: `brew install geos libxmlsec1`.
+**libxml2**, **libxmlsec1**, pkg-config and libclang only for the `saml` feature (SAML 2.0 sign-in; in the
+Docker image, not in `full`; see docs/build-features.md). On Debian/Ubuntu:
+`apt-get install libgeos-dev` (for `saml` also `libxml2-dev libxmlsec1-dev pkg-config libclang-dev`); on macOS:
+`brew install geos` (for `saml` also `libxml2 libxmlsec1`; see the libxml2 note in docs/development.md).
 
 ```bash
 # macOS · Linux · WSL
@@ -510,7 +512,9 @@ names each row's source.
 
 Topological relations (Simple Features, Egenhofer, RCC8) and `geof:relate` with
 DE-9IM patterns; distance, area, buffer and the other constructive functions;
-WKT, GML and GeoJSON geometry literals, and `geof:asGeoJSON` — all via GEOS.
+WKT, GML (a [documented profile](docs/geosparql.md#supported-gml-profile)), GeoJSON
+and KML geometry literals, with `geof:asWKT`, `asGML`, `asGeoJSON` and `asKML` —
+all via GEOS. A geometry result is in its first operand's serialisation and CRS.
 The metric family (`geof:metricDistance`, `metricLength`, `metricPerimeter`,
 `metricArea`, `metricBuffer`) measures in metres on the WGS84 ellipsoid whatever
 the CRS, and `geof:distance`/`geof:buffer` with a metre unit on a geographic CRS
@@ -518,13 +522,19 @@ are geodesic too. `geof:transform` converts between the built-in CRSs (RD New,
 CRS84, EPSG:4326 in authority axis order, Web Mercator), and binary predicates
 harmonise their operands' CRSs — a GML literal's `srsName` counts like a WKT
 prefix. `geof:aggUnion` is a real SPARQL aggregate —
-the union of a group's geometries, with or without `GROUP BY`.
+the union of a group's geometries, with or without `GROUP BY`. A triple pattern
+such as `?park geo:sfWithin ex:city` also matches where the geometries imply the
+relation (the Query Rewrite Extension, on by default), and RDFS entailment over a
+dataset with GeoSPARQL data reasons over the GeoSPARQL ontology and the Simple
+Features and GML geometry hierarchies.
 
-**Not implemented:** KML/DGGS literals, the Query Rewrite Extension, the other
-GeoSPARQL 1.1 aggregates and several of its non-metric functions. (Earlier versions of this
-README claimed "all 30 OGC requirements" — that number was the test file's own
-numbering, not the OGC conformance classes. The honest grade is *Partial*; see
-[docs/standards.md](docs/standards.md).)
+Every GeoSPARQL 1.1 query function (geometry properties, `centroid`,
+`boundingCircle`, `concaveHull`, `length`, `perimeter`, `geometryN`, `minX` … `maxZ`)
+and all six spatial aggregates are implemented. GeoSPARQL 1.0 is graded Full, and 1.1
+Full for every conformance class but the optional DGGS class — DGGS literals are not
+implemented. These are the project's own grades against a
+[requirement matrix](docs/conformance/geosparql.md#3-requirement-matrix), not an OGC
+certification; see [docs/standards.md](docs/standards.md).
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
@@ -541,14 +551,12 @@ SELECT ?feature WHERE {
 | Simple Features | `sfContains` `sfCrosses` `sfDisjoint` `sfEquals` `sfIntersects` `sfOverlaps` `sfTouches` `sfWithin` |
 | Egenhofer | `ehContains` `ehCoveredBy` `ehCovers` `ehDisjoint` `ehEquals` `ehInside` `ehMeet` `ehOverlap` |
 | RCC8 | `rcc8dc` `rcc8ec` `rcc8po` `rcc8tppi` `rcc8tpp` `rcc8ntpp` `rcc8ntppi` `rcc8eq` |
-| DE-9IM | `relate` |
-| Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` |
-| Measurement | `distance` `area` |
-| Metric (metres, WGS84 ellipsoid) | `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` |
-| CRS and serialisation | `getSRID` `transform` `asGeoJSON` |
-| Aggregate | `aggUnion` |
-
-The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#supported-functions).
+| Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` `transform` |
+| Measures | `distance` `area` `getSRID` `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` |
+| Serialisation | `asWKT` `asGML` `asGeoJSON` `asKML` |
+| Geometry properties | `dimension` `coordinateDimension` `spatialDimension` `is3D` `isMeasured` `isEmpty` `isSimple` `geometryType` `numGeometries` `geometryN` |
+| Other non-topological | `centroid` `boundingCircle` `concaveHull` `length` `perimeter` `minX` `maxX` `minY` `maxY` `minZ` `maxZ` |
+| Aggregates | `aggUnion` `aggBoundingBox` `aggBoundingCircle` `aggCentroid` `aggConvexHull` `aggConcaveHull` |
 
 ---
 
@@ -603,11 +611,11 @@ The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#suppo
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/datasets/:id/validate` | Validate dataset against shapes graph |
-| `GET` | `/api/datasets/:id/shapes` | Get shapes graph (Turtle or `?format=shaclc`) |
+| `GET` | `/api/datasets/:id/shapes` | Get shapes graph (Turtle or `?format=shaclc`; 422 with `losses` when SHACL-C cannot carry it) |
 | `PUT` | `/api/datasets/:id/shapes` | Upload shapes graph (Turtle or `Content-Type: text/shaclc`) |
 | `POST` | `/api/datasets/:id/infer` | Run SHACL-AF inference, materialize triples |
-| `POST` | `/api/shaclc/parse` | Convert SHACLC → Turtle (stateless) |
-| `POST` | `/api/shaclc/serialize` | Convert shapes graph → SHACLC (body: IRI or JSON) |
+| `POST` | `/api/shaclc/parse` | Convert W3C SHACL-C → Turtle (stateless; `?dialect=legacy` deprecated) |
+| `POST` | `/api/shaclc/serialize` | Convert shapes graph → SHACL-C (body: IRI or JSON; lossless or 422) |
 
 ### RML Mapping
 
@@ -622,7 +630,7 @@ The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#suppo
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/.well-known/void` | DCAT 2 catalog + VoID statistics (content-negotiated) |
+| `GET` | `/.well-known/void` | DCAT 3 catalog + VoID statistics (content-negotiated) |
 | `GET` | `/resource/*path` | IRI dereference — RDF or 303 redirect to SPA |
 | `GET` | `/api-docs/` | Swagger UI (OpenAPI 3.0) |
 | `GET` | `/api-docs/openapi.json` | Raw OpenAPI spec |
@@ -679,24 +687,32 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id> \
 
 ### SHACL Compact Syntax (SHACLC)
 
-Retrieve shapes in compact syntax:
+The W3C SHACL Compact Syntax of the SHACL Community Group report. Retrieve
+shapes in compact syntax — a `422` with a `losses` list when the shapes use
+something the syntax cannot express (`?lossy=true` for the partial document):
 
 ```bash
-curl http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc \
+curl 'http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc' \
      -H 'Authorization: Bearer <token>'
 # or: Accept: text/shaclc
 ```
+
+The 0.7 dialect is still parsed for one release with `?dialect=legacy`
+(deprecated); [docs/shacl.md](docs/shacl.md#migrating-from-the-legacy-dialect)
+shows how to migrate.
 
 Standalone conversion endpoints:
 
 ```bash
 # SHACLC → Turtle
 curl -X POST http://localhost:7878/api/shaclc/parse \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/shaclc' \
      --data-binary @shapes.shaclc
 
 # Shapes graph IRI → SHACLC
 curl -X POST http://localhost:7878/api/shaclc/serialize \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
      -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
 ```
@@ -705,12 +721,14 @@ See [docs/shacl.md](docs/shacl.md) for the full SHACL guide.
 
 ---
 
-## DCAT 2 Catalog
+## DCAT 3 Catalog
 
-The `/.well-known/void` endpoint returns a full **W3C DCAT 2** catalog including:
+The `/.well-known/void` endpoint returns a **W3C DCAT 3** catalog (optionally under the DCAT-AP 3 or DCAT-AP-NL 3 profile, `DCAT_PROFILE`) including:
 
-- `dcat:Catalog` with all registered datasets
-- Per-dataset `dcat:Dataset` with distributions (SPARQL endpoint + Graph Store)
+- `dcat:Catalog` with all registered datasets the caller may see
+- Per-dataset `dcat:Dataset` with distributions (SPARQL endpoint, Graph Store, per-graph downloads, LDES, OGC API), temporal coverage and update frequency
+- Released versions as DCAT 3 versions (`dcat:hasVersion`, `dcat:hasCurrentVersion`, `dcat:previousVersion`)
+- The SPARQL endpoint as a `dcat:DataService` with `dcat:servesDataset`
 - VoID statistics (`void:triples`, `void:distinctSubjects`, `void:properties`) per dataset
 - Organization metadata from dataset owners
 - `dct:conformsTo` linking to SHACL shapes graphs where configured
@@ -727,7 +745,7 @@ curl -H 'Accept: application/ld+json' http://localhost:7878/.well-known/void
 curl 'http://localhost:7878/.well-known/void?format=jsonld'
 ```
 
-See [docs/dcat.md](docs/dcat.md) for the full DCAT 2 guide, and [docs/linked-data-modelling-styleguide.md](docs/linked-data-modelling-styleguide.md) for the canonical linked-data modelling standard (the "holy" styleguide covering SKOS/OWL/SHACL/DCAT/VoID/ADMS conventions, graph roles, IRIs and versioning).
+See [docs/dcat.md](docs/dcat.md) for the full DCAT 3 guide, and [docs/linked-data-modelling-styleguide.md](docs/linked-data-modelling-styleguide.md) for the canonical linked-data modelling standard (the "holy" styleguide covering SKOS/OWL/SHACL/DCAT/VoID/ADMS conventions, graph roles, IRIs and versioning).
 
 ---
 
@@ -846,10 +864,10 @@ open-triplestore
 │   ├── store/          TripleStore (Oxigraph wrapper)
 │   ├── server/         Axum HTTP server — routes, OpenAPI spec, error handling
 │   │   ├── openapi.rs  OpenAPI spec at /api-docs/openapi.json (the UI is a frontend page)
-│   │   └── linked_data.rs  /.well-known/void (DCAT 2), /resource/* (dereference)
+│   │   └── linked_data.rs  /.well-known/void (DCAT 3), /resource/* (dereference)
 │   ├── shacl/          SHACL validation engine, SHACL-AF inference, reports
-│   ├── shaclc/         SHACL Compact Syntax parser (SHACLC → Turtle) and serializer
-│   ├── dcat/           DCAT 2 catalog generator (VoID stats, distributions, PROV-O)
+│   ├── shaclc/         W3C SHACL Compact Syntax parser and lossless-or-422 serializer (+ deprecated legacy dialect)
+│   ├── dcat/           DCAT 3 catalog generator (VoID stats, distributions, PROV-O)
 │   ├── rml/            RDF Mapping Language executor
 │   │   └── sources/    CSV, JSON (JSONPath), XML (XPath) source adapters
 │   ├── geo/            GeoSPARQL function registry (GEOS bindings)
@@ -862,7 +880,7 @@ open-triplestore
 │   │   ├── components/ SparqlEditorCM, GraphCanvas, RdfTerm
 │   │   └── pages/      One .svelte file per route
 │   └── dist/           Production build (served by the Rust binary)
-├── docs/               Feature guides (SHACL, DCAT 2, RML, performance, administration)
+├── docs/               Feature guides (SHACL, DCAT 3, RML, performance, administration)
 ├── tests/              Conformance & benchmark test suites
 ├── benches/            Criterion performance benchmarks
 └── scripts/            Test runners, conformance-table generator, benchmark tooling
@@ -882,39 +900,52 @@ licence policy allows no performance claims on a subset.
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
-| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
-| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 27 |  |
+| buildingSMART IDS 1.0 | `tests/buildingsmart_ids_conformance.rs` | **buildingSMART IDS test corpus**, fetched at a pinned commit and SHA-256 checked (not in the repository) | 2 | runs in CI as a development and regression ratchet; no score is published, and the results are not a buildingSMART certification; known gaps in `docs/conformance/ids.md` |
+| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI) | 18 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 192 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
-| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
+| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 14 |  |
 | OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
-| OWL 2 DL | `tests/owl2_dl_conformance.rs` | spec-derived (+ live tests against the reasoner sidecar) | 73 |  |
+| OWL 2 DL | `tests/owl2_dl_conformance.rs` | spec-derived (+ live tests against the reasoner sidecar) | 76 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 45 |  |
-| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 61 |  |
-| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 73 |  |
+| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
-| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 38 |  |
-| SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
+| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 50 |  |
+| RML-Core | `tests/rml_core_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven) | 2 | 76 corpus cases: 75 pass, 1 known failure, 0 runner-side skips (floor ≥70 asserted) |
+| RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
+| RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
+| SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality) | 1 | 10 corpus cases: 9 pass, 0 known failures, 1 expecting behaviour outside the spec (reported as the failure the spec requires), 0 runner-side skips (floor ≥9 asserted) |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 67 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
-| ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
-| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 17 |  |
+| ShEx | `tests/shex_conformance.rs` | spec-derived | 21 |  |
+| ShEx 2.1 | `tests/shextest_conformance.rs` | **vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven) | 6 | 1917 corpus cases: 1795 pass, 0 known failures, 122 runner-side skips (floor ≥1795 asserted) |
+| SPARQL 1.2 / RDF 1.2 | `tests/sparql12_conformance.rs` | spec-derived | 27 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
-| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
-| SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
+| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 28 |  |
+| SWRL | `tests/swrl_conformance.rs` | spec-derived | 33 |  |
+| JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
-| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| OWL 2 RL | `tests/w3c_owl2_rl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-rl.md` |
+| R2RML | `tests/w3c_r2rml_conformance.rs` | **fetched W3C test cases** (pinned commit + sha256, not vendored; SQLite here, PostgreSQL and MySQL in the live-database job) | 5 | runs in CI as a development and regression ratchet over the cases fetched by `scripts/fetch-w3c-r2rml-tests.sh`; no score is published (W3C test-suite policy) |
+| RDF 1.2 formats | `tests/w3c_rdf12_manifests.rs` | **vendored W3C test-suite subset** (N-Triples, N-Quads, Turtle, TriG, RDF/XML suites of `rdf/rdf12` + the `rdf/rdf11` suites they include, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/rdf12.md` |
+| RDF 1.1 Semantics (RDF/RDFS entailment) | `tests/w3c_rdf_mt_manifests.rs` | **vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 120 pass, 0 known failures, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Compact Syntax | `tests/w3c_shaclc_conformance.rs` | **vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip) | 2 | 32 corpus cases: 32 pass, 0 known failures, 0 runner-side skips (floor ≥32 asserted) |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 126 |  |
+| SPARQL 1.1 Entailment Regimes | `tests/w3c_sparql11_entailment_manifests.rs` | **vendored W3C test-suite subset** (entailment section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
+| SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1252 conformance tests across 44 suites; a further 850 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

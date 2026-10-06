@@ -212,8 +212,7 @@ impl BackupManager {
     pub fn verify(&self, id: &str) -> anyhow::Result<bool> {
         validate_backup_id(id)?;
         let dir = self.backup_dir.join(id);
-        let manifest: BackupManifest =
-            serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+        let manifest = read_manifest(&dir, id)?;
         let rdf_ok = sha256_hex(&fs::read(dir.join(&manifest.rdf_path))?) == manifest.rdf_sha256;
         let sqlite_ok =
             sha256_hex(&fs::read(dir.join(&manifest.sqlite_path))?) == manifest.sqlite_sha256;
@@ -491,6 +490,20 @@ fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read the manifest of the backup in `dir`, refusing file names that would
+/// leave that directory: `dir.join` of an absolute path *replaces* `dir`, and
+/// `..` climbs out of it, so an edited manifest could otherwise point verify,
+/// restore or the S3 upload at any file on the host.
+fn read_manifest(dir: &Path, id: &str) -> anyhow::Result<BackupManifest> {
+    let manifest: BackupManifest = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .with_context(|| format!("read manifest for backup {id}"))?,
+    )?;
+    validate_backup_file_name(&manifest.rdf_path)?;
+    validate_backup_file_name(&manifest.sqlite_path)?;
+    Ok(manifest)
+}
+
 /// Restore a backup into `store` and the SQLite identity DB at `target_sqlite`,
 /// **replacing** current data. SHA-256 checksums are verified before anything is
 /// touched, so a corrupt backup aborts without destroying the live store.
@@ -516,12 +529,7 @@ pub fn restore_backup(
 ) -> anyhow::Result<BackupManifest> {
     validate_backup_id(id)?;
     let dir = backup_dir.join(id);
-    let manifest: BackupManifest = serde_json::from_slice(
-        &fs::read(dir.join("manifest.json"))
-            .with_context(|| format!("read manifest for backup {id}"))?,
-    )?;
-    validate_backup_file_name(&manifest.rdf_path)?;
-    validate_backup_file_name(&manifest.sqlite_path)?;
+    let manifest = read_manifest(&dir, id)?;
 
     // Verify integrity BEFORE replacing any live data.
     let rdf_raw = fs::read(dir.join(&manifest.rdf_path))?;
@@ -595,7 +603,7 @@ pub async fn maybe_upload_to_s3(
     }
     validate_backup_id(id)?;
     let dir = mgr.backup_dir().join(id);
-    let manifest: BackupManifest = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    let manifest = read_manifest(&dir, id)?;
     for (name, ct) in [
         (manifest.rdf_path.as_str(), "application/octet-stream"),
         (manifest.sqlite_path.as_str(), "application/octet-stream"),
@@ -896,6 +904,52 @@ mod tests {
             !mgr.verify(&manifest.id).unwrap(),
             "tampered backup must fail verification"
         );
+    }
+
+    /// A manifest whose file names leave the backup directory is refused by
+    /// verify (and by restore and the S3 upload, which read it the same way)
+    /// instead of hashing, restoring or uploading a file elsewhere on the host.
+    #[test]
+    fn manifest_paths_outside_the_backup_dir_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+        let mgr = BackupManager::new(
+            backup_dir.clone(),
+            sqlite_path,
+            TripleStore::in_memory().unwrap(),
+            audit,
+            7,
+            false,
+            None,
+        )
+        .unwrap();
+        let manifest = mgr.run_once().unwrap();
+        let manifest_file = backup_dir.join(&manifest.id).join("manifest.json");
+
+        // A file outside the backup directory, with its true checksum in the
+        // manifest, so only the path check can stop it.
+        let outside = dir.path().join("secret.txt");
+        fs::write(&outside, b"not part of any backup").unwrap();
+        let outside_sha = sha256_hex(&fs::read(&outside).unwrap());
+        for evil in [
+            outside.to_string_lossy().into_owned(),
+            "../../secret.txt".to_string(),
+        ] {
+            let mut m = manifest.clone();
+            m.rdf_path = evil.clone();
+            m.rdf_sha256 = outside_sha.clone();
+            fs::write(&manifest_file, serde_json::to_vec(&m).unwrap()).unwrap();
+            let err = mgr
+                .verify(&manifest.id)
+                .expect_err(&format!("rdf_path {evil:?} must be refused"));
+            assert!(
+                err.to_string().contains("invalid backup file name"),
+                "{err}"
+            );
+        }
     }
 
     /// Retention pruning keeps only the newest `retention` snapshots.

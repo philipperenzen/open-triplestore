@@ -299,8 +299,6 @@ pub async fn create_shape_graph(
         .map(ShapeSource::from_str_or_manual)
         .unwrap_or(ShapeSource::Manual);
     let turtle = body.turtle.unwrap_or_else(|| EMPTY_SHAPES.to_string());
-    crate::shacl::lint::check_activation_flags(&turtle)
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let set = create_shape_graph_from_turtle(
         &state,
         &user,
@@ -536,8 +534,11 @@ pub async fn get_shape_graph_turtle(
             .map(|a| a.contains("text/shaclc"))
             .unwrap_or(false);
     if want_shaclc {
-        let shaclc = crate::shaclc::serialize(&state.store, &set.graph_iri).map_err(e500)?;
-        return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
+        return Ok(crate::server::routes::shaclc_response(
+            &state,
+            &set.graph_iri,
+            &q,
+        ));
     }
     // Prefixed: this is the document a human reads in the source view, and the
     // one the visual builder scans for the prefixes it offers. Serialised
@@ -584,13 +585,11 @@ pub async fn put_shape_graph_turtle(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
     let turtle = if ct.contains("shaclc") {
-        crate::shaclc::parse(&raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("SHACLC parse error: {e}")))?
+        crate::shaclc::parse_request(&raw, &q, "PUT /api/shacl/shape-graphs/{id}/turtle")
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?
     } else {
         raw
     };
-    crate::shacl::lint::check_activation_flags(&turtle)
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     // Every history entry used to read "Edited": the note was hard-coded here.
     let note = q.get("message").and_then(|m| revision_note(m));
     let version = write_shapes_revision(

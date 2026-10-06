@@ -155,7 +155,8 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
             svc(
                 "Transitive ancestors",
                 "transitive-ancestors",
-                "OWL 2 RL — query-time transitive closure over an owl:TransitiveProperty (ex:ancestorOf+).",
+                "SPARQL 1.1 property path ex:ancestorOf+ over an owl:TransitiveProperty — the closure an OWL 2 RL \
+                 reasoner materialises (POST /api/reasoning/materialize), computed here at query time without one.",
                 "PREFIX ex: <https://opentriplestore.org/demo/reasoning#>\n\
                  SELECT ?descendant ?ancestor WHERE { ?descendant ex:ancestorOf+ ?ancestor } ORDER BY ?descendant",
             ),
@@ -885,22 +886,54 @@ ex:carol a ex:User ; ex:email "carol@example.org" .
 "#;
 
 const SWRL_TTL: &str = r#"
-@prefix ex:   <https://opentriplestore.org/demo/rules#> .
-@prefix swrl: <http://www.w3.org/2003/11/swrl#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:    <https://opentriplestore.org/demo/rules#> .
+@prefix swrl:  <http://www.w3.org/2003/11/swrl#> .
+@prefix swrlb: <http://www.w3.org/2003/11/swrlb#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 
 ex:hasParent      a rdfs:Property .
 ex:hasGrandparent a rdfs:Property .
 
-# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z)
+# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z), in the
+# SWRL RDF syntax. Stored with the dataset, the rule runs after every write;
+# its conclusions are in the dataset's inference graph
+# (?entailment_dataset=<id> on /sparql).
+ex:x a swrl:Variable .
+ex:y a swrl:Variable .
+ex:z a swrl:Variable .
+
 ex:GrandparentRule a swrl:Imp ;
     rdfs:comment "hasParent(?x,?y) ^ hasParent(?y,?z) -> hasGrandparent(?x,?z)" ;
-    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ]
-                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ] ) ;
-    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ] ) .
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:y ]
+                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:y ; swrl:argument2 ex:z ] ) ;
+    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:z ] ) .
 
-ex:Tom   ex:hasParent ex:Mary .
-ex:Mary  ex:hasParent ex:Sophie .
+# A rule with a built-in that binds a value: swrlb:subtract computes the
+# age gap between a person and their parent.
+ex:p a swrl:Variable .
+ex:a a swrl:Variable .
+ex:b a swrl:Variable .
+ex:gap a swrl:Variable .
+
+ex:AgeGapRule a swrl:Imp ;
+    rdfs:comment "hasParent(?x,?p) ^ age(?x,?a) ^ age(?p,?b) ^ subtract(?gap,?b,?a) -> parentAgeGap(?x,?gap)" ;
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:p ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:a ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:p ; swrl:argument2 ex:b ]
+                [ a swrl:BuiltinAtom ; swrl:builtin swrlb:subtract ;
+                  swrl:arguments ( ex:gap ex:b ex:a ) ] ) ;
+    swrl:head ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:parentAgeGap ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:gap ] ) .
+
+ex:Tom   ex:hasParent ex:Mary ; ex:age 12 .
+ex:Mary  ex:hasParent ex:Sophie ; ex:age 41 .
+ex:Sophie ex:age 70 .
 "#;
 
 const LDP_TTL: &str = r#"
@@ -949,32 +982,38 @@ const CAPABILITIES_JSONLD: &str = r#"{
   },
   "@graph": [
     { "@id": "ots:rdf11",          "@type": "Standard", "title": "RDF 1.1",                                "conformance": "Full" },
-    { "@id": "ots:rdf12",          "@type": "Standard", "title": "RDF-star (CG) / RDF 1.2 (WD)",           "conformance": "Partial" },
-    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Partial" },
+    { "@id": "ots:rdf12",          "@type": "Standard", "title": "RDF 1.2 (CR 2026-04-07)",                "conformance": "Full" },
+    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Full" },
     { "@id": "ots:sparql11update", "@type": "Standard", "title": "SPARQL 1.1 Update",                      "conformance": "Full" },
+    { "@id": "ots:sparqlprotocol", "@type": "Standard", "title": "SPARQL 1.1 Protocol",                    "conformance": "Full" },
     { "@id": "ots:gsp",            "@type": "Standard", "title": "SPARQL 1.1 Graph Store HTTP",            "conformance": "Full" },
     { "@id": "ots:sparqlfed",      "@type": "Standard", "title": "SPARQL 1.1 Federated Query (SERVICE)",   "conformance": "Full" },
     { "@id": "ots:sd",             "@type": "Standard", "title": "SPARQL 1.1 Service Description",         "conformance": "Full" },
-    { "@id": "ots:sparql12",       "@type": "Standard", "title": "SPARQL 1.2 (WD)",                        "conformance": "Partial" },
+    { "@id": "ots:sparql12",       "@type": "Standard", "title": "SPARQL 1.2 (WD 2026-10-01)",             "conformance": "Full" },
     { "@id": "ots:rdfs",           "@type": "Standard", "title": "RDFS",                                   "conformance": "Full" },
     { "@id": "ots:owlql",          "@type": "Standard", "title": "OWL 2 QL",                               "conformance": "Full" },
     { "@id": "ots:owlel",          "@type": "Standard", "title": "OWL 2 EL",                               "conformance": "Full" },
-    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Partial" },
+    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Full" },
     { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
-    { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Partial" },
-    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Partial" },
+    { "@id": "ots:geosparql10",    "@type": "Standard", "title": "GeoSPARQL 1.0",                          "conformance": "Full" },
+    { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Full" },
+    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Full" },
     { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Partial" },
-    { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Partial" },
-    { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Partial" },
-    { "@id": "ots:ids",            "@type": "Standard", "title": "buildingSMART IDS 1.0",                  "conformance": "Partial" },
+    { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Full" },
+    { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Full" },
+    { "@id": "ots:ids",            "@type": "Standard", "title": "buildingSMART IDS 1.0",                  "conformance": "Full" },
     { "@id": "ots:icdd",           "@type": "Standard", "title": "ISO 21597-1 ICDD",                       "conformance": "Partial" },
     { "@id": "ots:rdfpatch",       "@type": "Standard", "title": "RDF Patch (RDF Delta)",                  "conformance": "Full" },
     { "@id": "ots:ldes",           "@type": "Standard", "title": "LDES / TREE",                            "conformance": "Full" },
     { "@id": "ots:ldp",            "@type": "Standard", "title": "LDP (Linked Data Platform) 1.0",         "conformance": "Full" },
-    { "@id": "ots:dcat",           "@type": "Standard", "title": "DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3",      "conformance": "Partial" },
+    { "@id": "ots:dcat",           "@type": "Standard", "title": "DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3",      "conformance": "Full" },
+    { "@id": "ots:void",           "@type": "Standard", "title": "VoID",                                   "conformance": "Full" },
     { "@id": "ots:rml",            "@type": "Standard", "title": "RML / R2RML",                            "conformance": "Partial" },
-    { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx",                                   "conformance": "Partial" },
-    { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Partial" },
+    { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx 2.1",                               "conformance": "Full" },
+    { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Full" },
+    { "@id": "ots:textsearch",     "@type": "Standard", "title": "SPARQL + full-text search (Tantivy)",    "conformance": "Full" },
+    { "@id": "ots:skos",           "@type": "Standard", "title": "SKOS",                                   "conformance": "Full" },
+    { "@id": "ots:jsonld",         "@type": "Standard", "title": "JSON-LD 1.1",                            "conformance": "Partial" },
     { "@id": "ots:jwt",        "@type": "AuthMethod", "title": "JSON Web Tokens (JWT)" },
     { "@id": "ots:oauth",      "@type": "AuthMethod", "title": "OAuth 2.0 / OIDC" },
     { "@id": "ots:saml",       "@type": "AuthMethod", "title": "SAML 2.0 SSO" }

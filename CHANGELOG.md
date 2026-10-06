@@ -14,6 +14,172 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
+  and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
+  (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
+  unmodified under `tests/fixtures/w3c-sparql12/` and
+  `tests/fixtures/w3c-rdf12/`, and run by `tests/w3c_sparql12_manifests.rs`
+  (every query on the engine and again through the in-memory mirror) and
+  `tests/w3c_rdf12_manifests.rs` (every file through the upload path) as
+  two-way ratchets. They are subsets of W3C test suites, used under the W3C
+  3-clause BSD licence for development and bug tracking, so no score is
+  published; `docs/conformance/sparql12.md` and `docs/conformance/rdf12.md`
+  describe the runs and list the known gaps. `tests/sparql12_conformance.rs`
+  now runs every pin on both read paths and adds `VERSION`, the `LANGDIR`
+  family, `~` / `{| |}` in updates and queries, duplicate `VALUES` variables,
+  `LATERAL` with a per-row `LIMIT` and `ADJUST`.
+- **JSON-LD remote contexts.** Every JSON-LD parse — uploads, imports, the
+  Graph Store, LDP, seed bundles, LDES pages — now resolves an `@context` named
+  by IRI through a document loader; before, any such document failed to parse.
+  The W3C contexts of ActivityStreams 2.0, CSVW, LDP and ODRL 2.2 are bundled
+  and resolve offline; any other context is fetched only from a URL in
+  `OTS_REMOTE_ALLOWLIST` (deny by default), following redirects and `Link`
+  alternates inside the allowlist, capped at `OTS_JSONLD_CONTEXT_MAX_BYTES`
+  (1 MiB) and cached for an hour. See `docs/formats.md`.
+- **The W3C json-ld-api toRdf and fromRdf sections run in CI**
+  (`tests/w3c_jsonld_api_manifests.rs`, vendored unmodified under
+  `tests/fixtures/w3c-jsonld-api/`) as a regression ratchet. They are a subset
+  of a W3C test suite, so no score is published; the known gaps are in
+  `docs/conformance/jsonld.md`.
+- **SKOS-aware inferencing and integrity checking.** The standards matrix
+  promised SKOS-aware inferencing, and there was none: `skos.ttl` was only a
+  bundled vocabulary. A dataset can now select the `skos` entailment regime —
+  OWL 2 RL over its conformance layer with the bundled W3C SKOS schema as a
+  premise, the schema's own closure pruned — and a built-in *SKOS integrity*
+  shape graph (`urn:system:shapes:skos-integrity`) checks the SKOS Reference's
+  integrity conditions S9, S13, S14, S27, S36, S37 and S46. `docs/standards.md`
+  grades SKOS *Full*; see `docs/reasoning.md#the-skos-regime`.
+- **Full-text search graded as a feature.** `docs/standards.md` grades
+  *SPARQL + full-text search (Tantivy)* — not a standard — as *Full*, now that
+  the index follows every write (see *Fixed*).
+- **W3C entailment corpora.** The RDF 1.1 Semantics test cases (`rdf-mt`) and the
+  SPARQL 1.1 entailment-regime section are vendored unmodified
+  (`tests/fixtures/w3c-rdf-mt/`, `tests/fixtures/w3c-sparql11/entailment/`) with
+  runners (`tests/w3c_rdf_mt_manifests.rs`,
+  `tests/w3c_sparql11_entailment_manifests.rs`), and the approved OWL 2 test cases
+  of the RL profile run through `tests/w3c_owl2_rl_manifests.rs`. Each is a
+  two-way known-failure ratchet; no score is published (W3C test-suite policy).
+- **ShEx 2.1.** The ShEx engine is rewritten to the ShEx 2.1 specification
+  (`src/shex/`). ShExC is parsed to the full 2.1 grammar (imports, start and
+  start actions, `EXTERNAL`, node constraints combined with shapes, value-set
+  stems, ranges and exclusions for IRIs, literals and languages, `/regex/`
+  patterns, triple-expression labels and inclusions, bracketed groups with
+  cardinalities, annotations, semantic actions); ShExJ (2.1 and `ShapeDecl`
+  layouts) and ShExR are read too. Validation partitions each node's
+  neighbourhood between the triple constraints and the remainder, decides
+  recursion as a greatest fixpoint per strongly connected component and
+  negation by strata, and checks typed terms (XSD lexical forms and ranges,
+  exact decimals, code-point lengths, XPath regular expressions). The
+  endpoints accept the ShapeMap language (`<n>@<S>`, `{FOCUS p o}@<S>`,
+  `@START`) and ShapeMap JSON as well as the original map, and ShExJ
+  schemas (`schema_format`, `base`). `IMPORT <g>` is resolved only from a
+  named graph the caller may read, holding ShExR — never over the network.
+  Semantic actions run only the shexTest Test extension; no action code is
+  executed. ShEx 2.next (`EXTENDS`, `ABSTRACT`) is refused. Guide:
+  `docs/shex.md`.
+- **shexTest suite, vendored.** `tests/fixtures/shextest/` (validation,
+  schemas, negative syntax and structure, pinned at shexTest fc784a95, W3C
+  Software and Document License, see its `PROVENANCE.md`) and the runner
+  `tests/shextest_conformance.rs`, a two-way ratchet that skips only tests
+  tagged with a ShEx 2.next trait and also checks every validation case
+  through the store.
+- **VoID per dataset.** Each dataset in the catalogue is described over the
+  graphs the caller may read with `void:distinctSubjects`,
+  `void:distinctObjects`, `void:properties`, `void:classes`,
+  `void:documents`, class and property partitions (`void:classPartition`,
+  `void:propertyPartition`), `void:vocabulary`, `void:exampleResource`,
+  `void:feature`, `void:dataDump` and `void:sparqlEndpoint`; a graph whose
+  role is `linkset` is a `void:Linkset` with its link predicates and targets.
+  Partitions are never computed for the store-wide aggregate. New settings
+  `OTS_VOID_PARTITION_LIMIT` (partitions listed per kind, default 100) and
+  `OTS_VOID_PARTITION_MAX_TRIPLES` (no partitions above it, default
+  5,000,000); a value that is not a whole number stops the server at startup.
+- **The official DCAT-AP shapes run in CI.** `tests/dcat_conformance.rs`
+  validates the catalogue against SEMIC's DCAT-AP 3.0.1 shapes (vendored in
+  `tests/fixtures/semic-dcat-ap-3.0.1/`, CC BY 4.0) and Geonovum's DCAT-AP-NL 3
+  shapes (fetched at a pinned commit by
+  `tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh`, sha256-checked) and
+  asserts no violation; `tests/dcat_ap_http.rs` validates the served
+  catalogue against the SEMIC shapes instead of a hand-written subset.
+- **DCAT 3 versions, data services, coverage and catalogue records.** The
+  dataset catalogue (`/.well-known/void`) describes each released (published
+  or deprecated) dataset version as a DCAT 3 §11 `dcat:Dataset` —
+  `dcat:isVersionOf`, `dcat:version`, `dcat:previousVersion`, `dct:issued`,
+  `adms:versionNotes`, a TriG download — linked by `dcat:hasVersion` and, for
+  the newest, `dcat:hasCurrentVersion`. The SPARQL endpoint (and the OGC API
+  when a dataset has geometry) is a `dcat:DataService` with
+  `dcat:servesDataset`, publisher, contact point and access rights. Datasets
+  gain temporal coverage (`temporal_start` / `temporal_end` → `dct:temporal`)
+  and an update frequency (`accrual_periodicity`, a code or IRI of the EU
+  frequency table → `dct:accrualPeriodicity`) in the API, the OpenAPI document
+  and the metadata dialog. Under `dcat-ap` / `dcat-ap-nl` every dataset has a
+  `dcat:CatalogRecord`. New settings `CATALOG_CONTACT_NAME` /
+  `CATALOG_CONTACT_EMAIL` (the contact point of the catalogue and its data
+  services, and the fallback for a dataset with none) and
+  `CATALOG_PUBLISHER_TYPE` (ADMS publisher type). `dcat:DatasetSeries` is not
+  used: the product has no series concept. See `docs/dcat.md`.
+- **`GET /sparql` without a query returns the SPARQL 1.1 Service
+  Description** (SPARQL 1.1 Service Description §2), scoped to the caller like
+  the one at `/`; the catalogue names it as the endpoint's
+  `dcat:endpointDescription`.
+- **OPM calculations; OPM graded Full.** `opm:Calculation`s are defined at
+  `POST /api/datasets/:id/properties/calculations` (inferred property,
+  argument paths such as `?foi ex:partOf/ex:height ?h`, an expression, and
+  optional `opm:foiRestriction` / `opm:pathRestriction`) and run only on
+  request, as OPM's REST guidance describes: `POST …/calculations/:calc`
+  derives the property for every feature of interest that has the arguments
+  and lacks the property, `PUT` recomputes the derived states whose argument
+  states were outdated, and `GET …/:calc/outdated` lists them. A derived state
+  is `opm:Derived` with the `opm:expression` and `prov:wasDerivedFrom` an
+  `rdf:Seq` of the argument states; one run is one commit. Paths,
+  restrictions and expressions are parsed with spargebra and allow-listed (no
+  `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, subqueries, aggregates or
+  non-deterministic functions), and the queries are built from the parsed
+  form: matching reads only the dataset's own data graphs, capped by
+  `OTS_OPM_CALC_MAX_ROWS` (default 10 000) and the query timeout, and the
+  expression is evaluated in an empty scratch store. Calculations travel
+  through OPM export and import (prefixed names resolve with the document's
+  prefixes). `docs/standards.md` grades OPM *Full* (the project's own
+  assessment; OPM has no test suite).
+- **OPM property lifecycle and exchange.** Property states gain the rest of
+  the Ontology for Property Management: `POST /api/datasets/:id/properties/delete`
+  records a current `opm:Deleted` state with no value and removes the plain
+  triple; `…/restore` brings back the last value (`prov:wasRevisionOf`);
+  `reliability` accepts `required` (`opm:Required`) and states take
+  `opm:documentation` IRIs. `GET /api/datasets/:id/properties` lists the
+  properties of an item, of a property kind or of the whole dataset — latest
+  state, full history or the state at a time (an item snapshot) — filtered by
+  reliability, deletion and derivation. `GET …/properties/export` writes
+  canonical OPM (`<item> <kind> <property>`) in Turtle, N-Triples, JSON-LD or
+  RDF/XML and `POST …/properties/import` reads it back (state IRIs kept,
+  duplicates skipped, states without `prov:generatedAtTime` rejected); every
+  read also accepts canonical OPM loaded straight into a dataset graph, and
+  `schema:value` in both the `http` and `https` scheme. The OPM profile shapes
+  ship as the `opm-profile` seed bundle, at `GET /api/properties/profile`, and
+  run over a states graph at `GET …/properties/validate`. All property routes
+  are in the OpenAPI document.
+- **`ALERT_SMTP_TLS`, and alerting falls back to the account-email relay.**
+  Alert email can now choose its transport security (`none`, `starttls` or
+  `implicit`, as for `SMTP_TLS`); unset, it stays implicit TLS. When
+  `ALERT_SMTP_HOST` is unset, alerting uses the `SMTP_*` relay as a whole
+  (host, port, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`) and never mixes
+  it with `ALERT_SMTP_*`, so the account relay's credentials are not sent to a
+  separate alert host. The sender falls back from `ALERT_SMTP_FROM` to
+  `SMTP_FROM`. Ops alerts still go only to `ALERT_SMTP_TO`. Saved-query
+  breakage notices to dataset owners use the same relay, so a deployment with
+  only `SMTP_*` set now delivers them.
+- **Identity policy in the web UI.** The dataset page and the organisation page
+  have an *Identity policy (owl:sameAs)* card over the existing
+  `GET/PUT/DELETE /api/{datasets|organisations}/:id/identity` routes: it shows
+  the policy in force and where it comes from (the dataset, its organisation,
+  or the built-in default), and lets dataset editors and organisation admins
+  pick `off`, `narrow` or `full`, or go back to inheriting.
+- **A not-found page.** A path no route serves now shows "Page not found" with
+  links back, instead of an empty page shell.
+- **`GET /health` lists the standards the build serves** (`capabilities`, from
+  the compiled feature set). The Home page shows these as its chips instead of
+  a hard-coded list.
+
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -21,11 +187,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `admin` or a value listed in `OTS_OIDC_IDP_WRITE_SCOPES`) and `full`. It is separate
   from `OTS_OIDC_SESSION_POLICY` because the two token sources are issued to
   different clients. `docker-compose.yml` passes both through.
-- **SP-initiated SAML sign-in (experimental `saml` feature).** A SAML button on
+- **SP-initiated SAML sign-in (`saml` feature).** A SAML button on
   the login page now goes to `GET /api/auth/saml/{slug}/login`, which redirects
   to the IdP's SSO URL with an AuthnRequest (HTTP-Redirect binding) and binds
   the attempt to the browser with a short-lived `saml_state` cookie
-  (`SameSite=None; Secure` with `SECURE_COOKIES`). The ACS now accepts only a
+  (`SameSite=None; Secure` whenever `BASE_URL` is https). The ACS now accepts only a
   signed response that answers that request (`InResponseTo`), from that
   browser, once and within 10 minutes. It then redirects to the SPA's
   `/oauth/callback` page instead of returning the tokens as JSON.
@@ -34,8 +200,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   succeed, and the login button led to a `404`. The store now identifies itself
   to the IdP with its own entity ID, the SP metadata URL
   `…/api/auth/saml/{slug}/metadata`, rather than reusing the IdP's entity ID.
-  Re-register the SP at the IdP with that entity ID. SAML stays out of `full`
-  until it has been verified against a real IdP. See `docs/auth.md`.
+  Re-register the SP at the IdP with that entity ID. See `docs/auth.md`.
+- **SAML 2.0 completed: IdP metadata import, encrypted assertions, signed
+  requests, Single Logout.** Per provider, a new `saml_config` holds our entity
+  ID override, the IdP's logout URL, the NameID format (persistent by default;
+  a transient NameID needs a subject attribute), attribute names (defaults now
+  include the `urn:oid:` names and the Microsoft role claim), the IdP-initiated
+  policy (off by default; when on, each assertion is accepted once), clock
+  skew, request signing, an encrypted-assertion requirement and a contact.
+  `POST /api/admin/oauth/saml-metadata` reads IdP metadata from an https URL
+  (no redirects) or pasted XML into the entity ID, SSO/SLO URLs and every
+  signing certificate; `idp_certificate` now holds several certificates, so an
+  IdP key rollover trusts old and new at once. Each provider gets its own SP
+  key pair, stored like an OAuth client secret, published in our metadata with
+  `use="signing"` and `use="encryption"` (samael's metadata labels both
+  `signing`; ours is written by the store) and managed under
+  `/api/admin/oauth/providers/{id}/saml/keys` (add, activate, delete: key
+  rollover). Assertions encrypted with AES-GCM or AES-CBC and RSA-OAEP decrypt;
+  AuthnRequests can be signed. `GET|POST /api/auth/saml/{slug}/slo` handles
+  Single Logout from the IdP (signed LogoutRequest → the named sessions'
+  refresh-token families are revoked → signed LogoutResponse), and signing out
+  of a SAML session revokes its family and returns `{"saml_logout_url"}` from
+  `POST /api/auth/logout`, which the web UI follows. Access tokens issued
+  before a logout stay valid until they expire. The admin form's SAML section
+  covers all of it. Tests: a fake IdP in `tests/security_federated.rs`.
 - **OWL 2 QL: DL-Lite_R closure, ground materialisation, consistency and
   existential query rewriting.** The `owl2-ql` regime of
   `POST /api/reasoning/materialize` and of a dataset's entailment now writes
@@ -156,6 +344,174 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   most that many features, the first in IRI order. A capped tileset reports
   `asset.extras.truncated` (`served`, `total`, `maxFeatures`), the GLB an
   `X-Tiles3d-Truncated: served/total` header, and the server logs a warning.
+- **SWRL: every §8 built-in, data ranges and class expressions — graded Full.**
+  - **Built-ins.** All 79 `swrlb:` built-ins of the SWRL submission §8
+    (comparisons, math, boolean, strings, dates/times/durations, URIs, lists)
+    are evaluated natively, and they bind variables: `swrlb:add(?z, ?x, 1)`
+    computes `?z`, the date/duration/URI constructors split a bound value
+    into its components, `tokenize`, `member` and `sublist` bind one value
+    per solution, and `add`/`subtract`/`unaryPlus`/`unaryMinus`/`booleanNot`/
+    `equal` solve for one unbound operand. A pattern with infinitely many
+    solutions is refused with `400`, naming the built-in. Constructed lists
+    are minted as deterministic `urn:ots:swrl:list:<hash>` nodes.
+  - **`DataRangeAtom`** is evaluated natively: datatypes by value space,
+    facets, `DataOneOf` (which also enumerates), union, intersection,
+    complement. Every syntax reads it (`xsd:integer(?v)` in SWRLAPI).
+  - **Class-expression atoms** become auxiliary classes
+    `urn:ots:swrl:aux:<hash>` equivalent to the expression, which the regime
+    the rules run with materialises. `POST /api/swrl/execute` takes a
+    `regime` that runs the rules and the regime to one joint fixed point
+    (response adds `regime`, `rounds`, `regime_triples`); stored dataset rules
+    use the dataset's regime.
+  - New reference page `docs/swrl.md` (`/docs/swrl`); the demo rules dataset
+    gains a rule with a binding built-in.
+- **SWRL reads five more rule syntaxes and runs over datasets.**
+  - **Syntaxes.** `POST /api/swrl/execute` now takes every `format` below.
+    - `rdf`: the SWRL RDF syntax (`swrl:Imp` with argument lists), in any
+      serialisation given as `rdf_format`.
+    - `functional`: OWL 2 functional-syntax `DLSafeRule`.
+    - `swrlapi`: the SWRLAPI human-readable syntax. Prefixes come from the
+      request's `prefixes`, then the server's prefix registry.
+    - `ruleml`: the SWRL §4 RuleML XML syntax.
+    - OWL/XML (`xml`, now also `owlxml`) reads `Prefix` declarations,
+      `abbreviatedIRI` and `xml:base`.
+  - **Dataset scope.** A request may name a `dataset` and `source_graphs`.
+    Rule bodies then read those graphs, with the read checks of
+    `/api/reasoning/materialize`, instead of the unnamed default graph.
+    Without a `target_graph`, a dataset run writes to the dataset's inference
+    graph, which only its writers may fill. The response adds `target_graph`
+    and `sources`.
+  by `tests/shacl_af_corpus.rs` as a two-way ratchet, validation cases at full
+  report equality like the W3C suite: 9 of 10 cases pass. The tenth,
+  `target/sparqlTarget-001`, expects TopBraid's fallback to the file's Turtle
+  prefixes, which the SHACL prefix mechanism (§5.2.1) does not have; it is
+  counted as expecting behaviour outside the spec, and passes when validation
+  fails as the spec requires (`docs/conformance/shacl.md`).
+- **SHACL-AF result annotations (`sh:resultAnnotation`).** A `sh:sparql`
+  constraint or a component validator can declare properties to add to its
+  results (SHACL-AF §4): the value of a variable of the solution, or the
+  annotation's `sh:annotationValue` when it is unbound. They are written into
+  the RDF report as properties of the result node, typed, and listed in the
+  JSON result and the write gate's 422 body as `annotations`
+  (`[{"property", "value"}]`); a result without annotations has no such key,
+  so other JSON is unchanged. An ill-formed annotation fails the shapes graph.
+- **GeoSPARQL 1.1: the remaining query functions and spatial aggregates.**
+  `geof:dimension`, `coordinateDimension`, `spatialDimension`, `is3D`,
+  `isMeasured`, `isEmpty`, `isSimple`, `geometryType` (an `sf:` or `gml:` IRI),
+  `numGeometries`, `geometryN` (from 1), `minX` … `maxZ`, `centroid`,
+  `boundingCircle` (Welzl's minimum bounding circle, drawn as a polygon around
+  it), `concaveHull` (GEOS, target 0 to 1, default 0.5), `length` and
+  `perimeter` (with units, geodesic for a linear unit on a geographic CRS), and
+  the aggregates `aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`,
+  `aggConvexHull` and `aggConcaveHull` (one argument, default target 0.5: the
+  SPARQL parser allows one expression per custom aggregate), with
+  `aggUnion`'s CRS, serialisation and error rules. Req 39, 40 and 42.
+- **GeoSPARQL: KML literals, `geof:asWKT`, `geof:asGML` and `geof:asKML`.**
+  `geo:kmlLiteral` (KML 2.2 `Point`, `LineString`, `LinearRing`, `Polygon`,
+  `MultiGeometry`; always CRS84; an empty literal is the empty geometry) is a
+  geometry for every `geof:` function, `geo:asKML` is indexed and fed to the
+  map viewer, and four serialisation functions write any geometry as WKT (its
+  CRS as the prefix), GML 3.2 (its CRS as `srsName`, `srsDimension="3"` for
+  Z), GeoJSON or KML (both reprojected to CRS84). GeoSPARQL 1.1 Req 19, 24 and
+  30–34.
+- **GeoSPARQL: a documented GML profile.** The GML reader now also takes
+  `Envelope`, a standalone `LinearRing`, `Curve` of `LineStringSegment`s,
+  `OrientableCurve`, `CompositeCurve`, `Ring`s of linear `curveMember`s,
+  `Triangle`, `Rectangle`, `Tin`/`TriangulatedSurface`, `PolyhedralSurface`,
+  `CompositeSurface`, `OrientableSurface`, `pointMembers`/`curveMembers`/
+  `surfaceMembers`, `gml:coordinates` with `cs`/`ts`/`decimal`, and GML 2's
+  `gml:coord`. The profile is listed in `docs/geosparql.md` (Req 22).
+- **GeoSPARQL Query Rewrite Extension.** A triple pattern whose predicate is
+  one of the 24 topological relations (`geo:sfWithin`, `geo:ehMeet`,
+  `geo:rcc8ntpp`, …) now also matches where the geometries imply the relation,
+  as the standard's rules give it: each side a feature through
+  `geo:hasDefaultGeometry` or a geometry itself, its literal from `geo:asWKT`,
+  `asGML`, `asGeoJSON` or `asKML`, decided by the `geof:` function of the same
+  name. Results have set semantics (two serialisations of one geometry, or an
+  asserted and a derived relation, match once), stay inside a `GRAPH` pattern,
+  and apply in queries and in the `WHERE` clause of `DELETE`/`INSERT` updates.
+  Variable predicates, property paths and `SERVICE` blocks are left alone.
+  `OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off (`src/geo/query_rewrite.rs`).
+- **GeoSPARQL RDFS Entailment Extension: geometry class hierarchies as
+  premises.** OGC's Simple Features vocabulary (`sf.ttl`, registry entry `sf`,
+  Apache-2.0, bundled unchanged) and a GML 3.2.1 geometry class hierarchy
+  (`gml.ttl`, registry entry `gml-geometries`), which Open Triplestore wrote
+  from the GML 3.2.1 schema's substitution groups because OGC no longer
+  publishes one, are seeded as public reference models. A dataset whose graphs
+  use any GeoSPARQL term now reasons over them and the GeoSPARQL ontology,
+  without declaring conformance to them; `GET /api/datasets/{id}/conformance`
+  lists them as `vocabulary_premises`.
+- **GeoSPARQL requirement matrix.** `docs/conformance/geosparql.md` maps every
+  requirement of GeoSPARQL 1.0 and 1.1 to its status and tests, and GeoSPARQL
+  1.0 has its own row in `docs/standards.md`.
+- **RML-Core and RML-IO.** RML mappings may be written in the W3C Knowledge
+  Graph Construction Community Group's vocabulary (`http://w3id.org/rml/`),
+  alongside R2RML and the legacy RML namespace, mixed freely. New with it:
+  RFC 9535 JSONPath iterators and references (`serde_json_path`), XPath 1.0
+  with attributes, axes and declared namespaces (`sxd-xpath`), references that
+  select several values (a term per value, templates as the cartesian product
+  of their references' values), `rml:languageMap` and `rml:datatypeMap`,
+  `rml:childMap` / `rml:parentMap` join expressions, the `rml:URI`,
+  `rml:UnsafeIRI` and `rml:UnsafeURI` term types, a blank-node term map with
+  no expression, `rml:RelativePathSource` / `rml:FilePath` sources and CSVW
+  `csvw:Table` sources with their dialect (delimiter, quote, header rows,
+  skipped rows, comment prefix, trim, `csvw:null`), `rml:encoding` (any WHATWG
+  label; a byte-order mark wins), `rml:compression` (gzip, zip, tar.gz,
+  tar.xz; a decompressed source over `OTS_RML_MAX_SOURCE_BYTES`, default
+  256 MiB, is refused) and JSON Lines files. A JSON value in an RML-Core
+  mapping carries its natural datatype (`xsd:integer`, `xsd:double`,
+  `xsd:boolean`, per the RML-IO registry); the legacy vocabulary keeps reading
+  JSON values as plain strings. An SQL timestamp or boolean takes its natural
+  RDF lexical form (`2009-10-10T12:12:22`, `true`) in literals and templates
+  (R2RML §10.2). RML-FNML, RML-CC, RML-LV, RML-star and RML-IO targets are not
+  implemented, and a mapping that uses their terms is refused naming the
+  module; a remote source is never fetched. The file-mapping endpoints accept
+  source parts that are not UTF-8. Three vendored corpora run in CI: the
+  RML-Core test cases (`tests/rml_core_conformance.rs`), the RML-IO source
+  test cases (`tests/rml_io_conformance.rs`) and the CSV, JSON and XML cases
+  of the legacy rml-test-cases (`tests/rml_legacy_conformance.rs`), with
+  their licences and provenance beside them and in `NOTICE`.
+- **The IFC lift writes an IDS projection.** Beside the building-topology
+  graph, an IFC import (`POST /api/datasets/:id/import/ifc`) now writes
+  `…/building/ids`: every instance with its exact, schema-qualified class
+  (no subclass axioms, so a class target matches the class alone) and all
+  its explicit attributes from per-schema IFC2X3 / IFC4 / IFC4X3_ADD2
+  tables; resolved predefined types (type object first, IFC2X3 type mapping
+  table included); property and quantity sets with type inheritance,
+  occurrence override and values in the SI units IDS nominates; part-of
+  edges per relation (aggregation, nesting, containment, groups,
+  voids/fills); materials with every name and category in their sets; and
+  classifications with their system and reference chain. The
+  building-topology output is unchanged (`tests/ifc_lift.rs` checks it is
+  the same with the projection on or off). `ConvertOptions::include_ids` and
+  `ifc::convert_layers` expose it to library callers; the demo seed does not
+  write it.
+- **The buildingSMART IDS test corpus runs in CI.** `tests/buildingsmart_ids_conformance.rs`
+  runs all 334 IDS + IFC cases of the buildingSMART IDS repository's test
+  corpus through the IFC lift, the IDS importer and the SHACL validator, as a
+  two-way ratchet with a known-failures list. The corpus (CC BY-ND 4.0) is not
+  vendored: the runner downloads it from a pinned commit and checks every
+  file against `tests/fixtures/buildingsmart-ids/MANIFEST.sha256`, and
+  `OTS_TEST_IDS_CORPUS_REQUIRED=1` (set in CI) fails a missing download.
+  Development results only, no score published, not a buildingSMART
+  certification ([docs/conformance/ids.md](docs/conformance/ids.md)).
+- **ICDD container validation.** Every container import now returns a
+  `validation` report (`conforms`, `violations`, `warnings`, `findings[]` with
+  severity, code, message, index node and archive entry), `strict=true`
+  refuses a container with any violation (422, nothing stored), and
+  `POST /api/containers/validate` validates an archive without storing it.
+  For ISO 21597-1 the validator runs the project's own SHACL shapes, written
+  from the Part 1 ontology restrictions (`src/containers/icdd_shapes.ttl`; ISO's
+  SHACL annexes are not used), plus structural checks: one root `Index.rdf`,
+  one container description, the three folders, the ISO ontology files, every
+  listed file at its path, duplicate names, path escapes, checksums, link
+  elements naming listed documents, and no extension of the ICDD classes in a
+  Part 1 container.
+- **`OTS_ICDD_ONTOLOGY_DIR`.** Point it at a directory holding ISO's
+  `Container.rdf` and `Linkset.rdf` (downloaded from ISO's maintenance portal;
+  the project does not ship them) and ICDD exports embed both unchanged.
+  Without it an export carries the `ontology-resource-missing` warning: not
+  Part 1-conformant for that reason.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -283,8 +639,288 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   questions for people using the platform: accounts, datasets and access,
   importing, querying, validation, models, Spark, the API, troubleshooting and
   how to get help.
+- **CI covers S3 storage, `sfcgal3d` and the container image.** Both CIs now
+  run the S3 asset store against MinIO (`tests/storage_s3_live.rs`: object and
+  HTTP round trips, overwrite, delete, an absent key reading as absent, wrong
+  credentials refusing to start; skipped unless `OTS_TEST_S3_ENDPOINT` is
+  set). Until now the S3 backend had no test that sent it a byte. GitHub
+  compiles and unit-tests `sfcgal3d` in a Debian trixie job, because Ubuntu's
+  `libsfcgal-dev` is 1.5 and the feature needs SFCGAL 2.x. Before, only GitLab
+  built it. The release image is built and started (`/livez`) on every pull
+  request that touches the Dockerfile, a Cargo manifest, the lock file,
+  `.cargo/` or `vendor/`, and nightly (`.github/workflows/image.yml` and the
+  GitLab `image-build` job). Before, it was first built at release.
+  `scripts/check_env_drift.py` (both docs-parity jobs) fails when
+  `docker-compose.yml` hands the server a variable that neither `.env.example`
+  nor `docs/administration.md` documents, or when `.env.example` sets one that
+  compose never passes on. Documented settings that compose does not forward
+  are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+
+- **Standards Score recounted once for the second merge train: 25 of 28.**
+  The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
+  retired for every system (owner decision, 2026-10-03): the W3C test-suite
+  licence allows no performance claims on a subset of a suite, so the row
+  could not be graded for this project; measured comparisons take its place in
+  `docs/performance-comparison.md`. The matrix has 28 rows, and every other
+  system's count drops by one. Open Triplestore's column, recounted from the
+  merged matrix, is 25 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
+  RDF 1.2, OWL 2 RL, SHACL Validation, ShEx, SWRL, GeoSPARQL 1.0 and 1.1, DCAT
+  3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its Partial
+  grade. `docs/standards.md` states the Full rubric: a row is Full only when
+  every remaining failure is a test-suite defect, blocked on an open external
+  specification issue, or a limit of an external database engine, and a
+  deliberate deviation keeps it Partial (JSON-LD 1.1 and RML for now).
+  SPARQL 1.2 and RDF 1.2 are graded Full: every SPARQL 1.2 entry passes, and
+  RDF 1.2's four remaining `rdf:XMLLiteral` entries wait on w3c/rdf-xml#97.
+- **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
+  first time, on the json-ld-api run: three `fromRdf` entries fail because the
+  serialiser writes every stored quad as it is, where the algorithm folds a
+  list typed `rdf:List` into `@list` (dropping the type quads) or refuses an
+  `rdf:JSON` literal that is not JSON; and uploads keep `@direction` as an RDF
+  1.2 directional string, where a JSON-LD 1.1 processor drops it by default.
+  The comparison's JSON-LD cell, which marked feature presence, follows
+  (✅ → 🟡).
+- **The JSON-LD processor is vendored with four fixes** (`oxjsonld` 0.2.6 in
+  `vendor/oxjsonld/`, one commit and one upstream draft each, see
+  `vendor/README.md`), and every `toRdf` entry of the W3C json-ld-api run now
+  passes (`docs/conformance/jsonld.md`). What changes for uploads:
+  - **Relative IRIs resolve as RFC 3986 says** when the base IRI or the
+    reference has `.` or `..` segments: `"@base": "http://a/b/./c"` with
+    `"@id": "../d"` now gives `http://a/d`, not `http://a/b/d`, and
+    `//host/../x` gives `http://host/x`. Documents whose base has no dot
+    segments are unaffected.
+  - **An `@base` that is not a valid IRI** but has a scheme
+    (`"http://invalid/<>/"`) no longer refuses the document: relative IRIs
+    resolved against it are not well-formed and are left out, as the JSON-LD
+    to RDF algorithm leaves out any such IRI.
+  - **A type map applies the type's scoped context to the nodes inside it,
+    nested ones included** (`"@container": "@type"`); nested nodes used to
+    fall back to the definitions without it.
+  - `@direction` is kept as an RDF 1.2 directional string as before; the
+    processor now also offers JSON-LD 1.1's `rdfDirection` modes, which the
+    W3C runner uses.
+- **The store keeps every literal exactly as written.** Typed literals used to
+  be stored as values and read back in a canonical form: `"1"^^xsd:boolean` as
+  `true`, `"05"^^xsd:integer` as `"5"`, a `+00:00` time zone as `Z`, every type
+  derived from `xsd:integer` (`xsd:int`, `xsd:nonNegativeInteger`, …) as
+  `xsd:integer` and `xsd:dateTimeStamp` as `xsd:dateTime`. They now come back
+  with the lexical form and datatype they were written with, from SPARQL, the
+  Graph Store Protocol and downloads (RDF 1.1 Concepts §3.3). Oxigraph 0.5.11
+  and its evaluator spareval 0.2.7 are vendored with this change
+  (`vendor/README.md`; the on-disk format is unchanged and existing stores open
+  as they are). What changes for queries:
+  - **Graph patterns, joins, `DISTINCT`, `GROUP BY`, `sameTerm` and
+    `DELETE DATA` match terms, not values.** `{ ?s ex:n 1 }` no longer finds
+    `"01"^^xsd:integer` or `"1"^^xsd:int`, `true` no longer finds
+    `"1"^^xsd:boolean`, a join between `"5"^^xsd:int` and `5` no longer
+    matches, and `SELECT DISTINCT` returns both. Use a `FILTER` to match by
+    value: `FILTER`, `ORDER BY`, arithmetic and aggregates still compare
+    values as before. The same holds inside RDF 1.2 triple terms.
+  - **Data loaded before this version keeps its canonical form**, so a query
+    constant written as in the source file may no longer match it
+    (`"05"^^xsd:integer` against a stored `"5"`), and appending the same file
+    again adds the as-written literals beside the old ones. Reload such data
+    with a replace (`PUT`, or `DROP` then load) rather than an append.
+  - **Seeded vocabularies and seed-bundle models** are checked once on the first
+    start and, where a copy holds its file's triples in the old canonical form,
+    replaced by the file's triples (nobody's edit, so nothing is kept aside);
+    their licence records then say "unchanged" without the canonical-form
+    caveat. LOV installs record the copy exactly as installed.
+  - **SHACL**: `sh:datatype` accepts valid data of the derived integer types
+    and `xsd:dateTimeStamp` (it used to report every stored
+    `"5"^^xsd:nonNegativeInteger` as a violation, which made write gates answer
+    422 on valid data), checks their ranges (`"300"^^xsd:byte` is a violation),
+    and requires a time zone on `xsd:dateTimeStamp`; `sh:minInclusive` and
+    friends compare `xsd:dateTimeStamp` with `xsd:dateTime`. Activation flags
+    take only the literal `true`: `sh:uniqueLang`, `sh:closed`,
+    `sh:qualifiedValueShapesDisjoint`, `sh:deactivated` (on shapes, rules,
+    constraints and validators) and `sh:optional` written as
+    `"1"^^xsd:boolean` no longer activate, so the shapes uploads no longer
+    need to refuse that form and accept it. `sh:hasValue`, `sh:in`,
+    `sh:equals` and `sh:disjoint` compare terms as written. A shape that is an
+    `rdfs:Class` through `rdfs:subClassOf` in the shapes graph is an implicit
+    class target (SHACL §2.1.3.3; a direct `a rdfs:Class` was the only form
+    found). W3C SHACL core: `core/property/uniqueLang-002` passes, so the core
+    section has no known failure at full result-set equality, and **SHACL Core
+    is graded Full** (`docs/standards.md`, the comparison matrix and the
+    in-app capabilities graph, demo content version 16).
+  - **OWL**: `dt-not-type` sees the datatype as written (`"300"^^xsd:byte` is
+    an inconsistency). `cls-maxc1/2`, `cls-maxqc1–4` and `owl:hasSelf` read
+    their number or flag by value, so `owl:maxCardinality 1` and
+    `"1"^^xsd:nonNegativeInteger` both apply. Rules that join on a literal
+    match it as written.
+  - **Parallel and columnar query paths** keep the term as written wherever
+    the engine does (`BIND(?o AS ?x)`, `IF`, `COALESCE`, `sameTerm`,
+    `COUNT(DISTINCT ?o)`) and read `xsd:dateTimeStamp` as a dateTime.
+- **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
+  first time, on the json-ld-api run: the JSON-LD processor keeps the dot
+  segments of a base IRI, writes `@direction` as an RDF 1.2 directional string
+  in the `rdf-12` build, mis-scopes type-scoped contexts in type maps and
+  serialises invalid `rdf:JSON` literals. The comparison's JSON-LD cell, which
+  marked feature presence, follows (✅ → 🟡).
+- **OWL 2 RL runs all 78 RL/RDF rules; graded Full.** The Table 8 rules with
+  literal subjects (`dt-type2`, `dt-eq`, `dt-diff`) are applied to data values
+  through the 32-type RL datatype map: a literal written two ways
+  (`"1"^^xsd:integer`, `"1.0"^^xsd:decimal`) gets the other's triples, so
+  `owl:hasValue`, `owl:hasKey` and negative data assertions match by value; data
+  values type the subjects of `owl:someValuesFrom` restrictions; a value outside
+  its property's datatype range is a `dt-not-type` inconsistency, and two
+  different values of a functional data property (or under a maximum cardinality
+  of one) a `dt-diff` one. Runs that used to succeed on such data now report the
+  inconsistency. A differential test checks the engine against a
+  generalized-triple reference evaluator. `eq-ref` stays opt-in (decision D2).
+- **RDFS follows RDF 1.1 Semantics; graded Full.** New: `rdfD2` (every predicate
+  is an `rdf:Property`), the RDF and RDFS axiomatic triples, and RDF 1.1 `rdfs1`
+  (recognized datatypes in use are `rdfs:Datatype`), replacing a non-standard
+  rule that made every literal's datatype a subclass of `rdfs:Literal` directly.
+  All patterns, axiomatic ones included, now run in one fixed-point loop over the
+  data and the derivations, so `rdfs:Resource rdfs:subClassOf ex:C` reaches
+  every resource. The infinite `rdf:_n` axioms stop at the largest index the data
+  uses and `rdfD1` is not materialised (decision D11). Every run now writes the
+  axiomatic triples, so the entailment graph holds more triples than before. A
+  datatype clash (an ill-typed literal such as `"ten"^^xsd:integer`, or a value
+  outside the datatype its property's range names) now ends an RDFS run in an
+  inconsistency (422 over HTTP) instead of being ignored, and a clean RDFS run
+  reports `"consistent": true` (it was `null`).
+- **SHACL-C is the W3C SHACL Compact Syntax.** The parser behind
+  `Content-Type: text/shaclc` (`PUT /api/datasets/{id}/shapes`,
+  `PUT /api/shacl/shape-graphs/{id}/turtle`, `POST /api/shaclc/parse`) now
+  implements the whole grammar and production rules of the SHACL Community
+  Group report and builds the RDF graph directly: `BASE`/`IMPORTS`/`PREFIX`,
+  `shapeClass`, several target classes after `->`, `param=value` node and
+  property parameters, `|` and `!`, `@shape` references, nested `{ }` bodies,
+  `[ … ]` arrays, full property paths, every Turtle literal form, and `.` after
+  every constraint. **Results change:** a bare non-XSD IRI after a path is now
+  `sh:class` (it was `sh:node`; write `@ex:Shape` for a shape reference), and
+  the old dialect's keywords (`closed` in the header, `pattern "x"`,
+  `// "msg"`, `or( … )`, `;`) are a `400` naming the line and column, with a
+  pointer to the dialect switch. The 32 test cases of the report are vendored
+  under `tests/fixtures/w3c-shaclc/` (W3C Software and Document License) and
+  pass, each also round-tripped through the serializer
+  (`tests/w3c_shaclc_conformance.rs`); `docs/standards.md` grades SHACL-C
+  **Full** (was Partial). Bugs of the old parser that made its Turtle invalid
+  (an undeclared `owl:` for `imports`, unescaped line breaks in messages and
+  patterns, bare `urn:` IRIs) are fixed in the legacy dialect too.
+- **SHACL-C downloads are lossless or a 422.** `GET …/shapes?format=shaclc`,
+  the Studio's `GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` and
+  `POST /api/shaclc/serialize` wrote only node shapes' first target class,
+  paths, datatypes, node kinds, counts, patterns and messages, and dropped
+  everything else without a word (`sh:class`, `sh:in`, `sh:hasValue`, ranges,
+  lengths, logical constraints, node-level constraints; complex paths came out
+  as an unparseable `_:b…`). The serializer now writes everything the syntax
+  can express, checks that its output parses back to exactly the triples it
+  wrote, and answers `422` with a `losses` list (subject, predicate, object,
+  reason) when anything is left over. Three implied triples are omitted without
+  counting as losses: `rdf:type sh:PropertyShape` and blank-node
+  `rdf:type sh:NodeShape` on shapes it writes, and `sh:minCount 0`
+  (docs/shacl.md, "Implied triples"); `?lossy=true` returns the partial
+  document with an `X-SHACLC-Losses` count and a `# INCOMPLETE:` comment block.
+  The form manifest's `shaclc` field is `null` for such a graph.
+- **ShEx semantics corrected** (results change). A triple whose predicate a
+  shape constrains but whose value fails the constraint now fails the shape
+  instead of being ignored (unless the predicate is `EXTRA`); one triple no
+  longer satisfies two constraints; `CLOSED {}` closes; `{m,}` is unbounded
+  (it meant exactly m); recursion is no longer assumed to succeed; string
+  lengths count code points, not bytes; numeric facets compare exactly.
+  Schemas whose references cycle through a negation, and malformed shape
+  maps, are now a `400`; a validation whose references nest deeper than
+  20 000 levels is a `422` (validation runs off the async runtime on a
+  thread sized for that depth). ShEx is graded Full in
+  `docs/standards.md`, and the comparison's ShEx cell follows.
+- **DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 and VoID are graded Full.**
+  `docs/standards.md` gives VoID its own row; the comparison's "DCAT" row is
+  now "DCAT 3", and both cells follow the grades. The
+  capabilities seed follows (`DEMO_CONTENT_VERSION` 16 refreshes it). The
+  aggregate dataset carries the themes of the datasets it covers.
+- **The DCAT catalogues use DCAT terms with their declared semantics.** The
+  model registry's catalogue (`/api/catalog`) is built as RDF terms instead of
+  hand-written Turtle: `dcat:hasVersion` points at version resources (it was a
+  literal), `dcat:mediaType` is an IANA IRI typed `dct:MediaType` (it was a
+  literal), a namespace that is not an IRI is dropped instead of interpolated,
+  and only the serialisations the data endpoint serves are offered (it
+  advertised JSON-LD and RDF/XML, which it answered with N-Quads and TriG).
+  Both catalogues type every object with its DCAT range class
+  (`dct:LicenseDocument`, `dct:LinguisticSystem`, `foaf:Document`, …) and
+  describe themes, statuses and agent types as labelled `skos:Concept`s. A
+  dataset's owner is now its `dct:publisher` and `dct:creator` in every
+  profile. A data-model's void:triples no longer counts version `1.0.1`'s
+  graphs into version `1.0`. The live dataset no longer carries the newest
+  version's `dcat:version`, and a draft version is no longer listed. The
+  SPARQL service's `dcat:endpointDescription` is the service description, not
+  the homepage.
+- **An unknown `DCAT_PROFILE` stops the server at startup** instead of
+  silently publishing plain DCAT; so do an unknown `CATALOG_PUBLISHER_TYPE`, a
+  `CATALOG_LANGUAGE` that is not an ISO 639-3 code, and a
+  `CATALOG_PUBLISHER_URI` / `CATALOG_LICENSE` that is not an IRI.
+- **Profile warnings.** What DCAT-AP-NL requires and the registry does not
+  hold — a dataset's theme, contact point or licence — is logged once as a
+  warning and never invented.
+- **SAML 2.0 is graded Full and ships in the Docker image.** The Dockerfile's
+  `CARGO_FEATURES` now defaults to `full,saml,plugin-postgres,plugin-mysql,plugin-mssql`;
+  the image already carried libxml2 and libxmlsec1, so it gains no package.
+  `saml` stays out of `full`, so a native `cargo build` still needs no
+  libxmlsec1, pkg-config or libclang. A custom `CARGO_FEATURES` must now list
+  `saml` to keep SAML. The admin UI no longer labels SAML experimental.
+  `docs/standards.md` grades it Full for the web-browser SSO and Single Logout
+  profiles with this store as the service provider (Artifact binding, ECP,
+  attribute queries, NameID management and metadata aggregates/MDQ out of
+  scope).
+- **SAML needs an https `BASE_URL` outside localhost.** The login route refuses
+  to start on a plain-http `BASE_URL` other than loopback, and the `saml_state`
+  cookie follows `BASE_URL` (https → `SameSite=None; Secure`) instead of
+  `SECURE_COOKIES`, which compose did not even forward. The public SP metadata
+  route now answers only for an active provider; admins fetch it before
+  activation from `/api/admin/oauth/providers/{id}/saml/metadata`.
+- **Docker Compose passes every `.env` setting to the server.** The
+  `triplestore` service listed its environment by name and had no `env_file`,
+  so documented settings such as `SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS`,
+  `OTS_REMOTE_ALLOWLIST`, `OTS_DISABLE_REGISTRATION`, `LDP_ROOT_ACL`,
+  `RATE_LIMIT_DISABLED` and the `LLM_*` tuning never reached it, and
+  `BACKUP_RETENTION_COUNT`, `BACKUP_SCHEDULE_HOURS`, `S3_BUCKET`, `S3_REGION`
+  and `RUST_LOG` were hard-coded over `.env`. It now loads `.env` through
+  `env_file` (`required: false`, Compose 2.24+), and those five take their value
+  from `.env` with the old default. `scripts/check_compose_env.py`, in both CI
+  pipelines, fails when a documented variable is not forwarded or is
+  hard-coded.
+- **`OAUTH_CLIENTS_JSON` client secrets accept secret references.** A
+  `secret` may be `env:NAME`, `file:/path` or `vault:…`, resolved at boot like
+  `JWT_SECRET`. Under `OTS_ENV=production` a raw secret now stops the server at
+  startup, as do the other raw-secret settings, and so does a reference that
+  does not resolve; no client from the variable is seeded until every secret
+  in it has resolved. Development still accepts a raw value, with a one-time
+  warning.
+- **Settings read in two places now come from one parsed value.**
+  `--serve-frontend false` now also stops `/` and `/sparql` from serving the
+  web UI to a browser; they used to read `SERVE_FRONTEND` from the environment
+  on their own. Federated identity assertions (`OTS_TRUSTED_ISSUERS`) are
+  checked against `--base-url` as well as `BASE_URL`; the built-in default
+  still counts as unset. `BACKUP_DIR` is read once: an empty value now means
+  `<data-dir>/backups` for `--restore` and store auto-recovery too, which used
+  to take it as the working directory.
+- **Library: `dcat::generate_dcat_catalog` and `generate_org_dcat_catalog`
+  removed.** Only tests called them. Use `dcat::generate_catalog_bytes` with
+  `RdfFormat::Turtle`.
+- **The app's own dialogs replace the browser's.** The 11 `window.confirm()`,
+  3 `window.prompt()` and 31 `window.alert()` calls in the web UI are now the
+  app's confirmation dialog, a text-entry dialog and error toasts: translated,
+  themed and non-blocking.
+- **Datasets list: badges and filters for all ten graph roles.** The list used
+  its own six-role map, so `domain-values`, `linkset`, `provenance` and
+  `catalog` graphs got no badge; it now follows the canonical role list.
+- **Shape graph revisions open in the history dialog** instead of as raw text
+  in a new browser window.
+- **The "Transitive ancestors" demo service says what it does**: a SPARQL
+  property path, not OWL 2 RL reasoning. The e2e "standards" checks for
+  reasoning, SWRL and LDP now call the engines
+  (`POST /api/reasoning/materialize`, `POST /api/swrl/execute`, the `/ldp`
+  routes) instead of only reading seeded triples.
+
+- **The conformance suites run once per CI run.** GitHub's conformance job ran
+  every `*conformance*` test binary that the backend job's `cargo test
+  --workspace` had already run, with fewer features. It now keeps only the
+  reasoner-sidecar and seed-bundle steps.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -523,6 +1159,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transactional quad path (`TripleStore::apply_quad_ops`) that records the
   exact net change in the change log, and the response's `added`/`removed`
   are that net change. Spec-derived tests in `tests/rdf_patch_conformance.rs`.
+- **RML file sources read JSON and XML by the RML-IO registry.** A JSONPath
+  iterator or reference is now RFC 9535 JSONPath and an XPath one is XPath
+  1.0, where the engine walked dotted keys and matched element names. Under
+  the legacy RML vocabulary this keeps what worked — a bare name is the member
+  or child element of that name, an iterator that selects one array iterates
+  its elements, a relative XML iterator (`person`) matches anywhere — and
+  adds nested references (`a.b`, `../@id`, attributes). An XML reference's
+  value is the node's string value (all its text, nested elements included)
+  rather than its first text child. A template with an unbalanced brace —
+  one opened inside a reference, closed outside one, or never closed — is
+  refused at upload instead of being read as best it could. RML stays graded
+  Partial in `docs/standards.md`: one remaining R2RML failure, R2RMLTC0002f
+  (SQL identifier case-folding), is a deliberate deviation, which the Full
+  rubric does not accept.
 - **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
   mapping and every newly frozen datasource mapping version now generate terms
   by R2RML's rules, so their output changes:
@@ -675,6 +1325,182 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/build-features.md` lists the three features, `docs/sources.md` says
   what the image carries, and GitHub CI's backend job compiles the main crate
   with all three (it built only `plugin-postgres`, in the live-sources job).
+- **`/sparql` gives a query the dataset SPARQL defines.** The dataset is now set
+  on the parsed query instead of being spliced into its text, and keeps its
+  meaning: `FROM <a>` alone makes `<a>` the default graph and no longer also a
+  named graph, `FROM NAMED <b>` alone leaves the default graph empty, and an
+  admin's `FROM` is no longer widened with every registered graph. Only a query
+  that names no dataset gets the union of the caller's readable graphs (as
+  before). Graphs the caller may not read are still dropped silently. The
+  protocol's `default-graph-uri` / `named-graph-uri` (queries) and
+  `using-graph-uri` / `using-named-graph-uri` (updates) are now honoured; they
+  were advertised but ignored. A query whose outer group has no `WHERE` keyword
+  and holds a sub-select no longer fails with 400. Clients that relied on
+  `FROM <g>` also exposing `<g>` to `GRAPH ?g` must add `FROM NAMED <g>`.
+- **Grades:** SPARQL 1.1 Query is graded Full again, and SPARQL 1.1 Protocol has
+  its own graded row (Full) in `docs/standards.md`, and the comparison's cells
+  follow.
+- **SPARQL query results follow the specification in six more places.** The
+  engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
+  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and
+  patched, one commit per fix, each with a
+  draft upstream PR (`vendor/README.md`):
+  - `GRAPH ?g { … }` no longer puts `?g` in scope inside the pattern: around a
+    `VALUES`, an aggregate sub-select or a `MINUS` it now enumerates the named
+    graphs as SPARQL defines (backport of oxigraph `fdc32b5`, issue #1905).
+  - A default graph made of several `FROM` (or `USING`) graphs is their RDF merge:
+    a triple held in two of them matches once, so `COUNT` and `SUM` over it no
+    longer double-count (backport of oxigraph #1920, issue #1919). The columnar
+    query copy deduplicates the same way.
+  - A zero-length property path (`*`, `?`) with a constant endpoint matches that
+    term even when the graph does not hold it (`ASK { :x :p* :x }` is true on an
+    empty graph).
+  - `GROUP_CONCAT` returns a plain `xsd:string`, never a language-tagged string.
+  - `BNODE("label")` returns a fresh blank node per solution (the same one within
+    a solution), accepts any string, and no longer returns the same node in every
+    later request.
+  - An aggregate nested in another one's argument (`SUM(COUNT(?x))`) is a syntax
+    error (400), as SPARQL requires; it used to be accepted (the vendored
+    `spargebra` 0.4.7 parser).
+  The vendored W3C SPARQL 1.1 query and update sections have no open known
+  failures left (`docs/conformance/sparql11.md`).
+- **SPARQL 1.2: three more fixes in the vendored engine; the W3C suite is down
+  to one known failure.** One commit each in `vendor/`, each with a draft
+  upstream PR:
+  - `=`, `!=` and `IN` between two literals that both carry a base direction
+    (`"abc"@en--ltr = "abc"@en--rtl`) answer by RDF 1.2 term equality; they used
+    to panic in the evaluator, a 500 over HTTP.
+  - A literal or a triple term as the subject of a triple-term expression
+    (`BIND(<<( "x" :p :o )>> AS ?t)`) is a syntax error (400), as the SPARQL 1.2
+    grammar requires (`ExprTripleTermSubject ::= iri | Var`).
+  - In an aggregating query a SELECT expression may use the variable of an
+    earlier SELECT expression, `SELECT (COUNT(?v) AS ?n) (?n + 1 AS ?m)`, as
+    SPARQL 1.2 allows; it used to be refused as an unbound variable.
+  With the nested-aggregate refusal above, every entry of the vendored W3C
+  SPARQL 1.2 suite passes except `grouping#group01`, which needs numeric lexical
+  forms kept in storage. SPARQL 1.2 stays *Partial* in `docs/standards.md`, now
+  waiting only on that change (`docs/conformance/sparql12.md`).
+- **SWRL results change.** Rules that were refused now run: a built-in
+  variable bound only by a built-in (`swrlb:add(?z, ?x, 1)` → `?z` in the
+  head), any §8 built-in beyond the comparisons, arithmetic, `stringConcat`,
+  `contains` and `matches`, `DataRangeAtom`s, and class-expression atoms when
+  a regime runs with them. A rule with built-ins runs as a `SELECT` plus
+  native evaluation, so its `rule_results[].sparql` shows the `SELECT` and the
+  built-ins as comments. Comparisons now compare literals by value across
+  types (`1 = 1.0`). `docs/standards.md` grades SWRL Full (was Partial).
+- **SWRL rules stored with a dataset always run with it.** `swrl:Imp` rules
+  in a dataset's `entailment`- and `model`-role graphs, and in the model
+  version it conforms to, re-run after every write to one of the dataset's
+  graphs.
+  - **Regime in `materialize` mode:** they reach one joint fixed point with
+    the regime in its graph.
+  - **No regime:** they run on their own into `urn:entailment:swrl:<dataset>`,
+    which `?entailment_dataset=` now adds to a query when the dataset has no
+    regime.
+
+  `GET /api/datasets/{id}/entailment` reports `inference_graph` and `rules`
+  (the graphs read, the count or why they cannot be read, the last run). The
+  seeded "Rules (SWRL)" demo dataset's rule had atoms without arguments and
+  could never run; it is now valid SWRL RDF.
+  `tests/fixtures/example-bridge/shapes-af.ttl` shows the first. In the RDF
+  report each result names the node expression as its `sh:sourceConstraint`
+  (SHACL-AF §7).
+- **GeoSPARQL 1.1 is graded Full for every conformance class but DGGS.** The
+  requirement matrix (`docs/conformance/geosparql.md`) has every requirement of
+  OGC 22-047r1 met outside the optional DGGS class; `docs/standards.md` grades
+  1.1 Full with that scope stated, and the comparison matrix follows. The
+  project's own grade, not an OGC certification.
+- **GeoSPARQL 1.0 is graded Full.** With the documented GML profile (R15, R17)
+  it meets every requirement of OGC 11-052r4 in the requirement matrix
+  (`docs/conformance/geosparql.md`); `docs/standards.md` and the comparison
+  matrix follow. The project's own grade, not an OGC certification.
+- **GeoSPARQL: geometry results follow their first operand's serialisation.**
+  `buffer`, `union`, `envelope`, `transform` and the other functions that
+  return a geometry used to return a `geo:wktLiteral` whatever the operand; they
+  now return a GML, GeoJSON or KML literal for a GML, GeoJSON or KML first
+  operand, in its CRS (a GML `srsName` kept as written), as GeoSPARQL 1.1
+  §10.9.1 says. GeoJSON and KML exist only in CRS84, so one transformed into
+  another CRS is still a WKT literal. `geof:aggUnion` returns the group's
+  serialisation when every value shares one.
+- **GeoSPARQL: Z survives GML and GeoJSON.** `srsDimension="3"` GML and GeoJSON
+  positions with an altitude were read in 2D; they now keep Z (a geometry
+  mixing 2D and 3D positions is still read in 2D). The geometry cache keeps Z
+  on GEOS 3.11 too. The map viewer still draws the 2D footprint.
+- **GeoSPARQL: GML is read strictly.** A multi-patch `gml:Surface` is now a
+  `MULTIPOLYGON` of its patches (its second patch used to become a hole of the
+  first). Arcs and other curved segments, solids, a `posList` whose numbers do
+  not divide into positions, a number that does not parse and a `Multi*`
+  member that does not read now make the literal unbound; they used to be read
+  as straight lines through the control points, or silently dropped. Text
+  outside the coordinate elements (`gml:name`) is no longer read as
+  coordinates.
+- **GeoSPARQL relation patterns match derived relations.** A query or update
+  that reads `?a geo:sfWithin ?b` (or any other of the 24 relations) used to
+  match asserted triples only; it now also matches pairs whose geometries are
+  related, and each pair once. Set `OTS_GEOSPARQL_QUERY_REWRITE=off` for the
+  old behaviour. A pattern with both sides unbound compares every pair of
+  geometries in scope.
+- **buildingSMART IDS 1.0 is graded Full** in `docs/standards.md`: all 334
+  cases of the buildingSMART IDS test corpus pass in CI with an empty
+  known-failures list — a development result, not a buildingSMART
+  certification (no comparison-matrix row).
+- **IDS import validates the document and checks the IDS projection.** An
+  IDS is checked against the IDS 1.0 XSD and the IDS audit rules (entity,
+  attribute and data-type names per schema, predefined types, value and
+  restriction types, lexical validity, satisfiable specifications) and
+  refused with every problem listed when it fails. The shapes are now
+  SHACL-SPARQL over the IDS projection, one constraint per requirement facet
+  with IDS facet semantics (exact classes, every matching property set and
+  property, transitive aggregation and nesting, classification parents,
+  material sets), plus a model-level shape for required specifications.
+  Shapes written over `props:` / `bot:` by earlier imports keep working as
+  they are; re-import the IDS and import the IFC again to check a model with
+  the new shapes.
+- **IDS export is lossless for imported specifications.** The importer
+  records each specification and a fingerprint of its shapes; the exporter
+  writes the recorded specification back while the shapes are unchanged
+  (import → export → import is a fixpoint), and reports an edited one
+  instead of exporting a stale source.
+- **IDS import compares values the way IDS does.** Values are typed by the
+  facet's IDS `dataType` (the IDS data-type table) or the restriction's
+  `base`: a double is equal within the IDS tolerance (`v ± (|v|·1e-6 +
+  1e-6)`), an integer by value, a boolean as `true`/`false`; `xs:pattern` is
+  anchored and translated from XSD regular expressions (several patterns are
+  alternatives); bounds are typed (a `0.` bound used to be invalid Turtle) and
+  carry no tolerance; a value invalid for its base is refused. A prohibited
+  facet is the negation of the required one instead of `sh:maxCount 0`, which
+  passed a matching value; applicability facets are conditions the node must
+  meet; a required specification fails when the model has no entity of an
+  applicable class; a prohibited specification uses all its applicability
+  facets and may not carry requirements; every `ifcVersion` listed is
+  targeted; entity patterns are expanded against the schema; a specification
+  without an entity is converted instead of skipped. The importer reads the
+  IFC2X3, IFC4 and IFC4X3_ADD2 schema tables now generated by
+  `scripts/gen_ifc_schema_tables.py` (`src/ifc/schema/`).
+- **ICDD import is complete for Part 1.** Folder documents import as asset
+  sub-folders (they were skipped), secured documents' checksums are verified
+  (`checksum_status`), encrypted documents are kept as flagged opaque files,
+  `ct:filename` sub-folders are kept as asset folders, ISO's own ontology files
+  are recognised instead of loaded as model graphs, and each document's name,
+  versions, alternatives, `requested` flag and parties are reported (the
+  container's parties and version too). An index with several container
+  descriptions is refused; a root `index.*` other than `Index.rdf` still
+  imports but is reported. Anonymous imports answer 401 (they were a 500), and
+  the import accepts archives up to `OTS_MAX_UPLOAD_MB` (512 MB) instead of the
+  8 MB default.
+- **ICDD export passes its own validator.** Documents carry `ct:name` and
+  `ct:belongsToContainer`, parties are `ct:Person` / `ct:Organisation` with a
+  real IRI (not the abstract `ct:Party` named by its own name), filenames are
+  relative to `Payload documents/` with asset folders kept and clashes renamed
+  (two assets of one name in different folders made a duplicate ZIP entry and a
+  500), linksets are RDF/XML, data graphs are RDF documents under
+  `Payload documents/`, the folders are explicit entries, the index imports the
+  Container ontology, and the download is `<dataset>.icdd`. The README.txt that
+  stood in for the ontology files is gone. Documents an earlier import brought
+  in keep their index IRIs, kinds, names, versions, alternatives and parties, so
+  linksets still resolve after a round trip. The `X-Container-Conforms`,
+  `X-Container-Validation` and `X-Container-Findings` headers report the
+  export's validation.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -699,13 +1525,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
-- **An RML file mapping with `rr:parentTriplesMap` is refused.** The upload
-  path (CSV, JSON, XML) has no join resolver, so a referencing object map
-  resolved to nothing: the run wrote the rest of the mapping, dropped every link
-  it asked for, and reported success. It now answers `400` naming the triples
-  map, as it already did for a mapping that reads a registered datasource.
-  Joins run on registered datasources (`docs/sources.md`). Tests:
+- **RML joins run on file sources.** The upload path (CSV, JSON, XML) had no
+  join resolver, so a referencing object map resolved to nothing: the run
+  wrote the rest of the mapping, dropped every link it asked for, and reported
+  success. Now the parent's rows are indexed by the parent side of the join —
+  the same index the relational executor uses, bounded by
+  `OTS_SOURCES_JOIN_MAX_ROWS` — and each child row links to every parent row
+  whose values equal its own on every join condition, across files and
+  formats. A key with a NULL in it matches nothing. Tests:
   `src/rml/executor.rs`, `tests/rml_conformance.rs`.
+- **A join-less referencing object map joins each row to itself.** Without a
+  `rr:joinCondition` (legal only when both triples maps read the same logical
+  source), R2RML §8's joint query is the child query itself: the object is the
+  parent's subject for the same row. The relational executor and the dry-run
+  sampler made it a cross join, linking every child row to every parent row's
+  subject. This applies to every mapping version, legacy-stamped ones
+  included: the old output was wrong data, not different names. Two maps over
+  the same file now count as the same logical source only when their iterator
+  and reference formulation match too.
+- **The W3C R2RML test cases run in CI.** `tests/w3c_r2rml_conformance.rs`
+  runs the RDB2RDF Working Group's R2RML cases on SQLite in the conformance job
+  and on PostgreSQL 16 and MySQL 8.4 in the live-database job, comparing each
+  output dataset by isomorphism and holding a per-database known-failure list
+  as a two-way ratchet. The cases are fetched at a pinned commit and checked by
+  sha256 (`scripts/fetch-w3c-r2rml-tests.sh`), not vendored, and no score is
+  published (W3C test-suite policy). `rml::sql::execute_relational_as_mapped`
+  runs a relational mapping into the graphs its graph maps name — the output
+  dataset R2RML defines — where a registered mapping's run still writes
+  everything into its run graph.
 - **`docker-compose.override.yml` no longer ships.** It was one machine's
   workaround for an unstable build host (thin LTO, two build jobs), and Compose
   merges the file automatically, so every `docker compose build` got the slow,
@@ -720,8 +1567,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regime that materialises only the TBox closure. OWL 2 EL: an unsound CR3 rule.
   OWL 2 RL: `dt-type1` and `dt-not-type` are implemented (the docs and README
   said they were not), and unscoped runs miss joins over two derived premises.
-  SHACL Core: literal canonicalisation, including derived integer datatypes
-  stored as `xsd:integer`. SHACL Advanced: the gaps that remain. GeoSPARQL: the
+  SHACL Advanced: the gaps that remain. GeoSPARQL: the
   functions that answer wrongly today. The RDF Patch and LDES rows are reworded:
   RDF Patch lacks multiple transaction blocks (there are no nested ones), and
   `ldes:versionKey` is not part of LDES 1.0. The in-app capabilities graph (the
@@ -837,7 +1683,87 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   geographic CRS, planar on a projected one. No unit, or `uom:unity`, still
   means the CRS's own units.
 
+### Deprecated
+- **The SHACL-C dialect of 0.7 and earlier** is parsed only when a request passes
+  `?dialect=legacy`, logs a deprecation warning each time, and is accepted for
+  one more release only; `?lenient=true` now applies to it alone. The migration
+  table is in `docs/shacl.md` ("Migrating from the legacy dialect").
+
 ### Fixed
+- **Triple terms and base direction no longer get lost.** The canonical and
+  Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
+  inside `<<( … )>>` is relabelled or skolemized with the same label as the
+  node outside it (it kept its input label before, breaking co-reference), and
+  two different triple terms no longer hash alike. Model version diffs render
+  terms in N-Triples form (escaped literals, `"x"@ar--rtl`, `<<( s p o )>>`;
+  every triple term rendered as `<< >>` before, so different ones compared
+  equal), the commit log keeps a triple-term value instead of an empty
+  string, and the browse endpoints' JSON carries a literal's `"its:dir"`, also
+  inside triple terms. Because diffs now escape quotes and newlines, the
+  draft revision token (`ETag`) of a version holding such a literal changes
+  once.
+- **The full-text index follows every write.** It used to be kept in step only
+  by SPARQL Update, Graph Store writes, imports, version restores and seeds, so
+  literals written through LDP, RDF Patch, RML runs, SHACL rule output,
+  entailment materialisation, replication, LDES sync or repair stayed
+  unsearchable until an unrelated write forced a rebuild. Every mutating store
+  operation now records what it is about to change in the store's search
+  journal, and the index catches up on it before it answers a text query —
+  touched graphs re-indexed, touched quads reconciled; only an unbounded write
+  rebuilds the whole index. A timed-out SPARQL Update or Graph Store write no
+  longer leaves the index stale either. Default-graph literals are refreshed
+  under the same key the full rebuild gives them.
+- **A dataset's governance metadata graph failed to load with an
+  `adms_status` code.** `urn:system:metadata:dataset:{id}` was hand-written
+  Turtle: a status given as a code (`completed`) became a relative IRI, the
+  document failed to parse, and the graph was silently not written. It is now
+  built as RDF terms (the code becomes its EU dataset-status IRI) and also
+  carries access rights, temporal coverage and update frequency.
+- **Dataset version IRIs in the catalogue did not match the version
+  registry's.** The catalogue percent-encoded the version label
+  (`…/version/1%2E0%2E0`); the registry, the version routes and the model
+  conformance links use `…/version/1.0.0`.
+- **Signing out revokes the session's refresh token.** The web UI sent `{}` as
+  the logout body, and the server read a body without `refresh_token` as "no
+  token" instead of falling back to the cookie, so the refresh token of an SSO
+  or password session stayed valid after sign-out. The UI now sends the token
+  it holds, and the server falls back to the cookie.
+- **AI assistant calls time out.** NL→SPARQL (`/api/llm/sparql`), the SHACL
+  assistant, saved-query repair, SQL-source review suggestions and
+  `/api/llm/feedback` had only a connect
+  timeout, so a gateway that accepted the connection and stalled held the
+  request indefinitely. They now share the chat's per-completion budget
+  (`LLM_TIMEOUT_SECONDS`, default 120).
+- **Spark's `vocab_term_search` tool says when it cannot search.** Without the
+  vocabulary term index it answered that no installed vocabulary defines the
+  term; it now says the search is not available, as `text_search` does.
+- **The service registry's refusals are logged.** A 401 or 500 from the
+  registry (`LD_DISCOVERY`) passed as a successful registration. The first
+  rejection, and each change of status, is now a warning that names the status
+  (and `LD_REGISTRY_TOKEN` for a 401 or 403).
+- **Docs.** `docs/spark.md` no longer says both that tool rounds are not
+  streamed and that every reply streams token by token: the answer streams on
+  the directive protocol and arrives per round with native tools. Two broken
+  `sources.md#secret-references` links now point at the section on secret
+  references.
+- **`/admin/docs` is admin-only in the UI too.** The docs editor had no guard;
+  like the other `/admin/*` pages it now sends anyone but an admin home before
+  loading anything (the write endpoints were already admin-only).
+- **Translated HTML is escaped and sanitized.** Translations with inline
+  markup were rendered with `{@html}`, most without a sanitizer, and dataset,
+  organisation and shape-graph names were spliced into them as HTML. Values
+  are now escaped and the result keeps only inline formatting tags.
+- **Turning on "Gate writes" asks for confirmation.** The pipeline editor's
+  check ran on the wrong transition (it asked when switching the gate *off*,
+  and could not undo either way).
+- **Untranslated Dutch strings** in the dataset viewer and the release titles.
+- **LDP `DELETE` removes the member from its container.** A container created
+  by POSTing to `/ldp/c` (no trailing slash) is `…/ldp/c`, but `DELETE` looked
+  for the parent at `…/ldp/c/`, so the `ldp:contains` triple survived and the
+  container kept listing the member. The parent is now the container that
+  lists the member. Found by the new e2e
+  check that drives the `/ldp` routes.
+
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
@@ -1036,14 +1962,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (a blank node such as `[ sh:path ex:p ]`) is evaluated as one (see
     *SHACL-AF node expressions* under Added). It wrote the shapes graph's own
     blank node into the data graph.
-  - The dataset `PUT /api/datasets/{id}/shapes` and SHACL Studio create and
-    `PUT …/turtle` refuse (422) an activation flag (`sh:uniqueLang`,
-    `sh:closed`, `sh:deactivated`, `sh:qualifiedValueShapesDisjoint`,
-    `sh:optional`) written as `"1"`/`"0"^^xsd:boolean`: storage reads it back as
-    `true`/`false`, which SHACL does not mean. The derived-datatype deviation
-    (`"5"^^xsd:nonNegativeInteger` reads back as `xsd:integer`, so
-    `sh:datatype xsd:nonNegativeInteger` rejects it) is now documented in
-    `docs/shacl.md` and pinned by tests; it is not fixed.
   - The IDS export reports a second `sh:pattern` or `sh:hasValue` and
     deactivated shapes as losses instead of exporting them with another meaning.
 - **SHACL-SPARQL constraints check blank nodes and follow the spec's result
@@ -1151,6 +2069,57 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/api/datasets/{id}/services/{service}/sparql` (docs/embedding.md), and an
   IFC file is uploaded through `POST /api/import/bulk`
   (docs/geo-3d-platform.md).
+- **R2RML natural lexical forms and language tags.** An SQL timestamp read
+  as `xsd:dateTime` kept the space between date and time
+  (`"2009-10-10 12:12:22"`, which is not an `xsd:dateTime`), and an SQL
+  boolean stored as `0` / `1` stayed so; both now take their natural RDF
+  lexical form (`2009-10-10T12:12:22`, `false`, R2RML §10.2), in literals and
+  in templates. `rr:language` now refuses a well-formed tag whose primary
+  language subtag cannot name a language (`english`: BCP 47 has no
+  registered subtags of four to eight letters). An `rr:sqlQuery` /
+  `rml:query` that ends in `;` no longer fails when it is wrapped as a
+  subquery (a join, a column check, the PostgreSQL cursor), and the
+  PostgreSQL connector reads a `CHAR(n)` value with its padding, as the
+  server holds it, where the cast to text stripped it. Found by the W3C R2RML
+  test cases (R2RMLTC0016c, R2RMLTC0015b, R2RMLTC0011a, R2RMLTC0015a,
+  R2RMLTC0018a).
+- **"Delete version" on a model page works.** The button has called
+  `DELETE /api/models/:id/versions/:ver` since 0.1.0, a route that did not
+  exist, so it always failed with `405`. The route now exists: admins, and
+  publishers who may write the entry, delete one version, its graphs and its
+  registry record in one transaction (a graph another version record also
+  names is kept), recorded on the entry's commit log and in the audit log. A
+  published version answers `409` unless `?force=true`; while datasets depend
+  on the version (pinned to it, floating on it as the latest published one, or
+  holding a dataset version that is not deprecated and conformed to it) it
+  answers `409` whatever `force` says, listing the datasets the caller may read
+  and counting the others. The model page shows those reasons and offers
+  "Delete anyway" only when force would succeed.
+- **Serving under a path prefix.** The web UI built with `OTS_BASE_PATH=/ots/`
+  (or `docker build --build-arg OTS_BASE_PATH=/ots/`) now works below that
+  prefix, behind a reverse proxy that strips it. Before, only the bundler knew
+  the prefix: the router matched the raw `/ots/…` path against its routes and
+  showed an empty page, and links, `config.json`, the API calls and the
+  `/embed/*` detection all went to the host root. The router now matches the
+  path below the prefix, and links, history entries, fetches, downloads, copied
+  endpoint URLs and embed snippets carry it. The server scopes its session and
+  OIDC-state cookies below the proxy's `X-Forwarded-Prefix`, so refresh and
+  single sign-on keep working. The 303 from an IRI to its page in the UI uses a
+  relative `Location`, and a 3D Tiles tileset refers to its content relative to
+  `tileset.json`. A prefix that starts with one of the app's own paths (`/api`,
+  `/sparql`, …) fails the build. nginx and Traefik configuration in
+  [docs/operations.md](docs/operations.md#serving-under-a-path-prefix); a root
+  deployment is unchanged. A Playwright smoke test (`npm run e2e:subpath`)
+  builds the UI under `/ots/` and loads deep links.
+- **SHACL enforces every value of `sh:not`, `sh:and`, `sh:or` and `sh:xone`.**
+  SHACL Core (§4.6.1–4.6.4) lets a shape carry several values of each of these
+  parameters, each a separate constraint. The shape loader read only one
+  `sh:not` value and followed only one list per `sh:and`/`sh:or`/`sh:xone`, so
+  a shape such as `ex:S sh:not [ sh:class ex:A ] ; sh:not [ sh:class ex:B ]`
+  silently enforced one of the two and let data breaking the other validate
+  as conforming. Each value now loads as its own constraint. Shapes graphs
+  that split these constraints over several shapes as a workaround keep
+  working unchanged.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
@@ -1263,8 +2232,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the reasoner examples passed a string to `TripleStore::open`, which takes a
     `Path`. The OWL 2 DL docs said keys of more than two properties produce no
     `owl:sameAs`; the RL phase merges keys of any length.
-  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
-    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
   - `docs/dcat.md` said VoID statistics are computed per request and never
     cached; they are cached until the next write.
   - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers
@@ -1339,7 +2306,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Checked against Konclude v0.7.0-1138. Data values entailed through
   `owl:hasValue` are not reported by Konclude and not materialised.
 
+- **Konclude: wrong answers for `owl:datatypeComplementOf`.** Konclude
+  v0.7.0-1138 says "consistent" for some inconsistent data complements, for
+  example `∃p.(xsd:integer ⊓ ¬xsd:integer)`, `∃p.¬rdfs:Literal`, or a range
+  `¬xsd:integer` with the value `1`. The bridge now writes `¬rdfs:Literal` as
+  the empty data range, so the entailment check for a `rdfs:Literal` range no
+  longer answers "not entailed". When the input still contains a data
+  complement after that, a check answers `unknown` instead of consistent, not
+  entailed or satisfiable. A materialisation reports `complete: false` with a
+  warning. Answers that rest on a clash (inconsistent, entailed,
+  unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
+
 ### Security
+- **A signed-in caller's DCAT catalogue was marked `Cache-Control: public`.**
+  `/.well-known/void` and `/{org}/.well-known/void` are scoped to the caller
+  (their datasets, their readable graphs' statistics), but every response said
+  `public, max-age=60` with `Vary: Accept` only, which lets a shared cache
+  store a response to a request with credentials and serve it to others. A
+  signed-in caller's copy is now `private`, and the responses vary on
+  `Authorization` and `Cookie` too.
+- **SAML responses are checked more strictly.** Signatures must use RSA or
+  ECDSA with SHA-256, -384 or -512 (samael accepted any algorithm, SHA-1
+  included, when none was configured); a message with a DOCTYPE or larger than
+  1 MiB is refused before libxml parses it; a provider without an IdP signing
+  certificate never starts a sign-in (samael skips verification without one);
+  a refused response gets a generic error, with the reason in the audit log
+  only; request IDs carry 128 random bits. RSA PKCS#1 v1.5 key transport in
+  encrypted assertions is refused.
+- **Property states of a private graph stay private.** A state written with
+  `graph` naming a private dataset graph mirrored its value into the states
+  graph, which every viewer of the dataset could read through
+  `…/properties/history` and `…/as-of`. Each state now records its data graph
+  (`ots:dataGraph`), and every property-state read and the export leave out
+  states whose graph the caller may not read.
+- **Spark's streaming endpoint no longer sends internal error text.** On
+  `POST /api/llm/chat/stream` a server fault reached the browser verbatim in
+  the `error` event and in a failed query's result; it is now "Internal server
+  error", with the detail in the server log, as on the JSON endpoints.
+- **Backup manifests cannot point outside their backup.** `verify` and the S3
+  upload joined the manifest's file names onto the backup directory without
+  the check restore makes, so an edited manifest with an absolute or `..` path
+  could have the server hash, or upload to S3, any file it can read. All three
+  now refuse such a manifest.
 - **Audit rows and the guest AI budget record the real client IP.** Both took
   the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
   never saw the TCP peer address, so a login failure, a permission denial or an

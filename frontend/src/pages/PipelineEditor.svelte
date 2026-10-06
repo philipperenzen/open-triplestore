@@ -1,4 +1,5 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
   // Validation pipeline editor (create + edit).
   //
   // The schedule is built via a friendly preset picker (Manual / Hourly /
@@ -466,18 +467,30 @@
   }
 
   async function doDelete() {
-    if (isNew || !confirm($i18nT('pages.pipelineEditor.confirmDelete', { values: { name } }))) return;
+    if (isNew) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.pipelineEditor.confirmDelete', { values: { name } }),
+      confirmLabel: $i18nT('system.delete'),
+    });
+    if (!ok) return;
     try {
       await deletePipeline(id);
       navigate('/shacl/pipelines');
     } catch (e) { toastError(e.message); }
   }
 
-  function gateConfirm() {
-    if (gateWrites) return; // turning OFF needs no confirmation
-    if (!confirm($i18nT('pages.pipelineEditor.confirmGateWrites'))) {
-      return;
-    }
+  // on:change runs after bind:checked, so `gateWrites` already holds the new
+  // value: confirm when it was just switched ON, and switch it back on "no".
+  async function gateConfirm() {
+    if (!gateWrites) return; // turning OFF needs no confirmation
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.pipelineEditor.confirmGateWrites'),
+      confirmLabel: $i18nT('system.confirm'),
+      variant: 'warning',
+    });
+    if (!ok) gateWrites = false;
   }
 </script>
 

@@ -1,7 +1,8 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
+  import { askConfirm } from '../lib/confirm';
   import { onMount } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { getShapeGraph, updateShapeGraph, listShapeGraphRevisions, getShapeGraphRevision, restoreShapeGraphRevision,
     validateShapeGraph, stageShapeGraph, publishShapeGraph, deprecateShapeGraph, listBindingsForShapeGraph,
     getShapeGraphTurtle, listDatasets } from '../lib/api.js';
@@ -108,6 +109,7 @@
 
   async function loadHistory() {
     showHistory = true;
+    preview = null;
     revLoading = true;
     try {
       revisions = await listShapeGraphRevisions(id);
@@ -118,21 +120,28 @@
     }
   }
 
+  // The revision's Turtle, shown inside the history dialog (it used to open as
+  // raw text in a blank browser window).
+  let preview = null; // { rev, turtle } | null
+  let previewLoading = null; // the revision being fetched
   async function previewRevision(rev) {
+    if (preview?.rev === rev) { preview = null; return; }
+    previewLoading = rev;
     try {
       const r = await getShapeGraphRevision(id, rev);
-      // Show in a simple alert window — Phase 4 brings a proper diff viewer.
-      const win = window.open('', '_blank');
-      if (win) {
-        win.document.title = $i18nT('pages.shapeGraphEditor.revisionTitle', { values: { rev } });
-        win.document.body.style.font = '0.85rem monospace';
-        win.document.body.textContent = r.turtle || '';
-      }
+      preview = { rev, turtle: r.turtle || '' };
     } catch (e) { toastError(e.message); }
+    finally { previewLoading = null; }
   }
 
   async function restoreRevision(rev) {
-    if (!confirm($i18nT('pages.shapeGraphEditor.confirmRestore', { values: { rev } }))) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.shapeGraphEditor.confirmRestore', { values: { rev } }),
+      confirmLabel: $i18nT('system.restore'),
+      variant: 'warning',
+    });
+    if (!ok) return;
     try {
       const res = await restoreShapeGraphRevision(id, rev);
       toastSuccess($i18nT('pages.shapeGraphEditor.toastRestored', { values: { version: res.version } }));
@@ -346,8 +355,8 @@
           <button class="icon-btn" on:click={() => (showAddShapes = false)}><X size={14} /></button>
         </header>
         <div class="modal-body">
-          <!-- eslint-disable-next-line svelte/no-at-html-tags -- DOMPurify-sanitized -->
-          <p class="add-hint">{@html sanitizeHtml($i18nT('pages.shapeGraphEditor.addShapesHint', { values: { name: `<strong>${set.name}</strong>` } }))}</p>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+          <p class="add-hint">{@html $tHtml('pages.shapeGraphEditor.addShapesHint', { values: { name: set.name } })}</p>
           <ShapesCatalog picker targetGraphId={id} excludeGraphIri={set.graph_iri} on:imported={onShapesImported} />
         </div>
       </div>
@@ -393,7 +402,7 @@
 
   {#if showHistory}
     <div class="modal-backdrop" on:click={() => (showHistory = false)} role="presentation">
-      <div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+      <div class="modal" class:modal-wide={preview} on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
         <header class="modal-head">
           <h3><History size={14} /> {$i18nT('pages.shapeGraphEditor.revisionHistoryHeading')}</h3>
           <button class="icon-btn" on:click={() => (showHistory = false)}><X size={14} /></button>
@@ -410,13 +419,25 @@
                   <span class="rev-num">v{r.revision}</span>
                   <span class="rev-note">{r.note || $i18nT('pages.shapeGraphEditor.noNote')}</span>
                   <span class="rev-time">{relativeTime(r.created_at)}</span>
-                  <button class="btn btn-xs btn-ghost" on:click={() => previewRevision(r.revision)}>{$i18nT('pages.shapeGraphEditor.previewButton')}</button>
+                  <button class="btn btn-xs btn-ghost" class:active={preview?.rev === r.revision} aria-pressed={preview?.rev === r.revision} on:click={() => previewRevision(r.revision)}>
+                    {#if previewLoading === r.revision}<Loader2 size={11} class="spin" />{/if}
+                    {$i18nT('pages.shapeGraphEditor.previewButton')}
+                  </button>
                   {#if r.revision !== set.version}
                     <button class="btn btn-xs btn-ghost" on:click={() => restoreRevision(r.revision)}><RotateCcw size={11} /> {$i18nT('pages.shapeGraphEditor.restoreButton')}</button>
                   {/if}
                 </li>
               {/each}
             </ul>
+            {#if preview}
+              <section class="rev-preview" aria-label={$i18nT('pages.shapeGraphEditor.revisionTitle', { values: { rev: preview.rev } })}>
+                <header class="rev-preview-head">
+                  <strong>{$i18nT('pages.shapeGraphEditor.revisionTitle', { values: { rev: preview.rev } })}</strong>
+                  <button class="icon-btn" title={$i18nT('system.close')} aria-label={$i18nT('system.close')} on:click={() => (preview = null)}><X size={13} /></button>
+                </header>
+                <pre class="rev-turtle">{preview.turtle}</pre>
+              </section>
+            {/if}
           {/if}
         </div>
       </div>
@@ -500,6 +521,10 @@
   .rev-note { flex: 1; font-size: 0.85rem; color: #334155; }
   .rev-time { font-size: 0.75rem; color: #94a3b8; }
   .btn-xs { font-size: 0.72rem; padding: 0.2rem 0.5rem; }
+  .btn-xs.active { background: #e0f2f1; }
+  .rev-preview { margin-top: 0.75rem; border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; }
+  .rev-preview-head { display: flex; align-items: center; justify-content: space-between; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line-soft); font-size: 0.85rem; }
+  .rev-turtle { margin: 0; padding: 0.6rem; max-height: 50vh; overflow: auto; font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; line-height: 1.45; white-space: pre; }
   .dim { color: #94a3b8; }
 
   /* Phone. Every `.btn` is full width below this breakpoint, which turned the
@@ -522,6 +547,7 @@
   :global(:is([data-theme="dark"], .dark)) .error { color: #fca5a5; background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark) .editor-page .back) { color: var(--brand-700); }
   :global(:is([data-theme="dark"], .dark)) .chip { background: rgba(255,255,255,0.06); color: var(--ink-400); }
+  :global(:is([data-theme="dark"], .dark)) .btn-xs.active { background: rgba(255,255,255,0.08); }
   :global(:is([data-theme="dark"], .dark)) .chip-target { background: var(--brand-100); color: var(--brand-700); }
   :global(:is([data-theme="dark"], .dark)) .impact { color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark)) .meta-quiet { color: var(--ink-500); }

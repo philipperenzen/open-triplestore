@@ -10,8 +10,12 @@
 //! `dash:` and `schema:` themselves are vocabulary only and are not loaded.
 //! The three test kinds and what is compared:
 //!
-//!   * `dash:GraphValidationTestCase` — `sh:conforms` and the multiset of
-//!     focus nodes, at the same level as `tests/w3c_shacl_conformance.rs`;
+//!   * `dash:GraphValidationTestCase` — `sh:conforms` and the full multiset
+//!     of results, at the same level as `tests/w3c_shacl_conformance.rs`
+//!     (`tests/common/shacl_report.rs`): every result property but
+//!     `sh:resultMessage`, our side being the RDF report the engine writes.
+//!     The expected report is the `dash:expectedResult` node of the test case,
+//!     in the file's own graph; blank nodes of the data are wildcards;
 //!   * `dash:InferencingTestCase` — the set of inferred triples, i.e. what
 //!     `infer_into` writes to a separate graph minus what the file asserts,
 //!     against the `dash:expectedResult` statements;
@@ -23,29 +27,48 @@
 //!
 //! Gap policy (two-way ratchet): every case NOT in `KNOWN_FAILURES` must pass,
 //! and every listed case must still fail.
+//!
+//! `NON_SPEC_EXPECTATIONS` is a third category, for cases whose expected
+//! outcome rests on TopBraid behaviour the specification does not have, where
+//! the specification requires a failure: such a case passes when validation
+//! fails with that failure, and fails if it ever produces a report.
 
-use open_triplestore::shacl::report::ValidationReport;
+#[path = "common/shacl_report.rs"]
+mod shacl_report;
+
 use open_triplestore::shacl::{infer_into, validate};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::model::Term;
 use oxigraph::sparql::QueryResults;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const FIXTURES: &str = "tests/fixtures/shacl-af-topquadrant";
 const GRAPH: &str = "urn:af:test";
 const INFERRED: &str = "urn:af:inferred";
+const REPORT: &str = "urn:af:report";
 const DASH: &str = "http://datashapes.org/dash#";
 
 /// Cases that currently fail, with the gap they sit behind. Keep sorted.
 /// Removing an entry requires the case to pass (the ratchet asserts both
 /// directions). Keys are paths within the fixture directory.
 ///
-/// Empirical baseline: 9 pass / 1 known-fail / 0 aux skips
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("target/sparqlTarget-001.test.ttl", "the target's query uses the owl: prefix, which its sh:prefixes ontology does not declare; TopBraid falls back to the file's Turtle prefixes, which the SHACL prefix mechanism (SHACL §5.2.1) does not include, so the shapes graph fails to load here"),
-];
+/// Empirical baseline: 9 pass / 0 known-fail / 0 aux skips / 1 non-spec expectation
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
+
+/// Cases that expect TopBraid behaviour the specification does not have and
+/// where it requires a failure, which this processor reports. Each entry names
+/// the error text the failure must carry. These pass when validation fails with
+/// that error, and fail on a report.
+const NON_SPEC_EXPECTATIONS: &[(&str, &str, &str)] = &[(
+    "target/sparqlTarget-001.test.ttl",
+    "Prefix not found",
+    "the target's sh:select uses the owl: prefix, which the ontology its sh:prefixes names \
+     does not declare; TopBraid falls back to the Turtle prefixes of the file it loaded, the \
+     SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets) does not, and a \
+     query that does not parse with the declared prefixes makes the shapes graph ill-formed",
+)];
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
@@ -118,29 +141,8 @@ fn test_case_of(store: &TripleStore, kind: &str) -> bool {
     )
 }
 
-/// Literal and IRI focus nodes by lexical form, blank nodes by count.
-fn focus_key(term: &Term) -> String {
-    match term {
-        Term::NamedNode(nn) => nn.as_str().to_string(),
-        Term::Literal(l) => l.value().to_string(),
-        _ => "_:".to_string(),
-    }
-}
-
-fn actual_focus(report: &ValidationReport) -> BTreeMap<String, usize> {
-    let mut out = BTreeMap::new();
-    for r in &report.results {
-        let key = if r.focus_node.starts_with("_:") {
-            "_:".to_string()
-        } else {
-            r.focus_node.clone()
-        };
-        *out.entry(key).or_insert(0) += 1;
-    }
-    out
-}
-
-fn run_validation(store: &TripleStore) -> Outcome {
+/// The expected `sh:conforms` of a `dash:GraphValidationTestCase`.
+fn expected_conforms(store: &TripleStore) -> Option<bool> {
     let expected = select(
         store,
         &format!(
@@ -148,25 +150,16 @@ fn run_validation(store: &TripleStore) -> Outcome {
              <{DASH}expectedResult> ?r . ?r <http://www.w3.org/ns/shacl#conforms> ?c }} }}"
         ),
     );
-    let Some(want_conforms) = expected.first().and_then(|s| match s.get("c") {
+    expected.first().and_then(|s| match s.get("c") {
         Some(Term::Literal(l)) => Some(l.value() == "true"),
         _ => None,
-    }) else {
+    })
+}
+
+fn run_validation(store: &TripleStore) -> Outcome {
+    let Some(want_conforms) = expected_conforms(store) else {
         return Outcome::Skip("no expected sh:conforms".into());
     };
-    let mut want_focus: BTreeMap<String, usize> = BTreeMap::new();
-    for sol in select(
-        store,
-        &format!(
-            "SELECT ?f WHERE {{ GRAPH <{GRAPH}> {{ ?t a <{DASH}GraphValidationTestCase> ; \
-             <{DASH}expectedResult> ?r . ?r <http://www.w3.org/ns/shacl#result> ?res . \
-             ?res <http://www.w3.org/ns/shacl#focusNode> ?f }} }}"
-        ),
-    ) {
-        if let Some(f) = sol.get("f") {
-            *want_focus.entry(focus_key(f)).or_insert(0) += 1;
-        }
-    }
     let report = match validate(store, GRAPH, &[GRAPH.to_string()]) {
         Ok(r) => r,
         Err(e) => return Outcome::Fail(format!("validate error: {e}")),
@@ -177,11 +170,30 @@ fn run_validation(store: &TripleStore) -> Outcome {
             report.conforms, report.results
         ));
     }
-    let got = actual_focus(&report);
-    if got != want_focus {
-        return Outcome::Fail(format!("focus nodes: want {want_focus:?}, got {got:?}"));
+    match shacl_report::compare_results(
+        store,
+        &report,
+        GRAPH,
+        "?t a dash:GraphValidationTestCase ; dash:expectedResult ?r . ?r sh:result ?res",
+        REPORT,
+    ) {
+        Ok(()) => Outcome::Pass,
+        Err(diff) => Outcome::Fail(diff),
     }
-    Outcome::Pass
+}
+
+/// A `NON_SPEC_EXPECTATIONS` case: validation must fail, naming `needle`.
+fn check_non_spec(store: &TripleStore, needle: &str) -> Outcome {
+    match validate(store, GRAPH, &[GRAPH.to_string()]) {
+        Err(e) if e.contains(needle) => Outcome::Pass,
+        Err(e) => Outcome::Fail(format!(
+            "expected the failure naming {needle} the spec requires, got another error: {e}"
+        )),
+        Ok(r) => Outcome::Fail(format!(
+            "expected the failure naming {needle} the spec requires, got a report with conforms={}",
+            r.conforms
+        )),
+    }
 }
 
 fn run_inferencing(store: &TripleStore) -> Outcome {
@@ -285,13 +297,16 @@ fn run_functions(store: &TripleStore, path: &Path) -> Outcome {
     Outcome::Pass
 }
 
-fn run_one(path: &Path) -> Outcome {
+fn run_one(path: &Path, non_spec: Option<&str>) -> Outcome {
     let store = match TripleStore::in_memory() {
         Ok(s) => s,
         Err(e) => return Outcome::Skip(format!("store: {e}")),
     };
     if let Err(e) = load_case(&store, path) {
         return Outcome::Skip(e);
+    }
+    if let Some(needle) = non_spec {
+        return check_non_spec(&store, needle);
     }
     if test_case_of(&store, "GraphValidationTestCase") {
         run_validation(&store)
@@ -313,21 +328,32 @@ fn topquadrant_shacl_af_suite() {
     assert!(!files.is_empty(), "vendored corpus present");
 
     let mut pass = 0usize;
+    let mut non_spec = 0usize;
     let mut skip = Vec::new();
     let mut unexpected_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
     let mut seen_known = 0usize;
+    let mut seen_non_spec = 0usize;
     for path in &files {
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        if let Some((_, needle, _)) = NON_SPEC_EXPECTATIONS.iter().find(|(k, ..)| *k == rel) {
+            seen_non_spec += 1;
+            match run_one(path, Some(needle)) {
+                Outcome::Pass => non_spec += 1,
+                Outcome::Fail(reason) => unexpected_failures.push(format!("{rel}: {reason}")),
+                Outcome::Skip(reason) => skip.push(format!("{rel}: {reason}")),
+            }
+            continue;
+        }
         let known = KNOWN_FAILURES.iter().find(|(k, _)| *k == rel);
         if known.is_some() {
             seen_known += 1;
         }
-        match run_one(path) {
+        match run_one(path, None) {
             Outcome::Pass => {
                 pass += 1;
                 if let Some((k, why)) = known {
@@ -343,7 +369,8 @@ fn topquadrant_shacl_af_suite() {
         }
     }
     println!(
-        "TopQuadrant SHACL-AF: {pass} passed, {} known-fail, {} skipped, {} cases",
+        "TopQuadrant SHACL-AF: {pass} passed, {} known-fail, {non_spec} non-spec expectation(s) \
+         reported as the spec requires, {} skipped, {} cases",
         KNOWN_FAILURES.len(),
         skip.len(),
         files.len()
@@ -352,6 +379,11 @@ fn topquadrant_shacl_af_suite() {
         seen_known,
         KNOWN_FAILURES.len(),
         "every KNOWN_FAILURES key must name a vendored case (stale entries?)"
+    );
+    assert_eq!(
+        seen_non_spec,
+        NON_SPEC_EXPECTATIONS.len(),
+        "every NON_SPEC_EXPECTATIONS key must name a vendored case (stale entries?)"
     );
     assert!(
         unexpected_failures.is_empty(),

@@ -751,12 +751,7 @@ impl Truncation {
 
 /// Build the tileset JSON body. The region comes from bounding boxes; no
 /// triangles are built.
-fn build_tileset(
-    store: &crate::store::TripleStore,
-    dataset_id: &str,
-    data_graphs: &[String],
-    cap: usize,
-) -> Built {
+fn build_tileset(store: &crate::store::TripleStore, data_graphs: &[String], cap: usize) -> Built {
     // Whole-dataset tileset: no query bbox, so the broad phase is skipped and the
     // full scan runs (a future `?bbox=` param plugs straight in here).
     let extent = collect_extent(store, data_graphs, cap);
@@ -772,7 +767,10 @@ fn build_tileset(
         (span_m).max(1.0)
     };
 
-    let content_uri = format!("/api/datasets/{dataset_id}/3dtiles/content.glb");
+    // Relative to tileset.json (3D Tiles resolves content URIs against the
+    // tileset's own URL), so the reference survives a reverse proxy that serves
+    // the instance under a path prefix: `/ots/api/…/tileset.json` → `…/content.glb`.
+    let content_uri = "content.glb";
     let credits = dataset_credits(store, data_graphs);
 
     let tileset = serde_json::json!({
@@ -1011,10 +1009,7 @@ async fn tileset_json(
     let cap = max_features();
     let key = CacheKey::new(&state.store, Kind::Tileset, &dataset_id, &data_graphs, cap);
     let store = state.store.clone();
-    let built = cached_build(key, move || {
-        build_tileset(&store, &dataset_id, &data_graphs, cap)
-    })
-    .await?;
+    let built = cached_build(key, move || build_tileset(&store, &data_graphs, cap)).await?;
     Ok((
         [(header::CONTENT_TYPE, "application/json")],
         built.body.clone(),
@@ -1486,7 +1481,7 @@ mod tests {
         );
 
         let tileset: serde_json::Value =
-            serde_json::from_slice(&build_tileset(&store, "ds", &[], 2).body).unwrap();
+            serde_json::from_slice(&build_tileset(&store, &[], 2).body).unwrap();
         assert_eq!(
             tileset["asset"]["extras"]["truncated"],
             serde_json::json!({ "served": 2, "total": 3, "maxFeatures": 2 })
@@ -1509,7 +1504,7 @@ mod tests {
         // Under the cap nothing is flagged.
         assert!(build_glb(&store, &[], 3).truncated.is_none());
         let full: serde_json::Value =
-            serde_json::from_slice(&build_tileset(&store, "ds", &[], 3).body).unwrap();
+            serde_json::from_slice(&build_tileset(&store, &[], 3).body).unwrap();
         assert!(full["asset"].get("extras").is_none(), "{full}");
     }
 

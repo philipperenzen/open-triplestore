@@ -8,7 +8,7 @@
 //! Heavier probers are feature-gated and off by default:
 //!   * `asset-pdf`   — PDF page count via `lopdf`.
 //!   * `asset-exif`  — image GPS → a `POINT` geometry via `kamadak-exif`.
-//!   * `asset-media` — audio/video duration (placeholder; not yet wired).
+//!   * `asset-media` — audio/video duration (plus video dimensions and audio sample rate) via `mp4` and `symphonia`.
 
 use super::AssetKind;
 

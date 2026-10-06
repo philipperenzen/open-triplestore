@@ -33,8 +33,9 @@
 //! checked against and a digest of the triples as stored
 //! ([`registry::set_seed_check`]). A record calls the copy the file's triples,
 //! unchanged (and downloads say so), only when the seeder loaded it verbatim
-//! or found it equal to the file, compared in the store's canonical literal
-//! forms ([`content_digest::as_stored`]). An edit through the API (a PATCH,
+//! or found it equal to the file ([`content_digest::compare_copy`]; a copy an
+//! earlier version stored with typed literals in a canonical form is restored
+//! to the file's triples). An edit through the API (a PATCH,
 //! version metadata stamped on publish) and a direct write into the graph (a
 //! SPARQL Update or a Graph Store Protocol request, see
 //! [`crate::data_models::write_guard`]) mark the record as possibly modified.
@@ -534,6 +535,40 @@ const VOCABS: &[StdVocab] = &[
                 file: &vf::GEOSPARQL,
             },
         ],
+    },
+    // The geometry class hierarchies GeoSPARQL's RDFS Entailment Extension
+    // reasons over (Req 48/49 of 22-047r1; R26/R27 of 11-052r4). Datasets that
+    // use GeoSPARQL terms get both, with the ontology, as reasoning premises
+    // (`crate::geo::premises`).
+    StdVocab {
+        id: "sf",
+        title: "Simple Features Vocabulary",
+        namespace: "http://www.opengis.net/ont/sf#",
+        versions: &[StdVersion {
+            version: "1.1.1",
+            official_name: "OGC Simple Features Vocabulary 1.1.1 (2026)",
+            date: "2026-02-27",
+            spec_url: "https://docs.ogc.org/is/22-047r1/22-047r1.html",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::SF,
+        }],
+    },
+    StdVocab {
+        id: "gml-geometries",
+        title: "GML 3.2.1 geometry types",
+        namespace: "http://www.opengis.net/ont/gml#",
+        versions: &[StdVersion {
+            version: "1.0",
+            official_name: "GML 3.2.1 geometry types (Open Triplestore, 2026)",
+            date: "2026-10-03",
+            spec_url: "https://schemas.opengis.net/gml/3.2.1/",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::GML_GEOMETRIES,
+        }],
     },
     StdVocab {
         id: "ots",
@@ -1549,10 +1584,15 @@ fn loader_stamp(
 ///   marked it — no read of the graph (unless the record says modified and the
 ///   copy may be the next case);
 /// * the stored triples equal the file's: unchanged;
+/// * they are the file's triples as the store wrote them before it kept
+///   lexical forms, typed literals in a canonical form ([`content_digest::CopyForm::EarlierStore`];
+///   its record says so, so this is checked once even when the file has not
+///   changed): the file's triples replace them in one transaction, and the
+///   copy is the file again — unchanged;
 /// * they equal the file's plus the `owl:versionInfo` triple a loader before
-///   0.7 added ([`loader_stamp`]) and nothing else: that triple, which the
-///   server wrote and nobody asked for, is removed, and the copy is the file
-///   again — unchanged;
+///   0.7 added ([`loader_stamp`]) and nothing else (in either form): that
+///   triple, which the server wrote and nobody asked for, is removed, and the
+///   copy is the file again — unchanged;
 /// * they differ otherwise: the copy may hold an admin's edit. Nothing is
 ///   modified: it is kept exactly as stored, and its record says it differs
 ///   from the file or may have been modified. To take the current file
@@ -1575,8 +1615,13 @@ fn check_copy(
     let graph = registry::version_record_iri(&state.base_url, v.id, ver.version);
     let recorded_unchanged = recorded.as_ref().is_none_or(|a| a.unchanged);
     // Open Triplestore's own vocabulary has no record to hold the outcome.
+    // A record from before the store kept lexical forms that names literals
+    // the store rewrote describes a copy in the earlier form: check it once.
     let checked_before = p.seed_source_sha256.as_deref() == Some(file_sha.as_str())
-        && (recorded.is_some() || !ver.file.third_party);
+        && (recorded.is_some() || !ver.file.third_party)
+        && !recorded
+            .as_ref()
+            .is_some_and(|a| a.stored_copy.contains(vf::EARLIER_STORE_FORM_TEXT));
     if checked_before && recorded_unchanged {
         return Ok(Checked {
             unchanged: true,
@@ -1594,18 +1639,29 @@ fn check_copy(
         });
     }
     let stored = content_digest::graph_triples(&state.store, &graph)?;
-    if content_digest::same_triples(&stored, &file) {
-        let digest = content_digest::triples_digest(&stored);
-        registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
-        return Ok(Checked {
-            unchanged: true,
-            keep_text: None,
-            writes: 1,
-        });
+    match content_digest::compare_copy(&stored, &file) {
+        content_digest::CopyForm::Exact => {
+            let digest = content_digest::triples_digest(&stored);
+            registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
+            return Ok(Checked {
+                unchanged: true,
+                keep_text: None,
+                writes: 1,
+            });
+        }
+        content_digest::CopyForm::EarlierStore => {
+            return restore_earlier_store_form(state, v, ver, &graph, &file_sha, quads, &file);
+        }
+        content_digest::CopyForm::Differs => {}
     }
     if let Some(stamp) = stamp {
         let mut with_stamp = file.clone();
         with_stamp.extend(content_digest::as_stored(std::slice::from_ref(&stamp))?);
+        if content_digest::compare_copy(&stored, &with_stamp)
+            == content_digest::CopyForm::EarlierStore
+        {
+            return restore_earlier_store_form(state, v, ver, &graph, &file_sha, quads, &file);
+        }
         if content_digest::same_triples(&stored, &with_stamp) {
             state.store.update(&format!(
                 "DELETE DATA {{ GRAPH <{graph}> {{ {} {} {} }} }}",
@@ -1647,13 +1703,55 @@ fn check_copy(
     })
 }
 
+/// A copy holding the file's triples as the store wrote them before it kept
+/// lexical forms (typed literals in a canonical form, [`content_digest::CopyForm::EarlierStore`]),
+/// so nobody's edit: replace it with the file's triples in one transaction
+/// ([`restore_atomically`]), verify, and record the check.
+fn restore_earlier_store_form(
+    state: &AppState,
+    v: &StdVocab,
+    ver: &StdVersion,
+    graph: &str,
+    file_sha: &str,
+    quads: Vec<Quad>,
+    file: &[Triple],
+) -> anyhow::Result<Checked> {
+    restore_atomically(state, v, ver, graph, quads, file)?;
+    let now = content_digest::graph_triples(&state.store, graph)?;
+    if !content_digest::same_triples(&now, file) {
+        anyhow::bail!(
+            "{} {}: after the restore the graph does not hold the triples of vocab/{}",
+            v.id,
+            ver.version,
+            ver.file.path
+        );
+    }
+    let digest = content_digest::triples_digest(&now);
+    registry::set_seed_check(&state.store, graph, file_sha, Some(&digest))?;
+    state.mark_vocab_registry_dirty();
+    #[cfg(feature = "text-search")]
+    state.mark_text_dirty();
+    tracing::info!(
+        "vocabulary '{}' version '{}': the copy held the triples of vocab/{} in the canonical \
+         literal forms an earlier version of the store wrote; it now holds them exactly as in \
+         the file",
+        v.id,
+        ver.version,
+        ver.file.path
+    );
+    Ok(Checked {
+        unchanged: true,
+        keep_text: None,
+        writes: 2,
+    })
+}
+
 /// Check, on every start, a seeded copy whose licence allows no altered
 /// copies (IMBOR), and repair it without losing anything:
 ///
 /// * the stored graph still digests as recorded at the last check against
 ///   this very file, and its record says unchanged: nothing to do;
-/// * its triples equal the file's (in the store's canonical literal forms):
-///   the check is recorded;
+/// * its triples equal the file's: the check is recorded;
 /// * they differ (a write outside the registry, an earlier build's altered
 ///   file, an interrupted repair):
 ///   1. the record stops calling the copy unchanged, so from here on it is
@@ -2620,7 +2718,8 @@ mod tests {
                     &version_iri(&state, v.id, ver.version),
                 );
                 assert_eq!(got, ver.attribution(true), "{} {}", v.id, ver.version);
-                if v.id != "ots" {
+                // Open Triplestore's own vocabularies carry no licence record.
+                if ver.file.third_party {
                     let a = got.unwrap();
                     assert_eq!(a.file, ver.file.path);
                     assert_eq!(a.specification_url.as_deref(), Some(ver.spec_url));
@@ -2799,6 +2898,75 @@ mod tests {
         assert_eq!(sync_seeded_records(&state, rdf, Mode::Seed).unwrap(), 0);
     }
 
+    /// The upgrade to a store that keeps lexical forms: a copy an earlier
+    /// version held with its typed literals in canonical form (PROV's
+    /// `"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`), whose record says
+    /// so, is checked even though the file is the one checked before, and the
+    /// file's triples replace it. The start after that writes nothing.
+    #[test]
+    fn a_copy_in_the_earlier_store_form_is_restored_to_the_file_once() {
+        let state = fresh();
+        seed_standard_vocabularies(&state);
+        let prov = vocab("prov");
+        let ver = prov.versions.iter().find(|v| v.latest).unwrap();
+        let iri = version_iri(&state, "prov", ver.version);
+        let file = stored_triples(&state, "prov", ver.version);
+        let earlier = content_digest::earlier_store_form(&file);
+        assert_ne!(
+            earlier, file,
+            "PROV has a literal the earlier store rewrote"
+        );
+        // The graph and record as the earlier version left them.
+        update(
+            &state,
+            &format!("DELETE WHERE {{ GRAPH <{iri}> {{ ?s ?p ?o }} }}"),
+        );
+        let graph = oxigraph::model::NamedNode::new(iri.as_str()).unwrap();
+        state
+            .store
+            .bulk_insert_quads(
+                earlier
+                    .iter()
+                    .cloned()
+                    .map(|t| t.in_graph(graph.clone()))
+                    .collect(),
+                std::slice::from_ref(&iri),
+            )
+            .unwrap();
+        let mut old = ver.record(true, None).unwrap();
+        old.stored_copy.push_str(&format!(
+            "{}, the same values, so 1 xsd:nonNegativeInteger literal (an OWL cardinality) \
+             reads as xsd:integer.",
+            vf::EARLIER_STORE_FORM_TEXT
+        ));
+        let current = registry::attribution_json(&state.store, &iri);
+        assert!(registry::replace_attribution_if(
+            &state.store,
+            &iri,
+            current.as_deref(),
+            Some(&old)
+        )
+        .unwrap());
+        let digest = content_digest::triples_digest(&stored_triples(&state, "prov", ver.version));
+        registry::set_seed_check(
+            &state.store,
+            &iri,
+            &content_digest::file_sha256(ver.file.ttl.as_bytes()),
+            Some(&digest),
+        )
+        .unwrap();
+
+        assert!(sync_seeded_records(&state, prov, Mode::Seed).unwrap() > 0);
+        assert_eq!(
+            content_digest::compare_copy(&stored_triples(&state, "prov", ver.version), &file),
+            content_digest::CopyForm::Exact
+        );
+        let now = record(&state, "prov", ver.version);
+        assert!(now.unchanged, "{}", now.stored_copy);
+        assert!(!now.stored_copy.contains(vf::EARLIER_STORE_FORM_TEXT));
+        assert_eq!(sync_seeded_records(&state, prov, Mode::Seed).unwrap(), 0);
+    }
+
     /// A seeded record whose notes an admin edited no longer reads as the
     /// seeder wrote it: without the marker it is not proven to be the
     /// seeder's, so it is left alone.
@@ -2872,7 +3040,7 @@ mod tests {
                     v.id,
                     ver.version
                 );
-                if v.id != "ots" {
+                if ver.file.third_party {
                     assert!(record(&state, v.id, ver.version).unchanged);
                 }
             }
@@ -3086,7 +3254,11 @@ mod tests {
                 digest,
                 "{id} {version} was reloaded"
             );
-            if id != "ots" {
+            if vocab(id)
+                .versions
+                .iter()
+                .any(|v| v.version == version && v.file.third_party)
+            {
                 assert!(record(&state, id, version).unchanged, "{id} {version}");
             }
             assert_eq!(

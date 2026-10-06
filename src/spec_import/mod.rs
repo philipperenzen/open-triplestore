@@ -17,6 +17,7 @@
 
 pub mod ids;
 pub mod ids_export;
+pub mod xsd_regex;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -92,6 +93,18 @@ pub trait SpecExporter: Send + Sync {
         shapes: &[crate::shacl::shapes::Shape],
         title: &str,
     ) -> anyhow::Result<ExportedSpec>;
+    /// Export with the shapes graph at hand, for exporters that read more
+    /// than the loaded shapes (the IDS exporter reads the source an IDS
+    /// import recorded). Defaults to [`SpecExporter::export`].
+    fn export_graph(
+        &self,
+        _store: &crate::store::TripleStore,
+        _graph: &str,
+        shapes: &[crate::shacl::shapes::Shape],
+        title: &str,
+    ) -> anyhow::Result<ExportedSpec> {
+        self.export(shapes, title)
+    }
 }
 
 pub fn exporters() -> &'static [&'static dyn SpecExporter] {
@@ -180,7 +193,7 @@ pub async fn export_spec(
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let title = q.title.clone().unwrap_or_else(|| "Exported shapes".into());
     let spec = exp
-        .export(&shapes, &title)
+        .export_graph(&store, "urn:export", &shapes, &title)
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, format!("{format}: {e}")))?;
     if q.raw {
         return Ok((

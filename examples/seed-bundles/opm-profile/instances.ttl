@@ -1,0 +1,49 @@
+# Canonical OPM sample (fictional). Each property node hangs off its item
+# with the property kind as predicate; every state records when it was
+# generated and by whom.
+
+@prefix opm:    <https://w3id.org/opm#> .
+@prefix prov:   <http://www.w3.org/ns/prov#> .
+@prefix schema: <https://schema.org/> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:     <https://example.org/opm-profile/> .
+
+ex:window-1 a ex:Window ;
+    rdfs:label "Window 1" ;
+    ex:width ex:window-1-width ;
+    ex:height ex:window-1-height ;
+    ex:fireRating ex:window-1-fire-rating .
+
+# Width: assumed early on, then confirmed with a document.
+ex:window-1-width a opm:Property ;
+    opm:hasPropertyState ex:window-1-width-1 , ex:window-1-width-2 .
+ex:window-1-width-1 a opm:PropertyState , opm:OutdatedPropertyState , opm:Assumed ;
+    schema:value 1.2 ;
+    prov:generatedAtTime "2026-01-10T09:00:00Z"^^xsd:dateTime ;
+    prov:wasAttributedTo ex:architect .
+ex:window-1-width-2 a opm:PropertyState , opm:CurrentPropertyState , opm:Confirmed ;
+    schema:value 1.25 ;
+    prov:generatedAtTime "2026-02-14T15:30:00Z"^^xsd:dateTime ;
+    prov:wasAttributedTo ex:engineer ;
+    opm:documentation ex:approval-letter-17 .
+
+# Height: one assumed state.
+ex:window-1-height a opm:Property ;
+    opm:hasPropertyState ex:window-1-height-1 .
+ex:window-1-height-1 a opm:PropertyState , opm:CurrentPropertyState , opm:Assumed ;
+    schema:value 1.5 ;
+    prov:generatedAtTime "2026-01-10T09:00:00Z"^^xsd:dateTime ;
+    prov:wasAttributedTo ex:architect .
+
+# Fire rating: required, then deleted (no longer part of the design).
+ex:window-1-fire-rating a opm:Property ;
+    opm:hasPropertyState ex:window-1-fire-rating-1 , ex:window-1-fire-rating-2 .
+ex:window-1-fire-rating-1 a opm:PropertyState , opm:OutdatedPropertyState , opm:Required ;
+    schema:value "EI30" ;
+    prov:generatedAtTime "2026-01-10T09:00:00Z"^^xsd:dateTime ;
+    prov:wasAttributedTo ex:client .
+ex:window-1-fire-rating-2 a opm:PropertyState , opm:CurrentPropertyState , opm:Deleted ;
+    prov:generatedAtTime "2026-03-01T08:00:00Z"^^xsd:dateTime ;
+    prov:wasAttributedTo ex:architect ;
+    rdfs:comment "The window moved out of the fire compartment boundary." .

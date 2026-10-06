@@ -12,7 +12,7 @@ The triplestore has built-in support for:
 - **Validation on write** — when `shacl_on_write` is enabled, every Graph Store `PUT` or `POST` is validated before the data is committed
 - **SHACL Studio** — reusable shape graphs, an RDF **validation layer** (graph-attached shapes that inherit into datasets), pipelines, write-gating, and **meta-validation** (SHACL-SHACL). See [SHACL Studio](#shacl-studio--shape-graphs-the-validation-layer--meta-validation) below
 - **SHACL-AF inference** — materialize inferred triples by executing `sh:SPARQLRule` and `sh:TripleRule` rules
-- **SHACLC** — upload and download shapes in [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/) as well as Turtle
+- **SHACLC** — upload and download shapes in the [W3C SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/) as well as Turtle; downloads are lossless or a `422` naming what the syntax cannot carry
 - **Repair proposals** — turn what the shapes determine into an explained RDF Patch, computed in a throwaway copy and applied only after review (`POST /api/datasets/:id/repair`). See [Repair proposals](repair.md)
 
 ---
@@ -42,16 +42,14 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
      --data-binary @shapes.ttl
 ```
 
-Write the boolean flags `sh:uniqueLang`, `sh:closed`, `sh:deactivated`,
-`sh:qualifiedValueShapesDisjoint` and `sh:optional` as `true` or `false`. An
-upload that writes one as another `xsd:boolean` form (`"1"^^xsd:boolean`,
-`"0"^^xsd:boolean`) is refused with 422 naming the triples, here and in SHACL
-Studio (create and `PUT …/turtle`); see
-[Literal forms the engine cannot see](#literal-forms-the-engine-cannot-see).
+The boolean flags `sh:uniqueLang`, `sh:closed`, `sh:deactivated`,
+`sh:qualifiedValueShapesDisjoint` and `sh:optional` take effect only when
+written as the literal `true`, as SHACL specifies: `"1"^^xsd:boolean` is stored
+as written and activates nothing; see [Literal forms](#literal-forms).
 
 ### SHACL Compact Syntax (SHACLC)
 
-Shapes can be uploaded in compact syntax — they are parsed to Turtle before storage. The stored form is always Turtle.
+Shapes can be uploaded in the [W3C SHACL Compact Syntax](#shacl-compact-syntax-shaclc) — they are parsed to Turtle before storage. The stored form is always Turtle.
 
 ```bash
 curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
@@ -60,20 +58,19 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
      --data-binary @shapes.shaclc
 ```
 
-The parser is **strict**: input it does not recognise — a W3C SHACL-C form this
-parser does not implement, an unknown constraint keyword, plain garbage — is a
-`400` naming the line and column, and the dataset's shapes graph is left as it
-was. (It used to be lenient: unrecognised input was dropped, so a document that
-used unsupported forms could parse to an *empty* shapes graph, and the upload
-replaced the dataset's shapes with nothing while answering 200.) Pass
-`?lenient=true` for the old behaviour — whatever parses is kept, the rest is
-ignored:
+The parser is **strict**: input the grammar does not allow is a `400` naming the
+line and column, and the dataset's shapes graph is left as it was. The 0.7
+dialect of this server is still accepted for one release with
+`?dialect=legacy` (deprecated; see
+[Migrating from the legacy dialect](#migrating-from-the-legacy-dialect)), and
+only there does `?lenient=true` keep its old meaning — whatever parses is kept,
+the rest is ignored:
 
 ```bash
-curl -X PUT 'http://localhost:7878/api/datasets/<dataset_id>/shapes?lenient=true' \
+curl -X PUT 'http://localhost:7878/api/datasets/<dataset_id>/shapes?dialect=legacy' \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/shaclc' \
-     --data-binary @shapes.shaclc
+     --data-binary @old-shapes.shaclc
 ```
 
 ---
@@ -94,6 +91,12 @@ curl http://localhost:7878/api/datasets/<dataset_id>/shapes \
 curl 'http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc' \
      -H 'Authorization: Bearer <token>'
 ```
+
+SHACL-C is answered only when it carries the whole shapes graph: a graph with
+anything the compact syntax cannot express is a `422` listing those triples,
+and `?lossy=true` asks for the partial document instead (see
+[Lossless or loud](#lossless-or-loud)). A dataset that resolves to several
+shapes graphs is a `400` for SHACL-C; request Turtle.
 
 ---
 
@@ -179,35 +182,30 @@ validation after writes that a cross-graph path depends on.
   no path); and a SPARQL target (`sh:target [ sh:select … ]`) that does not
   parse, does not project `?this`, or errors when it runs.
 
-### Literal forms the engine cannot see
+### Literal forms
 
-The store keeps `xsd:boolean`, the numeric types and the date/time types as
-values, not as the text that was written. What comes back is the canonical
-form of that value, and validation only ever sees what comes back:
+The store keeps every literal as written, its lexical form and its datatype
+([datatypes.md](datatypes.md)), so validation sees exactly the data and the
+shapes you stored:
 
-| Written | Read back |
-|---|---|
-| `"5"^^xsd:nonNegativeInteger` (any of the 12 types derived from `xsd:integer`: `xsd:int`, `xsd:byte`, `xsd:positiveInteger`, …) | `"5"^^xsd:integer` |
-| `"2026-10-01T12:00:00Z"^^xsd:dateTimeStamp` | `"2026-10-01T12:00:00Z"^^xsd:dateTime` |
-| `"1"^^xsd:boolean`, `"0"^^xsd:boolean` | `true`, `false` |
+- **`sh:datatype` checks the datatype as written.** A
+  `"5"^^xsd:nonNegativeInteger` conforms to `sh:datatype
+  xsd:nonNegativeInteger` and violates `sh:datatype xsd:integer`; the range of
+  the 12 types derived from `xsd:integer` is checked (`"300"^^xsd:byte` is
+  ill-formed), and `xsd:dateTimeStamp` needs a time zone.
+- **Flags take the literal `true` only.** `sh:uniqueLang "1"^^xsd:boolean`
+  does not activate the constraint (W3C test `core/property/uniqueLang-002`),
+  and the same holds for `sh:closed`, `sh:deactivated`,
+  `sh:qualifiedValueShapesDisjoint` and `sh:optional`.
+- **`sh:hasValue`, `sh:in`, `sh:equals` and `sh:disjoint` compare terms.**
+  `sh:hasValue 5` does not match `"05"^^xsd:integer` or `"5"^^xsd:int`;
+  `sh:minInclusive` and the other range constraints compare values.
 
-Two consequences for SHACL:
-
-- **`sh:datatype` with a derived integer type or `xsd:dateTimeStamp` reports
-  every stored value as a violation**, valid ones included, and a write gate
-  answers 422 on valid data. Until storage keeps the written datatype, use
-  `sh:datatype xsd:integer` with `sh:minInclusive` / `sh:maxInclusive` for
-  the range (or `xsd:dateTime`).
-- **A boolean flag written as `"1"` acts as `true`.** SHACL activates
-  `sh:uniqueLang`, `sh:closed`, `sh:deactivated` and the other flags only for
-  the literal `true` (W3C test `core/property/uniqueLang-002`, the one known
-  core failure), but once stored the two cannot be told apart. The dataset
-  `PUT …/shapes` and SHACL Studio uploads refuse such flags instead of storing
-  a meaning the author may not have intended; the other write paths (Graph
-  Store Protocol, SPARQL Update, imports) store them as given.
-
-Both are pinned by tests (`tests/shacl_conformance.rs`, `pinned_*`), which
-will flip when storage keeps lexical forms.
+Until the store kept lexical forms (see the changelog), it read the derived
+integer types back as `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime` and
+`"1"^^xsd:boolean` as `true`, so `sh:datatype` with a derived type rejected
+valid data and a `"1"` flag acted as `true`. Data stored then still reads that
+way; reload it (`PUT`) to have it checked as written.
 
 ## On-Demand Validation
 
@@ -252,14 +250,17 @@ property path, and `source_constraint` is a short label such as
 A test or partial run answers `"run_id": null, "ran_at": null` and adds
 `"test": true` and `"partial"`. The 422 body of a write gate uses
 camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
-`sourceConstraintComponent`).
+`sourceConstraintComponent`). A result of a SPARQL constraint or validator
+that declares [result annotations](#result-annotations-shresultannotation-shacl-af-4)
+also has an `annotations` list; no other result has the key.
 
 The report RDF the run writes (below) is the W3C form: typed `sh:focusNode`
 and `sh:value` terms (datatype and language kept), `sh:resultPath` as a SHACL
 path structure (`[ sh:inversePath ex:p ]`, RDF lists for sequences),
 `sh:sourceConstraintComponent` as the component IRI, `sh:sourceConstraint` for
-`sh:sparql` constraints, and the declared `sh:severity` IRI, custom ones
-included.
+`sh:sparql` constraints (the `sh:sparql` node) and expression constraints (the
+node expression), the declared `sh:severity` IRI, custom ones included, and
+any result annotations.
 
 ### What a run reads, and who sees its report
 
@@ -473,6 +474,7 @@ The content of a shape graph is served and replaced as one document:
 curl http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle -H 'Authorization: Bearer <token>'
 
 # SHACL Compact Syntax instead: ?format=shaclc, or Accept: text/shaclc
+# (422 with a losses list when the syntax cannot carry the graph; ?lossy=true)
 curl 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle?format=shaclc' -H 'Authorization: Bearer <token>'
 
 # Replace the content. The revision note is what the history shows for it.
@@ -481,7 +483,7 @@ curl -X PUT 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtl
 # → {"version": 4}
 ```
 
-`message` is optional (the default note is `Edited`), trimmed, bounded to 200 characters and stripped of control characters before it reaches the commit log. A body sent as `Content-Type: text/shaclc` is parsed as SHACL-C first and stored as Turtle. Reading needs read access to the shape graph; writing needs manage access.
+`message` is optional (the default note is `Edited`), trimmed, bounded to 200 characters and stripped of control characters before it reaches the commit log. A body sent as `Content-Type: text/shaclc` is parsed as W3C SHACL-C first (`?dialect=legacy` for the deprecated 0.7 dialect) and stored as Turtle. Reading needs read access to the shape graph; writing needs manage access.
 
 ---
 
@@ -727,8 +729,40 @@ ex:DutchCitizenShape a sh:NodeShape ;
 Both read the run's data graphs only. A `sh:target` with neither a `sh:select`
 nor a `sh:SPARQLTargetType` type fails the shapes graph: the engine cannot
 compute its focus nodes, and a shape that validated nothing would pass every
-write. `sh:resultAnnotation` (§4) is not supported yet: the report model has
-no place for the extra properties.
+write.
+
+### Result annotations (`sh:resultAnnotation`, SHACL-AF §4)
+
+The node that carries a `sh:sparql` constraint's query, or a component
+validator's `sh:select` / `sh:ask`, can declare extra properties for the
+results that query produces:
+
+```turtle
+ex:AnnotationExample a sh:NodeShape ;
+  sh:targetNode ex:ExampleResource ;
+  sh:sparql [
+    sh:resultAnnotation [ sh:annotationProperty ex:time ; sh:annotationVarName "time" ] ;
+    sh:select """
+      SELECT $this ?message ?time WHERE {
+        BIND (CONCAT("The ", "message.") AS ?message) .
+        BIND (NOW() AS ?time) .
+      }""" ] .
+```
+
+* Each result of a solution gets `sh:annotationProperty` set to the solution's
+  binding of `sh:annotationVarName` — or, without one, of the property's local
+  name (`ex:time` → `?time`).
+* When that variable is unbound, the annotation's `sh:annotationValue`s are
+  used instead, if it has any. An `sh:ask` validator has no solution to read,
+  so its results get the `sh:annotationValue`s only.
+* The RDF report writes each annotation as a property of the
+  `sh:ValidationResult` node, typed (`ex:time "…"^^xsd:dateTime`). The JSON
+  result lists them under `annotations`, as `{"property": IRI, "value":
+  display string}`, and so does the 422 body of a write gate; results without
+  annotations have no `annotations` key.
+* An annotation that is a literal, has no or several `sh:annotationProperty`
+  values (or one that is not an IRI), or more than one `sh:annotationVarName`
+  (or one that is not a string) fails the shapes graph.
 
 ### Node expressions (SHACL-AF §6)
 
@@ -757,8 +791,9 @@ evaluation. Paths read the run's data graphs, like every other path.
 `sh:expression` holds a node expression that must produce exactly `{ true }`
 for each value node (the focus node on a node shape), evaluated with that node
 as its focus node. Anything else — `false`, another value, several values, or
-nothing — is a result whose `sh:value` is the value node; the expression
-node's `sh:message` is the result message:
+nothing — is a result whose `sh:value` is the value node and whose
+`sh:sourceConstraint` is the node expression; the expression node's
+`sh:message` is the result message:
 
 ```turtle
 ex:atLeast a sh:SPARQLFunction ;
@@ -782,80 +817,177 @@ shape (`sh:property [ sh:path P ; sh:minExclusive 9.09 ]`).
 
 ## SHACL Compact Syntax (SHACLC)
 
-SHACLC is a compact, human-friendly syntax for SHACL shapes. It is fully compatible with Turtle SHACL — shapes stored as Turtle can be serialized as SHACLC and vice versa.
+SHACLC is the compact, human-oriented notation for a subset of SHACL Core
+defined by the SHACL Community Group report
+[SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
+(continued as the SHACL 1.2 Compact Syntax draft; this server implements the
+CG report). The parser implements the report's whole grammar (`SHACLC.g4`) and
+its production rules, building the RDF graph directly; the report's 32 test
+cases run in `tests/w3c_shaclc_conformance.rs`, each parsed and also written
+back by the serializer (see [standards.md](standards.md), footnote 8).
 
 ### SHACLC Syntax Overview
 
 ```shaclc
-PREFIX schema: <http://schema.org/>
-PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+BASE <http://example.com/ns>
+IMPORTS <http://example.com/person-ontology>
+PREFIX ex: <http://example.com/ns#>
 
-shape schema:PersonShape -> schema:Person {
-    schema:name xsd:string [1..1] // "Name is required" ;
-    schema:email xsd:string [0..*] ;
-    schema:age xsd:integer [0..1] ;
-    schema:knows IRI [0..*] ;
+shape ex:PersonShape -> ex:Person {
+    closed=true ignoredProperties=[rdf:type] .
+    ex:ssn       xsd:string [0..1] pattern="^\\d{3}-\\d{2}-\\d{4}$" .
+    ex:worksFor  IRI ex:Company [0..*] .
+    ex:address   BlankNode [0..1] {
+        ex:city xsd:string [1..1] message="A city is required"@en .
+        ex:postalCode xsd:integer|xsd:string [1..1] maxLength=5 .
+    } .
 }
 
-shape schema:OrganizationShape -> schema:Organization closed {
-    schema:name xsd:string [1..1] ;
-    schema:url IRI [0..1] ;
+shapeClass ex:Company {
+    ex:name xsd:string [1..*] .
+    ex:parent @ex:CompanyShape .
 }
 ```
 
-Key SHACLC constructs:
-
-| Construct | SHACLC | Turtle equivalent |
+| Construct | SHACL-C | Turtle |
 |---|---|---|
-| Node shape | `shape IRI -> TargetClass { ... }` | `sh:NodeShape ; sh:targetClass` |
-| Property cardinality | `[min..max]` or `[1..*]` | `sh:minCount / sh:maxCount` |
-| Datatype | `xsd:string` after path | `sh:datatype xsd:string` |
-| Node kind | `IRI` / `BlankNode` / `Literal` | `sh:nodeKind sh:IRI` |
-| Shape reference | `schema:OtherShape` (non-datatype IRI) | `sh:node schema:OtherShape` |
-| Closed shape | `closed` keyword | `sh:closed true` |
-| Message | `// "message text"` | `sh:message "message text"` |
-| Pattern | `pattern "regex"` | `sh:pattern "regex"` |
+| Directives (before any shape) | `BASE <iri>`, `IMPORTS <iri>`, `PREFIX ex: <iri>` | `<base> a owl:Ontology ; owl:imports <iri>` |
+| Node shape | `shape ex:S -> ex:A ex:B { … }` | `ex:S a sh:NodeShape ; sh:targetClass ex:A, ex:B` |
+| Shape that is a class | `shapeClass ex:C { … }` | `ex:C a sh:NodeShape, rdfs:Class` |
+| Node parameter | `closed=true .`, `targetNode=ex:n .`, `in=[ex:a ex:b] .` | `sh:closed true`, `sh:targetNode ex:n`, `sh:in ( ex:a ex:b )` |
+| Property shape | `path … .` (every constraint ends with `.`) | `sh:property [ sh:path … ]` |
+| Count | `[1..*]`, `[0..1]` | `sh:minCount 1` / `sh:maxCount 1` (a `0` minimum and a `*` maximum write nothing) |
+| Datatype | an XSD or RDF datatype after the path: `xsd:string` | `sh:datatype xsd:string` |
+| Class | any other IRI after the path: `ex:Company` | `sh:class ex:Company` |
+| Other datatype / class | `datatype=geo:wktLiteral`, `class=xsd:string` | `sh:datatype …` / `sh:class …` |
+| Node kind | `IRI`, `BlankNode`, `Literal`, `BlankNodeOrIRI`, … | `sh:nodeKind sh:IRI` |
+| Shape reference | `@ex:AddressShape` or `@<iri>` | `sh:node ex:AddressShape` |
+| Nested shape | `ex:address { ex:city [1..1] . }` | `sh:node [ sh:property [ … ] ]` |
+| Property parameter | `pattern="^a" flags="i" message="…"@en minInclusive=0 hasValue=true …` | `sh:pattern`, `sh:flags`, `sh:message`, … |
+| Or / not | `xsd:integer\|xsd:string`, `!ex:Person`, `datatype=xsd:string\|class=ex:C .` | `sh:or ( [ sh:datatype xsd:integer ] [ sh:datatype xsd:string ] )`, `sh:not [ sh:class ex:Person ] ` |
+| Paths | `^ex:p`, `ex:a/ex:b`, `ex:a\|ex:b`, `ex:p*`, `ex:p+`, `ex:p?`, `( … )` | `sh:inversePath`, lists, `sh:alternativePath`, `sh:zeroOrMorePath`, … |
+| Literals | `"…"`, `'…'`, `"""…"""`, `"…"@en`, `"…"^^ex:dt`, `42`, `1.5`, `1e3`, `true` | as in Turtle |
+
+The parameter names are the report's: node shapes take `targetNode`,
+`targetObjectsOf`, `targetSubjectsOf`, `deactivated`, `severity`, `message`,
+`class`, `datatype`, `nodeKind`, the four range bounds, `minLength`,
+`maxLength`, `pattern`, `flags`, `languageIn`, `equals`, `disjoint`, `closed`,
+`ignoredProperties`, `hasValue` and `in`; property shapes also take
+`uniqueLang`, `lessThan`, `lessThanOrEquals` and the four `qualified…`
+parameters. "XSD or RDF datatype" means every IRI in the XSD namespace plus
+`rdf:langString`, `rdf:HTML`, `rdf:XMLLiteral` and `rdf:JSON` — the report's
+"RDF datatypes supported by SPARQL 1.1".
+
+A document without `BASE` produces no `owl:Ontology` triple and may not use
+`IMPORTS` or relative IRIs; `POST /api/shaclc/parse?base=<iri>` supplies an
+initial base. `rdf:`, `rdfs:`, `sh:` and `xsd:` are predeclared. Two
+supersets of the grammar, neither changing what a valid document means: an
+`<IRI>` may contain `=` (the grammar's lexer excludes it; the serializer
+writes it as `\u003D`), and names may use the supplementary Unicode planes
+Turtle allows.
 
 ### Standalone conversion
 
 ```bash
-# SHACLC text → Turtle (strict: unrecognised input is a 400 naming its position)
+# SHACL-C text → Turtle (strict: a 400 names the line and column)
 curl -X POST http://localhost:7878/api/shaclc/parse \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/shaclc' \
      --data-binary @shapes.shaclc
 
-# The same, ignoring unrecognised input instead of failing on it
-curl -X POST 'http://localhost:7878/api/shaclc/parse?lenient=true' \
-     -H 'Content-Type: text/shaclc' \
-     --data-binary @shapes.shaclc
-
-# Shapes graph from store → SHACLC
+# Shapes graph from store → SHACL-C (422 with the losses when it cannot carry the graph)
 curl -X POST http://localhost:7878/api/shaclc/serialize \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
      -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
 
 # Plain IRI body also accepted
 curl -X POST http://localhost:7878/api/shaclc/serialize \
+     -H 'Authorization: Bearer <token>' \
      -d 'urn:dataset:my-dataset:shapes'
 ```
 
-### What the serializer leaves out
+<a id="what-the-serializer-leaves-out"></a>
 
-`/api/shaclc/serialize` (and `Accept: text/shaclc`) writes only part of a shapes graph, and
-**drops the rest without a warning or a comment** in the output:
+### Lossless or loud
 
-- Only subjects typed `sh:NodeShape` are written, each with its first `sh:targetClass` and
-  `sh:closed`; other targets are dropped.
-- Per property shape it writes the path, `sh:datatype`, `sh:nodeKind`, `sh:node`,
-  `sh:minCount`/`sh:maxCount`, `sh:pattern` and `sh:message`. Node-level constraints and
-  `sh:class`, `sh:in`, `sh:hasValue`, value ranges, string lengths, the logical constraints and
-  SPARQL-based constraints are dropped. A property shape without `sh:path` is skipped.
-- A complex property path (sequence, inverse, alternative) comes out as a blank-node label,
-  which the parser cannot read back.
-- `sh:pattern` is written without escaping.
+The compact syntax covers part of SHACL Core, so not every shapes graph has a
+SHACL-C form. The serializer writes everything the syntax can express and
+keeps track of each triple it wrote; it then parses its own output back and
+checks the result is isomorphic to those triples. If any triple of the graph
+was not written — other than the [implied triples](#implied-triples) below —
+every SHACL-C response — `GET …/shapes?format=shaclc`, the
+Studio's `GET …/turtle?format=shaclc` and `POST /api/shaclc/serialize` — is a
+`422` instead of a thinner document:
 
-So a SHACL-C export is not a faithful copy of a shapes graph; keep Turtle as the source of
-truth.
+```json
+{
+  "error": "this shapes graph cannot be written in SHACL Compact Syntax without losing 2 triples; request Turtle, or pass lossy=true for the partial document",
+  "losses": [
+    { "subject": "_:b0", "predicate": "<http://www.w3.org/ns/shacl#name>",
+      "object": "\"Name\"",
+      "reason": "sh:name is not a property parameter of the compact syntax" },
+    { "subject": "<http://example.org/S>", "predicate": "<http://www.w3.org/ns/shacl#sparql>",
+      "object": "<http://example.org/NoMinors>",
+      "reason": "sh:sparql is not a node parameter of the compact syntax" }
+  ]
+}
+```
+
+`?lossy=true` returns the partial document with `200`, an `X-SHACLC-Losses`
+header giving the count, and a `# INCOMPLETE:` comment block at the top naming
+each missing triple, so the file never reads as the whole graph.
+
+What has no SHACL-C form (each such triple is a loss): SPARQL-based
+constraints and targets, rules and functions; `sh:and`, `sh:xone`,
+`sh:property` at property level, `sh:qualifiedValueShape` with a blank-node
+shape, and `sh:not` with a named shape; named (IRI) property shapes and
+blank-node property shapes shared between shapes; non-SHACL triples such
+as `rdfs:label`, and `sh:name`, `sh:description`, `sh:order`, `sh:group`,
+`sh:defaultValue`; top-level blank-node shapes; a second `owl:Ontology`.
+Literals with a base direction (RDF 1.2) are losses too.
+
+### Implied triples
+
+A few triples have no SHACL-C form but say nothing validation depends on. The
+serializer leaves them out without counting them as losses, so an ordinary
+hand-written shapes graph does not get a `422` for them. The set is small and
+fixed; anything else the syntax cannot carry is a loss:
+
+| Triple | When it is implied | Why omitting it changes nothing |
+|---|---|---|
+| `_:p rdf:type sh:PropertyShape` | `_:p` is a property shape the document writes (its `sh:path` is written) | a property shape is whatever has an `sh:path` (SHACL §2.2); the type is a declaration only |
+| `_:n rdf:type sh:NodeShape` | `_:n` is a blank-node shape the document writes — a nested `{ … }` body, or a member of `\|` or `!` — and has no `sh:path` | a shape without `sh:path` is a node shape; the type adds nothing |
+| `_:p sh:minCount 0` | on a property shape the document writes | every focus node satisfies it; `[0..n]` writes no `sh:minCount` triple |
+
+A top-level node shape's own `rdf:type sh:NodeShape` is not in this table
+because `shape ex:S { … }` writes it. Parsing the document back gives the graph
+without the implied triples; re-serializing that graph gives the same document.
+
+### Migrating from the legacy dialect
+
+Up to 0.7 this server parsed its own SHACL-C dialect, which is not a subset
+of the W3C syntax: the same document can mean something different. It is
+still accepted, for one release only, when a request passes `?dialect=legacy`
+(on `PUT /api/datasets/{id}/shapes`, `PUT /api/shacl/shape-graphs/{id}/turtle`
+and `POST /api/shaclc/parse`); each such parse logs a deprecation warning. A
+W3C parse error on a legacy keyword says so. To migrate, rewrite:
+
+| Legacy dialect | W3C SHACL-C |
+|---|---|
+| `ex:p ex:OtherShape` (a bare non-XSD IRI meant `sh:node`) | `ex:p @ex:OtherShape` — a bare IRI is now `sh:class` |
+| `shape ex:S -> ex:T closed { … }` | `shape ex:S -> ex:T { closed=true . … }` |
+| `class ex:C` / `nodeKind IRI` in a shape body | `class=ex:C .` / `nodeKind=sh:IRI .` |
+| `pattern "x"` | `pattern="x"` |
+| `// "msg"` | `message="msg"` |
+| `or( ex:A ex:B )`, `and( … )`, `xone( … )`, `not ex:A` | `@ex:A\|@ex:B`, `!@ex:A`; `sh:and` / `sh:xone` have no compact form — keep those shapes in Turtle |
+| `;` or nothing after a constraint | `.` after every constraint |
+| `imports <iri>` | `BASE <ontology-iri>` then `IMPORTS <iri>` |
+| directives anywhere, keywords in any case | `BASE`, `IMPORTS`, `PREFIX` first, upper case; `shape`, `shapeClass` lower case |
+
+The quickest route for a stored shapes graph is the server itself: it is
+stored as Turtle, so `GET …/shapes?format=shaclc` returns it in the W3C syntax
+(or a `422` naming what needs Turtle).
 
 ---
 
@@ -900,15 +1032,27 @@ curl -X POST http://localhost:7878/api/shacl/export/ids \
 curl -X POST 'http://localhost:7878/api/shacl/export/ids?raw=true' …
 ```
 
-**The report is the default representation, and `losses` is the reason.** IDS's
-whole expressive surface for a requirement is a facet kind, a cardinality of
-`required` / `prohibited` / `optional`, and one value restriction. Most of SHACL
-has no IDS form at all, so an exporter that silently wrote a thinner document
-than the shapes it was given would be actively misleading for a delivery
-contract. Every constraint that cannot be carried is listed, and a shape graph
-from which nothing at all can be expressed is a `422`, not an empty document.
+**An imported IDS exports as it was imported.** The importer records each
+specification on its shape (`ots:idsSpecification`, re-serialised from the
+parsed document) with a fingerprint of the targets and SPARQL constraints it
+generated from it; the exporter writes the recorded specification back, with
+the document's `info`, while the shape graph still carries exactly those
+constraints. Import → export → import is a fixpoint: the second import
+produces the same Turtle as the first (`tests/spec_export_http.rs`), and the
+exported document passes the importer's XSD and audit checks. A specification
+whose shapes were edited after import is not exported from its stale source;
+it is listed in `losses` instead.
 
-### What survives
+**Other shapes go through the older translator, and `losses` is the reason
+the report is the default representation.** IDS's whole expressive surface for
+a requirement is a facet kind, a cardinality of `required` / `prohibited` /
+`optional`, and one value restriction. Most of SHACL has no IDS form at all,
+so an exporter that silently wrote a thinner document than the shapes it was
+given would be actively misleading for a delivery contract. Every constraint
+that cannot be carried is listed, and a shape graph from which nothing at all
+can be expressed is a `422`, not an empty document.
+
+### What survives (shapes not from an IDS import)
 
 | SHACL | IDS |
 |---|---|
@@ -934,26 +1078,14 @@ multiplicity. A shape targeted by `sh:targetNode`, `sh:targetSubjectsOf`,
 `sh:targetObjectsOf` or a SPARQL target cannot become a specification at all,
 because IDS applicability is class-based.
 
-Three further caveats, each reported in `losses` when it applies:
+Two further caveats, each reported in `losses` when it applies:
 
 - **A classification facet is dropped.** `ids:classificationType/system` is
-  mandatory and the importer keeps it only as free text, so it cannot be
+  mandatory and older imports kept it only as free text, so it cannot be
   recovered; synthesising one would emit a document that lies.
 - **`xs:pattern` is implicitly anchored and has no flags**, while `sh:pattern`
   is an XPath/SPARQL regex. A flagless pattern is exported with a warning that
-  the match semantics differ; a flagged one is dropped. So is every pattern
-  after the first: several `sh:pattern` values must all match, while several
-  `xs:pattern` facets are alternatives. Likewise only the first of several
-  `sh:hasValue` values is exported, and a deactivated shape or property shape
-  is not exported at all.
-- **This is not a general SHACL-to-IDS translator.** It exports shapes written
-  over *this store's* IFC RDF vocabulary — the `props:` / `bot:` convention the
-  IFC lift emits and the IDS importer targets. Shapes produced by other tools
-  will mostly land in the loss list.
-
-The tests pin an import → export → import fixpoint over that shared subset; they
-do not prove the output is schema-valid, because validating against the IDS XSD
-would need a network fetch and an XSD validator, and neither is available here.
+  the match semantics differ; a flagged one is dropped.
 
 ---
 
@@ -973,19 +1105,69 @@ curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
 ```
 
 Without `create=true` the response carries the Turtle and the report only.
-Each `ids:specification` becomes a node shape targeting the entity's ifcOWL
-class over the RDF the built-in IFC importer emits (`props:<Pset>_<Name>`
-properties, `props:ifcName`/`props:ifcGuid` attributes, BOT containment for
-`partOf`). Applicability facets beyond the entity become an "applies" shape
-combined with the "requires" shape as `sh:or ( [ sh:not applies ] requires )`
-— SHACL Core throughout. Value restrictions map to `sh:hasValue`, `sh:in`,
-`sh:pattern`, bounds and lengths; cardinality to `sh:minCount 1` /
-`sh:maxCount 0`. Whatever cannot be expressed per node (a specification's
-"at least one such entity must exist"), or relies on a value the IFC lift
-does not populate (predefined types, attributes other than Name/GlobalId), is
-listed under `warnings`. Classification and material facets target
-`props:ifcClassification` / `props:ifcMaterial`, which the lift emits from
-`IfcRelAssociatesClassification` (the reference's identification) and
-`IfcRelAssociatesMaterial` (the material's name); a model lifted before it
-did carries neither, and the warning says so.
+
+**Validation first.** The document is checked against the IDS 1.0 XSD
+(elements, their order and attributes, `ifcVersion` tokens, cardinality values)
+and the IDS audit rules after the buildingSMART IDS Audit Tool: entity names
+must exist (in upper case) in every schema the specification names; a
+predefined type must be one the entity can carry; an attribute must be an
+explicit attribute (not derived or inverse) of an entity the applicability
+admits, and a value can only be checked on a value attribute (not a
+reference, list or select); a property `dataType` must exist in the schema, a
+value needs one, and every value and bound must be lexically valid for its
+XSD base (`42.0` is not an integer, `FALSE` not a boolean, `42,3` not a
+double); a restriction's `base` must match the type it constrains; a
+prohibited specification may not carry requirements; and the applicability and
+requirements must be satisfiable together. A document that fails any of this
+is refused with every problem listed (422): an IDS that no model could satisfy
+does not become shapes that quietly pass. The standard property-set templates
+(`Pset_…` names) are not checked.
+
+**What the shapes check.** The shapes are SHACL-SPARQL over the **IDS
+projection** of the IFC lift — the graph an IFC import writes to
+`…/building/ids` (see [geo-3d-platform.md §9](geo-3d-platform.md)). Run a
+pipeline or a dataset validation over that graph. Each specification becomes a
+node shape:
+
+- **targets**: the exact classes its entity facet admits; a pattern or
+  enumeration is expanded against the tables of the schemas its `ifcVersion`
+  lists, an IFC2X3 name from the occurrence/type mapping table resolves
+  through the type object, and a specification without an entity targets
+  every concrete class. The `ifcVersion` list decides which names the audit
+  accepts; like the reference implementations, and as the buildingSMART corpus
+  requires, the checks then apply to a model of any schema.
+  Subclasses never match;
+- **one `sh:sparql` constraint per requirement facet**, which fails a node that
+  meets the applicability when the facet's cardinality is broken: `required` —
+  the facet does not hold; `prohibited` — it holds (the opposite of required);
+  `optional` — it is present but does not hold. The message names the facet;
+- **existence**: a required specification (the XSD default) also gets a shape
+  on the model node that fails when the model has no applicable entity; it
+  checks the whole model, so it is not meant for write gates. A prohibited
+  specification fails on every applicable entity.
+
+Facets follow the IDS documentation and the buildingSMART test corpus:
+
+| Facet | Holds when |
+|---|---|
+| entity | the node's exact class matches, and its predefined type (the type object's unless NOTDEFINED, else its own; the user-defined label counts beside `USERDEFINED`) |
+| attribute | any attribute the name admits has a value that matches; an empty string, a logical UNKNOWN or an empty list is never a value |
+| property | at least one property set matches the name, and every matching set has a matching property, and every matching property has a value of the data type that matches. Sets come from the type object, overridden property by property by the occurrence; quantities are properties; measures are compared in SI units |
+| classification | a classification of the node is in a matching system, and (with a value) its reference or one of its parent references matches; the type's classifications are inherited, overridden per system |
+| material | the node (or, without its own, its type) has a material whose name or category — or any layer, profile, constituent or set name — matches |
+| partOf | a matching whole (exact class, predefined type) is reached through the relation: aggregation and nesting transitively, containment through the node's aggregation ancestors, group assignment and voids/fills directly; without a relation, any of them |
+
+Values are compared by the XSD base of the facet's data type: a double within
+the IDS tolerance `v ± (|v|·1e-6 + 1e-6)` (the bound itself included, as the
+corpus requires), ranges without
+tolerance, integers by value, booleans as `true`/`false`, everything else as a
+case-sensitive string (dates and durations included); an `xs:pattern` is an
+XSD pattern, anchored and translated (`^`/`$` are literal, `\i`/`\c` and class
+subtraction are rewritten), and several are alternatives.
+
+Each specification shape keeps the specification it came from
+(`ots:idsSpecification`) with a fingerprint of the constraints generated from
+it, which is what makes export lossless (below). The buildingSMART IDS test
+corpus runs against this path in CI ([conformance/ids.md](conformance/ids.md));
+the results are development results, not a buildingSMART certification.
 

@@ -6,12 +6,14 @@
 //!
 //! ## Content Negotiation
 //! RDF Accept types (text/turtle, application/ld+json, …) → SPARQL CONSTRUCT result.
-//! `text/html` → 303 See Other redirect to the SPA resource view.
+//! `text/html` → 303 See Other redirect to the SPA resource view, with a
+//! relative `Location` so it lands right behind a reverse proxy that serves the
+//! instance under a path prefix (see docs/operations.md).
 //! Default (*/*, empty) → Turtle.
 
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -51,13 +53,15 @@ struct FormatParam {
 /// the triplestore and returning the result in the negotiated RDF format.
 ///
 /// - RDF Accept headers → CONSTRUCT result (outgoing + incoming triples)
-/// - `text/html` → 303 See Other to `/resource?iri={full_iri}` (SPA view)
+/// - `text/html` → 303 See Other to the SPA view `resource?iri={full_iri}`, as a
+///   reference relative to the request (see [`spa_resource_location`])
 /// - `?format=turtle|jsonld|ntriples|rdfxml|nquads|trig` overrides Accept
 async fn dereference_handler(
     State(state): State<AppState>,
     user: Option<Extension<crate::auth::middleware::AuthenticatedUser>>,
     Path(path): Path<String>,
     Query(params): Query<FormatParam>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let full_iri = format!("{}/resource/{}", state.base_url, path);
@@ -96,8 +100,7 @@ async fn dereference_handler(
         && effective_accept.contains("text/html")
         && !effective_accept.contains("text/turtle")
     {
-        let encoded = utf8_percent_encode(&full_iri, NON_ALPHANUMERIC).to_string();
-        let location = format!("/resource?iri={}", encoded);
+        let location = spa_resource_location(uri.path(), &full_iri);
         return axum::http::Response::builder()
             .status(StatusCode::SEE_OTHER)
             .header("location", location)
@@ -200,7 +203,7 @@ async fn void_handler(
         format.to_rdf_format(),
     )
     .map_err(AppError::Internal)?;
-    catalog_response(format, bytes)
+    catalog_response(format, bytes, user_id.is_some())
 }
 
 /// `?format=` wins over `Accept`; Turtle is the default.
@@ -220,12 +223,27 @@ fn catalog_format(params: &FormatParam, headers: &HeaderMap) -> GraphFormat {
     negotiate_graph_format(&effective_accept)
 }
 
-fn catalog_response(format: GraphFormat, bytes: Vec<u8>) -> Result<Response, AppError> {
+/// The catalogue is scoped to the caller (their datasets, their readable
+/// graphs' statistics), so a signed-in caller's copy is `private`: a shared
+/// cache must not hand it to anyone else. `public` would let it, even for a
+/// request that carried credentials (RFC 9111 §3.5).
+fn catalog_response(
+    format: GraphFormat,
+    bytes: Vec<u8>,
+    signed_in: bool,
+) -> Result<Response, AppError> {
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, format.content_type())
-        .header("vary", "Accept")
-        .header("cache-control", "public, max-age=60")
+        .header("vary", "Accept, Authorization, Cookie")
+        .header(
+            "cache-control",
+            if signed_in {
+                "private, max-age=60"
+            } else {
+                "public, max-age=60"
+            },
+        )
         .body(axum::body::Body::from(bytes))
         .map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -262,7 +280,7 @@ async fn org_void_handler(
         format.to_rdf_format(),
     )
     .map_err(AppError::Internal)?;
-    catalog_response(format, bytes)
+    catalog_response(format, bytes, user_id.is_some())
 }
 
 /// Compute the set of named graph IRIs a NON-ADMIN caller may read when
@@ -307,4 +325,73 @@ fn compute_dereference_allowed_graphs(
     }
 
     Ok(allowed)
+}
+
+/// The `Location` of the 303 that sends a browser from `GET /resource/{path}`
+/// to the SPA's resource page, `resource?iri=…`.
+///
+/// It is relative to the request: one `../` per segment of `{path}` climbs from
+/// `…/resource/a/b` back to the directory that holds `resource/`. A
+/// root-absolute `/resource?iri=` would leave a deployment that a reverse proxy
+/// serves under a prefix (`https://example.org/ots/resource/a` → the proxy
+/// strips `/ots`) for the host root, where nothing answers. Relative references
+/// are allowed in `Location` (RFC 9110 §10.2.2) and every browser resolves them.
+fn spa_resource_location(request_path: &str, full_iri: &str) -> String {
+    // The raw (still percent-encoded) path, so an encoded `/` inside a segment
+    // does not count as a separator — the browser resolves the same string.
+    // The route is `/resource/*path`: the first `/resource/` is the route's,
+    // anything after it (another `resource/` included) is the IRI's path.
+    let tail = request_path
+        .split_once("/resource/")
+        .map(|(_, t)| t)
+        .unwrap_or("");
+    let depth = tail.split('/').count();
+    let encoded = utf8_percent_encode(full_iri, NON_ALPHANUMERIC);
+    format!("{}resource?iri={}", "../".repeat(depth), encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spa_resource_location;
+
+    /// Resolve a relative reference against a request path the way a browser
+    /// does (RFC 3986 §5.2, enough of it for `../` chains plus a query).
+    fn resolve(request_path: &str, reference: &str) -> String {
+        let mut dir: Vec<&str> = request_path.split('/').collect();
+        dir.pop(); // drop the last segment: references resolve from the directory
+        let (path_part, query) = reference.split_once('?').unwrap_or((reference, ""));
+        for seg in path_part.split('/') {
+            match seg {
+                ".." => {
+                    if dir.len() > 1 {
+                        dir.pop();
+                    }
+                }
+                "." | "" => {}
+                s => dir.push(s),
+            }
+        }
+        format!("{}?{}", dir.join("/"), query)
+    }
+
+    #[test]
+    fn spa_redirect_lands_on_the_resource_page_at_any_depth_and_prefix() {
+        let iri = "https://example.org/ots/resource/a/b";
+        let enc = "https%3A%2F%2Fexample%2Eorg%2Fots%2Fresource%2Fa%2Fb";
+        for (served_at, prefix) in [("", ""), ("/ots", "/ots"), ("/tools/ots", "/tools/ots")] {
+            for tail in ["a", "a/b", "a/b/c", "a/", "a%2Fb", "x/resource/y"] {
+                // What the browser asked for (before a proxy strips the prefix) …
+                let browser_path = format!("{served_at}/resource/{tail}");
+                // … and what the backend sees after it did.
+                let backend_path = format!("/resource/{tail}");
+                let loc = spa_resource_location(&backend_path, iri);
+                assert!(!loc.starts_with('/'), "Location must be relative: {loc}");
+                assert_eq!(
+                    resolve(&browser_path, &loc),
+                    format!("{prefix}/resource?iri={enc}"),
+                    "{browser_path} -> {loc}"
+                );
+            }
+        }
+    }
 }

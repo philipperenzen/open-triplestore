@@ -6,6 +6,7 @@ pub mod parallel_mirror;
 pub mod query_cache;
 pub mod recovery;
 pub mod replication;
+pub mod search_journal;
 pub mod telemetry;
 
 pub use engine::{QuadOp, StoreError, TripleStore};

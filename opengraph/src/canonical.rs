@@ -37,10 +37,12 @@
 //!   after full refinement — rare in real ontology/SHACL/list data) are ordered
 //!   by their input label as a deterministic tie-break. Full RDFC-1.0 resolves
 //!   these with the "Hash N-Degree Quads" procedure; that is a future addition.
-//! * RDF-star triple terms are not traversed (OpenGraph does not enable the
-//!   `rdf-star` feature on `oxrdf`).
+//! * RDF 1.2 triple terms (`sparql-12` feature) are walked: a blank node
+//!   inside a triple term — at any nesting depth — is hashed, labelled and
+//!   relabelled like any other occurrence, so it keeps its co-reference with
+//!   the same node elsewhere in the dataset.
 
-use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
+use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, NamedOrBlankNodeRef, Quad, Term};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -58,40 +60,73 @@ pub struct Canonicalized {
 
 // ── blank-node extraction ───────────────────────────────────────────────────
 
-fn subject_bnode(s: &NamedOrBlankNode) -> Option<&str> {
-    match s {
-        NamedOrBlankNode::BlankNode(b) => Some(b.as_str()),
-        _ => None,
-    }
-}
-fn term_bnode(t: &Term) -> Option<&str> {
+/// Push every blank-node id of an object term, including the ones nested
+/// inside RDF 1.2 triple terms (a triple term's subject is an IRI or a blank
+/// node; its object may be another triple term).
+fn term_bnodes<'a>(t: &'a Term, out: &mut Vec<&'a str>) {
     match t {
-        Term::BlankNode(b) => Some(b.as_str()),
-        _ => None,
+        Term::BlankNode(b) => out.push(b.as_str()),
+        #[cfg(feature = "sparql-12")]
+        Term::Triple(tt) => {
+            if let NamedOrBlankNode::BlankNode(b) = &tt.subject {
+                out.push(b.as_str());
+            }
+            term_bnodes(&tt.object, out);
+        }
+        _ => {}
     }
 }
-fn graph_bnode(g: &GraphName) -> Option<&str> {
-    match g {
-        GraphName::BlankNode(b) => Some(b.as_str()),
-        _ => None,
+
+/// Every blank-node id a quad mentions (subject, object at any triple-term
+/// depth, graph name), with repeats.
+fn quad_bnodes(q: &Quad) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let NamedOrBlankNode::BlankNode(b) = &q.subject {
+        out.push(b.as_str());
     }
+    term_bnodes(&q.object, &mut out);
+    if let GraphName::BlankNode(b) = &q.graph_name {
+        out.push(b.as_str());
+    }
+    out
 }
 
 /// Every distinct blank-node id occurring anywhere in `quads`.
 fn collect_bnodes(quads: &[Quad]) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for q in quads {
-        if let Some(b) = subject_bnode(&q.subject) {
-            set.insert(b.to_string());
-        }
-        if let Some(b) = term_bnode(&q.object) {
-            set.insert(b.to_string());
-        }
-        if let Some(b) = graph_bnode(&q.graph_name) {
+        for b in quad_bnodes(q) {
             set.insert(b.to_string());
         }
     }
     set
+}
+
+// ── node rewriting (shared with `skolem`) ───────────────────────────────────
+
+/// A node rewrite: `Some(replacement)` for a node to replace, `None` to keep it.
+pub(crate) type NodeMap<'f> = &'f dyn Fn(NamedOrBlankNodeRef<'_>) -> Option<NamedOrBlankNode>;
+
+/// Apply `f` to a subject-position node.
+pub(crate) fn map_subject(s: &NamedOrBlankNode, f: NodeMap<'_>) -> NamedOrBlankNode {
+    f(s.as_ref()).unwrap_or_else(|| s.clone())
+}
+
+/// Apply `f` to every IRI and blank node of an object term, recursing into
+/// RDF 1.2 triple terms (their subjects and objects; predicates are IRIs that
+/// no rewrite here touches).
+pub(crate) fn map_object(t: &Term, f: NodeMap<'_>) -> Term {
+    match t {
+        Term::NamedNode(n) => f(n.as_ref().into()).map_or_else(|| t.clone(), Term::from),
+        Term::BlankNode(b) => f(b.as_ref().into()).map_or_else(|| t.clone(), Term::from),
+        Term::Literal(_) => t.clone(),
+        #[cfg(feature = "sparql-12")]
+        Term::Triple(tt) => Term::Triple(Box::new(oxrdf::Triple::new(
+            map_subject(&tt.subject, f),
+            tt.predicate.clone(),
+            map_object(&tt.object, f),
+        ))),
+    }
 }
 
 // ── serialization for hashing ───────────────────────────────────────────────
@@ -103,21 +138,37 @@ fn ser_named(n: &NamedNode) -> String {
 /// Serialize a quad to a single N-Quad-ish line, rendering every blank node via
 /// `bn` (which maps a blank-node id to its placeholder/coloured form). The exact
 /// syntax only needs to be deterministic and injective for our own hashing.
-fn ser_quad(q: &Quad, bn: &dyn Fn(&str) -> String) -> String {
-    let s = match &q.subject {
+fn ser_subject(s: &NamedOrBlankNode, bn: &dyn Fn(&str) -> String) -> String {
+    match s {
         NamedOrBlankNode::NamedNode(n) => ser_named(n),
         NamedOrBlankNode::BlankNode(b) => bn(b.as_str()),
-    };
-    let p = ser_named(&q.predicate);
-    let o = match &q.object {
+    }
+}
+
+fn ser_object(t: &Term, bn: &dyn Fn(&str) -> String) -> String {
+    match t {
         Term::NamedNode(n) => ser_named(n),
         Term::BlankNode(b) => bn(b.as_str()),
+        // Display keeps the language tag, the RDF 1.2 base direction and the
+        // datatype, escaped as in N-Triples.
         Term::Literal(l) => l.to_string(),
-        // `Term::Triple` only exists when the oxigraph family has rdf-12 on, so
-        // without `sparql-12` the three arms above are already exhaustive.
+        // `Term::Triple` only exists when the oxigraph family has rdf-12 on.
+        // A triple term is written out in full, its blank nodes through `bn`
+        // like any others, so two triple terms only hash alike when they are.
         #[cfg(feature = "sparql-12")]
-        _ => "<<triple>>".to_string(),
-    };
+        Term::Triple(tt) => format!(
+            "<<( {} {} {} )>>",
+            ser_subject(&tt.subject, bn),
+            ser_named(&tt.predicate),
+            ser_object(&tt.object, bn)
+        ),
+    }
+}
+
+fn ser_quad(q: &Quad, bn: &dyn Fn(&str) -> String) -> String {
+    let s = ser_subject(&q.subject, bn);
+    let p = ser_named(&q.predicate);
+    let o = ser_object(&q.object, bn);
     match &q.graph_name {
         GraphName::DefaultGraph => format!("{s} {p} {o} ."),
         GraphName::NamedNode(n) => format!("{s} {p} {o} {} .", ser_named(n)),
@@ -179,18 +230,9 @@ fn index_by_bnode(quads: &[Quad], bnodes: &BTreeSet<String>) -> BTreeMap<String,
     let mut by_bnode: BTreeMap<String, Vec<usize>> =
         bnodes.iter().map(|b| (b.clone(), Vec::new())).collect();
     for (i, q) in quads.iter().enumerate() {
-        let mut touched = BTreeSet::new();
-        if let Some(b) = subject_bnode(&q.subject) {
-            touched.insert(b.to_string());
-        }
-        if let Some(b) = term_bnode(&q.object) {
-            touched.insert(b.to_string());
-        }
-        if let Some(b) = graph_bnode(&q.graph_name) {
-            touched.insert(b.to_string());
-        }
+        let touched: BTreeSet<&str> = quad_bnodes(q).into_iter().collect();
         for b in touched {
-            by_bnode.get_mut(&b).unwrap().push(i);
+            by_bnode.get_mut(b).unwrap().push(i);
         }
     }
     by_bnode
@@ -234,16 +276,14 @@ pub fn canonical_hashes(quads: &[Quad]) -> BTreeMap<String, String> {
 }
 
 fn relabel_quad(q: &Quad, m: &BTreeMap<String, String>) -> Quad {
-    let subject = match &q.subject {
-        NamedOrBlankNode::BlankNode(b) => {
-            NamedOrBlankNode::BlankNode(BlankNode::new_unchecked(m[b.as_str()].clone()))
-        }
-        other => other.clone(),
+    let relabel = |n: NamedOrBlankNodeRef<'_>| match n {
+        NamedOrBlankNodeRef::BlankNode(b) => Some(NamedOrBlankNode::BlankNode(
+            BlankNode::new_unchecked(m[b.as_str()].clone()),
+        )),
+        NamedOrBlankNodeRef::NamedNode(_) => None,
     };
-    let object = match &q.object {
-        Term::BlankNode(b) => Term::BlankNode(BlankNode::new_unchecked(m[b.as_str()].clone())),
-        other => other.clone(),
-    };
+    let subject = map_subject(&q.subject, &relabel);
+    let object = map_object(&q.object, &relabel);
     let graph_name = match &q.graph_name {
         GraphName::BlankNode(b) => {
             GraphName::BlankNode(BlankNode::new_unchecked(m[b.as_str()].clone()))
@@ -537,5 +577,122 @@ mod tests {
             "v",
         )]);
         assert_ne!(nquad_set(&a), nquad_set(&other));
+    }
+
+    // ── RDF 1.2 triple terms ────────────────────────────────────────────────
+
+    #[cfg(feature = "sparql-12")]
+    fn tt(s: NamedOrBlankNode, p: &str, o: Term) -> Term {
+        Term::Triple(Box::new(oxrdf::Triple::new(s, iri(p), o)))
+    }
+
+    #[cfg(feature = "sparql-12")]
+    const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+
+    /// `_:x :name "Alice" . _:r rdf:reifies <<( _:x :knows _:y )>> . _:y :name "Bob"`
+    #[cfg(feature = "sparql-12")]
+    fn reified(x: &str, y: &str, r: &str) -> Vec<Quad> {
+        vec![
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode(x)),
+                "http://ex/name",
+                "Alice",
+            ),
+            Quad::new(
+                NamedOrBlankNode::BlankNode(bnode(r)),
+                iri(RDF_REIFIES),
+                tt(
+                    NamedOrBlankNode::BlankNode(bnode(x)),
+                    "http://ex/knows",
+                    Term::BlankNode(bnode(y)),
+                ),
+                GraphName::DefaultGraph,
+            ),
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode(y)),
+                "http://ex/name",
+                "Bob",
+            ),
+        ]
+    }
+
+    /// A blank node inside a triple term is labelled, and keeps its
+    /// co-reference with the same node outside the triple term.
+    #[cfg(feature = "sparql-12")]
+    #[test]
+    fn blank_nodes_inside_triple_terms_are_relabelled_with_coreference() {
+        let c = canonicalize(&reified("x", "y", "r"));
+        assert_eq!(c.mapping.len(), 3, "x, y and the reifier are all labelled");
+        let x = &c.mapping["x"];
+        let y = &c.mapping["y"];
+        let joined: String = c.quads.iter().map(|q| format!("{q}\n")).collect();
+        assert!(
+            joined.contains(&format!("<<( _:{x} <http://ex/knows> _:{y} )>>")),
+            "the triple term carries the same labels as the nodes outside it:\n{joined}"
+        );
+        assert!(
+            !joined.contains("_:x ") && !joined.contains("_:y "),
+            "{joined}"
+        );
+    }
+
+    /// The same logical graph with other labels and another order gives the
+    /// same canonical quads when blank nodes sit inside triple terms.
+    #[cfg(feature = "sparql-12")]
+    #[test]
+    fn triple_term_canonicalisation_is_label_and_order_independent() {
+        let a = canonicalize(&reified("x", "y", "r"));
+        let mut other = reified("q1", "q2", "q3");
+        other.reverse();
+        let b = canonicalize(&other);
+        assert_eq!(nquad_set(&a.quads), nquad_set(&b.quads));
+    }
+
+    /// Two different triple terms must hash apart: before triple terms were
+    /// walked every one rendered alike, so these two shapes collided.
+    #[cfg(feature = "sparql-12")]
+    #[test]
+    fn different_triple_terms_do_not_collide() {
+        let shape = |o: &str| {
+            vec![Quad::new(
+                NamedOrBlankNode::BlankNode(bnode("r")),
+                iri(RDF_REIFIES),
+                tt(
+                    NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+                    "http://ex/p",
+                    Term::NamedNode(iri(o)),
+                ),
+                GraphName::DefaultGraph,
+            )]
+        };
+        assert_ne!(
+            nquad_set(&stable_relabel(&shape("http://ex/o1"))),
+            nquad_set(&stable_relabel(&shape("http://ex/o2")))
+        );
+    }
+
+    /// Nesting: a blank node two triple terms deep is still found.
+    #[cfg(feature = "sparql-12")]
+    #[test]
+    fn nested_triple_terms_are_walked() {
+        let inner = tt(
+            NamedOrBlankNode::BlankNode(bnode("deep")),
+            "http://ex/p",
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let outer = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            "http://ex/says",
+            inner,
+        );
+        let q = Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/claims"),
+            outer,
+            GraphName::DefaultGraph,
+        );
+        let c = canonicalize(&[q]);
+        assert_eq!(c.mapping.len(), 1);
+        assert!(c.quads[0].to_string().contains("_:c14n0"), "{}", c.quads[0]);
     }
 }
