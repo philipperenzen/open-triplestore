@@ -387,12 +387,22 @@ mod identity_policy {
         )
     }
 
-    /// Materialise owl2-rl for `ds` through the settings endpoint.
+    /// Materialise owl2-rl for `ds` through the settings endpoint, after
+    /// setting its identity policy through `PUT …/identity`, the one place it
+    /// is set.
     async fn materialize(app: &Router, token: &str, ds: &str, identity: Option<&str>) -> Value {
-        let mut body = json!({ "regime": "owl2-rl", "mode": "materialize" });
         if let Some(i) = identity {
-            body["identity"] = json!(i);
+            let (st, _, txt) = req(
+                app,
+                Method::PUT,
+                &format!("/api/datasets/{ds}/identity"),
+                token,
+                Some(json!({ "policy": i })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{txt}");
         }
+        let body = json!({ "regime": "owl2-rl", "mode": "materialize" });
         let (st, v, txt) = req(
             app,
             Method::PUT,
@@ -737,15 +747,154 @@ mod identity_policy {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        let (st, _, _) = req(
+        // `PUT …/identity` is the one surface: the entailment setting refuses
+        // an `identity` field rather than ignore it, and the policy stays.
+        let (st, _, txt) = req(
             &app,
             Method::PUT,
             "/api/datasets/idp-org/entailment",
             &token,
-            Some(json!({ "regime": "owl2-rl", "identity": "sameas-maybe" })),
+            Some(json!({ "regime": "owl2-rl", "identity": "sameas-off" })),
         )
         .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+        assert!(txt.contains("identity"), "{txt}");
+        let (_, v, txt) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/idp-org/identity",
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(v["policy"], "sameas-full", "{txt}");
+    }
+
+    /// P2-8: `eq_ref` is part of a dataset's entailment setting. It is kept
+    /// until changed, applies to the OWL 2 RL engine only, and a dataset run
+    /// writes the reflexive sameAs triples it asks for.
+    #[tokio::test]
+    async fn eq_ref_is_part_of_the_dataset_setting() {
+        let (state, token) = admin_state();
+        dataset(&state, "idp-eqref", (OwnerType::User, "adm"));
+        let app = test_app(state.clone());
+        let put = |body: Value| {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                req(
+                    &app,
+                    Method::PUT,
+                    "/api/datasets/idp-eqref/entailment",
+                    &token,
+                    Some(body),
+                )
+                .await
+            }
+        };
+        let reflexive = format!("<{EX}asset1> <http://www.w3.org/2002/07/owl#sameAs> <{EX}asset1>");
+
+        let (st, v, txt) = put(json!({ "regime": "owl2-rl" })).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["eq_ref"], false, "off by default: {txt}");
+        assert!(!entailed(&state, "idp-eqref", &reflexive));
+
+        let (st, v, txt) = put(json!({ "regime": "owl2-rl", "eq_ref": true })).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["eq_ref"], true, "{txt}");
+        assert!(entailed(&state, "idp-eqref", &reflexive), "eq-ref ran");
+
+        // Omitted: unchanged, and a later write-triggered run keeps it.
+        let (st, v, txt) = put(json!({ "regime": "owl2-rl" })).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["eq_ref"], true, "{txt}");
+        let (_, v, txt) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/idp-eqref/entailment",
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(v["eq_ref"], true, "{txt}");
+
+        // Only the OWL 2 RL engine honours it.
+        let (st, _, txt) = put(json!({ "regime": "rdfs", "eq_ref": true })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+        let (st, v, txt) = put(json!({ "regime": "rdfs" })).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["eq_ref"], false, "{txt}");
+    }
+
+    /// P2-8: a run without a dataset applies the identity policy it names,
+    /// by default `sameas-narrow` (the dataset default), and reports it; a
+    /// dataset run refuses one, since the dataset's own policy applies.
+    #[tokio::test]
+    async fn an_unscoped_run_takes_an_identity_policy() {
+        let (state, token) = admin_state();
+        let (inst, _) = dataset(&state, "idp-unscoped", (OwnerType::User, "adm"));
+        state
+            .store
+            .load_str(
+                &format!(
+                    "<{EX}asset1> <http://www.w3.org/2002/07/owl#sameAs> <{EX}asset1-dup> . \
+                     <{EX}asset1-dup> <{EX}inspected> \"2026-01-01\" ."
+                ),
+                RdfFormat::Turtle,
+                Some(&inst),
+            )
+            .unwrap();
+        let app = test_app(state.clone());
+        let target = "urn:entailment:owl2-rl:unscoped-test";
+        let run = |extra: Value| {
+            let app = app.clone();
+            let token = token.clone();
+            let inst = inst.clone();
+            async move {
+                let mut body = json!({
+                    "regime": "owl2-rl", "source_graphs": [inst], "target_graph": target
+                });
+                for (k, v) in extra.as_object().unwrap() {
+                    body[k] = v.clone();
+                }
+                req(
+                    &app,
+                    Method::POST,
+                    "/api/reasoning/materialize",
+                    &token,
+                    Some(body),
+                )
+                .await
+            }
+        };
+        let merged = || {
+            matches!(
+                state.store.query(&format!(
+                    "ASK {{ GRAPH <{target}> {{ <{EX}asset1> <{EX}inspected> ?x }} }}"
+                )),
+                Ok(QueryResults::Boolean(true))
+            )
+        };
+
+        let (st, v, txt) = run(json!({})).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["identity"], "sameas-narrow", "{txt}");
+        assert!(
+            merged(),
+            "narrow runs the equality rules over the given graphs"
+        );
+
+        let (st, v, txt) = run(json!({ "identity": "sameas-off" })).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["identity"], "sameas-off", "{txt}");
+        assert!(!merged(), "off: no equality rules");
+
+        let (st, _, txt) = run(json!({ "identity": "sameas-maybe" })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+        let (st, _, txt) =
+            run(json!({ "dataset": "idp-unscoped", "identity": "sameas-full" })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+        assert!(txt.contains("/identity"), "{txt}");
     }
 }
 

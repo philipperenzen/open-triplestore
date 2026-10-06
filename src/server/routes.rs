@@ -10791,9 +10791,15 @@ struct MaterializeRequest {
     /// `source_graphs` are added on top.
     dataset: Option<String>,
     /// `owl2-rl` only: also run eq-ref, writing `x owl:sameAs x` for every
-    /// term (about one triple per term). Default `false`.
+    /// term (about one triple per term). Omitted: the dataset's entailment
+    /// setting with `dataset`, else `false`.
     #[serde(default)]
-    eq_ref: bool,
+    eq_ref: Option<bool>,
+    /// What `owl:sameAs` may do in a run without `dataset`: `sameas-off`,
+    /// `sameas-narrow` (default) or `sameas-full`. A dataset run applies the
+    /// dataset's policy (`PUT …/identity`), so this is refused with `dataset`.
+    #[serde(default)]
+    identity: Option<String>,
 }
 
 /// `?async=true`: queue the run as a job and answer 202 at once.
@@ -10946,24 +10952,6 @@ pub(crate) struct RegimeOptions {
 
 /// [`run_regime`] with the reasoner's own error, for a caller that records
 /// what the run found (`crate::entailment`).
-pub(crate) fn run_reasoner(
-    state: &AppState,
-    regime: &str,
-    sources: Option<Vec<String>>,
-    target: &str,
-    identity: crate::reasoning::identity::IdentityPolicy,
-) -> Result<Option<RegimeRun>, crate::reasoning::ReasoningError> {
-    run_reasoner_with(
-        state,
-        regime,
-        sources,
-        target,
-        identity,
-        RegimeOptions::default(),
-    )
-}
-
-/// [`run_reasoner`] with explicit [`RegimeOptions`].
 pub(crate) fn run_reasoner_with(
     state: &AppState,
     regime: &str,
@@ -11046,15 +11034,42 @@ pub(crate) fn run_reasoner_with(
     Ok(report.map(RegimeRun::plain))
 }
 
+/// The identity policy a request without a dataset asked for: `identity`
+/// parsed, else the built-in default (`sameas-narrow`, the same default every
+/// dataset starts from). With a dataset the dataset's own policy applies and
+/// `identity` is refused: `PUT …/identity` is the one place it is set.
+fn requested_identity(
+    dataset: Option<&str>,
+    identity: Option<&str>,
+) -> Result<crate::reasoning::identity::IdentityPolicy, AppError> {
+    use crate::reasoning::identity::IdentityPolicy;
+    match (dataset, identity) {
+        (_, None) => Ok(IdentityPolicy::default()),
+        (Some(_), Some(_)) => Err(AppError::BadRequest(
+            "a dataset run applies the dataset's identity policy; set it with \
+             PUT /api/datasets/{id}/identity, or leave `dataset` out to choose one per run"
+                .into(),
+        )),
+        (None, Some(raw)) => IdentityPolicy::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "unknown identity policy `{raw}`; one of {}",
+                IdentityPolicy::ALL.join(", ")
+            ))
+        }),
+    }
+}
+
 /// The graphs a reasoning request may read: a dataset's conformance layer
 /// (only the graphs the caller can read), explicit `source_graphs` the caller
 /// can read, or — neither given — `None`, the unnamed default graph. Also the
-/// identity policy that applies (the dataset's, else `sameas-full`).
+/// identity policy that applies: the dataset's, else the one the request
+/// names ([`requested_identity`], default `sameas-narrow`).
 fn reasoning_scope(
     state: &AppState,
     user: &AuthenticatedUser,
     dataset: Option<&str>,
     source_graphs: Option<Vec<String>>,
+    identity: Option<&str>,
 ) -> Result<
     (
         Option<Vec<String>>,
@@ -11063,9 +11078,9 @@ fn reasoning_scope(
     AppError,
 > {
     // A dataset run applies the dataset's identity policy (what owl:sameAs
-    // may do, whether linksets are premises); an unscoped run reads whatever
-    // it is given and keeps the full behaviour.
-    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
+    // may do, whether linksets are premises); a run without one takes the
+    // policy it names, by default the dataset default `sameas-narrow`.
+    let mut identity = requested_identity(dataset, identity)?;
     let sources: Option<Vec<String>> = if let Some(ds_id) = dataset {
         let ds = state
             .auth_db
@@ -11139,6 +11154,7 @@ fn resolve_reasoning_scope(
     user: &AuthenticatedUser,
     dataset: Option<&str>,
     source_graphs: Option<&[String]>,
+    identity: Option<&str>,
 ) -> Result<
     (
         Option<Vec<String>>,
@@ -11146,7 +11162,13 @@ fn resolve_reasoning_scope(
     ),
     AppError,
 > {
-    reasoning_scope(state, user, dataset, source_graphs.map(<[String]>::to_vec))
+    reasoning_scope(
+        state,
+        user,
+        dataset,
+        source_graphs.map(<[String]>::to_vec),
+        identity,
+    )
 }
 
 /// Run `work` on the blocking pool under the expensive-operations semaphore —
@@ -11229,12 +11251,20 @@ async fn reasoning_materialize(
         &user,
         body.dataset.as_deref(),
         body.source_graphs.clone(),
+        body.identity.as_deref(),
     )?;
     let regime = body.regime.clone();
     let st = state.clone();
-    let options = RegimeOptions {
-        eq_ref: body.eq_ref,
-    };
+    // eq-ref: as asked, else as the dataset's entailment setting has it.
+    let eq_ref = body.eq_ref.unwrap_or_else(|| {
+        body.dataset.as_deref().is_some_and(|d| {
+            crate::entailment::config(&state.auth_db, d)
+                .ok()
+                .flatten()
+                .is_some_and(|c| c.eq_ref)
+        })
+    });
+    let options = RegimeOptions { eq_ref };
     let work = move || -> Result<serde_json::Value, AppError> {
         // Entailment graphs are derived data and must be rebuilt from
         // scratch each run. Materialisation only ever INSERTed, so after a
@@ -11263,6 +11293,9 @@ async fn reasoning_materialize(
             // null: the regime has no inconsistency rules (an inconsistent
             // run is a 422, never a 200).
             "consistent": crate::reasoning::common::checks_consistency(&r.regime).then_some(true),
+            // The identity policy the run applied (the dataset's, or the
+            // request's, default `sameas-narrow`).
+            "identity": identity.as_str(),
         });
         // Axioms the regime could not use (outside its profile), by
         // construct (D9: `owl2-el`, `owl2-ql`); only present when there were
@@ -11295,6 +11328,8 @@ struct CheckRequest {
     conclusion: Option<String>,
     /// `satisfiability`: the class IRI.
     class: Option<String>,
+    /// What `owl:sameAs` may do without `dataset` (see `MaterializeRequest`).
+    identity: Option<String>,
 }
 
 /// POST /api/reasoning/check — an OWL 2 DL consistency, entailment,
@@ -11365,13 +11400,14 @@ async fn reasoning_check(
             None => None,
         };
         let (sources, identity) = if premise.is_some() {
-            (None, crate::reasoning::identity::IdentityPolicy::Full)
+            (None, requested_identity(None, body.identity.as_deref())?)
         } else {
             reasoning_scope(
                 &state,
                 &user,
                 body.dataset.as_deref(),
                 body.source_graphs.clone(),
+                body.identity.as_deref(),
             )?
         };
         let st = state.clone();
@@ -11801,6 +11837,9 @@ struct SwrlExecuteRequest {
     /// materialises. Needs a scope (`dataset` or `source_graphs`) and a target.
     #[serde(default)]
     regime: Option<String>,
+    /// What `owl:sameAs` may do without `dataset` (see `MaterializeRequest`).
+    #[serde(default)]
+    identity: Option<String>,
 }
 
 #[cfg(feature = "swrl")]
@@ -11841,6 +11880,7 @@ async fn swrl_execute(
         &user,
         body.dataset.as_deref(),
         body.source_graphs.as_deref(),
+        body.identity.as_deref(),
     )
     .map_err(swrl_err)?;
 
@@ -11982,7 +12022,7 @@ async fn swrl_execute(
             &compiled,
             &scope,
             &target,
-            Some((regime.as_str(), identity)),
+            Some((regime.as_str(), identity, RegimeOptions::default())),
             true,
             max_iter,
             deadline,

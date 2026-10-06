@@ -657,6 +657,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **One surface for the identity policy; `eq_ref` in the dataset setting**
+  (breaking). `PUT /api/datasets/{id}/identity` is now the only way to set a
+  dataset's `owl:sameAs` policy: `PUT …/entailment` no longer takes
+  `identity` and refuses unknown fields (`422`). The entailment setting gains
+  `eq_ref` (`owl2-rl` and `skos`; kept until changed, reported by
+  `GET …/entailment`), honoured by every run of the dataset, the
+  write-triggered ones and the joint SWRL runs included;
+  `POST /api/reasoning/materialize` with a `dataset` uses it unless the body
+  says otherwise. A run without a dataset (`materialize`, `check`,
+  `swrl/execute`) takes an `identity` from the body and defaults to
+  `sameas-narrow`, the dataset default, instead of `sameas-full`; a dataset
+  run refuses one (`400`). The materialisation report names the policy it
+  applied (`identity`). See `docs/reasoning.md`.
 - **LDP: a resource that does not exist is a 404 with its discovery
   headers.** `GET`/`HEAD` on an LDP path nothing created — never written,
   deleted, an intermediate path, or an IRI another resource only links to —
