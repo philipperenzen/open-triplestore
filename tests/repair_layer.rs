@@ -1063,9 +1063,19 @@ async fn a_rewrite_merge_rematerialises_entailment_under_narrow_and_off() {
         let (s, body) = send(
             &app,
             Method::PUT,
+            "/api/datasets/ds/identity",
+            Some(&token),
+            Some(json!({ "policy": identity })),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        let (s, body) = send(
+            &app,
+            Method::PUT,
             "/api/datasets/ds/entailment",
             Some(&token),
-            Some(json!({ "regime": "rdfs", "mode": "materialize", "identity": identity })),
+            Some(json!({ "regime": "rdfs", "mode": "materialize" })),
             None,
         )
         .await;

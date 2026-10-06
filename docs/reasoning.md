@@ -255,11 +255,17 @@ curl -X PUT http://localhost:7878/api/organisations/<org-id>/identity   -H "Auth
 ```
 
 `GET /api/datasets/<id>/entailment` reports the effective policy too
-(`identity`, `identity_source`), and `PUT …/entailment` accepts an optional
-`"identity"` next to `regime`/`mode` (`"inherit"` removes the dataset's own
-setting). The policy applies to `POST /api/reasoning/materialize` with a
-`dataset` as well; an unscoped run (no dataset) keeps `sameas-full`, as it
-reads whatever graphs it is given.
+(`identity`, `identity_source`). `PUT …/identity` is the only place the policy
+is set: `PUT …/entailment` sets the regime, the mode and `eq_ref` and refuses
+an `identity` field (`422`) rather than ignore it. A run of
+`POST /api/reasoning/materialize` (also `/api/reasoning/check` and
+`/api/swrl/execute`) with a `dataset` applies that dataset's policy and
+refuses an `identity` in the body (`400`); a run without one takes
+`"identity": "sameas-off" | "sameas-narrow" | "sameas-full"` from the body,
+by default `sameas-narrow` like a new dataset, and reports the policy it
+applied as `identity`. Without a dataset there are no linkset graphs to leave
+out, so `sameas-narrow` and `sameas-full` read the same graphs there; only
+`sameas-off` changes the result.
 
 ## SWRL rules
 

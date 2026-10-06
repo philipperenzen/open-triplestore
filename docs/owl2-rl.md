@@ -175,8 +175,11 @@ The expression is a blank node, and no RDF triple can have a blank-node predicat
 
 `eq-ref` writes `x owl:sameAs x` for every subject, predicate and non-literal object: about one
 triple per term, and no other rule needs those triples to fire. It is off by default; turn it
-on with `Owl2RLReasoner::with_eq_ref(true)` or `"eq_ref": true` in the body of
-`POST /api/reasoning/materialize`. `sameas-off` skips it with the other equality rules. The
+on with `Owl2RLReasoner::with_eq_ref(true)`, with `"eq_ref": true` in a dataset's entailment
+setting (`PUT /api/datasets/<id>/entailment`, kept until changed and honoured by every later run
+of that dataset, `skos` included), or with `"eq_ref": true` in the body of
+`POST /api/reasoning/materialize` (omitted there: the dataset's setting when the run names a
+`dataset`, else off). `sameas-off` skips it with the other equality rules. The
 inconsistencies that follow from it — `x owl:differentFrom x`, an individual listed twice in an
 `owl:AllDifferent` — are reported whether or not it runs. Without it, the only triples missing
 from the closure are the reflexive `owl:sameAs` ones. The grade (Full, docs/standards.md) is
