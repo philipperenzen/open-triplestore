@@ -51,19 +51,26 @@ authorise compliance marks for its standards. The files are © Open Geospatial C
 and redistributed under the Apache License 2.0 — see
 [`LICENSE.md`](../../tests/fixtures/ogc-geosparql/LICENSE.md) there.
 
-### Results (2026-10-02)
+### Results (2026-10-06)
 
 | | count |
 |---|---|
-| **Examples matching the OGC oracle** | **47** |
-| Known deviations (ratcheted) | 1 |
+| **Examples matching the OGC oracle** | **48** |
+| Known deviations (ratcheted) | 0 |
 | Total examples | 48 |
 | **Reference-example round-trip** ([`example-bridge`](../../tests/fixtures/example-bridge/)) | **conforms ✓** |
 
-*(Previous baseline: 2026-06-11, 46 matching / 2 known deviations.)*
+*(Previous baselines: 2026-10-02, 47 matching / 1 known deviation; 2026-06-11, 46 / 2.)*
 
-Known deviation (same two-way ratchet as the W3C suite): `S18-invalid.ttl`, a
-GeoJSON literal the validator's `sh:pattern` should reject. `S21-invalid.ttl`
+No known deviation is left (same two-way ratchet as the W3C suite). `S18-invalid.ttl`
+matches since 2026-10-06: the validator's S18 shape checks a GeoJSON literal with
+`sh:pattern "^\\s*$|^\\s*({)(.*)(})\\s*$"`, and SPARQL `REGEX` (which `sh:pattern` uses)
+reads `{` and `}` outside a quantifier as ordinary characters, as XML Schema 1.0 regular
+expressions do. The `regex` crate refused the unescaped braces, the engine fell back to
+SPARQL, whose evaluator refused them too, and the error passed every value. The braces
+are now escaped before the pattern is compiled, in the SHACL engine and in the vendored
+SPARQL evaluator, and a pattern the engine cannot evaluate fails the shapes graph at load
+instead of passing every value. `S21-invalid.ttl`
 matches since 2026-10-02: its `sh:sparql` constraint has a blank-node geometry as
 focus node, and blank-node focus nodes used to be skipped by `sh:sparql`; they
 are now pre-bound as terms (see `docs/conformance/shacl.md`). The two node-level
@@ -161,16 +168,16 @@ the standard.
 | 32 | geometry-extension/kml-literal-empty | Met | `ogc_req32_kml_literal_empty_is_the_empty_geometry` |
 | 33 | geometry-extension/geometry-as-kml-literal | Met | `ogc_req33_geometry_as_kml_literal_is_queryable` |
 | 34 | geometry-extension/asKML-function | Met | `ogc_req34_as_kml_reprojects_and_round_trips` |
-| 35–38 | geometry-extension-dggs (DGGS literals, `asDGGS`) | Missing (owner decision) | — |
+| 35–38 | geometry-extension-dggs (DGGS literals, `asDGGS`) | Missing (owner decision; what support would need: [#509](https://github.com/philipperenzen/open-triplestore/issues/509)) | — |
 | 39 | geometry-extension/query-functions | Met — all 23 functions; results follow the first operand's serialisation and SRS (§10.9.1); `geometryType` returns an IRI; `concaveHull`'s default target is 0.5 | `geo_req27_*` … `geo_req29_*`, `ogc_req39_*` (`ogc_req39_geometry_property_functions`, `ogc_req39_geometry_type_is_an_iri`, `ogc_req39_centroid_bounding_circle_and_concave_hull`, `ogc_req39_geometry_results_follow_the_first_operand`, `ogc_req39_40_functions_over_a_non_geometry_are_unbound`) |
 | 40 | geometry-extension/query-functions-non-sf | Met — all 14 functions | `geos_cx_geosparql11_metric_functions`, `ogc_req40_*` (`ogc_req40_length_and_perimeter_with_units`, `ogc_req40_area_on_every_serialisation`, `ogc_req40_area_with_area_units`, `ogc_req40_num_geometries_and_geometry_n`, `ogc_req40_min_and_max_ordinates`) |
-| 41 | geometry-extension/srid-function | Met — the result is the CRS as an IRI term (owner decision: IRIs, not `xsd:anyURI` literals) | `ogc_req41_get_srid_of_a_gml_literal`, `geos_cx_get_srid` |
+| 41 | geometry-extension/srid-function | Met — the result is the CRS as an IRI term (owner decision: IRIs, not the `xsd:anyURI` literals the signature gives; open for a new owner call under the Full rubric, [#510](https://github.com/philipperenzen/open-triplestore/issues/510)) | `ogc_req41_get_srid_of_a_gml_literal`, `geos_cx_get_srid` |
 | 42 | geometry-extension/sa-functions | Met — all six aggregates; `aggConcaveHull` takes one argument (the parser allows one expression per custom aggregate) with the default target 0.5 | `agg_union_*`, `ogc_req42_*` |
 | 43 | geometry-topology-extension/relate-query-function | Met | as R21 |
 | 44–46 | geometry-topology-extension/sf, eh, rcc8-query-functions | Met | as R22–R24 |
 | 47–49 | rdfs-entailment-extension/bgp-rdfs-ent, wkt-geometry-types, gml-geometry-types | Met | as R25–R27 |
 | 50–52 | query-rewrite-extension/sf, eh, rcc8-query-rewrite | Met | as R28–R30 |
-| DGGS 39–42 | the DGGS versions of query-functions, query-functions-non-sf, srid-function, sa-functions | Missing (owner decision) | — |
+| DGGS 39–42 | the DGGS versions of query-functions, query-functions-non-sf, srid-function, sa-functions | Missing (owner decision; [#509](https://github.com/philipperenzen/open-triplestore/issues/509)) | — |
 
 Every requirement outside the DGGS conformance class (`/conf/geometry-extension-dggs`:
 Req 35–38 and the DGGS versions of Req 39–42) is met, and GeoSPARQL 1.1 is graded **Full**

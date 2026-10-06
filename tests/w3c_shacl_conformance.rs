@@ -70,8 +70,8 @@ const OPTIONAL_UNSUPPORTED: &[(&str, &str, &str)] = &[(
     "$shapesGraph",
     "$shapesGraph and $currentShape are optional (SHACL §5.3.1), and a processor without them \
      must report a failure when a constraint uses them, which this one does; the test's \
-     expected report assumes support, which w3c/data-shapes#426 contests, and SHACL 1.2 \
-     SPARQL Extensions drops both variables",
+     expected report assumes support (a test-suite defect, #508); w3c/data-shapes#426, now \
+     closed, asked to drop both, and SHACL 1.2 SPARQL Extensions drops them",
 )];
 
 #[derive(Debug, PartialEq)]

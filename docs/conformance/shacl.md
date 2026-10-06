@@ -70,8 +70,10 @@ the processor ever produces a report for it instead.
   the data graphs only, so a constraint that uses either variable fails the shapes
   graph at load, naming the variable. The test's expected report assumes a
   processor that supports them; [w3c/data-shapes#426](https://github.com/w3c/data-shapes/issues/426)
-  contests the test for that reason, and SHACL 1.2 SPARQL Extensions drops both
-  variables. The runner checks that the failure is reported.
+  (now closed) asked to drop both variables, and SHACL 1.2 SPARQL Extensions drops
+  them. The runner checks that the failure is reported. Under the Full rubric this
+  is (a), a defect in the test suite: a test of an optional feature that is not
+  marked optional ([#508](https://github.com/philipperenzen/open-triplestore/issues/508)).
 
 ## Remaining known failures
 
@@ -149,6 +151,8 @@ validation fails with that failure, and fails if a report ever comes back.
   The SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets)
   has no such fallback: the query does not parse with the declared prefixes,
   so the shapes graph is ill-formed, and validation fails with "Prefix not found".
+  Under the Full rubric this is (a), a defect in the test suite; what upstream
+  should change is in [#507](https://github.com/philipperenzen/open-triplestore/issues/507).
 
 Every SHACL-AF feature is covered by `tests/shacl_conformance.rs` and
 `tests/shacl_rules_conformance.rs` as well, including the one these tests do

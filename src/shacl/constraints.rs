@@ -1758,9 +1758,120 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
     {
         return hit.map(|re| re.is_match(value));
     }
+    let built = compile_pattern(pattern, flags).map(Arc::new);
+    REGEXES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 1024 {
+            c.clear();
+        }
+        c.entry(pattern.to_string())
+            .or_default()
+            .insert(flags.to_string(), built.clone());
+    });
+    built.map(|re| re.is_match(value))
+}
+
+/// An XPath regular expression (the SPARQL `REGEX` syntax `sh:pattern`
+/// uses: XML Schema 1.0 regular expressions with XPath's anchors, reluctant
+/// quantifiers and back-references) in the `regex` crate's syntax. XML
+/// Schema 1.0 has `{` and `}` as ordinary characters wherever they do not
+/// make a quantifier `{n}`, `{n,}` or `{n,m}`, so `({)(.*)(})` matches a
+/// braced string; the `regex` crate needs those escaped.
+pub(crate) fn xpath_regex(pattern: &str) -> std::borrow::Cow<'_, str> {
+    if !pattern.contains(['{', '}']) {
+        return pattern.into();
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let (mut i, mut class_depth) = (0usize, 0usize);
+    // Whether the previous token can take a quantifier.
+    let mut quantifiable = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                out.push(c);
+                // `\p{…}` / `\P{…}`: the braces belong to the escape.
+                if let Some(&n) = chars.get(i + 1) {
+                    out.push(n);
+                    i += 1;
+                    if matches!(n, 'p' | 'P') && chars.get(i + 1) == Some(&'{') {
+                        while i + 1 < chars.len() {
+                            i += 1;
+                            out.push(chars[i]);
+                            if chars[i] == '}' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                quantifiable = true;
+            }
+            '[' => {
+                class_depth += 1;
+                out.push(c);
+            }
+            ']' if class_depth > 0 => {
+                class_depth -= 1;
+                out.push(c);
+                quantifiable = class_depth == 0;
+            }
+            _ if class_depth > 0 => out.push(c),
+            '{' => {
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&x| x == '}')
+                    .map(|p| i + 1 + p);
+                let quantity = end.is_some_and(|e| {
+                    let body: String = chars[i + 1..e].iter().collect();
+                    let mut parts = body.splitn(2, ',');
+                    let lo = parts.next().unwrap_or("");
+                    let hi = parts.next();
+                    !lo.is_empty()
+                        && lo.bytes().all(|b| b.is_ascii_digit())
+                        && hi.is_none_or(|h| h.bytes().all(|b| b.is_ascii_digit()))
+                });
+                if quantity && quantifiable {
+                    let e = end.expect("a quantity has an end");
+                    out.extend(&chars[i..=e]);
+                    i = e;
+                    // A reluctant `?` may follow; another quantifier may not.
+                    quantifiable = false;
+                } else {
+                    out.push_str("\\{");
+                    quantifiable = true;
+                }
+            }
+            '}' => {
+                out.push_str("\\}");
+                quantifiable = true;
+            }
+            '(' | '|' => {
+                out.push(c);
+                quantifiable = false;
+            }
+            '*' | '+' | '?' => {
+                out.push(c);
+                quantifiable = false;
+            }
+            _ => {
+                out.push(c);
+                quantifiable = !matches!(c, '^');
+            }
+        }
+        i += 1;
+    }
+    out.into()
+}
+
+/// `pattern` with SPARQL `REGEX` `flags` compiled, or `None` when the flags
+/// are not REGEX flags or the pattern is not a regular expression this
+/// processor evaluates.
+pub(crate) fn compile_pattern(pattern: &str, flags: &str) -> Option<regex::Regex> {
     let mut literal = false;
     let mut ok = true;
-    let mut b = regex::RegexBuilder::new(pattern);
+    let translated = xpath_regex(pattern);
+    let mut b = regex::RegexBuilder::new(&translated);
     for f in flags.chars() {
         match f {
             'i' => {
@@ -1779,7 +1890,7 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
             _ => ok = false,
         }
     }
-    let built = if !ok {
+    if !ok {
         None
     } else if literal {
         regex::RegexBuilder::new(&regex::escape(pattern))
@@ -1790,17 +1901,6 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
     } else {
         b.size_limit(1 << 20).build().ok()
     }
-    .map(Arc::new);
-    REGEXES.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 1024 {
-            c.clear();
-        }
-        c.entry(pattern.to_string())
-            .or_default()
-            .insert(flags.to_string(), built.clone());
-    });
-    built.map(|re| re.is_match(value))
 }
 
 fn string_repr(term: &Term) -> Option<String> {
@@ -2053,5 +2153,35 @@ pub(crate) fn xsd_lexical_valid(lit: &Literal) -> bool {
             .is_some()
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::{compile_pattern, xpath_regex};
+
+    /// XML Schema 1.0 regular expressions take `{` and `}` as ordinary
+    /// characters outside a quantifier (the OGC GeoSPARQL validator's S18
+    /// shape matches a GeoJSON object with `^\s*({)(.*)(})\s*$`).
+    #[test]
+    fn braces_outside_a_quantifier_are_ordinary_characters() {
+        assert_eq!(xpath_regex("a{2}"), "a{2}");
+        assert_eq!(xpath_regex("a{2,}b{1,3}?"), "a{2,}b{1,3}?");
+        assert_eq!(xpath_regex("({)(.*)(})"), "(\\{)(.*)(\\})");
+        assert_eq!(xpath_regex("{a}"), "\\{a\\}");
+        assert_eq!(xpath_regex("x{y"), "x\\{y");
+        assert_eq!(xpath_regex("[{}]"), "[{}]");
+        assert_eq!(xpath_regex("\\{"), "\\{");
+        assert_eq!(xpath_regex("\\p{Lu}{2}"), "\\p{Lu}{2}");
+        let re = compile_pattern("^\\s*$|^\\s*({)(.*)(})\\s*$", "s").unwrap();
+        assert!(re.is_match("  {\"type\": \"Point\"}\n"));
+        assert!(!re.is_match("<gml:Point/>"));
+        assert!(compile_pattern("a{2}", "").unwrap().is_match("aa"));
+    }
+
+    #[test]
+    fn what_cannot_be_evaluated_does_not_compile() {
+        assert!(compile_pattern("(", "").is_none());
+        assert!(compile_pattern("a", "z").is_none());
     }
 }
