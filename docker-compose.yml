@@ -41,10 +41,10 @@ services:
       - BACKUP_DIR=/data/backups
       - BACKUP_RETENTION_COUNT=${BACKUP_RETENTION_COUNT:-7}
       - BACKUP_SCHEDULE_HOURS=${BACKUP_SCHEDULE_HOURS:-24}
-      - S3_ENDPOINT=http://minio:9000
+      - S3_ENDPOINT=http://s3-gateway:7070
       - S3_BUCKET=${S3_BUCKET:-triplestore-assets}
-      - S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
-      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
+      - S3_ACCESS_KEY=${S3_GATEWAY_ACCESS_KEY:?S3_GATEWAY_ACCESS_KEY must be set (no default) — see .env.example}
+      - S3_SECRET_KEY=${S3_GATEWAY_SECRET_KEY:?S3_GATEWAY_SECRET_KEY must be set (no default) — see .env.example}
       - S3_REGION=${S3_REGION:-us-east-1}
       # OIDC resource server (optional). Set OIDC_ISSUER to
       # enable verifying IdP-issued access tokens; leave blank to keep password/PAT only.
@@ -160,7 +160,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      minio:
+      s3-gateway:
         condition: service_healthy
     restart: unless-stopped
     # Bound container memory so a large seed/import is a clean, observable OOM
@@ -182,27 +182,38 @@ services:
       start_period: 180s
       retries: 3
 
-  minio:
-    # Pin to an immutable digest in production (e.g. quay.io/minio/minio@sha256:...) instead of a
-    # floating tag, so a re-pull can't silently change the image. Override via MINIO_IMAGE.
-    image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
-    command: server /data --console-address ":9001"
+  # The S3 asset store: Versity S3 Gateway (Apache-2.0) serving the
+  # s3_gateway_data volume through its POSIX backend. Each bucket is a
+  # directory and each object a file; object metadata (content type, ETag,
+  # user metadata) lives in extended attributes. Docker named volumes support
+  # them (ext4/xfs on Linux, the Docker Desktop VM on macOS and Windows). A host
+  # bind mount on macOS or Windows does not: the gateway then exits with
+  # "xattrs are not supported on this filesystem", and needs
+  # `--sidecar /data/.sidecar` before `posix` in the command below.
+  # Every request must carry a valid signature for the root credentials below.
+  s3-gateway:
+    # Pinned by tag and digest, so a re-pull cannot silently change the image.
+    # Override via S3_GATEWAY_IMAGE.
+    image: ${S3_GATEWAY_IMAGE:-versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499}
+    # /health answers GET without credentials (the healthcheck below). The web
+    # UI shares the S3 port under /ui; sign in with the root credentials.
+    command: ["--health", "/health", "--webui-s3-prefix", "/ui", "posix", "/data"]
     ports:
-      # Loopback only — the S3 API + admin console must not be world-reachable. They are accessed
-      # by the triplestore over the compose network (unaffected) and locally for administration.
-      # Override MINIO_PORT / MINIO_CONSOLE_PORT per-worktree in .env if 9000/9001 are already
-      # bound by another `docker compose up` — see the note on TRIPLESTORE_PORT above.
-      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
-      - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+      # Loopback only — the S3 API and its web UI must not be world-reachable. The triplestore
+      # reaches them over the compose network (unaffected); the host port is for local
+      # administration. Override S3_GATEWAY_PORT per-worktree in .env if 7070 is already bound
+      # by another `docker compose up` — see the note on TRIPLESTORE_PORT above.
+      - "${S3_GATEWAY_BIND:-127.0.0.1}:${S3_GATEWAY_PORT:-7070}:7070"
     volumes:
-      - minio_data:/data
+      - s3_gateway_data:/data
     environment:
-      # No minioadmin/minioadmin default — credentials must be set explicitly (see .env.example).
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no default)}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no default)}
+      # Root credentials, passed in the environment rather than as arguments so they stay out
+      # of the process list. No default — set them explicitly (see .env.example).
+      - ROOT_ACCESS_KEY=${S3_GATEWAY_ACCESS_KEY:?S3_GATEWAY_ACCESS_KEY must be set (no default)}
+      - ROOT_SECRET_KEY=${S3_GATEWAY_SECRET_KEY:?S3_GATEWAY_SECRET_KEY must be set (no default)}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7070/health"]
       interval: 10s
       timeout: 5s
       start_period: 5s
@@ -219,8 +230,7 @@ services:
         condition: service_healthy
     environment:
       - TRIPLESTORE_PORT=${TRIPLESTORE_PORT:-7878}
-      - MINIO_PORT=${MINIO_PORT:-9000}
-      - MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT:-9001}
+      - S3_GATEWAY_PORT=${S3_GATEWAY_PORT:-7070}
     command:
       - sh
       - -c
@@ -231,8 +241,8 @@ services:
         echo "    Web UI & API : http://localhost:$$TRIPLESTORE_PORT"
         echo "    Health check : http://localhost:$$TRIPLESTORE_PORT/health"
         echo "    API docs     : http://localhost:$$TRIPLESTORE_PORT/api-docs/"
-        echo "    MinIO console: http://localhost:$$MINIO_CONSOLE_PORT"
-        echo "    MinIO S3 API : http://localhost:$$MINIO_PORT"
+        echo "    S3 API       : http://localhost:$$S3_GATEWAY_PORT"
+        echo "    S3 web UI    : http://localhost:$$S3_GATEWAY_PORT/ui"
         echo "=================================================="
         echo
     restart: "no"
@@ -255,7 +265,7 @@ services:
   # image also supports DKIM signing if you mount keys:
   # https://github.com/bokysan/docker-postfix#dkim--domainkeys
   mail:
-    # Pin to an immutable digest in production, like MINIO_IMAGE above.
+    # Pin to an immutable digest in production, like S3_GATEWAY_IMAGE above.
     image: ${MAIL_IMAGE:-boky/postfix:latest}
     profiles: ["mail"]
     environment:
@@ -419,7 +429,7 @@ services:
 volumes:
   triplestore_data:
     driver: local
-  minio_data:
+  s3_gateway_data:
     driver: local
   mail_queue:
     driver: local

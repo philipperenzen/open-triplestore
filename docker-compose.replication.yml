@@ -3,7 +3,7 @@
 # A stand-alone example of replication (docs/operations.md, "Replication"):
 # the leader records every write in its change log and the follower tails
 # it, keeping a read-only copy that is one network round trip behind. The
-# file is independent of docker-compose.yml on purpose — no MinIO, no mail,
+# file is independent of docker-compose.yml on purpose — no S3 gateway, no mail,
 # no LLM — so it starts with one secret. Both nodes share JWT_SECRET: a
 # session or API token minted on the leader is then valid on the follower,
 # whose identity database is a copy of the leader's.

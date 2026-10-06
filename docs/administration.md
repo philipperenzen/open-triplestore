@@ -395,7 +395,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS` | `500` | After a write, the mirror is rebuilt only once writes have been quiet this long; queries in the meantime are answered by the persistent store. `0` rebuilds eagerly. |
 | `OTS_SHACL_RUN_INDEX_MIN_PROBES` | `20000` | A SHACL validation run builds an in-memory index of the predicates its shapes traverse only when it will make at least this many lookups. |
 | `OTS_SHACL_RUN_INDEX_MAX_QUADS` | *(derived from RAM)* | The most quads that run index may hold. The default is derived from the memory limit, 1 M where none can be detected, and is never below 250 k or above 8 M. Beyond the cap, lookups go to the store. |
-| `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
+| `S3_ENDPOINT` | *(unset — local filesystem)* | Endpoint URL of an S3-compatible store (the compose stack points it at its bundled Versity S3 Gateway). If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |
 | `S3_SECRET_KEY` | | S3 secret key (raw or a secret reference; raw is refused under `OTS_ENV=production`) |
@@ -419,8 +419,8 @@ JWT_SECRET=<64-char random string>
 CORS_ORIGINS=https://www.example.com
 SECURE_COOKIES=true
 BASE_URL=https://www.example.com
-MINIO_ROOT_USER=triplestore
-MINIO_ROOT_PASSWORD=<strong password>
+S3_GATEWAY_ACCESS_KEY=triplestore
+S3_GATEWAY_SECRET_KEY=<strong password>
 
 # Outbound account email via the bundled Postfix relay (full options: .env.example)
 COMPOSE_PROFILES=mail
@@ -443,7 +443,8 @@ server — including settings the compose file does not list by name, such as
 `SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` or `OTS_REMOTE_ALLOWLIST`. A few entries are
 wired by compose itself and ignore `.env`: `AUTH_DB_PATH` and `BACKUP_DIR` (the `/data`
 volume) and the `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` link to the bundled
-MinIO. `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
+S3 gateway (`http://s3-gateway:7070`, signed with `S3_GATEWAY_ACCESS_KEY` /
+`S3_GATEWAY_SECRET_KEY`). `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
 `scripts/check_compose_env.py` to keep the compose file and these docs in step.
 
 ---

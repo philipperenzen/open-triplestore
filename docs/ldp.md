@@ -157,7 +157,7 @@ curl -X POST http://localhost:7878/ldp/images/ \
 
 The server stores the binary data as a base64-encoded triple internally and returns the original bytes on GET with the original `Content-Type`.
 
-> **Note for large files:** For files larger than a few MB, use the dataset asset storage API (`POST /api/datasets/:id/assets`) which streams to the configured S3/MinIO backend rather than encoding in the triple store.
+> **Note for large files:** For files larger than a few MB, use the dataset asset storage API (`POST /api/datasets/:id/assets`) which streams to the configured S3-compatible backend rather than encoding in the triple store.
 
 ---
 

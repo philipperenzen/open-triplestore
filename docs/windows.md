@@ -40,8 +40,8 @@ Compose has no insecure defaults; it won't start until the secrets exist.
 Copy-Item .env.example .env
 function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
 Add-Content .env "JWT_SECRET=$(New-Secret 32)"
-Add-Content .env "MINIO_ROOT_USER=$(New-Secret 8)"
-Add-Content .env "MINIO_ROOT_PASSWORD=$(New-Secret 24)"
+Add-Content .env "S3_GATEWAY_ACCESS_KEY=$(New-Secret 8)"
+Add-Content .env "S3_GATEWAY_SECRET_KEY=$(New-Secret 24)"
 ```
 
 `Get-Random` is fine for generating these secrets locally. (Docker Compose strips the
@@ -74,7 +74,7 @@ docker compose down -v                 # stop and WIPE all data (destructive)
 docker compose exec triplestore open-triplestore --data-dir /data --promote-super-admin <username>
 ```
 
-### Standalone container (no MinIO)
+### Standalone container (no S3 store)
 
 ```powershell
 docker build -t open-triplestore .

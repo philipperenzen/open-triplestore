@@ -658,6 +658,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The compose stack's S3 asset store is Versity S3 Gateway, not MinIO.**
+  MinIO no longer publishes community images: `quay.io/minio/minio:latest`
+  has no manifest, the old release tags answer "unauthorized" and the Docker
+  Hub tags are gone, so a fresh `docker compose up` could not start the asset
+  store. The `minio` service is replaced by `s3-gateway`: Versity S3 Gateway
+  (Apache-2.0), pinned as `versity/versitygw:v1.8.0` by tag and digest, serving
+  the `s3_gateway_data` volume through its POSIX backend on port 7070, with
+  object metadata in extended attributes (a host bind mount without xattr
+  support needs `--sidecar`; see the comment in `docker-compose.yml`). It
+  checks every request signature. Its web UI is on the S3 port under `/ui`,
+  replacing the MinIO console on 9001. The variables are renamed with no
+  aliases: `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` → `S3_GATEWAY_ACCESS_KEY`
+  / `S3_GATEWAY_SECRET_KEY`, `MINIO_BIND` → `S3_GATEWAY_BIND`, `MINIO_PORT`
+  → `S3_GATEWAY_PORT` (default 7070, was 9000), `MINIO_IMAGE` →
+  `S3_GATEWAY_IMAGE`, and `MINIO_CONSOLE_PORT` is gone. Existing installs
+  rename those lines in `.env`. The assets in the old `minio_data` volume
+  are not carried over: MinIO's on-disk format is its own. To keep them,
+  copy them across with an S3 client before switching.
+
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
   retired for every system (owner decision, 2026-10-03): the W3C test-suite
