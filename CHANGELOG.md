@@ -1773,6 +1773,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes its manifest tree from the planner, and a new CI job
   (`docker-manifests`) checks on every PR that cargo can load what the image
   builds.
+- **An entailment query counts an asserted and derived triple once.**
+  `/sparql?entailment=<regime>` and `?entailment_dataset=<id>` add the
+  entailment graph to the query's default graph as one more `FROM` graph. A
+  triple that was asserted and also derived sat in both, so it matched twice:
+  rows came back twice and `COUNT` and `SUM` were inflated. The default graph is
+  now the RDF merge of the two, a set, through the vendored evaluator's merge of
+  several `FROM` graphs. `GRAPH ?g` still finds the triple in each graph that
+  holds it. Six cases of the W3C SPARQL 1.1 entailment section (`rdfs05`,
+  `rdfs11`, `sparqldl-13`, `paper-sparqldl-Q1`, `paper-sparqldl-Q1-rdfs`,
+  `paper-sparqldl-Q4`) now pass and are off the runner's known failures.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
