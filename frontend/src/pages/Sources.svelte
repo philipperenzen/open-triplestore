@@ -29,10 +29,12 @@
   let gatesForm = null;
   let savingGates = false;
   const GATE_FIELDS = [
-    'autoThreshold', 'reviewThreshold', 'datatypeMismatchCap', 'ambiguityMargin',
-    'enumMatchMinimum', 'systematicShare', 'systematicMinSubjects', 'driftKlThreshold',
+    'auto_threshold', 'review_threshold', 'datatype_mismatch_cap', 'ambiguity_margin',
+    'enum_match_minimum', 'systematic_share', 'systematic_min_subjects', 'drift_kl_threshold',
   ];
-  const LEXICAL_FIELDS = ['nameWeight', 'commentWeight', 'typeWeight', 'minimumScore'];
+  const LEXICAL_FIELDS = ['name_weight', 'comment_weight', 'type_weight', 'minimum_score'];
+  /** The i18n keys name the gate fields in camelCase; the API names them in snake_case. */
+  const camel = (f) => f.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 
   async function loadGates() {
     try {
@@ -62,8 +64,8 @@
 
   const EMPTY = {
     id: '', name: '', dialect: 'sqlite', host: '', port: null, database: '',
-    username: '', credential: '', readOnly: true, statementTimeoutMs: 30000,
-    watermarkColumn: '', allowModelAssist: false, tls: false, dataset: '', optionsText: '',
+    username: '', credential: '', read_only: true, statement_timeout_ms: 30000,
+    watermark_column: '', allow_model_assist: false, tls: false, dataset: '', optionsText: '',
   };
   let form = { ...EMPTY };
   const OPTIONS_EXAMPLE = 'sslrootcert=/run/secrets/db-ca.pem\nsearch_path=legacy';
@@ -104,7 +106,7 @@
   /** Only the fields the API accepts, with blanks dropped. */
   function payload() {
     const body = { ...form };
-    for (const key of ['name', 'host', 'username', 'credential', 'watermarkColumn', 'dataset']) {
+    for (const key of ['name', 'host', 'username', 'credential', 'watermark_column', 'dataset']) {
       if (!String(body[key] ?? '').trim()) delete body[key];
     }
     if (!body.port) delete body.port;
@@ -161,7 +163,7 @@
       <div><span class="stat-n">{metrics.sources}</span><span class="stat-l">{$t('pages.sources.statSources')}</span></div>
       <div><span class="stat-n">{metrics.mappings}</span><span class="stat-l">{$t('pages.sources.statMappings')}</span></div>
       <div><span class="stat-n">{metrics.runs?.total ?? 0}</span><span class="stat-l">{$t('pages.sources.statRuns')}</span></div>
-      <div><span class="stat-n">{(metrics.triplesProduced ?? 0).toLocaleString()}</span><span class="stat-l">{$t('pages.sources.statTriples')}</span></div>
+      <div><span class="stat-n">{(metrics.triples_produced ?? 0).toLocaleString()}</span><span class="stat-l">{$t('pages.sources.statTriples')}</span></div>
     </div>
   {/if}
 
@@ -178,12 +180,12 @@
         <form class="form" on:submit|preventDefault={saveGates}>
           <div class="grid">
             {#each GATE_FIELDS as f (f)}
-              <label>{$t(`pages.sources.gate_${f}`)}
-                <input type="number" step={f === 'systematicMinSubjects' ? '1' : '0.01'} min="0" max={f === 'systematicMinSubjects' || f === 'driftKlThreshold' ? undefined : '1'} bind:value={gatesForm[f]} required />
+              <label>{$t(`pages.sources.gate_${camel(f)}`)}
+                <input type="number" step={f === 'systematic_min_subjects' ? '1' : '0.01'} min="0" max={f === 'systematic_min_subjects' || f === 'drift_kl_threshold' ? undefined : '1'} bind:value={gatesForm[f]} required />
               </label>
             {/each}
             {#each LEXICAL_FIELDS as f (f)}
-              <label>{$t(`pages.sources.gateLexical_${f}`)}
+              <label>{$t(`pages.sources.gateLexical_${camel(f)}`)}
                 <input type="number" step="0.01" min="0" max="1" bind:value={gatesForm.lexical[f]} required />
               </label>
             {/each}
@@ -237,10 +239,10 @@
           <span class="hint">{$t('pages.sources.credentialHint')}</span>
         </label>
         <label>{$t('pages.sources.fieldTimeout')}
-          <input type="number" bind:value={form.statementTimeoutMs} min="1" required />
+          <input type="number" bind:value={form.statement_timeout_ms} min="1" required />
         </label>
         <label>{$t('pages.sources.fieldWatermark')}
-          <input bind:value={form.watermarkColumn} placeholder="updated_at" />
+          <input bind:value={form.watermark_column} placeholder="updated_at" />
         </label>
         <label>{$t('pages.sources.fieldDataset')}
           <input bind:value={form.dataset} placeholder={$t('pages.sources.fieldDatasetPlaceholder')} />
@@ -257,7 +259,7 @@
         <label class="switch"><input type="checkbox" checked disabled />
           <span><Lock size={13} /> {$t('pages.sources.readOnlyAlways')}</span>
         </label>
-        <label class="switch"><input type="checkbox" bind:checked={form.allowModelAssist} />
+        <label class="switch"><input type="checkbox" bind:checked={form.allow_model_assist} />
           <span><Sparkles size={13} /> {$t('pages.sources.allowModelAssist')}</span>
         </label>
         {#if !fileBacked(form.dialect)}
@@ -271,7 +273,7 @@
       {#if testResult}
         <div class="probe" class:ok={testResult.ok} class:bad={!testResult.ok}>
           {#if testResult.ok}
-            <Check size={14} /> {$t('pages.sources.probeOk', { values: { tables: testResult.tables ?? 0, version: testResult.serverVersion || '—' } })}
+            <Check size={14} /> {$t('pages.sources.probeOk', { values: { tables: testResult.tables ?? 0, version: testResult.server_version || '—' } })}
           {:else}
             <AlertTriangle size={14} /> {testResult.error}
           {/if}
@@ -303,13 +305,13 @@
           <div class="src-head">
             <Link to={`/sources/${s.id}`} class="src-name">{s.name}</Link>
             <span class="chip">{s.dialect}</span>
-            {#if s.readOnly}<span class="chip chip-ok"><Lock size={10} /> {$t('pages.sources.chipReadOnly')}</span>{/if}
+            {#if s.read_only}<span class="chip chip-ok"><Lock size={10} /> {$t('pages.sources.chipReadOnly')}</span>{/if}
             {#if s.allowlisted}
               <span class="chip chip-ok"><ShieldCheck size={10} /> {$t('pages.sources.chipAllowlisted')}</span>
             {:else}
               <span class="chip chip-warn"><ShieldAlert size={10} /> {$t('pages.sources.chipNotAllowlisted')}</span>
             {/if}
-            {#if s.allowModelAssist}<span class="chip chip-assist"><Sparkles size={10} /> {$t('pages.sources.chipModelAssist')}</span>{/if}
+            {#if s.allow_model_assist}<span class="chip chip-assist"><Sparkles size={10} /> {$t('pages.sources.chipModelAssist')}</span>{/if}
           </div>
           <div class="src-meta">
             <span>{s.host ? `${s.host}${s.port ? `:${s.port}` : ''} · ` : ''}{s.database}</span>

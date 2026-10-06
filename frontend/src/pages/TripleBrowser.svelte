@@ -1463,7 +1463,7 @@
       const res = await browseTriples(params, ctl ? { signal: ctl.signal } : {});
       if (seq !== _triplesSeq) return; // superseded by a newer fetch
       triples = res.triples || [];
-      hasMore = !!res.hasMore;
+      hasMore = !!res.has_more;
       if (typeof res.total === 'number') total = res.total;
     } catch (e) {
       if (seq !== _triplesSeq) return;

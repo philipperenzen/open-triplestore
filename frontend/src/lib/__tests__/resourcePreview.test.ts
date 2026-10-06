@@ -32,7 +32,7 @@ beforeAll(() => {
 describe('summarizeTriples', () => {
   it('extracts label, types and description from a triples page', () => {
     const res = {
-      hasMore: true,
+      has_more: true,
       triples: [
         triple(`${RDF}type`, uri('http://ex.org/def#Bridge')),
         triple(`${RDFS}label`, lit('Voorbeeldbrug', 'nl')),

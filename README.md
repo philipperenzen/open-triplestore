@@ -714,7 +714,7 @@ curl -X POST http://localhost:7878/api/shaclc/parse \
 curl -X POST http://localhost:7878/api/shaclc/serialize \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
-     -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
+     -d '{"shapes_graph_iri": "urn:dataset:my-dataset:shapes"}'
 ```
 
 See [docs/shacl.md](docs/shacl.md) for the full SHACL guide.

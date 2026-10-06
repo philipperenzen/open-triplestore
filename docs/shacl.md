@@ -248,9 +248,9 @@ property path, and `source_constraint` is a short label such as
 `source_constraint_component` is the SHACL constraint component IRI.
 `message` is the shape's `sh:message` when it has one, else a default text.
 A test or partial run answers `"run_id": null, "ran_at": null` and adds
-`"test": true` and `"partial"`. The 422 body of a write gate uses
-camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
-`sourceConstraintComponent`). A result of a SPARQL constraint or validator
+`"test": true` and `"partial"`. The 422 body of a write gate uses the same
+snake_case keys (`focus_node`, `source_shape`, `source_constraint`,
+`source_constraint_component`). A result of a SPARQL constraint or validator
 that declares [result annotations](#result-annotations-shresultannotation-shacl-af-4)
 also has an `annotations` list; no other result has the key.
 
@@ -899,7 +899,7 @@ curl -X POST http://localhost:7878/api/shaclc/parse \
 curl -X POST http://localhost:7878/api/shaclc/serialize \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
-     -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
+     -d '{"shapes_graph_iri": "urn:dataset:my-dataset:shapes"}'
 
 # Plain IRI body also accepted
 curl -X POST http://localhost:7878/api/shaclc/serialize \

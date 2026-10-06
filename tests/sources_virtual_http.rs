@@ -282,7 +282,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
         json!({
             "id": "vkg", "name": "A virtual knowledge graph", "dialect": "sparql",
             "host": "127.0.0.1", "port": port, "database": "/sparql", "username": "reader",
-            "credential": "env:OTS_VKG_TEST_PASSWORD", "statementTimeoutMs": 5000,
+            "credential": "env:OTS_VKG_TEST_PASSWORD", "statement_timeout_ms": 5000,
         }),
     )
     .await;
@@ -298,7 +298,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
         "/api/sources/test",
         &admin,
         json!({ "id": "x", "dialect": "sparql", "host": "127.0.0.1", "port": port, "database": "/sparql",
-                "username": "nobody", "statementTimeoutMs": 5000 }),
+                "username": "nobody", "statement_timeout_ms": 5000 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -324,8 +324,8 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     );
     let product = &tables[1];
     assert_eq!(product["kind"], "view");
-    assert_eq!(product["rowEstimate"], 3);
-    assert_eq!(product["primaryKey"][0], "subject");
+    assert_eq!(product["row_estimate"], 3);
+    assert_eq!(product["primary_key"][0], "subject");
     let columns: Vec<&str> = product["columns"]
         .as_array()
         .unwrap()
@@ -344,8 +344,8 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
         .iter()
         .find(|c| c["name"] == format!("{EX}price"))
         .unwrap();
-    assert_eq!(price["genericType"], "decimal");
-    assert_eq!(price["nativeType"], "decimal");
+    assert_eq!(price["generic_type"], "decimal");
+    assert_eq!(price["native_type"], "decimal");
     assert_eq!(price["nullable"], true, "one product has no price");
 
     let (st, profile, txt) = req(
@@ -378,7 +378,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
-    assert_eq!(run["rowsExtracted"], 3, "{txt}");
+    assert_eq!(run["rows_extracted"], 3, "{txt}");
     assert_eq!(run["mapping"]["id"], "vkg-products");
     let graph = run["graph"].as_str().unwrap().to_string();
     let (st, rows) = local_sparql(&app, &admin, &format!(
@@ -416,8 +416,8 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
-    assert_eq!(run["rowsExtracted"], 1, "{txt}");
-    assert_eq!(run["triplesProduced"], 2, "{txt}");
+    assert_eq!(run["rows_extracted"], 1, "{txt}");
+    assert_eq!(run["triples_produced"], 2, "{txt}");
 
     // A snapshot: the endpoint's whole graph, as a run with no mapping.
     let (st, snap, txt) = req(
@@ -432,7 +432,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     assert_eq!(snap["mode"], "snapshot");
     assert_eq!(snap["status"], "succeeded");
     assert!(snap.get("mapping").is_none(), "{txt}");
-    assert_eq!(snap["triplesProduced"], 10, "{txt}");
+    assert_eq!(snap["triples_produced"], 10, "{txt}");
     let snap_id = snap["id"].as_str().unwrap().to_string();
     let snap_graph = snap["graph"].as_str().unwrap().to_string();
     let (_, src, _) = req(&app, Method::GET, "/api/sources/vkg", &admin, Value::Null).await;
@@ -480,7 +480,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
         .unwrap()
         .execute_batch("CREATE TABLE t (id INTEGER)")
         .unwrap();
-    let (st, _, txt) = req(&app, Method::POST, "/api/sources", &admin, json!({ "id": "db", "dialect": "sqlite", "database": db.to_string_lossy(), "statementTimeoutMs": 1000 })).await;
+    let (st, _, txt) = req(&app, Method::POST, "/api/sources", &admin, json!({ "id": "db", "dialect": "sqlite", "database": db.to_string_lossy(), "statement_timeout_ms": 1000 })).await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     let (st, _, txt) = req(
         &app,
@@ -588,7 +588,7 @@ async fn register_source(app: &Router, admin: &str, id: &str, port: u16, dataset
         json!({
             "id": id, "dialect": "sparql", "host": "127.0.0.1", "port": port,
             "database": "/sparql", "username": "reader",
-            "credential": "env:OTS_VKG_TEST_PASSWORD", "statementTimeoutMs": 5000,
+            "credential": "env:OTS_VKG_TEST_PASSWORD", "statement_timeout_ms": 5000,
             "dataset": dataset,
         }),
     )

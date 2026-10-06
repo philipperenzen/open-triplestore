@@ -156,7 +156,6 @@ pub fn kl_divergence(newer: &BTreeMap<String, u64>, older: &BTreeMap<String, u64
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TypeChange {
     pub column: String,
     pub from: String,
@@ -164,14 +163,12 @@ pub struct TypeChange {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DistributionShift {
     pub column: String,
     pub kl_divergence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct CodeListChange {
     pub column: String,
     /// `gained` when the column became a code list, `lost` when it stopped
@@ -180,7 +177,6 @@ pub struct CodeListChange {
 }
 
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TableDrift {
     pub table: String,
     pub structural_hash_changed: bool,
@@ -268,7 +264,6 @@ fn describe_type(native: &str, dt: Option<&str>) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelBump {
     pub model: String,
     /// The version the mapping targets.
@@ -294,7 +289,6 @@ pub fn model_bump(
 // ───────────────────────────── Tickets ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Ticket {
     pub id: String,
     pub iri: String,
@@ -512,7 +506,7 @@ pub fn delete_tickets(store: &TripleStore, source_id: &str) -> Result<(), String
 // ───────────────────────────── HTTP ─────────────────────────────
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DriftRequest {
     /// The mapping whose baseline and model version to check, by id or IRI.
     pub mapping: Option<String>,
@@ -521,7 +515,7 @@ pub struct DriftRequest {
     pub baseline: Option<u32>,
     /// Profile version to compare; defaults to the newest.
     pub candidate: Option<u32>,
-    /// Overrides the gates' `driftKlThreshold`.
+    /// Overrides the gates' `drift_kl_threshold`.
     pub kl_threshold: Option<f64>,
     /// Open (or update) a re-map ticket when there is anything to report.
     /// Default true.
@@ -534,7 +528,6 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DriftReport {
     pub source: String,
     pub baseline: u32,

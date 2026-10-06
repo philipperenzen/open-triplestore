@@ -66,7 +66,7 @@ fn sqlite_body(id: &str, db: &Path, credential: &str) -> Value {
         "id": id, "name": id, "dialect": "sqlite",
         "database": db.to_string_lossy(),
         "credential": credential,
-        "readOnly": true, "statementTimeoutMs": 5000,
+        "read_only": true, "statement_timeout_ms": 5000,
     })
 }
 
@@ -118,7 +118,7 @@ async fn statement_timeout_is_mandatory_in_production() {
         &dir.join("assets.db"),
         "env:OTS_TEST_DB_PASSWORD",
     );
-    body.as_object_mut().unwrap().remove("statementTimeoutMs");
+    body.as_object_mut().unwrap().remove("statement_timeout_ms");
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
     assert!(txt.to_lowercase().contains("timeout"), "{txt}");
@@ -155,7 +155,7 @@ async fn networked_source_must_be_on_the_egress_allowlist() {
         "id": "pg", "name": "pg", "dialect": "postgresql",
         "host": "db.internal", "port": 5432, "database": "assets", "username": "reader",
         "credential": "env:OTS_TEST_DB_PASSWORD",
-        "readOnly": true, "statementTimeoutMs": 30000,
+        "read_only": true, "statement_timeout_ms": 30000,
     });
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");

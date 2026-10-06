@@ -2998,7 +2998,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Serialize to SHACL Compact Syntax",
-                "Serialise a stored shapes graph (body: its IRI, or `{\"shapesGraphIri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
+                "Serialise a stored shapes graph (body: its IRI, or `{\"shapes_graph_iri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
                 vec![qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
                 vec![("200", "SHACL-C text"), ("400", "Invalid body"), ("403", "No read access to that graph"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")],
                 false,
@@ -3437,15 +3437,15 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                      `full` (default), `watermark` (only rows past the last cursor), or \
                      `snapshot` — a virtual (`sparql`) source's whole graph as the endpoint \
                      serves it, with no mapping involved; a snapshot run carries no `mapping`. \
-                     `onDataError` decides what a row value that cannot become its term does \
+                     `on_data_error` decides what a row value that cannot become its term does \
                      (R2RML §4.3): `abort` (default) fails the run and names the offending rows; \
-                     `skip` leaves those terms out and reports the rows as `dataErrors` on the run.",
+                     `skip` leaves those terms out and reports the rows as `data_errors` on the run.",
                     vec![],
                     vec![
                         ("201", "The run"),
                         (
                             "400",
-                            "Unknown mode or onDataError, no mapping outside snapshot mode, a \
+                            "Unknown mode or on_data_error, no mapping outside snapshot mode, a \
                              snapshot of a database, or the mapping belongs to another datasource",
                         ),
                         ("404", "Datasource or mapping not found"),
@@ -3532,17 +3532,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
 
     mount(paths, "/api/sources/gates", vec![
-        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`autoThreshold`, `reviewThreshold`), `datatypeMismatchCap`, `ambiguityMargin`, `enumMatchMinimum`, the dry-run classifier's `systematicShare` and `systematicMinSubjects`, `driftKlThreshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
+        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`auto_threshold`, `review_threshold`), `datatype_mismatch_cap`, `ambiguity_margin`, `enum_match_minimum`, the dry-run classifier's `systematic_share` and `systematic_min_subjects`, `drift_kl_threshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
             vec![], vec![("200", "The gates, JSON or Turtle")], true)),
         (M::Put, o("Sources", "Change the mapping gates", "A partial update: every field optional, an unknown field refused rather than ignored. Bands that cross, a fraction outside `[0, 1]` or a weight set summing to zero are a 400. Recorded in the commit log.",
             vec![], vec![("200", "The gates as they now stand"), ("400", "A value that cannot be applied"), ("422", "An unknown field")], true)),
     ]);
     mount(paths, "/api/sources/:id/dry-run", vec![
-        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mappingGraph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sampleSize` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triplesMaps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapesGraph`, else the registered mapping's, else the model version's (`model` + `modelVersion`). A violation hitting at least `systematicShare` of a type's subjects over at least `systematicMinSubjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
+        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mapping_graph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sample_size` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triples_maps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapes_graph`, else the registered mapping's, else the model version's (`model` + `model_version`). A violation hitting at least `systematic_share` of a type's subjects over at least `systematic_min_subjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
             vec![], vec![("200", "The dry-run result"), ("400", "The request names no mapping, two, or a table nothing reads"), ("404", "Datasource or mapping not found"), ("502", "The datasource did not answer"), ("503", "Server overloaded")], true)),
     ]);
     mount(paths, "/api/sources/:id/drift", vec![
-        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profileVersion` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `klThreshold`, default the gates' `driftKlThreshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `modelVersionBump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `openTicket: false` only reports.",
+        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profile_version` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `kl_threshold`, default the gates' `drift_kl_threshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `model_version_bump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `open_ticket: false` only reports.",
             vec![], vec![("200", "The drift report, with the ticket it opened or updated"), ("400", "Fewer than two profile versions, or an unknown one"), ("404", "Datasource or mapping not found")], true)),
     ]);
     mount(paths, "/api/sources/:id/tickets", vec![
@@ -3558,8 +3558,8 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![], vec![("200", "The closed ticket"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/mappings/convert", vec![
-        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, emptyAsNull?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `emptyAsNull` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
-            vec![], vec![("200", "`{rml, triplesMaps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
+        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, empty_as_null?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `empty_as_null` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
+            vec![], vec![("200", "`{rml, triples_maps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
     ]);
     mount(
         paths,
@@ -3681,7 +3681,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Sources",
                     "Get a run",
-                    "One run, including graphTriples — what its graph holds now, which is how a \
+                    "One run, including graph_triples — what its graph holds now, which is how a \
                      caller tells a kept candidate from a collected one.",
                     vec![],
                     vec![("200", "The run"), ("404", "Not found")],
@@ -3784,8 +3784,8 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![], vec![("200", "`{applied, status, fixes: [{rule, path, from, to, constraint}], patch, unfixable}`"), ("404", "Not found"), ("422", "Nothing can be fixed without inventing a value")], true)),
     ]);
     mount(paths, "/api/reviews/:id/suggest", vec![
-        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allowModelAssist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
-            vec![], vec![("200", "`{model, applied: false, valuesShared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
+        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allow_model_assist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
+            vec![], vec![("200", "`{model, applied: false, values_shared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
     ]);
     mount(paths, "/api/runs/:id/promote", vec![
         (M::Post, o("Sources", "Promote a corrected candidate", "Runs the SHACL write gate again over the run's kept candidate graph as it now stands — after the fixer, a patch or a human edit — and, when it passes, gives it the production role exactly as a passing run would: one pointer swap, the previous graph demoted and kept, LDES members published. Recorded as a `ds:Promotion` activity on the run's PROV trail naming who promoted it; the run's review items are marked `promoted`.",
@@ -7413,6 +7413,59 @@ mod tests {
         assert!(
             v["paths"]["/api/datasets/{dataset_id}/services"]["post"].is_object(),
             "missing SPARQL service create operation"
+        );
+    }
+
+    /// Every property name the spec describes, with its JSON path.
+    fn collect_properties(node: &serde_json::Value, at: &str, out: &mut Vec<(String, String)>) {
+        match node {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    let here = format!("{at}/{k}");
+                    if k == "properties" {
+                        if let Some(props) = v.as_object() {
+                            for name in props.keys() {
+                                out.push((name.clone(), here.clone()));
+                            }
+                        }
+                    }
+                    collect_properties(v, &here, out);
+                }
+            }
+            serde_json::Value::Array(a) => a
+                .iter()
+                .enumerate()
+                .for_each(|(i, v)| collect_properties(v, &format!("{at}/{i}"), out)),
+            _ => {}
+        }
+    }
+
+    /// The HTTP API names every JSON field in snake_case (owner decision,
+    /// 2026-10): no schema the spec describes may have a camelCase (or any
+    /// upper-case) property.
+    /// Formats defined elsewhere keep their own names and are listed here
+    /// with the standard that fixes them.
+    #[test]
+    fn spec_has_no_camel_case_properties() {
+        // Field names fixed by an external specification, not by this API.
+        const EXTERNAL: &[&str] = &[];
+        let v = serde_json::to_value(openapi_spec()).unwrap();
+        let mut props = Vec::new();
+        collect_properties(&v, "", &mut props);
+        assert!(
+            props.len() > 100,
+            "expected many properties, got {}",
+            props.len()
+        );
+        let camel: Vec<&(String, String)> = props
+            .iter()
+            .filter(|(name, _)| {
+                name.chars().any(|c| c.is_ascii_uppercase()) && !EXTERNAL.contains(&name.as_str())
+            })
+            .collect();
+        assert!(
+            camel.is_empty(),
+            "camelCase properties in the OpenAPI spec: {camel:#?}"
         );
     }
 

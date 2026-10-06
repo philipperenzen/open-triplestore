@@ -657,6 +657,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **Every JSON field of the HTTP API is snake_case** (breaking). The
+  datasource, mapping, run, gates, dry-run, drift, profile, review,
+  calibration and legacy-convert bodies (`/api/sources/*`, `/api/mappings/*`,
+  `/api/runs/*`, review items), the introspection and profile tables, and
+  the RML `data_errors` / sample `triples_map` rows no longer use camelCase:
+  `statementTimeoutMs` is `statement_timeout_ms`, `onDataError` is
+  `on_data_error`, `sampleSize` is `sample_size`, and so on, with no aliases.
+  The hand-built keys follow: `has_more` on `/api/browse/triples`,
+  `shapes_graph_iri` on `POST /api/shaclc/serialize`, `server_version`,
+  the `/api/sources/metrics` counters, `current_revision` and `version_iri`
+  on the model endpoints, `dataset_id` on a version commit, `parse_error` /
+  `saved_revision` on the saved-query repair, and `focus_node`,
+  `source_shape`, `source_constraint`, `source_constraint_component` in a
+  write gate's 422 (now the same keys as every other SHACL report). Enum
+  values keep their casing (`needsHuman`, `dateTime`), and formats another
+  specification defines keep its names (OGC API, 3D Tiles, ShExJ, WebAuthn,
+  SAML, the LOV API v2 `queryString`). Review items stored before this change
+  lose their stored violations and fixes; reset the install or re-run the
+  affected mappings. The web UI follows, and a unit test
+  (`spec_has_no_camel_case_properties`) fails the build on any upper-case
+  property in the OpenAPI document. See `docs/api-reference.md`.
 - **One ignored-axioms report for OWL 2 EL and QL** (breaking). An `owl2-ql`
   materialisation now reports the axioms it left out as `ignored:
   [{construct, count, example}]`, the shape `owl2-el` already used; the

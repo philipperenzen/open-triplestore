@@ -45,7 +45,6 @@ impl OnDataError {
 
 /// The rows of a run that raised data errors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DataErrors {
     /// Rows that raised at least one data error.
     pub rows: u64,
@@ -97,7 +96,7 @@ impl DataErrors {
         format!(
             "data error: {} row{} would generate an invalid RDF term{more}, so the run was \
              aborted and nothing was written (R2RML §4.3). {}. To leave those terms out and \
-             have the rows reported instead, run with onDataError \"skip\" \
+             have the rows reported instead, run with on_data_error \"skip\" \
              (?on_data_error=skip on the file-mapping endpoints).",
             self.rows,
             if self.rows == 1 { "" } else { "s" },
