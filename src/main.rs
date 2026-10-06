@@ -108,7 +108,7 @@ struct Cli {
     #[arg(long, env = "AUTH_DB_PATH")]
     db_path: Option<PathBuf>,
 
-    /// S3-compatible endpoint URL (e.g. http://localhost:9000 for MinIO)
+    /// S3-compatible endpoint URL (e.g. http://localhost:7070, the compose stack's S3 gateway)
     #[arg(long, env = "S3_ENDPOINT")]
     s3_endpoint: Option<String>,
 
@@ -507,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
             .to_string(),
     };
 
-    // Initialize asset storage — S3/MinIO if configured, local filesystem otherwise
+    // Initialize asset storage — S3 if configured, local filesystem otherwise
     let object_store = if let Some(endpoint) = cli.s3_endpoint {
         let access_key = cli.s3_access_key.unwrap_or_default();
         // A secret reference (env:/file:/vault:) is resolved here; a raw value

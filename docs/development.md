@@ -146,7 +146,7 @@ builds and warm local rebuilds:
 ### Fast local image
 
 The production image links with **fat LTO**, which is slow. For a local
-full-stack image (Compose + MinIO, etc.) you rarely need that — build with the
+full-stack image (Compose with the S3 gateway, etc.) you rarely need that — build with the
 `release-dev` profile instead:
 
 ```bash

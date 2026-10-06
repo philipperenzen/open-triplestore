@@ -7,11 +7,11 @@ set -e
 echo "Cleaning up stale containers..."
 
 # Stop and remove any container belonging to this project, whatever compose
-# named it: the fixed dev names (triplestore, triplestore-minio, …) as well as
-# the project-prefixed variants other workspaces/compose runs produce
-# (<dir>-triplestore-1, <dir>-minio-1 under a project dir containing
+# named it: the fixed dev names (triplestore, triplestore-s3-gateway, …) as well
+# as the project-prefixed variants other workspaces/compose runs produce
+# (<dir>-triplestore-1, <dir>-s3-gateway-1 under a project dir containing
 # "triplestore", ots-*). The pattern deliberately requires a project-specific
-# component — never a bare service name like "minio" or "postgres" — so
+# component — never a bare service name like "s3-gateway" or "postgres" — so
 # containers from unrelated projects are left alone.
 docker ps -a --format "{{.Names}}" | grep -E '(^|[-_])(triplestore)([-_]|$)|^ots[-_]' | while read -r container; do
   echo "Removing stale container: $container"

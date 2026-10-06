@@ -124,9 +124,9 @@ secret):
 ```bash
 # macOS · Linux · WSL · Git Bash
 cp .env.example .env
-printf 'JWT_SECRET=%s\n'          "$(openssl rand -hex 32)" >> .env
-printf 'MINIO_ROOT_USER=%s\n'     "$(openssl rand -hex 8)"  >> .env
-printf 'MINIO_ROOT_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+printf 'JWT_SECRET=%s\n'            "$(openssl rand -hex 32)" >> .env
+printf 'S3_GATEWAY_ACCESS_KEY=%s\n' "$(openssl rand -hex 8)"  >> .env
+printf 'S3_GATEWAY_SECRET_KEY=%s\n' "$(openssl rand -hex 24)" >> .env
 ```
 
 ```powershell
@@ -134,17 +134,17 @@ printf 'MINIO_ROOT_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 Copy-Item .env.example .env
 function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
 Add-Content .env "JWT_SECRET=$(New-Secret 32)"
-Add-Content .env "MINIO_ROOT_USER=$(New-Secret 8)"
-Add-Content .env "MINIO_ROOT_PASSWORD=$(New-Secret 24)"
+Add-Content .env "S3_GATEWAY_ACCESS_KEY=$(New-Secret 8)"
+Add-Content .env "S3_GATEWAY_SECRET_KEY=$(New-Secret 24)"
 ```
 
 **2. Start the stack:**
 
 ```bash
-# Option A: docker compose — full stack incl. MinIO (S3 asset store); reads .env
+# Option A: docker compose — full stack incl. the S3 asset store (Versity S3 Gateway); reads .env
 docker compose up -d
 
-# Option B: standalone container — no MinIO; JWT secret auto-generates in /data
+# Option B: standalone container — no S3 store (assets on /data); JWT secret auto-generates in /data
 docker build -t open-triplestore .
 docker run -p 7878:7878 -v triplestore_data:/data open-triplestore
 ```

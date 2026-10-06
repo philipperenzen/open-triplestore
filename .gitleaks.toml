@@ -15,7 +15,8 @@ regexes = [
   '''ots-live-pw''',
   '''OtsLive-Passw0rd''',
   '''OtsLive-R3ader''',
-  # Root password of the throwaway MinIO the S3 storage tests run against
-  # (backend job in .github/workflows/ci.yml, rust job in .gitlab-ci.yml).
-  '''ots-ci-minio-secret''',
+  # Root secret of the throwaway S3 server (Versity S3 Gateway) the S3 storage
+  # tests run against (backend job in .github/workflows/ci.yml, rust job in
+  # .gitlab-ci.yml).
+  '''ots-ci-s3-secret''',
 ]

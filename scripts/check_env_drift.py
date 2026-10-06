@@ -224,7 +224,7 @@ def main() -> int:
         for n in example
         if not dotenv and n not in env and n not in reads and n not in COMPOSE_OWN
     )
-    # Names another service or a port mapping reads (MINIO_ROOT_USER, MAIL_*)
+    # Names another service or a port mapping reads (S3_GATEWAY_*, MAIL_*)
     # are consumed by compose, not meant for the server.
     not_forwarded = sorted(
         n
