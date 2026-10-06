@@ -15,16 +15,11 @@ pub struct ReasoningReport {
     pub elapsed_ms: u64,
     /// IRI of the named graph that received the entailed triples.
     pub target_graph: String,
-    /// How many axioms outside the regime's profile the run did not use
-    /// (reported by OWL 2 QL; omitted when zero).
-    #[serde(skip_serializing_if = "is_zero")]
-    pub ignored_axioms: usize,
-    /// The first few of those axioms (at most [`IGNORED_SAMPLE`]).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub ignored_sample: Vec<IgnoredAxiom>,
     /// Axioms the regime read but could not use: constructs outside its
-    /// profile, by construct. Empty (and not serialized) for a regime that
-    /// does not report them.
+    /// profile, by construct (decision D9). Reported by OWL 2 EL and OWL 2
+    /// QL; empty, and not serialized, when nothing was left out and for the
+    /// regimes that use every triple (RDFS, OWL 2 RL/RDF, SKOS) or refuse
+    /// input outside their profile (OWL 2 DL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<IgnoredAxioms>,
 }
@@ -32,32 +27,49 @@ pub struct ReasoningReport {
 /// Axioms of one construct that a reasoning run left out.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IgnoredAxioms {
-    /// The OWL 2 construct, e.g. `ObjectUnionOf` or `FunctionalObjectProperty`.
+    /// The construct outside the profile, named as in the OWL 2 Structural
+    /// Specification where one name fits (`ObjectUnionOf`,
+    /// `TransitiveObjectProperty`, `SameIndividual`), otherwise described
+    /// (`cardinality restriction`, `datatype outside the OWL 2 QL datatype
+    /// map`).
     pub construct: String,
     /// How many axioms or expressions used it.
     pub count: usize,
-    /// One of them: the subject term of the first one read.
+    /// One of them, the first one read: an IRI, or `_:` and a blank-node
+    /// label.
     pub example: String,
 }
 
-/// How many ignored axioms a [`ReasoningReport`] lists by name.
-pub const IGNORED_SAMPLE: usize = 20;
-
-/// An axiom a reasoner read but did not use because it lies outside the
-/// regime's profile (an `owl:TransitiveProperty` under OWL 2 QL, say).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
-pub struct IgnoredAxiom {
-    /// The construct, as a prefixed name (`owl:TransitiveProperty`,
-    /// `rdfs:subClassOf`).
-    pub axiom: String,
-    /// The axiom's subject: an IRI, or `_:` and a blank-node label.
-    pub subject: String,
-    /// Why it was not used.
-    pub reason: String,
+impl IgnoredAxioms {
+    /// The report rows for `construct → (count, example)`, the most frequent
+    /// construct first (ties by name), so a report reads the same each run.
+    pub fn rows<'a>(
+        by_construct: impl IntoIterator<Item = (&'a str, &'a (usize, String))>,
+    ) -> Vec<IgnoredAxioms> {
+        let mut rows: Vec<IgnoredAxioms> = by_construct
+            .into_iter()
+            .map(|(construct, (count, example))| IgnoredAxioms {
+                construct: construct.to_string(),
+                count: *count,
+                example: example.clone(),
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.construct.cmp(&b.construct))
+        });
+        rows
+    }
 }
 
-fn is_zero(n: &usize) -> bool {
-    *n == 0
+/// How a term reads as the `example` of an [`IgnoredAxioms`] row: an IRI
+/// bare, anything else in N-Triples form (`_:b0`).
+pub fn example_label(t: &oxigraph::model::Term) -> String {
+    match t {
+        oxigraph::model::Term::NamedNode(n) => n.as_str().to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Errors that can occur during reasoning.

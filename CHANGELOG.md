@@ -657,6 +657,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **One ignored-axioms report for OWL 2 EL and QL** (breaking). An `owl2-ql`
+  materialisation now reports the axioms it left out as `ignored:
+  [{construct, count, example}]`, the shape `owl2-el` already used; the
+  QL-only `ignored_axioms` and `ignored_sample` fields are removed. Constructs
+  are named as in the OWL 2 Structural Specification (`ObjectUnionOf`,
+  `TransitiveObjectProperty`, `SameIndividual`), an axiom whose expression is
+  outside the profile counts under that expression's constructor, examples
+  are bare IRIs, and the most frequent construct comes first. RDFS, OWL 2 RL
+  and SKOS use every triple and OWL 2 DL refuses input outside its profile,
+  so they never report `ignored`. See `docs/reasoning.md`.
 
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is

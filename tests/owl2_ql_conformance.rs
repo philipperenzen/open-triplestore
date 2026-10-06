@@ -1129,26 +1129,30 @@ fn test_ql_data_ranges_outside_the_map_are_reported() {
          ex:a ex:active \"maybe\" ; ex:weight \"1.5E0\"^^xsd:double .",
     );
     let report = materialise(&s).unwrap();
-    let axioms: Vec<(&str, &str)> = report
-        .ignored_sample
+    let constructs: Vec<(&str, usize, &str)> = report
+        .ignored
         .iter()
-        .map(|a| (a.axiom.as_str(), a.reason.as_str()))
+        .map(|i| (i.construct.as_str(), i.count, i.example.as_str()))
         .collect();
+    // The range and the restriction on the left both use a datatype outside
+    // the map.
     assert!(
-        axioms.contains(&("rdfs:range", "a datatype outside the OWL 2 QL datatype map")),
-        "{axioms:?}"
-    );
-    assert!(
-        axioms.iter().any(|(a, _)| *a == "rdfs:subClassOf"),
-        "{axioms:?}"
-    );
-    assert!(
-        axioms
+        constructs
             .iter()
-            .any(|(_, r)| *r == "a datatype definition outside OWL 2 QL"),
-        "{axioms:?}"
+            .any(|(c, n, _)| *c == "datatype outside the OWL 2 QL datatype map" && *n == 2),
+        "{constructs:?}"
     );
-    assert_eq!(report.ignored_axioms, 3, "{axioms:?}");
+    assert!(
+        constructs.iter().any(|(c, n, e)| *c == "DatatypeDefinition"
+            && *n == 1
+            && *e == "http://example.org/Half"),
+        "{constructs:?}"
+    );
+    assert_eq!(
+        report.ignored.iter().map(|i| i.count).sum::<usize>(),
+        3,
+        "{constructs:?}"
+    );
     assert!(!in_entailment_graph(&s, "ex:a a ex:Weighed"));
 }
 
@@ -1163,26 +1167,49 @@ fn test_ql_reports_ignored_axioms() {
          ex:Prof rdfs:subClassOf ex:Staff .",
     );
     let report = materialise(&s).unwrap();
-    assert_eq!(report.ignored_axioms, 4, "{:?}", report.ignored_sample);
-    let axioms: Vec<&str> = report
-        .ignored_sample
+    let rows: Vec<(&str, usize, &str)> = report
+        .ignored
         .iter()
-        .map(|a| a.axiom.as_str())
+        .map(|i| (i.construct.as_str(), i.count, i.example.as_str()))
         .collect();
-    for a in [
-        "owl:TransitiveProperty",
-        "owl:FunctionalProperty",
-        "owl:sameAs",
-        "rdfs:subClassOf",
+    // One row per construct, named as in the OWL 2 Structural Specification;
+    // the union is counted under its constructor, not under rdfs:subClassOf.
+    for row in [
+        (
+            "TransitiveObjectProperty",
+            1,
+            "http://example.org/ancestorOf",
+        ),
+        (
+            "FunctionalObjectProperty",
+            1,
+            "http://example.org/hasMother",
+        ),
+        ("SameIndividual", 1, "http://example.org/a"),
+        ("ObjectUnionOf", 1, "http://example.org/Pet"),
     ] {
-        assert!(axioms.contains(&a), "{axioms:?}");
+        assert!(rows.contains(&row), "{rows:?}");
     }
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    // The shared shape: `ignored: [{construct, count, example}]`, and the
+    // old QL-only fields are gone.
     let json = serde_json::to_value(&report).unwrap();
-    assert_eq!(json["ignored_axioms"], 4);
-    // A QL-only TBox reports nothing (and the fields are omitted).
+    assert_eq!(json["ignored"].as_array().map(Vec::len), Some(4), "{json}");
+    assert_eq!(json["ignored"][0]["count"], 1, "{json}");
+    assert!(json.get("ignored_axioms").is_none(), "{json}");
+    assert!(json.get("ignored_sample").is_none(), "{json}");
+    // The most frequent construct comes first.
+    let report = materialise(&data_store(
+        "ex:p a owl:TransitiveProperty . ex:q a owl:TransitiveProperty . \
+         ex:a owl:sameAs ex:b .",
+    ))
+    .unwrap();
+    assert_eq!(report.ignored[0].construct, "TransitiveObjectProperty");
+    assert_eq!(report.ignored[0].count, 2);
+    // A QL-only TBox reports nothing (and the field is omitted).
     let report = materialise(&data_store("ex:Prof rdfs:subClassOf ex:Staff .")).unwrap();
     let json = serde_json::to_value(&report).unwrap();
-    assert!(json.get("ignored_axioms").is_none(), "{json}");
+    assert!(json.get("ignored").is_none(), "{json}");
 }
 
 /// A small deterministic generator (xorshift) for the differential test.
