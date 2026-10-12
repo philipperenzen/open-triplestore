@@ -49,6 +49,13 @@ impl Drop for LoadDepthGuard {
 /// Validate data graphs against shapes in a shapes graph.
 ///
 /// Returns a `ValidationReport` summarising all constraint violations.
+///
+/// A shapes graph that declares `sh:entailment` is validated under that
+/// regime (SHACL §1.5): `sh:Rules` (SHACL-AF §8.3) runs the shapes graph's
+/// rules first, and RDFS (with the `rdfs-entailment` feature) materialises
+/// the RDFS entailments, into a run-local inferences graph that is validated
+/// with the data and never stored (see [`super::entailment`]). Any other
+/// regime fails the run with an error naming it.
 pub fn validate(
     store: &TripleStore,
     shapes_graph: &str,
@@ -58,6 +65,52 @@ pub fn validate(
         "SHACL validation: shapes_graph=<{}>, data_graphs={:?}",
         shapes_graph, data_graphs
     );
+    let started = std::time::Instant::now();
+
+    let regimes = super::entailment::declared_regimes(store, shapes_graph)?;
+    let (mut report, source) = if regimes.is_empty() {
+        validate_graphs(store, shapes_graph, data_graphs)?
+    } else {
+        let report =
+            super::entailment::validate_entailed(store, shapes_graph, data_graphs, &regimes)?;
+        (report, super::entailment::SOURCE_KIND)
+    };
+
+    // The run's own account of itself: for the report, the run row and the
+    // workload telemetry (docs/notes/analytical-mirror-design.md §1.4). The
+    // scope is the caller's data graphs in `store`, whatever copy the run
+    // read; the duration includes any entailment.
+    if let Some(metrics) = report.metrics.as_mut() {
+        metrics.duration_ms = started.elapsed().as_millis() as u64;
+        metrics.quads = data_graphs
+            .iter()
+            .filter_map(|g| store.graph_count_cached(Some(g.as_str())))
+            .map(|n| n as u64)
+            .sum();
+        metrics.source = source.to_string();
+        store
+            .telemetry()
+            .record_validation(crate::store::telemetry::ValidationSample {
+                path: crate::store::telemetry::validation_path(),
+                duration_ms: metrics.duration_ms.min(u32::MAX as u64) as u32,
+                quads: metrics.quads,
+                graphs: metrics.graphs,
+                source,
+                run_index: metrics.run_index,
+                results: report.results_count.min(u32::MAX as usize) as u32,
+            });
+    }
+    Ok(report)
+}
+
+/// [`validate`] without entailment and without telemetry: the shapes of
+/// `shapes_graph` over `data_graphs` as stored in `store`. Returns the report
+/// and the kind of data source the run read.
+pub(crate) fn validate_graphs(
+    store: &TripleStore,
+    shapes_graph: &str,
+    data_graphs: &[String],
+) -> Result<(ValidationReport, &'static str), String> {
     let started = std::time::Instant::now();
 
     let shapes = load_shapes(store, shapes_graph)?;
@@ -184,38 +237,25 @@ pub fn validate(
 
     debug!("SHACL validation complete: {} violations", results_count);
 
-    // The run's own account of itself: for the report, the run row and the
-    // workload telemetry (docs/notes/analytical-mirror-design.md §1.4).
+    // `validate` completes the scope and duration and records the run.
     let metrics = RunMetrics {
         path: crate::store::telemetry::validation_path().to_string(),
         duration_ms: started.elapsed().as_millis() as u64,
-        quads: data_graphs
-            .iter()
-            .filter_map(|g| store.graph_count_cached(Some(g.as_str())))
-            .map(|n| n as u64)
-            .sum(),
+        quads: 0,
         graphs: view.graph_count() as u32,
         source: view.source_kind().to_string(),
         run_index: view.has_index(),
     };
-    store
-        .telemetry()
-        .record_validation(crate::store::telemetry::ValidationSample {
-            path: crate::store::telemetry::validation_path(),
-            duration_ms: metrics.duration_ms.min(u32::MAX as u64) as u32,
-            quads: metrics.quads,
-            graphs: metrics.graphs,
-            source: view.source_kind(),
-            run_index: metrics.run_index,
-            results: results_count.min(u32::MAX as usize) as u32,
-        });
 
-    Ok(ValidationReport {
-        conforms,
-        results: all_results,
-        results_count,
-        metrics: Some(metrics),
-    })
+    Ok((
+        ValidationReport {
+            conforms,
+            results: all_results,
+            results_count,
+            metrics: Some(metrics),
+        },
+        view.source_kind(),
+    ))
 }
 
 /// Apply a shape-declared `sh:message` to the results of one constraint

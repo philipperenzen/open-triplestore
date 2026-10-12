@@ -464,74 +464,63 @@ pub fn eval_terms<R: Record + ?Sized>(
         TermMapKind::Template(template) => {
             let encoding = Encoding::for_term(gen.semantics, &tm.term_type);
             for value in expand_template_all(template, rec, encoding) {
-                render_value(tm, value, None, None, rec, gen, at, out);
+                render_value(tm, value, None, rec, gen, at, out);
             }
         }
         TermMapKind::Reference(col) => {
             for (value, kind) in rec.values(col).iter() {
-                let written = natural_shape(value, kind);
-                let value = canonical_form(&written, kind).into_owned();
-                let written = (*written != value).then(|| written.into_owned());
-                render_value(tm, value, written.as_deref(), kind, rec, gen, at, out);
+                let value = natural_lexical(value, kind).into_owned();
+                render_value(tm, value, kind, rec, gen, at, out);
             }
         }
     }
 }
 
-/// The natural RDF lexical form of a typed source value (R2RML §10.2): the
-/// canonical lexical representation of its natural datatype
-/// ([`super::xsd::canonical`]), so a `DOUBLE` 30 is `3.0E1`. An SQL
+/// A typed source value as R2RML reads it before typing it: an SQL
 /// timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL boolean
-/// written as a letter becomes `true` / `false`, first. A value outside its
-/// datatype's lexical space, and an untyped one, stays as the source wrote
-/// it. The store keeps literals as written, so this is the one place the
-/// canonical form is made.
+/// written as a number or a letter becomes `true` / `false`. Every other value
+/// stays as the source wrote it. [`canonical_lexical`] goes on to the
+/// canonical form where R2RML asks for it.
 fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
-    use std::borrow::Cow;
-    match natural_shape(value, kind) {
-        Cow::Borrowed(v) => canonical_form(v, kind),
-        Cow::Owned(v) => Cow::Owned(canonical_form(&v, kind).into_owned()),
-    }
-}
-
-/// A typed source value in XSD shape, before canonicalisation: an SQL
-/// timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL boolean
-/// written as a letter becomes `true` / `false`.
-fn natural_shape(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     match kind {
         Some(ValueKind::DateTime) if value.len() > 10 && value.as_bytes()[10] == b' ' => {
             Cow::Owned(format!("{}T{}", &value[..10], &value[11..]))
         }
         Some(ValueKind::Boolean) => match value {
-            "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
-            "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
+            "1" | "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
+            "0" | "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
             _ => Cow::Borrowed(value),
         },
         _ => Cow::Borrowed(value),
     }
 }
 
-/// The canonical lexical form of a value in XSD shape, or the value itself
-/// when it has no kind or lies outside its datatype's lexical space.
-fn canonical_form(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
+/// The natural RDF lexical form of a typed source value (R2RML §10.2): the
+/// canonical lexical representation of its natural datatype
+/// ([`super::xsd::canonical`]), so a `DOUBLE` 30 is `3.0E1`. It is what a
+/// literal of the natural datatype carries and what a template writes in
+/// (§7.3). A value outside its datatype's lexical space, and an untyped one,
+/// stays as [`natural_lexical`] leaves it. The store keeps literals as
+/// written, so this is the one place the canonical form is made.
+///
+/// A literal whose datatype the mapping overrides (`rr:datatype`, a datatype
+/// map) keeps the source's own spelling instead, which the override's
+/// lexical-space check then judges: a `REAL` 0.25 typed `xsd:decimal` stays
+/// the valid `0.25` rather than becoming the ill-typed `2.5E-1`.
+fn canonical_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    match kind.and_then(|k| super::xsd::canonical(value, k)) {
+    let value = natural_lexical(value, kind);
+    match kind.and_then(|k| super::xsd::canonical(&value, k)) {
         Some(canonical) if canonical != value => Cow::Owned(canonical),
-        _ => Cow::Borrowed(value),
+        _ => value,
     }
 }
 
 /// One value of a term map as the term its term type asks for.
-///
-/// `written` is the value in XSD shape as the source wrote it, when that
-/// differs from the canonical `raw_value`: a datatype override falls back to
-/// it (see [`typed_literal`]).
-#[allow(clippy::too_many_arguments)]
 fn render_value<R: Record + ?Sized>(
     tm: &TermMap,
     raw_value: String,
-    written: Option<&str>,
     kind: Option<ValueKind>,
     rec: &R,
     gen: &mut TermGen,
@@ -600,7 +589,7 @@ fn render_value<R: Record + ?Sized>(
                     }
                 }
             } else if let Some(dt) = &tm.datatype {
-                out.extend(typed_literal(tm, &raw_value, written, dt, gen));
+                out.extend(typed_literal(tm, &raw_value, dt, gen));
             } else if let Some(dm) = &tm.datatype_map {
                 let mut datatypes = Vec::new();
                 eval_terms(
@@ -617,13 +606,14 @@ fn render_value<R: Record + ?Sized>(
                     let Some(dt) = dt.strip_prefix('<').and_then(|d| d.strip_suffix('>')) else {
                         continue;
                     };
-                    out.extend(typed_literal(tm, &raw_value, written, dt, gen));
+                    out.extend(typed_literal(tm, &raw_value, dt, gen));
                 }
             } else if let Some(dt) = natural_datatype_for(tm, kind) {
+                let lexical = canonical_lexical(&raw_value, kind);
                 out.extend(
                     NamedNode::new(format!("{XSD}{dt}"))
                         .ok()
-                        .map(|n| Literal::new_typed_literal(&raw_value, n).to_string()),
+                        .map(|n| Literal::new_typed_literal(lexical.as_ref(), n).to_string()),
                 );
             } else {
                 out.push(Literal::new_simple_literal(&raw_value).to_string());
@@ -632,37 +622,18 @@ fn render_value<R: Record + ?Sized>(
     }
 }
 
-/// A datatype-override literal (R2RML §10.3): the natural lexical form typed
-/// as `dt`, and a data error when the value is not in the datatype's lexical
-/// space.
-///
-/// The natural lexical form SHOULD be the canonical one (§10.2), and is when
-/// `dt` accepts it. When it does not but the value as the source wrote it
-/// (`written`, another lexical form of the same value) is in `dt`'s lexical
-/// space, that form is used: a `REAL` 0.25 typed `xsd:decimal` is `"0.25"`,
-/// not the ill-typed `"2.5E-1"`.
-fn typed_literal(
-    tm: &TermMap,
-    raw_value: &str,
-    written: Option<&str>,
-    dt: &str,
-    gen: &mut TermGen,
-) -> Option<String> {
-    let lexical = match super::xsd::ill_typed(raw_value, dt) {
-        None => raw_value,
-        Some(why) => match written.filter(|w| super::xsd::ill_typed(w, dt).is_none()) {
-            Some(w) => w,
-            None => {
-                gen.data_error(format!(
-                    "{} generates {} as <{dt}>, which is {why}",
-                    describe(tm),
-                    quoted(raw_value)
-                ));
-                return None;
-            }
-        },
-    };
-    Some(Literal::new_typed_literal(lexical, NamedNode::new(dt).ok()?).to_string())
+/// A datatype-override literal (R2RML §10.3): a data error when the value is
+/// not in the datatype's lexical space.
+fn typed_literal(tm: &TermMap, raw_value: &str, dt: &str, gen: &mut TermGen) -> Option<String> {
+    if let Some(why) = super::xsd::ill_typed(raw_value, dt) {
+        gen.data_error(format!(
+            "{} generates {} as <{dt}>, which is {why}",
+            describe(tm),
+            quoted(raw_value)
+        ));
+        return None;
+    }
+    Some(Literal::new_typed_literal(raw_value, NamedNode::new(dt).ok()?).to_string())
 }
 
 /// The plain string values an expression map (a language map) evaluates
@@ -852,13 +823,13 @@ fn expand_template_all<R: Record + ?Sized>(
                     0 => return Vec::new(),
                     1 => {
                         let (v, kind) = values.get(0);
-                        let v = encoding.apply(&natural_lexical(v, kind));
+                        let v = encoding.apply(&canonical_lexical(v, kind));
                         results.iter_mut().for_each(|r| r.push_str(&v));
                     }
                     _ => {
                         let encoded: Vec<String> = values
                             .iter()
-                            .map(|(v, kind)| encoding.apply(&natural_lexical(v, kind)))
+                            .map(|(v, kind)| encoding.apply(&canonical_lexical(v, kind)))
                             .collect();
                         results = results
                             .into_iter()
@@ -1298,48 +1269,6 @@ mod tests {
         assert!(errors[0].contains("\"not an iri\"") && errors[0].contains("not a valid IRI"));
         assert!(errors[1].contains("\"1.5\"") && errors[1].contains("integer"));
         assert!(g.take_errors().is_empty(), "taking them clears them");
-    }
-
-    #[test]
-    fn a_datatype_override_falls_back_to_the_value_as_written() {
-        // R2RML §10.2/§10.3: the canonical form when the override accepts it,
-        // the source's own lexical form of the same value when only that one
-        // is in the override's lexical space, and a data error otherwise.
-        let r = row(&[("p", "0.25"), ("q", "30"), ("big", "1e300")]);
-        let kinds: Kinds = HashMap::from([
-            ("p".to_string(), ValueKind::Float),
-            ("q".to_string(), ValueKind::Float),
-            ("big".to_string(), ValueKind::Float),
-        ]);
-        let typed = |col: &str, dt: &str| {
-            let mut tm = term(TermMapKind::Reference(col.into()), TermType::Literal);
-            tm.datatype = Some(format!("{XSD}{dt}"));
-            tm
-        };
-        assert_eq!(
-            eval(&typed("p", "decimal"), &r, Some(&kinds)).unwrap(),
-            format!("\"0.25\"^^<{XSD}decimal>"),
-            "\"2.5E-1\" is not a decimal; the REAL as written is"
-        );
-        assert_eq!(
-            eval(&typed("q", "float"), &r, Some(&kinds)).unwrap(),
-            format!("\"3.0E1\"^^<{XSD}float>"),
-            "the canonical form wins whenever the override accepts it"
-        );
-        let mut g = TermGen::new(Semantics::R2rml, "b");
-        assert_eq!(
-            eval_term(
-                &typed("big", "decimal"),
-                &r,
-                Some(&kinds),
-                &mut g,
-                At::default()
-            ),
-            None
-        );
-        let errors = g.take_errors();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("\"1.0E300\"") && errors[0].contains("decimal"));
     }
 
     #[test]
