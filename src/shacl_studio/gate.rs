@@ -1,8 +1,24 @@
-//! Write-gating: before a write to a named graph lands, evaluate every
-//! `gate_writes` pipeline whose scope covers that graph against the *incoming*
-//! data (in a throwaway store) and reject the write if any fails its severity
-//! threshold. This generalises the legacy per-dataset `shacl_on_write` gate to
-//! reusable, composable pipelines.
+//! Write-gating: before a write to a named graph lands, every SHACL gate that
+//! covers the graph is evaluated against the graph's *future* contents (in one
+//! throwaway store) and the write is refused if any fails.
+//!
+//! Three sources gate a write, and every write path — Graph Store `PUT`/`POST`,
+//! validate-and-commit, bulk import, RDF Patch, repair — runs all of them in
+//! one pass, in this order, stopping at the first that fails:
+//!
+//! 1. `gate_writes` pipelines whose scope covers the graph, each at its own
+//!    severity threshold (a creator who may no longer write what the pipeline
+//!    covers gates nothing);
+//! 2. validation-layer bindings — shapes bound to the graph itself or to its
+//!    dataset — at the `Violation` threshold;
+//! 3. the dataset's own `shacl_on_write` flag with its `shapes_graph_iri`,
+//!    which refuses on any result (the report does not conform), whatever its
+//!    severity.
+//!
+//! The refusal is the first failing gate's report. The order only decides
+//! which report a refused write gets: a write lands only when every gate
+//! passes. Each gate is evaluated once per write; the incoming data is staged
+//! once and the shape graphs are copied once.
 
 use std::collections::BTreeSet;
 
@@ -162,23 +178,20 @@ pub(crate) fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
     }
 }
 
-/// Returns `Err(report)` with the first failing gate's report when the incoming
-/// data would violate a gating pipeline **or** a validation-layer binding that
-/// applies to this write; `Ok(())` otherwise.
-///
-/// Two independent gate sources are evaluated:
-/// 1. `gate_writes` pipelines whose scope covers the graph (at each pipeline's
-///    own severity threshold);
-/// 2. validation-layer bindings — shapes attached directly to the written graph
-///    or to its owning dataset. A binding gates on its own (no pipeline needed)
-///    at the default `Violation` threshold, so graph-attached shapes travel
-///    with the graph and are enforced wherever it is mounted.
+/// Returns `Err(report)` with the first failing gate's report when the
+/// graph's future contents would fail a gate that covers this write; `Ok(())`
+/// otherwise. All three gate sources run, in the module's order: `gate_writes`
+/// pipelines, validation-layer bindings (shapes attached to the written graph
+/// or its dataset, which travel with the graph wherever it is mounted), and
+/// the dataset's `shacl_on_write` shapes graph. `on_dataset_gate`, if
+/// given, is called with the dataset gate's report whenever it runs.
 pub fn check_write_gates(
     ctx: GateContext<'_>,
     graph_iri: &str,
     data: &str,
     format: RdfFormat,
     mode: WriteMode,
+    on_dataset_gate: Option<DatasetGateHook<'_>>,
 ) -> Result<(), ValidationReport> {
     let GateContext {
         main_store,
@@ -187,9 +200,7 @@ pub fn check_write_gates(
         base_url,
         writer,
     } = ctx;
-    // The legacy per-dataset `shacl_on_write` gate is handled separately by
-    // `validate_on_write` on this path, so it is excluded here.
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false)?;
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -212,7 +223,7 @@ pub fn check_write_gates(
     }
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
-    evaluate_gates(&temp, studio, &gates, graph_iri).map_err(|refusal| {
+    evaluate_gates(&temp, studio, &gates, graph_iri, on_dataset_gate).map_err(|refusal| {
         let (report, shapes) = *refusal;
         report_for_writer(auth_db, writer, report, &shapes)
     })
@@ -220,7 +231,7 @@ pub fn check_write_gates(
 
 /// Cheap pre-check for bulk import: does *any* gate apply to writes into
 /// `graph_iri`? Considers `gate_writes` pipelines, validation-layer bindings
-/// (graph- and dataset-level) and the owning dataset's legacy `shacl_on_write`
+/// (graph- and dataset-level) and the owning dataset's `shacl_on_write`
 /// shapes graph. Metadata lookups only — no quad scans, no temp store — so
 /// large imports with no gates configured (the common case) pay near-nothing.
 ///
@@ -234,7 +245,6 @@ pub fn import_gates_apply(ctx: GateContext<'_>, graph_iri: &str) -> bool {
         ctx.studio,
         ctx.base_url,
         graph_iri,
-        true,
     ) {
         Ok(gates) => !gates.is_empty(),
         Err(_) => true,
@@ -244,9 +254,8 @@ pub fn import_gates_apply(ctx: GateContext<'_>, graph_iri: &str) -> bool {
 /// Quad-based write gate for bulk import: validates `quads` (re-homed into
 /// `graph_iri` in a throwaway store) against every gate that applies —
 /// `gate_writes` pipelines, validation-layer bindings, and the owning dataset's
-/// legacy `shacl_on_write` shapes graph (which Graph Store writes enforce in
-/// `validate_on_write` but bulk import must enforce itself). `Err` carries the
-/// first failing gate's report.
+/// `shacl_on_write` shapes graph, in that order, as [`check_write_gates`].
+/// `Err` carries the first failing gate's report.
 pub fn check_import_gates(
     ctx: GateContext<'_>,
     graph_iri: &str,
@@ -259,7 +268,7 @@ pub fn check_import_gates(
         base_url,
         writer,
     } = ctx;
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true)?;
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -288,7 +297,7 @@ pub fn check_import_gates(
         .map_err(|e| gate_error(format!("staging the incoming quads: {e}")))?;
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
-    evaluate_gates(&temp, studio, &gates, graph_iri).map_err(|refusal| {
+    evaluate_gates(&temp, studio, &gates, graph_iri, None).map_err(|refusal| {
         let (report, shapes) = *refusal;
         report_for_writer(auth_db, writer, report, &shapes)
     })
@@ -322,20 +331,29 @@ pub fn summarize_report(report: &ValidationReport, max_results: usize) -> String
     )
 }
 
-/// Everything that gates a write to one graph: covering `gate_writes`
-/// pipelines, validation-layer binding shape graphs, and (import path only)
-/// the owning dataset's legacy `shacl_on_write` shapes graph.
+/// Everything that gates a write to one graph, in evaluation order:
+/// covering `gate_writes` pipelines, validation-layer binding shape graphs,
+/// and the owning dataset's `shacl_on_write` shapes graph.
 struct GateSet {
     pipelines: Vec<ValidationPipeline>,
     binding_graphs: BTreeSet<String>,
-    legacy_shapes_graph: Option<String>,
+    dataset_gate: Option<DatasetGate>,
 }
+
+/// A dataset's own `shacl_on_write` gate.
+struct DatasetGate {
+    dataset_id: String,
+    shapes_graph: String,
+}
+
+/// Called with what a dataset's `shacl_on_write` gate found — its dataset,
+/// shapes graph and report, conforming or not — so a caller can keep the
+/// on-write report history.
+pub type DatasetGateHook<'a> = &'a dyn Fn(&str, &str, &ValidationReport);
 
 impl GateSet {
     fn is_empty(&self) -> bool {
-        self.pipelines.is_empty()
-            && self.binding_graphs.is_empty()
-            && self.legacy_shapes_graph.is_none()
+        self.pipelines.is_empty() && self.binding_graphs.is_empty() && self.dataset_gate.is_none()
     }
 }
 
@@ -353,7 +371,6 @@ fn discover_gates(
     studio: &ShaclStudioStore,
     base_url: &str,
     graph_iri: &str,
-    include_legacy_dataset_gate: bool,
 ) -> Result<GateSet, ValidationReport> {
     // Which dataset (if any) owns the graph being written — needed both for
     // pipelines scoped by dataset and for dataset-level bindings.
@@ -408,21 +425,24 @@ fn discover_gates(
         binding_graphs.extend(bindings_of(&ds_iri)?);
     }
 
-    // (c) Legacy per-dataset gate (`shacl_on_write` + `shapes_graph_iri`).
-    let legacy_shapes_graph = if include_legacy_dataset_gate {
-        owning_dataset
-            .as_ref()
-            .filter(|ds| ds.shacl_on_write)
-            .and_then(|ds| ds.shapes_graph_iri.clone())
-            .filter(|iri| !iri.is_empty())
-    } else {
-        None
-    };
+    // (c) The dataset's own gate (`shacl_on_write` + `shapes_graph_iri`).
+    let dataset_gate = owning_dataset
+        .as_ref()
+        .filter(|ds| ds.shacl_on_write)
+        .and_then(|ds| {
+            ds.shapes_graph_iri
+                .clone()
+                .filter(|iri| !iri.is_empty())
+                .map(|shapes_graph| DatasetGate {
+                    dataset_id: ds.id.clone(),
+                    shapes_graph,
+                })
+        });
 
     Ok(GateSet {
         pipelines,
         binding_graphs,
-        legacy_shapes_graph,
+        dataset_gate,
     })
 }
 
@@ -470,8 +490,8 @@ fn needed_shape_graphs(
     for p in &gates.pipelines {
         needed.extend(pipeline_shape_graphs(studio, p)?);
     }
-    if let Some(g) = &gates.legacy_shapes_graph {
-        needed.insert(g.clone());
+    if let Some(g) = &gates.dataset_gate {
+        needed.insert(g.shapes_graph.clone());
     }
     Ok(needed)
 }
@@ -501,13 +521,15 @@ fn copy_shape_graphs(
     Ok(())
 }
 
-/// Run every gate source against the prepared temp store. Returns the first
-/// failing gate's report, with the shape graphs that gate validated against.
+/// Run every gate source against the prepared temp store, in the module's
+/// order. Returns the first failing gate's report, with the shape graphs that
+/// gate validated against.
 fn evaluate_gates(
     temp: &TripleStore,
     studio: &ShaclStudioStore,
     gates: &GateSet,
     graph_iri: &str,
+    on_dataset_gate: Option<DatasetGateHook<'_>>,
 ) -> Result<(), Refusal> {
     let data_graphs = [graph_iri.to_string()];
     // Every run below is a gate, for the workload telemetry.
@@ -561,10 +583,14 @@ fn evaluate_gates(
         }
     }
 
-    // Legacy per-dataset gate: mirrors `validate_on_write` — a direct engine
-    // run against the dataset's configured shapes graph, failing on
-    // `!conforms`.
-    if let Some(shapes_graph) = &gates.legacy_shapes_graph {
+    // The dataset's own gate: a direct engine run against its configured
+    // shapes graph, failing on `!conforms` (any result, whatever its
+    // severity).
+    if let Some(DatasetGate {
+        dataset_id,
+        shapes_graph,
+    }) = &gates.dataset_gate
+    {
         // `if let Ok(..)` dropped the error case, so a failing engine run meant
         // "no violations" and the write sailed through ungated.
         let report = crate::shacl::validate(temp, shapes_graph, &data_graphs).map_err(|e| {
@@ -573,6 +599,9 @@ fn evaluate_gates(
                 Vec::new(),
             )
         })?;
+        if let Some(hook) = on_dataset_gate {
+            hook(dataset_id, shapes_graph, &report);
+        }
         if !report.conforms {
             return Err(refusal(report, vec![shapes_graph.clone()]));
         }
@@ -1003,6 +1032,7 @@ mod tests {
              <http://example.org/name> \"Ada\" .",
             RdfFormat::Turtle,
             WriteMode::Replace,
+            None,
         )
         .expect_err("an unresolvable gate must block the write");
         assert_eq!(
@@ -1045,6 +1075,7 @@ mod tests {
              <http://example.org/name> \"Ada\" .",
             RdfFormat::Turtle,
             WriteMode::Replace,
+            None,
         )
         .expect_err("a failed discovery must block the write");
         for report in [import, write] {
@@ -1213,16 +1244,37 @@ mod tests {
         )
         .expect("conforming data must pass the legacy dataset gate");
 
-        // Graph Store path (`check_write_gates`) intentionally excludes the
-        // legacy gate — `validate_on_write` runs it separately there.
-        check_write_gates(
+        // The Graph Store path runs the same gate in the same pass, and
+        // reports it to the caller's hook once.
+        let runs = std::cell::RefCell::new(Vec::new());
+        let hook = |ds: &str, shapes: &str, r: &ValidationReport| {
+            runs.borrow_mut()
+                .push((ds.to_string(), shapes.to_string(), r.conforms));
+        };
+        let report = check_write_gates(
             ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             "<http://example.org/p1> a <http://example.org/Person> .",
             RdfFormat::Turtle,
             WriteMode::Replace,
+            Some(&hook),
         )
-        .expect("legacy gate must not double-fire on the GSP path");
+        .unwrap_err();
+        assert!(!report.conforms);
+        assert_eq!(
+            *runs.borrow(),
+            vec![("d1".to_string(), SHAPES_GRAPH.to_string(), false)]
+        );
+        check_write_gates(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH,
+            "<http://example.org/p1> a <http://example.org/Person> ; \
+             <http://example.org/name> \"Ann\" .",
+            RdfFormat::Turtle,
+            WriteMode::Replace,
+            None,
+        )
+        .expect("conforming data passes the dataset gate on the Graph Store path");
     }
 
     #[test]
