@@ -117,6 +117,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 ENV RUST_MIN_STACK=33554432
 COPY .cargo/ .cargo/
 COPY --from=planner /app/recipe.json recipe.json
+# The vendored Oxigraph fork is a [patch.crates-io] path dependency outside the
+# workspace, so the cook skeleton does not carry it: copy it in before cooking.
+COPY --from=planner /app/vendor/ vendor/
 # This layer is cached as long as the dependency set is unchanged — source-only
 # edits no longer trigger a full dependency rebuild. `full` enables every
 # standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search),
