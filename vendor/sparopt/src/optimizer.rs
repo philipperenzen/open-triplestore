@@ -34,7 +34,58 @@ impl Optimizer {
         let input_types = VariableTypes::default();
         let pattern = Self::unnest_pattern_laterals(pattern);
         let pattern = Self::reorder_joins(pattern, &input_types);
-        Self::push_filters(pattern, Vec::new(), &input_types)
+        let pattern = Self::push_filters(pattern, Vec::new(), &input_types);
+        Self::hash_pattern_laterals(pattern, &input_types)
+    }
+
+    /// `reorder_joins` makes every triple or path pattern that can follow a lateral
+    /// (for-loop) join: one index probe per solution of the left side, which is
+    /// right when the left side is small. A pattern evaluated standalone has no
+    /// such guarantee — it reads whole predicates — so here a `Lateral(L, R)` whose
+    /// `R` reads nothing from `L` but join keys (a triple or path pattern, maybe
+    /// filtered on its own variables) becomes a hash join of `L` and `R`.
+    fn hash_pattern_laterals(pattern: GraphPattern, input_types: &VariableTypes) -> GraphPattern {
+        match pattern {
+            #[cfg(feature = "sep-0006")]
+            GraphPattern::Lateral { left, right } => {
+                let left = Self::hash_pattern_laterals(*left, input_types);
+                if is_self_contained_pattern(&right) {
+                    let keys = join_key_variables(
+                        &infer_graph_pattern_types(&left, input_types.clone()),
+                        &infer_graph_pattern_types(&right, input_types.clone()),
+                        input_types,
+                    );
+                    GraphPattern::join(
+                        left,
+                        *right,
+                        JoinAlgorithm::HashBuildLeftProbeRight { keys },
+                    )
+                } else {
+                    GraphPattern::lateral(left, *right)
+                }
+            }
+            GraphPattern::Join {
+                left,
+                right,
+                algorithm,
+            } => GraphPattern::join(
+                Self::hash_pattern_laterals(*left, input_types),
+                Self::hash_pattern_laterals(*right, input_types),
+                algorithm,
+            ),
+            GraphPattern::Filter { inner, expression } => {
+                GraphPattern::filter(Self::hash_pattern_laterals(*inner, input_types), expression)
+            }
+            GraphPattern::Graph { graph_name, inner } => {
+                GraphPattern::graph(Self::hash_pattern_laterals(*inner, input_types), graph_name)
+            }
+            GraphPattern::Union { inner } => GraphPattern::union_all(
+                inner
+                    .into_iter()
+                    .map(|c| Self::hash_pattern_laterals(c, input_types)),
+            ),
+            other => other,
+        }
     }
 
     /// Turns every `Lateral(L, R)` whose `R` is a triple or path pattern back
@@ -1243,6 +1294,25 @@ impl Optimizer {
                 aggregates,
             ),
         }
+    }
+}
+
+/// A triple or path pattern, possibly filtered on its own variables only: its
+/// solutions do not depend on an input binding beyond compatibility, so a
+/// lateral join into it equals a join.
+#[cfg(feature = "sep-0006")]
+fn is_self_contained_pattern(pattern: &GraphPattern) -> bool {
+    match pattern {
+        GraphPattern::QuadPattern { .. } | GraphPattern::Path { .. } => true,
+        GraphPattern::Filter { inner, expression } => {
+            is_self_contained_pattern(inner)
+                && !does_contain_exists(expression)
+                && are_all_expression_variables_bound(
+                    expression,
+                    &infer_graph_pattern_types(inner, VariableTypes::default()),
+                )
+        }
+        _ => false,
     }
 }
 

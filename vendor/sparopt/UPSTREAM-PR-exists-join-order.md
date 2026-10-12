@@ -48,10 +48,14 @@ driven by it. In the query above `P` becomes
 `Filter(Lateral(?review bsbm:reviewFor ?product, ?review bsbm:rating1 ?r), ?r >= 9)`:
 one index lookup from `?product`, one per review found.
 
-It also adds `Optimizer::optimize_for_standalone_evaluation`, the same two
-passes with no input types, for an evaluator that wants to evaluate an `EXISTS`
-pattern once for all outer solutions (see the companion spareval draft,
-`UPSTREAM-PR-exists-semi-join.md`).
+It also adds `Optimizer::optimize_for_standalone_evaluation`, for an evaluator
+that wants to evaluate an `EXISTS` pattern once for all outer solutions (see the
+companion spareval draft, `UPSTREAM-PR-exists-semi-join.md`): it turns every
+`Lateral(L, R)` whose `R` is a triple or path pattern back into `Join(L, R)` —
+equal, since such an `R` evaluated with a solution of `L` as input yields exactly
+its compatible solutions — and then runs the two passes with no input types, so
+the pattern evaluated standalone is a hash join rather than one index probe per
+solution of `L`.
 
 ### Tests
 

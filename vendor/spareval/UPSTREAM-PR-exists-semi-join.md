@@ -49,15 +49,18 @@ binds a variable not usable as a key is evaluated on its own, as before.
 ### Which plan
 
 The planner cannot know how many outer rows there will be, nor how large `P`
-is. So both run: after 8 rows, each per-row evaluation is followed by as much
+is. So both run: after 8 rows and 5 ms of per-row work, each per-row evaluation is followed by as much
 time spent evaluating `P` standalone into the table (keyed by the bound shared
 variables and the active graph); once the standalone evaluation is complete the
 table answers every later row. Total work stays within about twice that of the
 better plan. A table that would hold more than 2^21 keys, or whose evaluation
 fails, is dropped and the `EXISTS` stays per row. The standalone plan is `P`
-re-planned with no input bindings (`optimize_for_standalone_evaluation`), so a
-join of two parts that only share an outer variable is a hash join there, not a
-cartesian product. The clock is `std::time::Instant`; on
+re-planned with no input bindings and hash joins instead of lateral joins
+(`optimize_for_standalone_evaluation`), so it reads each predicate once instead of
+probing the index per solution, and a join of two parts that only share an outer
+variable is a hash join there, not a cartesian product. Starting it builds the
+first hash-join side at once, outside the interleaving budget; the 5 ms floor
+keeps that from landing on a query whose `EXISTS` is cheap per row. The clock is `std::time::Instant`; on
 `wasm32-unknown-unknown`, which has none that works, the table is never used.
 `QueryEvaluator::without_optimizations` turns it off too.
 
@@ -68,4 +71,4 @@ small, so they are answered per row). New tests cover the table path with
 several hundred outer rows: a correlated `NOT EXISTS` and `EXISTS`, an outer
 variable unbound in some rows (`OPTIONAL`), a filter inside `P` reading an
 outer-only variable (refused, per row), and two shared variables across a
-`UNION`. On the query above: 4.4 s → 30 ms at BSBM 1k in Open Triplestore.
+`UNION`. Timings on the query above are in Open Triplestore's `docs/performance-comparison.md`.

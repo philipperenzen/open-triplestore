@@ -4290,9 +4290,13 @@ fn format_list<T: ToString>(values: impl IntoIterator<Item = T>) -> String {
         .join(", ")
 }
 
-/// Outer solutions an `EXISTS` evaluates one by one before it also starts
-/// evaluating its pattern once for all of them (see [`ExistsSemiJoin`]).
+/// Outer solutions an `EXISTS` evaluates one by one, and the time those
+/// evaluations must have taken, before it also starts evaluating its pattern
+/// once for all of them (see [`ExistsSemiJoin`]). The time floor matters
+/// because starting the standalone evaluation builds the first hash-join
+/// side at once, outside the interleaving budget.
 const SEMI_JOIN_MIN_ROWS: usize = 8;
+const SEMI_JOIN_MIN_PER_ROW_TIME: std::time::Duration = std::time::Duration::from_millis(5);
 /// Distinct key tuples a semi-join table may hold. Past it the table is dropped
 /// and the `EXISTS` stays a per-solution evaluation, so memory stays bounded.
 const SEMI_JOIN_MAX_KEYS: usize = 1 << 21;
@@ -4334,6 +4338,8 @@ struct ExistsSemiJoin<'a, T> {
 
 struct SemiJoinState<'a, T> {
     rows: usize,
+    /// Time spent evaluating rows one by one.
+    per_row_time: std::time::Duration,
     /// Set when the table was given up: every row is evaluated on its own.
     disabled: bool,
     /// Bitmask over `slots` and active graph of the table being built or built.
@@ -4351,6 +4357,7 @@ impl<'a, T: Clone + Eq + Hash + 'a> ExistsSemiJoin<'a, T> {
             slots,
             state: RefCell::new(SemiJoinState {
                 rows: 0,
+                per_row_time: std::time::Duration::ZERO,
                 disabled: false,
                 signature: None,
                 building: None,
@@ -4397,12 +4404,15 @@ impl<'a, T: Clone + Eq + Hash + 'a> ExistsSemiJoin<'a, T> {
             return table.contains(key.as_slice());
         }
         state.rows += 1;
-        let start_building = state.signature.is_none() && state.rows >= SEMI_JOIN_MIN_ROWS;
+        let start_building = state.signature.is_none()
+            && state.rows >= SEMI_JOIN_MIN_ROWS
+            && state.per_row_time >= SEMI_JOIN_MIN_PER_ROW_TIME;
         drop(state);
         let start = SemiJoinClock::now();
         let result = per_row(tuple.clone()).next().is_some();
         let spent = start.elapsed();
         let mut state = self.state.borrow_mut();
+        state.per_row_time += spent;
         if start_building && state.signature.is_none() && !state.disabled {
             let mut from = InternalTuple::with_capacity(0);
             from.graph_name.clone_from(&tuple.graph_name);
