@@ -262,9 +262,9 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let nt = body_text(resp.into_body()).await;
-    // NUMERIC(10,2) prints two decimals; the natural mapping writes the
-    // canonical xsd:decimal (R2RML §10.2).
-    assert!(nt.contains("<http://example.org/products/product_2> <http://example.org/products/ontology#hasPrice> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>"), "{nt}");
+    // NUMERIC(10,2) prints two decimals, and a declared rr:datatype keeps
+    // the source's spelling.
+    assert!(nt.contains("<http://example.org/products/product_2> <http://example.org/products/ontology#hasPrice> \"1.50\"^^<http://www.w3.org/2001/XMLSchema#decimal>"), "{nt}");
     assert!(nt.contains("\"Bolt\""), "{nt}");
     // The timestamp arrived in XSD shape (a `T`, a full offset), took the
     // natural datatype and its canonical form: the offset shifted to Z.
