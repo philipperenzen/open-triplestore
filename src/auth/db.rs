@@ -846,7 +846,9 @@ impl AuthDb {
                 -- the reasoner that ran (owl2-dl: native | konclude | sidecar)
                 last_backend TEXT,
                 -- 1 complete reasoner, 0 sound but incomplete, NULL not applicable
-                last_complete INTEGER
+                last_complete INTEGER,
+                -- owl2-rl / skos: 1 also runs eq-ref (x owl:sameAs x for every term)
+                eq_ref INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS endpoint_acl (
@@ -1543,6 +1545,8 @@ impl AuthDb {
             "ALTER TABLE dataset_entailment ADD COLUMN last_error TEXT",
             "ALTER TABLE dataset_entailment ADD COLUMN last_backend TEXT",
             "ALTER TABLE dataset_entailment ADD COLUMN last_complete INTEGER",
+            // `owl2-rl`/`skos`: run eq-ref (the setting `PUT …/entailment` stores).
+            "ALTER TABLE dataset_entailment ADD COLUMN eq_ref INTEGER NOT NULL DEFAULT 0",
             // LDES: the newest member timestamp ever published (a member is
             // never stamped earlier, LDES 1.0 §4.1, even after retention
             // pruned that member), and the declared ldes:pollingInterval.
