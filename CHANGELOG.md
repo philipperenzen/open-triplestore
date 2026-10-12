@@ -1722,6 +1722,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `0005b`, `0012a`, `0012e`, `0016b`) failed on every database. Templates
   get the same form, as §7.3 asks. JSON numbers read under RML-Core, which
   carry the same natural datatypes, follow the same rule (`1.5` → `1.5E0`).
+  A literal whose datatype the mapping sets (`rr:datatype`, a datatype map)
+  keeps the source's spelling, so a SQLite `REAL` 0.25 typed `xsd:decimal`
+  stays `0.25` rather than becoming the ill-typed `2.5E-1`.
 - **Triple terms and base direction no longer get lost.** The canonical and
   Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
   inside `<<( … )>>` is relabelled or skolemized with the same label as the

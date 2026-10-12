@@ -476,31 +476,42 @@ pub fn eval_terms<R: Record + ?Sized>(
     }
 }
 
-/// The natural RDF lexical form of a typed source value (R2RML §10.2): the
-/// canonical lexical representation of its natural datatype
-/// ([`super::xsd::canonical`]), so a `DOUBLE` 30 is `3.0E1`. An SQL
+/// A typed source value as R2RML reads it before typing it: an SQL
 /// timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL boolean
-/// written as a letter becomes `true` / `false`, first. A value outside its
-/// datatype's lexical space, and an untyped one, stays as the source wrote
-/// it. The store keeps literals as written, so this is the one place the
-/// canonical form is made.
+/// written as a number or a letter becomes `true` / `false`. Every other value
+/// stays as the source wrote it. [`canonical_lexical`] goes on to the
+/// canonical form where R2RML asks for it.
 fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    let Some(kind) = kind else {
-        return Cow::Borrowed(value);
-    };
-    let value: Cow<'_, str> = match kind {
-        ValueKind::DateTime if value.len() > 10 && value.as_bytes()[10] == b' ' => {
+    match kind {
+        Some(ValueKind::DateTime) if value.len() > 10 && value.as_bytes()[10] == b' ' => {
             Cow::Owned(format!("{}T{}", &value[..10], &value[11..]))
         }
-        ValueKind::Boolean => match value {
-            "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
-            "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
+        Some(ValueKind::Boolean) => match value {
+            "1" | "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
+            "0" | "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
             _ => Cow::Borrowed(value),
         },
         _ => Cow::Borrowed(value),
-    };
-    match super::xsd::canonical(&value, kind) {
+    }
+}
+
+/// The natural RDF lexical form of a typed source value (R2RML §10.2): the
+/// canonical lexical representation of its natural datatype
+/// ([`super::xsd::canonical`]), so a `DOUBLE` 30 is `3.0E1`. It is what a
+/// literal of the natural datatype carries and what a template writes in
+/// (§7.3). A value outside its datatype's lexical space, and an untyped one,
+/// stays as [`natural_lexical`] leaves it. The store keeps literals as
+/// written, so this is the one place the canonical form is made.
+///
+/// A literal whose datatype the mapping overrides (`rr:datatype`, a datatype
+/// map) keeps the source's own spelling instead, which the override's
+/// lexical-space check then judges: a `REAL` 0.25 typed `xsd:decimal` stays
+/// the valid `0.25` rather than becoming the ill-typed `2.5E-1`.
+fn canonical_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let value = natural_lexical(value, kind);
+    match kind.and_then(|k| super::xsd::canonical(&value, k)) {
         Some(canonical) if canonical != value => Cow::Owned(canonical),
         _ => value,
     }
@@ -598,10 +609,11 @@ fn render_value<R: Record + ?Sized>(
                     out.extend(typed_literal(tm, &raw_value, dt, gen));
                 }
             } else if let Some(dt) = natural_datatype_for(tm, kind) {
+                let lexical = canonical_lexical(&raw_value, kind);
                 out.extend(
                     NamedNode::new(format!("{XSD}{dt}"))
                         .ok()
-                        .map(|n| Literal::new_typed_literal(&raw_value, n).to_string()),
+                        .map(|n| Literal::new_typed_literal(lexical.as_ref(), n).to_string()),
                 );
             } else {
                 out.push(Literal::new_simple_literal(&raw_value).to_string());
@@ -811,13 +823,13 @@ fn expand_template_all<R: Record + ?Sized>(
                     0 => return Vec::new(),
                     1 => {
                         let (v, kind) = values.get(0);
-                        let v = encoding.apply(&natural_lexical(v, kind));
+                        let v = encoding.apply(&canonical_lexical(v, kind));
                         results.iter_mut().for_each(|r| r.push_str(&v));
                     }
                     _ => {
                         let encoded: Vec<String> = values
                             .iter()
-                            .map(|(v, kind)| encoding.apply(&natural_lexical(v, kind)))
+                            .map(|(v, kind)| encoding.apply(&canonical_lexical(v, kind)))
                             .collect();
                         results = results
                             .into_iter()
@@ -1283,7 +1295,8 @@ mod tests {
                 Some(&kinds)
             )
             .unwrap(),
-            format!("\"1.50\"^^<{XSD}decimal>")
+            format!("\"1.5\"^^<{XSD}decimal>"),
+            "a natural decimal takes its canonical form (R2RML §10.2)"
         );
         assert_eq!(
             eval(
