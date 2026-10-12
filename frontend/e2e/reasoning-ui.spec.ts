@@ -40,6 +40,16 @@ async function ask(query: string): Promise<boolean> {
   return (await res.json()).boolean === true;
 }
 
+/** ASK with the dataset's inference graph (regime and stored rules) joined in. */
+async function askInferred(pattern: string): Promise<boolean> {
+  const res = await api.get('/sparql', {
+    params: { query: `ASK { ${pattern} }`, entailment_dataset: datasetId },
+    headers: { ...auth(), accept: 'application/sparql-results+json' },
+  });
+  expect(res.ok(), `ASK failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+  return (await res.json()).boolean === true;
+}
+
 async function signIn(page: Page): Promise<void> {
   await page.goto('/login');
   await page.getByLabel('Username').fill(ADMIN.username);
@@ -100,11 +110,11 @@ test.describe('API-only features in the UI', () => {
     await page.getByRole('link', { name: /^Reasoning & rules/ }).click();
     await expect(page).toHaveURL(new RegExp(`/datasets/${datasetId}/reasoning$`));
     const card = page.locator('#entailment-settings');
-    await expect(card.getByText('None configured')).toBeVisible();
+    await expect(card.getByText('None configured', { exact: true })).toBeVisible();
     await choose(page, 'Regime', 'RDFS');
     await card.getByRole('button', { name: 'Save and run' }).click();
     await expect(card.getByTestId('entailment-status')).toHaveText(/OK/, { timeout: 20_000 });
-    expect(await ask(`ASK { GRAPH <urn:entailment:rdfs:${datasetId}> { <${EX}rex> a <${EX}Animal> } }`)).toBe(true);
+    expect(await askInferred(`<${EX}rex> a <${EX}Animal>`)).toBe(true);
   });
 
   test('stored SWRL rules: add, see the run, remove after the app dialog', async ({ page }) => {
@@ -117,10 +127,10 @@ test.describe('API-only features in the UI', () => {
     await rules.getByRole('button', { name: 'Store and run' }).click();
     await expect(rules.getByTestId('rule-set')).toContainText('Seniors', { timeout: 20_000 });
     await expect(rules.getByTestId('rules-report')).toBeVisible();
-    // The dataset runs RDFS (previous test) or nothing; either way the rule fired.
-    const fired = `ASK { GRAPH ?g { <${EX}rex> a <${EX}Senior> } FILTER(STRSTARTS(STR(?g), "urn:entailment:")) }`;
-    await expect.poll(() => ask(fired), { timeout: 20_000 }).toBe(true);
-    expect(await ask(`ASK { GRAPH ?g { <${EX}fido> a <${EX}Senior> } }`)).toBe(false);
+    // The rule ran with the dataset's regime (RDFS, previous test) into its inference graph.
+    const fired = `<${EX}rex> a <${EX}Senior>`;
+    await expect.poll(() => askInferred(fired), { timeout: 20_000 }).toBe(true);
+    expect(await askInferred(`<${EX}fido> a <${EX}Senior>`)).toBe(false);
 
     // A refused rule names the built-in and writes nothing.
     await rules.getByRole('button', { name: 'Add rules' }).click();
@@ -137,7 +147,7 @@ test.describe('API-only features in the UI', () => {
     await expect(dialog).toContainText('Remove these rules?');
     await dialog.getByRole('button', { name: 'Delete' }).click();
     await expect(rules.getByTestId('rule-set')).toHaveCount(0, { timeout: 20_000 });
-    await expect.poll(() => ask(fired), { timeout: 20_000 }).toBe(false);
+    await expect.poll(() => askInferred(fired), { timeout: 20_000 }).toBe(false);
   });
 
   test('a one-off SWRL run with a regime reports its rounds', async ({ page }) => {
@@ -213,7 +223,10 @@ ex:DogShape { ex:name xsd:string ; ex:age xsd:integer }`);
     await clientNavigate(page, `/datasets/${datasetId}`);
     await versions.getByRole('button', { name: 'Clean up' }).click();
     await versions.getByLabel('Unpublished versions to keep').fill('1');
-    await expect(versions.getByTestId('version-gc')).toContainText('2 versions will be deleted');
+    // Every unpublished version but the newest goes: the three cut here less
+    // one, plus the patch log's version 0 (the patch test), which is flagged.
+    await expect(versions.getByTestId('version-gc')).toContainText('3 versions will be deleted');
+    await expect(versions.getByTestId('version-gc')).toContainText("version 0 of the dataset's RDF Patch log");
     await versions.getByTestId('version-gc').getByRole('button', { name: 'Clean up' }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Delete old versions?');
