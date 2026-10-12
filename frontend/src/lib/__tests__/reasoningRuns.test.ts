@@ -40,13 +40,14 @@ describe('MaterialisePanel', () => {
   it('materialises into the dataset graph and shows the ignored axioms', async () => {
     api.materializeEntailment.mockResolvedValue({
       regime: 'owl2-el', triples_added: 5, iterations: 2, elapsed_ms: 12, target_graph: 'urn:entailment:owl2-el:ds1',
-      sources: ['g1'], consistent: true, ignored: [{ construct: 'ObjectUnionOf', count: 2, example: 'ex:A or ex:B' }],
+      sources: ['g1'], consistent: true, identity: 'sameas-narrow', ignored: [{ construct: 'ObjectUnionOf', count: 2, example: 'ex:A or ex:B' }],
     });
     const view = render(MaterialisePanel, { datasetId: 'ds1', canWrite: true, dlBackend: null });
     await choose(view, 'Regime to materialise', 'OWL 2 EL');
     expect((view.getByLabelText('Target graph') as HTMLInputElement).placeholder).toBe('urn:entailment:owl2-el:ds1');
     await fireEvent.click(view.getByRole('button', { name: 'Materialise' }));
     await waitFor(() => expect(api.materializeEntailment).toHaveBeenCalledWith({ regime: 'owl2-el', dataset: 'ds1' }, false));
+    expect((await view.findByTestId('materialise-report')).textContent).toContain('Narrow');
     expect(await view.findByTestId('materialise-report')).toBeTruthy();
     expect(view.getByTestId('ignored-axioms').textContent).toContain('ObjectUnionOf');
     expect(view.getByText(/2 axioms are outside the profile/)).toBeTruthy();
@@ -106,7 +107,7 @@ describe('ConsistencyCheck', () => {
     await fireEvent.click(view.getByLabelText('A Turtle premise'));
     await fireEvent.input(view.getByLabelText('Premise (Turtle)'), { target: { value: '<a> <b> <c> .' } });
     await fireEvent.click(view.getByRole('button', { name: 'Run check' }));
-    await waitFor(() => expect(api.reasoningCheck).toHaveBeenCalledWith({ task: 'satisfiability', premise: '<a> <b> <c> .', class: 'http://example.org/Nothing' }, false));
+    await waitFor(() => expect(api.reasoningCheck).toHaveBeenCalledWith({ task: 'satisfiability', premise: '<a> <b> <c> .', class: 'http://example.org/Nothing', identity: 'sameas-narrow' }, false));
     expect((await view.findByTestId('check-result')).textContent).toContain('The class is unsatisfiable');
   });
 });

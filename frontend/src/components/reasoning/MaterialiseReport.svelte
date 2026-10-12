@@ -28,6 +28,9 @@
         {:else if report.complete === true}<span class="rz-badge rz-ok">{$t('components.reasoning.complete')}</span>{/if}
       </dd>
     {/if}
+    {#if report.identity}
+      <dt>{$t('components.reasoning.identityApplied')}</dt><dd>{$t(`components.identityPolicy.option.${report.identity}`)}</dd>
+    {/if}
     <dt>{$t('components.reasoning.sourcesLabel')}</dt>
     <dd>{report.sources ? report.sources.length : $t('components.reasoning.defaultGraph')}</dd>
   </dl>

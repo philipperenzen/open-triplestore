@@ -206,6 +206,25 @@ fn wac_allow_value(state: &AppState, agent: &wac::Agent, iri: &str) -> Option<He
 
 const WAC_ALLOW: &str = "wac-allow";
 
+/// The 404 for a resource that does not exist (deleted, never created, or an
+/// intermediate path). It still carries the discovery headers a `GET`/`HEAD`
+/// on an existing resource has — `Link: <R.acl>; rel="acl"`,
+/// `rel="…constrainedBy"` and the caller's `WAC-Allow` for that path — so a
+/// client can find the ACL that would govern the resource and see whether it
+/// may create it with `PUT` (WAC: servers advertise the ACL and the caller's
+/// modes "in the response of HTTP GET and HEAD requests", not only on 2xx).
+fn not_found_with_discovery(base_url: &str, iri: &str, wac_allow: Option<HeaderValue>) -> Response {
+    let mut headers = HeaderMap::new();
+    let link = format!("{}, {}", constrained_by_link(base_url), acl_link(iri));
+    if let Ok(v) = HeaderValue::from_str(&link) {
+        headers.insert(HeaderName::from_static("link"), v);
+    }
+    if let Some(v) = wac_allow {
+        headers.insert(HeaderName::from_static(WAC_ALLOW), v);
+    }
+    (StatusCode::NOT_FOUND, headers).into_response()
+}
+
 /// Refuse a `PUT`/`POST` body that describes another LDP resource. The body
 /// is authorized for `target` only; a triple whose subject is another IRI
 /// under `/ldp/` would land in that resource past its ACL. Subjects outside
@@ -271,21 +290,24 @@ fn acl_get(state: &AppState, agent: &wac::Agent, governed: &str, headers: &Heade
     if let Err(r) = require_mode(state, agent, governed, wac::Mode::Control) {
         return r;
     }
+    // A 404 here still links the ACL to itself, so a client holding Control
+    // learns where to PUT one.
+    let acl = wac::acl_iri(governed);
     if !governed_exists(state, governed) {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found_with_discovery(&state.base_url, &acl, None);
     }
     let nt = match wac::acl_ntriples(&state.store, governed) {
         Ok(nt) => nt,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
     if nt.is_empty() {
-        // No ACL of its own: the resource inherits (Solid clients read a 404 so).
-        return StatusCode::NOT_FOUND.into_response();
+        // No ACL of its own: the resource inherits (WAC: a 404, Solid clients
+        // read it so).
+        return not_found_with_discovery(&state.base_url, &acl, None);
     }
     let (out_format, out_content_type) = negotiate_ldp_format(headers);
     let etag = container::compute_etag(&nt);
     let body = reserialize_ntriples(&nt, out_format);
-    let acl = wac::acl_iri(governed);
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         axum::http::header::CONTENT_TYPE,
@@ -633,6 +655,15 @@ pub async fn ldp_get(
     }
     let wac_allow = wac_allow_value(&state, &agent, &iri);
 
+    // A resource that does not exist is a 404, whatever triples mention its
+    // IRI; the root container always exists. The Read check above comes
+    // first, so a caller who may not read the path learns nothing about
+    // whether it exists.
+    let is_root = wac::canonical(&iri) == wac::root_iri(&state.base_url);
+    if !is_root && !container::resource_exists(&state.store, &iri) {
+        return not_found_with_discovery(base, &iri, wac_allow);
+    }
+
     let page_size = params.page_size.unwrap_or(100).min(1000);
     let page = params.page.unwrap_or(0);
     let offset = page * page_size;
@@ -668,7 +699,7 @@ pub async fn ldp_get(
                 }
                 (StatusCode::OK, resp_headers, data).into_response()
             }
-            Ok(None) => StatusCode::NOT_FOUND.into_response(),
+            Ok(None) => not_found_with_discovery(base, &iri, wac_allow),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         };
     }
@@ -730,8 +761,8 @@ pub async fn ldp_get(
         }
     }
 
-    if body.is_empty() && !exists {
-        return StatusCode::NOT_FOUND.into_response();
+    if body.is_empty() && !exists && !is_root {
+        return not_found_with_discovery(base, &iri, wac_allow);
     }
 
     // Re-serialize from N-Triples to the negotiated format
@@ -1230,6 +1261,33 @@ pub async fn ldp_put(
         }
     }
 
+    // Check the body before anything is removed: a body that does not parse,
+    // or that describes another resource, used to be refused only after the
+    // resource's triples were deleted, so a refused PUT wiped the resource
+    // (and, with it, its existence).
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/turtle");
+    let rdf_body = if body.is_empty() || content_type.contains("application/octet-stream") {
+        None
+    } else {
+        let Ok(text) = std::str::from_utf8(&body) else {
+            return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response();
+        };
+        let fmt = if content_type.contains("application/ld+json") {
+            oxigraph::io::RdfFormat::JsonLd {
+                profile: Default::default(),
+            }
+        } else {
+            oxigraph::io::RdfFormat::Turtle
+        };
+        if let Err(r) = body_confined_to(&state, text, fmt, &iri) {
+            return r;
+        }
+        Some(text)
+    };
+
     // Delete existing triples for this resource
     let del_q = format!("DELETE WHERE {{ <{iri}> ?p ?o }}");
     if let Err(e) = state.store.update(&del_q) {
@@ -1238,38 +1296,11 @@ pub async fn ldp_put(
 
     // Load new body
     if !body.is_empty() {
-        let content_type = headers
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/turtle");
-
-        if content_type.contains("application/ld+json") {
-            let text = match std::str::from_utf8(&body) {
-                Ok(s) => s,
-                Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response()
-                }
-            };
-            let fmt = oxigraph::io::RdfFormat::JsonLd {
-                profile: Default::default(),
-            };
-            if let Err(r) = body_confined_to(&state, text, fmt, &iri) {
-                return r;
-            }
+        if let (Some(text), true) = (rdf_body, content_type.contains("application/ld+json")) {
             if let Err(e) = container::load_resource_jsonld(&state.store, &iri, text) {
                 return (StatusCode::BAD_REQUEST, e).into_response();
             }
-        } else if !content_type.contains("application/octet-stream") {
-            let turtle = match std::str::from_utf8(&body) {
-                Ok(s) => s,
-                Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response()
-                }
-            };
-            if let Err(r) = body_confined_to(&state, turtle, oxigraph::io::RdfFormat::Turtle, &iri)
-            {
-                return r;
-            }
+        } else if let Some(turtle) = rdf_body {
             if let Err(e) = container::load_resource_turtle(&state.store, &iri, turtle) {
                 return (StatusCode::BAD_REQUEST, e).into_response();
             }

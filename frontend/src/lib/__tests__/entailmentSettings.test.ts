@@ -5,14 +5,14 @@ import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { init, addMessages } from 'svelte-i18n';
 import en from '../i18n/en.json';
 
-const api = vi.hoisted(() => ({ getEntailment: vi.fn(), setEntailment: vi.fn() }));
+const api = vi.hoisted(() => ({ getEntailment: vi.fn(), setEntailment: vi.fn(), setIdentityPolicy: vi.fn(), clearIdentityPolicy: vi.fn() }));
 vi.mock('../api', () => api);
 
 import EntailmentSettings from '../../components/reasoning/EntailmentSettings.svelte';
 
 function state(over: Record<string, unknown> = {}) {
   return {
-    dataset_id: 'ds1', regime: 'owl2-rl', mode: 'materialize', graph: 'urn:entailment:owl2-rl:ds1',
+    dataset_id: 'ds1', regime: 'owl2-rl', mode: 'materialize', eq_ref: false, graph: 'urn:entailment:owl2-rl:ds1',
     last_run_at: '2026-10-06T10:00:00Z', last_triples: 12, consistent: true, inconsistency: null,
     status: 'ok', error: null, backend: null, complete: null,
     identity: 'sameas-narrow', identity_source: 'default', identity_options: ['sameas-off', 'sameas-narrow', 'sameas-full'],
@@ -51,16 +51,31 @@ describe('EntailmentSettings', () => {
     expect(view.queryByRole('button', { name: 'Save and run' })).toBeNull();
   });
 
-  it('saves regime, mode and identity with PUT', async () => {
+  it('sets the identity on its own surface, then regime, mode and eq_ref with PUT', async () => {
     api.getEntailment.mockResolvedValue(state({ regime: null, mode: 'off', status: null }));
     api.setEntailment.mockResolvedValue({});
+    api.setIdentityPolicy.mockResolvedValue({});
     const view = render(EntailmentSettings, { datasetId: 'ds1', canWrite: true });
     await view.findByText('None configured');
     await choose(view, 'Regime', 'SKOS');
     expect(view.getByText(/SKOS data model/)).toBeTruthy();
+    await fireEvent.click(view.getByLabelText(/eq-ref/));
     await choose(view, 'Identity policy (owl:sameAs)', 'Full');
     await fireEvent.click(view.getByRole('button', { name: 'Save and run' }));
-    await waitFor(() => expect(api.setEntailment).toHaveBeenCalledWith('ds1', { regime: 'skos', mode: 'materialize', identity: 'sameas-full' }));
+    await waitFor(() => expect(api.setEntailment).toHaveBeenCalledWith('ds1', { regime: 'skos', mode: 'materialize', eq_ref: true }));
+    expect(api.setIdentityPolicy).toHaveBeenCalledWith('dataset', 'ds1', 'sameas-full');
+    expect(api.setIdentityPolicy.mock.invocationCallOrder[0]).toBeLessThan(api.setEntailment.mock.invocationCallOrder[0]);
+  });
+
+  it('leaves the identity alone when it did not change', async () => {
+    api.getEntailment.mockResolvedValue(state());
+    api.setEntailment.mockResolvedValue({});
+    const view = render(EntailmentSettings, { datasetId: 'ds1', canWrite: true });
+    await view.findByText('OWL 2 RL', { selector: 'strong' });
+    await fireEvent.click(view.getByRole('button', { name: 'Save and run' }));
+    await waitFor(() => expect(api.setEntailment).toHaveBeenCalledWith('ds1', { regime: 'owl2-rl', mode: 'materialize', eq_ref: false }));
+    expect(api.setIdentityPolicy).not.toHaveBeenCalled();
+    expect(api.clearIdentityPolicy).not.toHaveBeenCalled();
   });
 
   it('cannot pick owl2-dl without a backend', async () => {

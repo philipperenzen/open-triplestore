@@ -4839,7 +4839,6 @@
       "ignoredConstruct": "Construct",
       "ignoredCount": "Axioms",
       "ignoredExample": "Example",
-      "ignoredSample": "{count, plural, one {# sample axiom} other {# sample axioms}}",
       "checkHeading": "Consistency and OWL 2 DL checks",
       "checkIntro": "Ask the DL reasoner whether the ontology is consistent, a class satisfiable or a conclusion entailed, or check that the input is in OWL 2 DL.",
       "checkNoBackend": "No DL backend is configured: only the OWL 2 DL profile check is available.",
@@ -4907,7 +4906,9 @@
       "rewritten": "Rewritten query",
       "copy": "Copy the rewritten query",
       "copied": "Copied",
-      "rewriteIntroDataset": "See what a query becomes under OWL 2 QL: the TBox of this dataset's reasoning sources is unfolded into it. The query is not run."
+      "rewriteIntroDataset": "See what a query becomes under OWL 2 QL: the TBox of this dataset's reasoning sources is unfolded into it. The query is not run.",
+      "identityApplied": "Identity policy applied",
+      "runIdentity": "Identity policy (owl:sameAs) for this run"
     },
     "swrl": {
       "storedHeading": "Stored SWRL rules",

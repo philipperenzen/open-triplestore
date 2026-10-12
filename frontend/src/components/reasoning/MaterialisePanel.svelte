@@ -17,12 +17,16 @@
   export let canWrite = false;
   /** The server's DL backend; null: owl2-dl is unavailable. */
   export let dlBackend: string | null = null;
+  /** The dataset's own eq_ref setting, the starting point for a run. */
+  export let eqRefDefault = false;
 
   const dispatch = createEventDispatcher<{ queued: { jobId: string } }>();
   const REGIMES: MaterializeRegime[] = ['rdfs', 'owl2-rl', 'owl2-el', 'owl2-ql', 'owl2-dl'];
 
   let regime: string = 'owl2-rl';
-  let eqRef = false;
+  let eqRef = eqRefDefault;
+  let eqRefTouched = false;
+  $: if (!eqRefTouched) eqRef = eqRefDefault;
   let runAsync = false;
   let target = '';
   let running = false;
@@ -39,7 +43,8 @@
     failure = null;
     try {
       const body: Parameters<typeof materializeEntailment>[0] = { regime: regime as MaterializeRegime, dataset: datasetId };
-      if (regime === 'owl2-rl' && eqRef) body.eq_ref = true;
+      // Sent explicitly, so unchecking overrides a dataset that has it on.
+      if (regime === 'owl2-rl') body.eq_ref = eqRef;
       if (target.trim()) body.target_graph = target.trim();
       const res = await materializeEntailment(body, runAsync);
       if ('job_id' in res) {
@@ -75,7 +80,7 @@
     </div>
     <div class="rz-row">
       {#if regime === 'owl2-rl'}
-        <label class="rz-check"><input type="checkbox" bind:checked={eqRef} disabled={running} /> {$t('components.reasoning.eqRef')}</label>
+        <label class="rz-check"><input type="checkbox" bind:checked={eqRef} on:change={() => (eqRefTouched = true)} disabled={running} /> {$t('components.reasoning.eqRef')}</label>
       {/if}
       <label class="rz-check"><input type="checkbox" bind:checked={runAsync} disabled={running || regime === 'owl2-dl'} /> {$t('components.reasoning.runAsync')}</label>
     </div>

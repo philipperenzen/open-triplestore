@@ -2,22 +2,17 @@
 // version-diff views (lib/reasoning.ts).
 import { describe, it, expect } from 'vitest';
 import {
-  normaliseIgnored, ignoredSample, statusTone, shexVerdict, parsePrefixLines, prefixLines,
+  normaliseIgnored, statusTone, shexVerdict, parsePrefixLines, prefixLines,
   parsePatchRows, splitTerms, patchHeader, withLogHeaders, gcPreview, shortIri,
 } from '../reasoning';
 
 describe('normaliseIgnored', () => {
-  it('keeps the EL shape as rows', () => {
+  it('reads the ignored rows', () => {
     const rows = normaliseIgnored({ ignored: [{ construct: 'ObjectUnionOf', count: 3, example: 'ex:A ⊔ ex:B' }] });
     expect(rows).toEqual([{ construct: 'ObjectUnionOf', count: 3, example: 'ex:A ⊔ ex:B' }]);
   });
-  it('folds the QL count and sample into one row', () => {
-    const r = { ignored_axioms: 4, ignored_sample: ['a', 'b'] };
-    expect(normaliseIgnored(r)).toEqual([{ construct: 'outside the profile', count: 4, example: 'a' }]);
-    expect(ignoredSample(r)).toEqual(['a', 'b']);
-  });
   it('is empty when nothing was left out', () => {
-    expect(normaliseIgnored({ ignored_axioms: 0 })).toEqual([]);
+    expect(normaliseIgnored({ ignored: [] })).toEqual([]);
     expect(normaliseIgnored(null)).toEqual([]);
   });
 });

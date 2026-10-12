@@ -64,7 +64,7 @@
   <div class="stack">
     <EntailmentSettings datasetId={id} {canWrite} refreshKey={settingsKey} on:loaded={(e) => (entailment = e.detail)} />
     {#if $isAuthenticated}
-      <MaterialisePanel datasetId={id} {canWrite} {dlBackend} on:queued={queued} />
+      <MaterialisePanel datasetId={id} {canWrite} {dlBackend} eqRefDefault={!!entailment?.eq_ref} on:queued={queued} />
       <ConsistencyCheck datasetId={id} {dlBackend} on:queued={queued} />
       <ReasoningJobs datasetId={id} refreshKey={jobsKey} />
     {/if}

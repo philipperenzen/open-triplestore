@@ -686,6 +686,80 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`GET /api/reasoning/status`** answers `{graphs, dl_backend}`: the counts per
   shared entailment graph moved under `graphs`, and the server's OWL 2 DL backend
   is reported beside them.
+- **`image` Cargo feature.** `image` is an alias for the published image's
+  feature set — `full`, `saml` and the three SQL connector plugins — and the
+  Dockerfile's default `CARGO_FEATURES` is now `image`, so
+  `cargo build --release --features image` builds the image's binary
+  natively. The `full` and `default` comments in `Cargo.toml` no longer claim
+  "all extensions" or SAML, and `docs/build-features.md` lists both aliases.
+- **SHACL write gates run in one pass with a defined order.** A Graph Store
+  `PUT`/`POST` and validate-and-commit used to run the Studio gates
+  (`gate_writes` pipelines, validation-layer bindings) and then, separately,
+  the dataset's `shacl_on_write` shapes, staging the graph twice. Every write
+  path now runs all three in one pass over one staged graph, in a documented
+  order — pipelines (own threshold), bindings (`Violation`), then the
+  dataset's `shacl_on_write` shapes (any result refuses) — and answers with
+  the first failing gate's report; the write lands only when all pass. A
+  malformed body on a gated Graph Store write now gets the same answer as on
+  an ungated one. See `docs/shacl.md` "How the write gates combine".
+- **One surface for the identity policy; `eq_ref` in the dataset setting**
+  (breaking). `PUT /api/datasets/{id}/identity` is now the only way to set a
+  dataset's `owl:sameAs` policy: `PUT …/entailment` no longer takes
+  `identity` and refuses unknown fields (`422`). The entailment setting gains
+  `eq_ref` (`owl2-rl` and `skos`; kept until changed, reported by
+  `GET …/entailment`), honoured by every run of the dataset, the
+  write-triggered ones and the joint SWRL runs included;
+  `POST /api/reasoning/materialize` with a `dataset` uses it unless the body
+  says otherwise. A run without a dataset (`materialize`, `check`,
+  `swrl/execute`) takes an `identity` from the body and defaults to
+  `sameas-narrow`, the dataset default, instead of `sameas-full`; a dataset
+  run refuses one (`400`). The materialisation report names the policy it
+  applied (`identity`). See `docs/reasoning.md`.
+- **LDP: a resource that does not exist is a 404 with its discovery
+  headers.** `GET`/`HEAD` on an LDP path nothing created — never written,
+  deleted, an intermediate path, or an IRI another resource only links to —
+  used to answer `200` with an empty body whenever any triple mentioned the
+  IRI, and a bare `404` otherwise. It now answers `404` carrying
+  `Link: <…acl>; rel="acl"`, the `constrainedBy` link and the caller's
+  `WAC-Allow` for that path, so ACL discovery and creating with `PUT` keep
+  working; a resource exists when an LDP write typed it, and the root
+  container always does. `PUT`, `PATCH` and `DELETE` use the same test, so a
+  `PUT` to a merely-mentioned IRI is a create (Append on the container, the
+  caller becomes owner). A caller without Read still gets `403` either way.
+  A `PUT` whose body does not parse or describes another resource is now
+  refused before anything is removed; it used to delete the resource's
+  triples first, so a refused `PUT` wiped the resource. See `docs/ldp.md`.
+- **Every JSON field of the HTTP API is snake_case** (breaking). The
+  datasource, mapping, run, gates, dry-run, drift, profile, review,
+  calibration and legacy-convert bodies (`/api/sources/*`, `/api/mappings/*`,
+  `/api/runs/*`, review items), the introspection and profile tables, and
+  the RML `data_errors` / sample `triples_map` rows no longer use camelCase:
+  `statementTimeoutMs` is `statement_timeout_ms`, `onDataError` is
+  `on_data_error`, `sampleSize` is `sample_size`, and so on, with no aliases.
+  The hand-built keys follow: `has_more` on `/api/browse/triples`,
+  `shapes_graph_iri` on `POST /api/shaclc/serialize`, `server_version`,
+  the `/api/sources/metrics` counters, `current_revision` and `version_iri`
+  on the model endpoints, `dataset_id` on a version commit, `parse_error` /
+  `saved_revision` on the saved-query repair, and `focus_node`,
+  `source_shape`, `source_constraint`, `source_constraint_component` in a
+  write gate's 422 (now the same keys as every other SHACL report). Enum
+  values keep their casing (`needsHuman`, `dateTime`), and formats another
+  specification defines keep its names (OGC API, 3D Tiles, ShExJ, WebAuthn,
+  SAML, the LOV API v2 `queryString`). Review items stored before this change
+  lose their stored violations and fixes; reset the install or re-run the
+  affected mappings. The web UI follows, and a unit test
+  (`spec_has_no_camel_case_properties`) fails the build on any upper-case
+  property in the OpenAPI document. See `docs/api-reference.md`.
+- **One ignored-axioms report for OWL 2 EL and QL** (breaking). An `owl2-ql`
+  materialisation now reports the axioms it left out as `ignored:
+  [{construct, count, example}]`, the shape `owl2-el` already used; the
+  QL-only `ignored_axioms` and `ignored_sample` fields are removed. Constructs
+  are named as in the OWL 2 Structural Specification (`ObjectUnionOf`,
+  `TransitiveObjectProperty`, `SameIndividual`), an axiom whose expression is
+  outside the profile counts under that expression's constructor, examples
+  are bare IRIs, and the most frequent construct comes first. RDFS, OWL 2 RL
+  and SKOS use every triple and OWL 2 DL refuses input outside its profile,
+  so they never report `ignored`. See `docs/reasoning.md`.
 
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is

@@ -747,8 +747,8 @@ async fn repair_core(
         "sparql": res.sparql,
         "model": res.model,
         "valid": parse_error.is_none(),
-        "parseError": parse_error,
-        "savedRevision": saved_revision,
+        "parse_error": parse_error,
+        "saved_revision": saved_revision,
     })))
 }
 

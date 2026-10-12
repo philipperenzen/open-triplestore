@@ -493,7 +493,7 @@ export const listSavedQueryTests = (scope: SavedQueryScope, ownerId: string, slu
   request('GET', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests`);
 export const acknowledgeSavedQueryTest = (scope: SavedQueryScope, ownerId: string, slug: string, testId: string) =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests/${encodeURIComponent(testId)}/ack`);
-export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; savedRevision: number | null }> =>
+export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; valid: boolean; parse_error: string | null; saved_revision: number | null }> =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/repair`, data);
 export const savedQueryOpenApiUrl = (scope: SavedQueryScope, ownerId: string) =>
   withBase(`/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`);
@@ -2084,7 +2084,7 @@ export interface EntailmentState {
   error?: string | null;
   backend?: string | null;
   complete?: boolean | null;
-  /** Present once the dataset config carries it. */
+  /** `owl2-rl` / `skos`: also derive `x owl:sameAs x` for every term. */
   eq_ref?: boolean;
   identity: IdentityPolicyName;
   identity_source: 'dataset' | 'organisation' | 'default';
@@ -2100,7 +2100,7 @@ export const getEntailment = (datasetId: string): Promise<EntailmentState> =>
   request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`);
 export const setEntailment = (
   datasetId: string,
-  body: { regime: EntailmentRegime; mode: 'materialize' | 'off'; identity?: IdentityPolicyName | 'inherit'; eq_ref?: boolean },
+  body: { regime: EntailmentRegime; mode: 'materialize' | 'off'; eq_ref?: boolean },
 ) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`, body);
 
 /** One axiom construct a regime left out (outside its profile). */
@@ -2116,8 +2116,8 @@ export interface MaterializeReport {
   sources: string[] | null;
   consistent: boolean | null;
   ignored?: IgnoredConstruct[];
-  ignored_axioms?: number;
-  ignored_sample?: string[];
+  /** The identity policy the run applied. */
+  identity?: IdentityPolicyName;
   backend?: string;
   backend_version?: string | null;
   complete?: boolean;
@@ -2128,7 +2128,7 @@ export interface MaterializeReport {
 export interface QueuedJob { job_id: string; status: string; location: string }
 
 export const materializeEntailment = (
-  body: { regime: MaterializeRegime; dataset?: string; target_graph?: string; source_graphs?: string[]; eq_ref?: boolean },
+  body: { regime: MaterializeRegime; dataset?: string; target_graph?: string; source_graphs?: string[]; eq_ref?: boolean; identity?: IdentityPolicyName },
   runAsync = false,
 ): Promise<MaterializeReport | QueuedJob> =>
   request('POST', `/api/reasoning/materialize${runAsync ? '?async=true' : ''}`, body);
@@ -2153,7 +2153,7 @@ export interface CheckResult {
 }
 
 export const reasoningCheck = (
-  body: { task: CheckTask; dataset?: string; source_graphs?: string[]; premise?: string; conclusion?: string; class?: string },
+  body: { task: CheckTask; dataset?: string; source_graphs?: string[]; premise?: string; conclusion?: string; class?: string; identity?: IdentityPolicyName },
   runAsync = false,
 ): Promise<CheckResult | QueuedJob> =>
   request('POST', `/api/reasoning/check${runAsync ? '?async=true' : ''}`, body);
@@ -2249,7 +2249,7 @@ export interface SwrlExecuteReport {
 }
 
 export const executeSwrl = (body: SwrlRuleSetBody & {
-  dataset?: string; source_graphs?: string[]; target_graph?: string; regime?: MaterializeRegime; max_iterations?: number;
+  dataset?: string; source_graphs?: string[]; target_graph?: string; regime?: MaterializeRegime; max_iterations?: number; identity?: IdentityPolicyName;
 }): Promise<SwrlExecuteReport> => request('POST', '/api/swrl/execute', body);
 
 // ─── ShEx — docs/shex.md ─────────────────────────────────────────────────────────

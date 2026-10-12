@@ -11,6 +11,7 @@
   import RunFailure from './RunFailure.svelte';
   import { reasoningCheck, type CheckResult, type CheckTask } from '../../lib/api';
   import { toastInfo } from '../../lib/toast';
+  import type { IdentityPolicyName } from '../../lib/api';
   import './reasoning.css';
 
   /** The dataset to check; null: a Turtle premise only (or the default graph). */
@@ -28,6 +29,12 @@
   let klass = '';
   let runAsync = false;
   let running = false;
+  // A run without a dataset says what owl:sameAs may do (default: narrow,
+  // the dataset default); a dataset run applies the dataset's policy.
+  let runIdentity: IdentityPolicyName = 'sameas-narrow';
+  $: identityRunOptions = (['sameas-off', 'sameas-narrow', 'sameas-full'] as const).map((p) => ({
+    value: p, label: $t(`components.identityPolicy.option.${p}`),
+  }));
   let result: CheckResult | null = null;
   let failure: { status: number | null; message: string; body: Record<string, unknown> | null } | null = null;
 
@@ -44,6 +51,7 @@
       const body: Parameters<typeof reasoningCheck>[0] = { task: task as CheckTask };
       if (usePremise) body.premise = premise;
       else if (datasetId) body.dataset = datasetId;
+      if (usePremise || !datasetId) body.identity = runIdentity;
       if (task === 'entailment') body.conclusion = conclusion;
       if (task === 'satisfiability') body.class = klass.trim();
       const res = await reasoningCheck(body, runAsync);
@@ -75,6 +83,12 @@
       <span class="rz-label">{$t('components.reasoning.checkTask')}</span>
       <Select bind:value={task} {options} ariaLabel={$t('components.reasoning.checkTask')} disabled={running} />
     </div>
+    {#if usePremise || !datasetId}
+      <div class="rz-field">
+        <span class="rz-label">{$t('components.reasoning.runIdentity')}</span>
+        <Select bind:value={runIdentity} options={identityRunOptions} ariaLabel={$t('components.reasoning.runIdentity')} disabled={running} />
+      </div>
+    {/if}
     {#if task === 'satisfiability'}
       <div class="rz-field">
         <label for="check-class">{$t('components.reasoning.checkClass')}</label>

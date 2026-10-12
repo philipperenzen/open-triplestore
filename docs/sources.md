@@ -97,7 +97,7 @@ warnings:
 | Raw secret where a reference is expected | warning | **refused** |
 | Datasource credential is a raw value | **refused** | **refused** |
 | Unresolvable secret reference | **refused** | **refused** |
-| `statementTimeoutMs` omitted | defaults to 30 000 | **refused** |
+| `statement_timeout_ms` omitted | defaults to 30 000 | **refused** |
 | Networked datasource host not on `OTS_REMOTE_ALLOWLIST` | warning | **refused** |
 | File-backed datasource outside `OTS_SOURCES_DIR` | allowed | **refused** |
 | Read-write datasource account | **refused** | **refused** |
@@ -211,7 +211,7 @@ curl -X POST http://localhost:7878/api/sources -H "Authorization: Bearer $TOKEN"
   -H 'Content-Type: application/json' \
   -d '{"id": "assets-vkg", "dialect": "sparql", "host": "ontop.internal", "port": 8080,
        "database": "/sparql", "username": "reader", "credential": "env:ONTOP_READER_PASSWORD",
-       "statementTimeoutMs": 30000, "tls": true}'
+       "statement_timeout_ms": 30000, "tls": true}'
 ```
 
 **The catalogue is the classes.** An endpoint has no tables, so introspection
@@ -289,10 +289,10 @@ curl -X POST http://localhost:7878/api/sources \
     "host": "db.internal", "port": 5432,
     "database": "assets", "username": "reader",
     "credential": "vault:secret/data/sources/legacy-assets#password",
-    "readOnly": true,
-    "statementTimeoutMs": 30000,
-    "watermarkColumn": "updated_at",
-    "allowModelAssist": false,
+    "read_only": true,
+    "statement_timeout_ms": 30000,
+    "watermark_column": "updated_at",
+    "allow_model_assist": false,
     "dataset": "assets"
   }'
 ```
@@ -303,10 +303,10 @@ curl -X POST http://localhost:7878/api/sources \
 | `dialect` | `sqlite` in core; others from plugins |
 | `database` | Database name, or the file path for a file-backed dialect |
 | `credential` | A secret **reference**. Omit it entirely when the dialect needs none |
-| `readOnly` | Must be `true` |
-| `statementTimeoutMs` | Per-statement budget. Required in production |
-| `watermarkColumn` | Column incremental runs resume from. Must be monotonic — a timestamp or an ascending id |
-| `allowModelAssist` | Whether the external mapping proposer may send this source's *schema metadata* to a model. Default `false` |
+| `read_only` | Must be `true` |
+| `statement_timeout_ms` | Per-statement budget. Required in production |
+| `watermark_column` | Column incremental runs resume from. Must be monotonic — a timestamp or an ascending id |
+| `allow_model_assist` | Whether the external mapping proposer may send this source's *schema metadata* to a model. Default `false` |
 | `dataset` | Dataset the run graphs are registered to, so they appear in its graph list and SPARQL scope |
 
 Other calls:
@@ -392,7 +392,7 @@ curl -X POST http://localhost:7878/api/mappings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{
     "id": "products-map",
     "title": "Products",
-    "shapesGraph": "https://example.org/shapes/products",
+    "shapes_graph": "https://example.org/shapes/products",
     "rml": "@prefix rr: <http://www.w3.org/ns/r2rml#> . …"
   }'
 ```
@@ -627,8 +627,8 @@ curl -X POST http://localhost:7878/api/sources/legacy-assets/runs \
   "id": "6f1c…", "graph": "urn:run:6f1c…", "activity": "urn:run:6f1c…:activity",
   "status": "succeeded", "mode": "full",
   "mapping": { "id": "products-map", "version": 1, "iri": "urn:mapping:products-map:version:1" },
-  "rowsExtracted": 1204, "triplesProduced": 5310, "graphTriples": 5310,
-  "durationMs": 812, "previousGraph": "urn:run:5a0b…",
+  "rows_extracted": 1204, "triples_produced": 5310, "graph_triples": 5310,
+  "duration_ms": 812, "previous_graph": "urn:run:5a0b…",
   "shacl": { "conforms": true, "violations": 0 }
 }
 ```
@@ -641,8 +641,8 @@ What a run does, in order:
    its query returns first. A **data error** — a row value that cannot become
    its term (R2RML §4.3) — fails the run by default: the candidate graph is
    dropped, and the run's `error` names the first ten offending rows with
-   their values. A run started with `"onDataError": "skip"` leaves those
-   terms out instead, goes on, and reports the rows as `dataErrors`
+   their values. A run started with `"on_data_error": "skip"` leaves those
+   terms out instead, goes on, and reports the rows as `data_errors`
    (`{"rows": n, "first": [...]}`) on the run record.
 2. **Record** a PROV activity at `urn:run:<id>:activity` — `prov:used` the
    datasource and the mapping *version*, `prov:generated` the graph, the agent,
@@ -657,7 +657,7 @@ What a run does, in order:
    previous graph is **kept**, demoted, and unregistered from the dataset.
 
 A failing gate answers **422** with the report and the run record. Production
-is untouched, and the candidate graph stays for inspection — `graphTriples` on
+is untouched, and the candidate graph stays for inspection — `graph_triples` on
 the run tells you it is still there.
 
 ```bash
@@ -674,7 +674,7 @@ it is not a run.
 | Call | Effect |
 |---|---|
 | `GET /api/sources/:id/runs` | Run history, newest first |
-| `GET /api/runs/:id` | One run, including `graphTriples` — what its graph holds *now* |
+| `GET /api/runs/:id` | One run, including `graph_triples` — what its graph holds *now* |
 | `GET /api/runs/:id/provenance` | The run's PROV-O trail as Turtle |
 | `POST /api/runs/:id/rollback` | Re-point the datasource at the previous graph |
 | `POST /api/runs/:id/promote` | Re-gate a refused run's corrected candidate and swap it in (see [review items](#review-items-the-fixer-and-promotion)) |
@@ -684,7 +684,7 @@ it is not a run.
 ### Incremental runs
 
 `mode: "watermark"` re-maps only the rows that moved. It needs two things the
-first run establishes: a `watermarkColumn` on the datasource, and a graph in
+first run establishes: a `watermark_column` on the datasource, and a graph in
 production. Until both exist, it answers 400 naming which is missing rather
 than quietly running a full one.
 
@@ -698,7 +698,7 @@ What it does differently:
 
 1. The graph currently in production is **copied** into the fresh run graph.
 2. Only rows past the cursor are read — the child query is bounded by
-   `<watermarkColumn> > <last watermark>`. A triples map whose source the
+   `<watermark_column> > <last watermark>`. A triples map whose source the
    catalogue cannot confirm carries that column (an `rml:query` source, or a
    reference table that simply has not got it) is read in full.
 3. Those rows are re-mapped into a scratch graph, and every **IRI subject** it
@@ -728,7 +728,7 @@ When the bound dataset has a stream enabled, a run publishes the entities it
 wrote as stream members after the swap, so a member never points at a graph
 that is not yet being served. A full run publishes every entity; an incremental
 one publishes only what moved. With no stream enabled, nothing is published and
-the run pays nothing. The count is reported as `ldesMembers` on the run.
+the run pays nothing. The count is reported as `ldes_members` on the run.
 
 ### Why provenance is served as Turtle
 
@@ -824,18 +824,18 @@ endpoint. `Accept: text/turtle` serves the graph itself.
 
 | Gate | Default | Meaning |
 |---|---|---|
-| `autoThreshold` | 0.90 | Confidence at or above which a proposal is accepted without review |
-| `reviewThreshold` | 0.70 | At or above: a reviewer; below: an expert |
-| `datatypeMismatchCap` | 0.10 | Largest fraction of sampled values that may fail the target datatype |
-| `ambiguityMargin` | 0.05 | Smallest score margin between the best candidate and the runner-up |
-| `enumMatchMinimum` | 0.80 | Fraction of a code list that must match an enumeration's members |
-| `systematicShare` | 0.90 | Share of a type's subjects a violation must hit to be a mapping defect |
-| `systematicMinSubjects` | 2 | …and the fewest subjects that can make one |
-| `driftKlThreshold` | 0.10 | KL divergence of a code list between two profiles above which drift is reported |
-| `lexical.nameWeight` | 0.60 | The deterministic scorer: weight of column-name against property-name similarity |
-| `lexical.commentWeight` | 0.25 | …of column comment against `rdfs:comment` / definition |
-| `lexical.typeWeight` | 0.15 | …of datatype compatibility |
-| `lexical.minimumScore` | 0.40 | Below this a candidate is not proposed |
+| `auto_threshold` | 0.90 | Confidence at or above which a proposal is accepted without review |
+| `review_threshold` | 0.70 | At or above: a reviewer; below: an expert |
+| `datatype_mismatch_cap` | 0.10 | Largest fraction of sampled values that may fail the target datatype |
+| `ambiguity_margin` | 0.05 | Smallest score margin between the best candidate and the runner-up |
+| `enum_match_minimum` | 0.80 | Fraction of a code list that must match an enumeration's members |
+| `systematic_share` | 0.90 | Share of a type's subjects a violation must hit to be a mapping defect |
+| `systematic_min_subjects` | 2 | …and the fewest subjects that can make one |
+| `drift_kl_threshold` | 0.10 | KL divergence of a code list between two profiles above which drift is reported |
+| `lexical.name_weight` | 0.60 | The deterministic scorer: weight of column-name against property-name similarity |
+| `lexical.comment_weight` | 0.25 | …of column comment against `rdfs:comment` / definition |
+| `lexical.type_weight` | 0.15 | …of datatype compatibility |
+| `lexical.minimum_score` | 0.40 | Below this a candidate is not proposed |
 
 `PUT` takes a partial object; an unknown field is refused, not ignored, and so
 are bands that cross, a fraction outside `[0, 1]` or weights that sum to
@@ -849,19 +849,19 @@ nothing. Until something is saved, `GET` reports `"source": "default"`.
 scratch graph, validates it, and says which violations are the mapping's fault.
 
 ```json
-{ "mapping": "products-map", "table": "products", "sampleSize": 5 }
+{ "mapping": "products-map", "table": "products", "sample_size": 5 }
 ```
 
 The mapping is named in exactly one of four ways: `mapping` (a registered id
-or IRI, with an optional `version`), `mappingGraph` (a version graph,
+or IRI, with an optional `version`), `mapping_graph` (a version graph,
 `urn:mapping:<id>:version:<n>`), or `rml` / `yarrrml` — an **unregistered**
 mapping, which is what the proposer sends before it writes a proposal and what
 the Studio editor sends between saves. Nothing about a dry-run is registered,
 promoted or published.
 
-**The sample.** `sampleSize` rows (default 20, at most 1 000) are taken from
+**The sample.** `sample_size` rows (default 20, at most 1 000) are taken from
 the head of each triples map — or only from those reading `table`, or listed
-in `triplesMaps`. Then the sample is **closed under its joins**: every row a
+in `triples_maps`. Then the sample is **closed under its joins**: every row a
 sampled row references through `rr:parentTriplesMap` is fetched by key and
 mapped too, and a parent's own references likewise. Without that, one row of
 a child table would point at a parent that was never materialised and every
@@ -869,8 +869,8 @@ a child table would point at a parent that was never materialised and every
 by the mapping. The plan is the run's plan: the same pushed-down joins, the
 same index fallback, the same term evaluation.
 
-**Shapes** come from `shapesGraph` in the request, else the registered
-mapping's shapes graph, else the model version's (`model` + `modelVersion`,
+**Shapes** come from `shapes_graph` in the request, else the registered
+mapping's shapes graph, else the model version's (`model` + `model_version`,
 from the request or the mapping). With none, nothing is validated, and the
 response says so in `warnings` rather than reporting a conforming sample.
 
@@ -887,21 +887,21 @@ grant. Admins read every graph.
 
 **Classification.** Results are grouped by what fired — shape, path and
 constraint — and each group is measured against the subjects of its focus
-nodes' types in the sample. A group hitting at least `systematicShare` of them
-(default 90 %), over at least `systematicMinSubjects` (default 2), is a
+nodes' types in the sample. A group hitting at least `systematic_share` of them
+(default 90 %), over at least `systematic_min_subjects` (default 2), is a
 **mapping defect**: the mapping produced the wrong term for that property.
 Anything sparser is a **data issue**: a fact about those rows. Both numbers
 are mapping gates, so the proposer and the reviewer apply one rule. One
 subject is never a pattern, whatever share of its type it is.
 
-**The response** carries the classification (`mappingDefects`, `dataIssues`,
+**The response** carries the classification (`mapping_defects`, `data_issues`,
 each with the shape, path, constraint, message, affected and population
 counts, share and the first focus nodes), the merged validation `report`,
 `entities` — each subject with its types, its own Turtle and the violations
-that name it — what each triples map contributed (`sampledRows`,
-`pulledInRows`, `triples`), the total `rows` and `triples`, `dataErrors` —
+that name it — what each triples map contributed (`sampled_rows`,
+`pulled_in_rows`, `triples`), the total `rows` and `triples`, `data_errors` —
 sampled rows whose values cannot become their terms, which the sample leaves
-out but a run would fail on — and the scratch `graph` with its `expiresAt`. The graph is readable through the Graph Store
+out but a run would fail on — and the scratch `graph` with its `expires_at`. The graph is readable through the Graph Store
 protocol (admin) until then, and dropped after: `OTS_DRYRUN_TTL_SECS`, default
 fifteen minutes. Scratch graphs an earlier process left behind are dropped at
 start-up.
@@ -918,7 +918,7 @@ up table for table. `POST /api/sources/{id}/drift` reads the difference:
 ```
 
 **The baseline** is the profile version the mapping was registered or
-approved against — `profileVersion` on the mapping record, set when the
+approved against — `profile_version` on the mapping record, set when the
 mapping is created, when new RML is saved and when the state moves to
 `approved` — else the previous profile version. `baseline` and `candidate`
 in the request override both. A datasource with one profile version cannot
@@ -927,11 +927,11 @@ drift yet, and the response says to profile it again.
 **Per table**, the report lists new and removed columns, type changes (native
 or XSD type), code lists whose value distribution moved — the KL divergence of
 the newer distribution from the older, both smoothed by one count over the
-union of their values, above `klThreshold` (default: the gates'
-`driftKlThreshold`) — code lists gained or lost, and whether the structural
+union of their values, above `kl_threshold` (default: the gates'
+`drift_kl_threshold`) — code lists gained or lost, and whether the structural
 hash moved. New and removed tables are listed beside. A mapping registered
 against a model version is also checked against that model's newest
-published version; a newer one is a `modelVersionBump`.
+published version; a newer one is a `model_version_bump`.
 
 **Tickets.** Anything affected opens one re-map ticket for the (datasource,
 mapping) pair: `ds:RemapTicket` in `urn:system:sources`, with the affected
@@ -941,7 +941,7 @@ that one ticket rather than opening one per table, and a later check updates
 the open ticket rather than opening another beside it. `GET
 /api/sources/{id}/tickets` lists them, `GET /api/tickets/{id}` reads one,
 `POST /api/tickets/{id}/close` closes it — explicitly, and in the commit log.
-`"openTicket": false` only reports. Deleting a datasource deletes its
+`"open_ticket": false` only reports. Deleting a datasource deletes its
 tickets.
 
 ---
@@ -976,7 +976,7 @@ where R2RML reads an empty string as a value. Every converted logical source
 therefore carries RML-IO's `rml:null ""`, which says so in the mapping and
 keeps `rr:tableName` sources, so join pushdown and watermark runs stay
 available. A mapping that must behave the same under a processor that does
-not read `rml:null` is converted with `"emptyAsNull": true`, which turns the
+not read `rml:null` is converted with `"empty_as_null": true`, which turns the
 logical sources into queries reading each text-valued column through
 `NULLIF(col, '')`. That query is opaque to the catalogue, so joins are indexed
 rather than pushed down and watermark runs are not available. Either way the
@@ -1011,7 +1011,7 @@ What the scopes withhold is as deliberate as what they grant:
 - **A datasource's location.** `GET /api/sources` for a non-admin answers
   without `host`, `port`, `database`, `username` or `credential` — the
   credential field is a reference, not a value, but a reference is the first
-  half of a DSN. The dialect, the dataset, `allowModelAssist` and what is in
+  half of a DSN. The dialect, the dataset, `allow_model_assist` and what is in
   production remain.
 - **Rows.** `GET /api/sources/:id/preview` is an admin call whatever the
   token's scopes, and so is the review queue, whose items carry a snapshot of
@@ -1091,7 +1091,7 @@ curl "http://localhost:7878/api/sources/legacy-assets/reviews?status=needsHuman"
 ```json
 [{
   "id": "0c4e…", "subject": "http://example.org/products/product_2", "status": "needsHuman",
-  "run": "6f1c…", "graph": "urn:run:6f1c…", "mapping": "products-map", "mappingVersion": 1,
+  "run": "6f1c…", "graph": "urn:run:6f1c…", "mapping": "products-map", "mapping_version": 1,
   "violations": [{ "constraint": "sh:minInclusive 0", "path": "http://example.org/products/ontology#hasPrice",
                    "value": "-0.1", "message": "Value -0.1 is not >= 0", "shape": "…#ProductShape" }],
   "snapshot": "<http://example.org/products/product_2> <…#hasPrice> \"-0.1\"^^<…#decimal> .\n…"
@@ -1130,7 +1130,7 @@ marked `corrected`. A human sets any status with `POST /api/reviews/:id/status`
 `POST /api/reviews/:id/suggest` asks the configured LLM gateway (see
 [Spark](spark.md)) for an explanation and, when the constraint implies one, an
 exact replacement. It applies nothing. What leaves the deployment follows the
-datasource's `allowModelAssist`: with it, the offending values go along;
+datasource's `allow_model_assist`: with it, the offending values go along;
 without it, only the constraints and paths are sent and the values are
 withheld. The snapshot and any credential never leave, and without a gateway
 the call is a 503 rather than a pretence.

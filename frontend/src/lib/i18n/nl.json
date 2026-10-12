@@ -4839,7 +4839,6 @@
       "ignoredConstruct": "Constructie",
       "ignoredCount": "Axioma's",
       "ignoredExample": "Voorbeeld",
-      "ignoredSample": "{count, plural, one {# voorbeeldaxioma} other {# voorbeeldaxioma's}}",
       "checkHeading": "Consistentie en OWL 2 DL-controles",
       "checkIntro": "Vraag de DL-redeneerder of de ontologie consistent is, een klasse vervulbaar is of een conclusie volgt, of controleer of de invoer binnen OWL 2 DL valt.",
       "checkNoBackend": "Er is geen DL-backend ingesteld: alleen de OWL 2 DL-profielcontrole is beschikbaar.",
@@ -4907,7 +4906,9 @@
       "rewritten": "Herschreven query",
       "copy": "De herschreven query kopiëren",
       "copied": "Gekopieerd",
-      "rewriteIntroDataset": "Zie wat een query wordt onder OWL 2 QL: de TBox uit de redeneerbronnen van deze dataset wordt erin uitgevouwen. De query wordt niet uitgevoerd."
+      "rewriteIntroDataset": "Zie wat een query wordt onder OWL 2 QL: de TBox uit de redeneerbronnen van deze dataset wordt erin uitgevouwen. De query wordt niet uitgevoerd.",
+      "identityApplied": "Toegepast identiteitsbeleid",
+      "runIdentity": "Identiteitsbeleid (owl:sameAs) voor deze run"
     },
     "swrl": {
       "storedHeading": "Opgeslagen SWRL-regels",

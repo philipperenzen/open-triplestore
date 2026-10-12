@@ -18,17 +18,17 @@
 # fully optimised, for production and CI. `release-dev` is thin LTO + 16 codegen
 # units: it links far faster at a small runtime cost, for quick local iteration.
 ARG CARGO_PROFILE=release
-# Cargo feature set for the image: 'full', SAML 2.0 sign-in ('saml'; docs/auth.md)
-# and the three SQL datasource connectors (PostgreSQL, MySQL / MariaDB, SQL
-# Server; docs/sources.md). 'saml' links libxml2 + libxmlsec1, which the builder
-# and runtime stages below already install; the connectors are pure Rust over
-# rustls and need no system library. 'saml' is in this list rather than in
-# 'full' so a native `cargo build` never needs libxmlsec1, pkg-config or
-# libclang. A deployment that enables more compile-time plugins repeats the
-# list, e.g.
-#   --build-arg CARGO_FEATURES="full,saml,plugin-postgres,plugin-mysql,plugin-mssql,plugin-accounts-dashboard"
+# Cargo feature set for the image: the `image` feature of Cargo.toml, which is
+# 'full', SAML 2.0 sign-in ('saml'; docs/auth.md) and the three SQL datasource
+# connectors (PostgreSQL, MySQL / MariaDB, SQL Server; docs/sources.md). 'saml'
+# links libxml2 + libxmlsec1, which the builder and runtime stages below already
+# install; the connectors are pure Rust over rustls and need no system library.
+# 'saml' is in `image` rather than in 'full' so a native `cargo build` never
+# needs libxmlsec1, pkg-config or libclang. A deployment that enables more
+# compile-time plugins adds them, e.g.
+#   --build-arg CARGO_FEATURES="image,plugin-accounts-dashboard"
 # and one that wants neither SAML nor connectors builds with CARGO_FEATURES=full.
-ARG CARGO_FEATURES=full,saml,plugin-postgres,plugin-mysql,plugin-mssql
+ARG CARGO_FEATURES=image
 
 # ─── Stage 1: Frontend ───
 FROM node:24-slim AS frontend
@@ -111,7 +111,8 @@ COPY --from=planner /app/recipe.json recipe.json
 # edits no longer trigger a full dependency rebuild. `full` enables every
 # standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search),
 # encrypted backups and alerting, so the running server matches what the docs
-# advertise; the default CARGO_FEATURES adds SAML and the SQL connectors. NOT
+# advertise; the default CARGO_FEATURES (`image`) adds SAML and the SQL
+# connectors. NOT
 # included: `sfcgal3d` (native SFCGAL); see docs/build-features.md. Cooking with
 # the same features as the build below keeps samael and the plugin dependencies
 # in this cached layer too.

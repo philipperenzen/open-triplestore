@@ -1,6 +1,7 @@
 <script lang="ts">
-  // A dataset's entailment regime, mode and identity policy over
-  // GET/PUT /api/datasets/:id/entailment (docs/reasoning.md), with the last
+  // A dataset's entailment regime, mode and eq_ref over GET/PUT
+  // /api/datasets/:id/entailment, and its identity policy over its one
+  // surface, PUT/DELETE …/identity (docs/reasoning.md), with the last
   // run: its status, consistency, the DL backend that ran and the stored
   // rules. An `owl2-dl` run goes to the background; while it is queued or
   // running this view polls until it settles.
@@ -8,7 +9,10 @@
   import { t } from 'svelte-i18n';
   import { Brain, Loader2, RefreshCw } from 'lucide-svelte';
   import Select from '../Select.svelte';
-  import { getEntailment, setEntailment, type EntailmentRegime, type EntailmentState, type IdentityPolicyName } from '../../lib/api';
+  import {
+    getEntailment, setEntailment, setIdentityPolicy, clearIdentityPolicy,
+    type EntailmentRegime, type EntailmentState, type IdentityPolicyName,
+  } from '../../lib/api';
   import { statusTone } from '../../lib/reasoning';
   import { toastError, toastSuccess } from '../../lib/toast';
   import './reasoning.css';
@@ -83,7 +87,6 @@
       value: p, label: $t(`components.identityPolicy.option.${p}`),
     })),
   ];
-  $: eqRefSupported = !!state && 'eq_ref' in state;
   $: eqRefApplies = regime === 'owl2-rl' || regime === 'skos';
   $: busy = state?.status === 'queued' || state?.status === 'running';
 
@@ -91,13 +94,18 @@
     saving = true;
     runError = null;
     try {
-      const body: Parameters<typeof setEntailment>[1] = {
+      // The identity policy has its own surface; set it first so the run
+      // below already applies it.
+      const own = state?.identity_source === 'dataset' ? state.identity : 'inherit';
+      if (identity !== own) {
+        if (identity === 'inherit') await clearIdentityPolicy('dataset', datasetId);
+        else await setIdentityPolicy('dataset', datasetId, identity as IdentityPolicyName);
+      }
+      await setEntailment(datasetId, {
         regime: regime as EntailmentRegime,
         mode: mode as 'materialize' | 'off',
-        identity: identity as IdentityPolicyName | 'inherit',
-      };
-      if (eqRefSupported) body.eq_ref = eqRefApplies && eqRef;
-      await setEntailment(datasetId, body);
+        eq_ref: eqRefApplies && eqRef,
+      });
       toastSuccess($t('components.reasoning.saved'));
     } catch (e) {
       const err = e as { message?: string; body?: { violations?: { rule: string; detail: string }[] } };
@@ -228,7 +236,7 @@
       {#if regime === 'skos'}
         <p class="rz-muted">{$t('components.reasoning.skosHint')}</p>
       {/if}
-      {#if eqRefSupported && eqRefApplies}
+      {#if eqRefApplies}
         <label class="rz-check"><input type="checkbox" bind:checked={eqRef} disabled={saving} /> {$t('components.reasoning.eqRef')}</label>
       {/if}
       <div class="rz-row">

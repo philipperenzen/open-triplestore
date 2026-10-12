@@ -10,6 +10,7 @@
   import SwrlReport from './SwrlReport.svelte';
   import { executeSwrl, type MaterializeRegime, type SwrlExecuteReport, type SwrlFormat } from '../../lib/api';
   import { parsePrefixLines } from '../../lib/reasoning';
+  import type { IdentityPolicyName } from '../../lib/api';
   import './reasoning.css';
 
   /** The dataset whose reasoning sources rule bodies read; null: the default graph. */
@@ -27,6 +28,12 @@
   let target = '';
   let maxIterations = 100;
   let running = false;
+  // A run without a dataset says what owl:sameAs may do (default: narrow,
+  // the dataset default); a dataset run applies the dataset's policy.
+  let runIdentity: IdentityPolicyName = 'sameas-narrow';
+  $: identityRunOptions = (['sameas-off', 'sameas-narrow', 'sameas-full'] as const).map((p) => ({
+    value: p, label: $t(`components.identityPolicy.option.${p}`),
+  }));
   let report: SwrlExecuteReport | null = null;
   let error = '';
 
@@ -55,6 +62,7 @@
         regime: (regime || undefined) as MaterializeRegime | undefined,
         target_graph: target.trim() || undefined,
         max_iterations: maxIterations,
+        identity: datasetId ? undefined : runIdentity,
       });
     } catch (e) {
       error = (e as Error)?.message || String(e);
@@ -80,6 +88,12 @@
         <label for="swrl-target">{$t('components.reasoning.targetGraph')}</label>
         <input id="swrl-target" bind:value={target} placeholder={inferenceGraph || $t('components.reasoning.defaultGraph')} disabled={running} />
       </div>
+      {#if !datasetId}
+        <div class="rz-field">
+          <span class="rz-label">{$t('components.reasoning.runIdentity')}</span>
+          <Select bind:value={runIdentity} options={identityRunOptions} ariaLabel={$t('components.reasoning.runIdentity')} disabled={running} />
+        </div>
+      {/if}
       <div class="rz-field">
         <label for="swrl-iter">{$t('components.swrl.maxIterations')}</label>
         <input id="swrl-iter" type="number" min="1" max="1000" bind:value={maxIterations} disabled={running} />

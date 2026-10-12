@@ -4,31 +4,9 @@
 
 import type { IgnoredConstruct, ShexStatus } from './api';
 
-/**
- * The axioms a run left out, in one shape. The API reports EL's as
- * `ignored: [{construct, count, example}]` and (until the shapes are unified)
- * QL's as `ignored_axioms` plus `ignored_sample`; either becomes rows here.
- */
-export function normaliseIgnored(report: {
-  ignored?: IgnoredConstruct[] | null;
-  ignored_axioms?: number | null;
-  ignored_sample?: string[] | null;
-} | null | undefined): IgnoredConstruct[] {
-  if (!report) return [];
-  if (Array.isArray(report.ignored) && report.ignored.length) {
-    return report.ignored.map((r) => ({ construct: r.construct, count: r.count, example: r.example ?? null }));
-  }
-  const n = report.ignored_axioms ?? 0;
-  if (n > 0) {
-    const sample = report.ignored_sample ?? [];
-    return [{ construct: 'outside the profile', count: n, example: sample[0] ?? null }];
-  }
-  return [];
-}
-
-/** The sample axioms of the old QL shape, for display under the table. */
-export function ignoredSample(report: { ignored_sample?: string[] | null } | null | undefined): string[] {
-  return report?.ignored_sample ?? [];
+/** The axioms a run left out, one row per construct (`ignored`, EL and QL alike). */
+export function normaliseIgnored(report: { ignored?: IgnoredConstruct[] | null } | null | undefined): IgnoredConstruct[] {
+  return (report?.ignored ?? []).map((r) => ({ construct: r.construct, count: r.count, example: r.example ?? null }));
 }
 
 /** Badge tone of an entailment run status or a job status. */
