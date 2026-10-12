@@ -179,7 +179,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`GET /health` lists the standards the build serves** (`capabilities`, from
   the compiled feature set). The Home page shows these as its chips instead of
   a hard-coded list.
-
 - **Performance comparison with other open-source triplestores.**
   [`docs/performance-comparison.md`](docs/performance-comparison.md) measures
   Open Triplestore against upstream Oxigraph 0.5.11, Apache Jena Fuseki 6.2.0,

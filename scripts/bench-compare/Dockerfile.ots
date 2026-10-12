@@ -24,6 +24,8 @@ COPY plugins/ plugins/
 COPY tools/ tools/
 COPY docs/ docs/
 COPY examples/ examples/
+# The Oxigraph crates patched in through [patch.crates-io] (vendor/README.md).
+COPY vendor/ vendor/
 COPY frontend/public/vocab/ frontend/public/vocab/
 COPY frontend/public/samples/ frontend/public/samples/
 COPY assets/ assets/
