@@ -200,8 +200,9 @@ async fn a_write_is_visible_to_the_next_search() {
 /// With change capture on, a write maintains the index from its own change
 /// log rows — the documents it added and removed — instead of re-reading the
 /// graph it touched. A literal written behind the index's back (straight
-/// into the store) therefore stays unindexed, which is how the test tells the
-/// two apart; without capture the graph is re-read and finds it.
+/// into the underlying store, past the engine) therefore stays unindexed,
+/// which is how the test tells the two apart; a re-read of the graph would
+/// find it.
 #[tokio::test]
 async fn a_write_updates_the_index_from_its_change_log_rows() {
     use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
@@ -228,13 +229,24 @@ async fn a_write_updates_the_index_from_its_change_log_rows() {
     let (_, body) = sparql(&state, &search("viaduct"), Some(&token)).await;
     assert!(body.contains("http://example.org/bridge"), "got: {body}");
 
-    state
-        .store
-        .update(&format!(
-            "INSERT DATA {{ GRAPH <{PUBLIC_GRAPH}> {{ \
-               <http://example.org/ghost> <{LABEL}> \"Ghostword\" }} }}"
-        ))
-        .unwrap();
+    // Behind the index's back: straight into the underlying Oxigraph store,
+    // past the engine's write bracket, so neither the change log nor the
+    // search journal sees it. (A write through the engine reaches the index
+    // on its own now — see `a_store_write_reaches_the_index_without_any_caller_hook`.)
+    {
+        use oxigraph::model::{GraphNameRef, Literal, NamedNodeRef, QuadRef};
+        let ghost = Literal::new_simple_literal("Ghostword");
+        state
+            .store
+            .store()
+            .insert(QuadRef::new(
+                NamedNodeRef::new("http://example.org/ghost").unwrap(),
+                NamedNodeRef::new(LABEL).unwrap(),
+                &ghost,
+                GraphNameRef::NamedNode(NamedNodeRef::new(PUBLIC_GRAPH).unwrap()),
+            ))
+            .unwrap();
+    }
     let write = |method: &str, uri: String, ct: &str, body: String| {
         let req = Request::builder()
             .method(method)
