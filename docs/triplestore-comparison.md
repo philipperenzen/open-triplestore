@@ -443,10 +443,11 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > project's code, and each of the last kind was fixed or filed. Fixed: the RDF 1.1 Semantics
 > cases (D-entailment by value, `rdfD1`, lexical spaces without whitespace normalization,
 > `rdf:XMLLiteral` checks; none fails now) and the OGC GeoSPARQL validator's S18 example
-> (braces in `REGEX` / `sh:pattern`). Filed: [#504]({I}504) (RDF 1.2, w3c/rdf-xml#97),
-> [#505]({I}505) and [#506]({I}506) (OWL 2 DL: test defects, HermiT limit), [#507]({I}507) and
-> [#508]({I}508) (SHACL test defects), [#509]({I}509) (GeoSPARQL DGGS scope) and [#510]({I}510)
-> (GeoSPARQL `getSRID` / `geometryType` return type, back with the owner). No grade changed:
+> (braces in `REGEX` / `sh:pattern`). Filed: [#504](https://github.com/philipperenzen/open-triplestore/issues/504) (RDF 1.2, w3c/rdf-xml#97),
+> [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
+> [#508](https://github.com/philipperenzen/open-triplestore/issues/508) (SHACL test defects), [#509](https://github.com/philipperenzen/open-triplestore/issues/509) (GeoSPARQL DGGS scope) and [#510](https://github.com/philipperenzen/open-triplestore/issues/510)
+> (GeoSPARQL `getSRID` / `geometryType` return type; since fixed, both now return the
+> `xsd:anyURI` literals their signatures give). No grade changed:
 > the 25 ✅ rows hold, and the three 🟡 rows (JSON-LD 1.1, RML, SHACL-AF inference) are the ones
 > their own round-3 work addresses.
 
