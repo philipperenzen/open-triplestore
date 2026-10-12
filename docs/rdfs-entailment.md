@@ -93,8 +93,8 @@ graph; with it, only those graphs and the entailment graph. Over HTTP,
 ## Querying the entailed triples
 
 Entailed triples are stored in the named graph `urn:entailment:rdfs`. Add
-`?entailment=rdfs` to a SPARQL request to fold that graph into the query's default graph, or
-name it in the query:
+`?entailment=rdfs` to a SPARQL request to fold that graph into the query's default graph (their
+RDF merge, so a triple both asserted and derived matches once), or name it in the query:
 
 ```sparql
 SELECT * FROM <urn:entailment:rdfs> WHERE { ?s rdf:type ?c }

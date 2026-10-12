@@ -154,10 +154,13 @@ pub fn standard_type(native: &str) -> ValueKind {
     }
 }
 
-/// The lexical form the R2RML natural mapping wants, from what a server
-/// prints: booleans as `true` / `false`, timestamps with a `T`, no trailing
-/// zeros in the fractional seconds and a full `±hh:mm` offset. Anything else
-/// passes through as the server wrote it.
+/// A server's printed value as a valid XSD lexical form of its kind, the same
+/// whichever driver read it: booleans as `true` / `false`, timestamps with a
+/// `T`, no trailing zeros in the fractional seconds, a full `±hh:mm` offset
+/// and the shortest spelling of a double. Anything else passes through as the
+/// server wrote it. Previews and profiles show this form; the RML natural
+/// mapping turns it into the datatype's canonical lexical form
+/// (`open_triplestore::rml::xsd::canonical`, R2RML §10.2: `2` → `2.0E0`).
 pub fn canonical(kind: ValueKind, lexical: &str) -> String {
     match kind {
         ValueKind::Boolean => match lexical.trim().to_ascii_lowercase().as_str() {

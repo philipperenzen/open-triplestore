@@ -39,7 +39,8 @@ positive case does not match.
 
 A case runs with the RDFS engine when its regimes include `RDFS`, `RDF` or `D`, with the OWL 2 RL
 engine when they include only the OWL 2 RDF-Based Semantics, and is skipped when they name only
-the OWL 2 Direct Semantics or RIF. The query runs over the data and the derived triples; its
+the OWL 2 Direct Semantics or RIF. The query runs over the RDF merge of the data and the derived triples (a set: a triple both
+asserted and derived is one triple, as `/sparql?entailment=` evaluates it); its
 solutions are compared with the expected ones as multisets, blank nodes compared as "some blank
 node". Materialization is not the regimes' answer semantics, which restrict answers to terms of
 the queried graph. `OTS_TEST_W3C_ENTAILMENT_EXPLAIN=1` prints the differing rows.
