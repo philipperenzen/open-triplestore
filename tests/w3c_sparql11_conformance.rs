@@ -891,6 +891,128 @@ fn w3c_negation_not_exists_scoping() {
     assert!(r[0][0].contains("/b>"));
 }
 
+// Correlated EXISTS over many outer rows (issue #471). After a few rows the
+// evaluator also evaluates the EXISTS pattern once and answers from a hash
+// table on the shared variables; these pin that it gives the substitution
+// semantics' answer in each case the table must and must not be used for.
+
+/// 400 offers over 40 products (offers 400..449 have none), 100 reviews over
+/// products 0..49 with ratings 1..10, a price 1..10 per offer.
+fn semi_join_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    let mut ttl = String::from("@prefix ex: <http://example.org/> .\n");
+    for i in 0..450 {
+        ttl.push_str(&format!(
+            "ex:o{i} a ex:Offer ; ex:price {} .\n",
+            1 + (i * 11) % 10
+        ));
+        if i < 400 {
+            ttl.push_str(&format!("ex:o{i} ex:product ex:p{} .\n", i % 40));
+        }
+    }
+    for j in 0..100 {
+        ttl.push_str(&format!(
+            "ex:r{j} ex:reviewFor ex:p{} ; ex:rating {} .\n",
+            (j * 7) % 50,
+            1 + (j * 3) % 10
+        ));
+    }
+    load(&s, &ttl);
+    s
+}
+
+/// The ratings of the reviews of product `p`.
+fn semi_join_ratings(p: usize) -> Vec<usize> {
+    (0..100)
+        .filter(|j| (j * 7) % 50 == p)
+        .map(|j| 1 + (j * 3) % 10)
+        .collect()
+}
+
+#[test]
+fn exists_semi_join_correlated_not_exists() {
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
+         FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
+    );
+    let expected = (0..400)
+        .filter(|i| !semi_join_ratings(i % 40).iter().any(|x| *x >= 9))
+        .count();
+    assert_eq!(r.len(), expected);
+    assert!(
+        expected > 0 && expected < 400,
+        "the data must split the offers"
+    );
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
+         FILTER EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
+    );
+    assert_eq!(r.len(), 400 - expected);
+}
+
+#[test]
+fn exists_semi_join_outer_variable_unbound_in_some_rows() {
+    // Offers 400..449 have no product: `?p` is unbound there, the pattern
+    // `?r ex:reviewFor ?p` matches every review, so NOT EXISTS is false.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o a ex:Offer \
+         OPTIONAL { ?o ex:product ?p } FILTER NOT EXISTS { ?r ex:reviewFor ?p } }",
+    );
+    let expected = (0..400)
+        .filter(|i| semi_join_ratings(i % 40).is_empty())
+        .count();
+    assert_eq!(r.len(), expected);
+    assert!(r.iter().all(|row| {
+        let n: usize = row[0]
+            .trim_start_matches("<http://example.org/o")
+            .trim_end_matches('>')
+            .parse()
+            .unwrap();
+        n < 400
+    }));
+}
+
+#[test]
+fn exists_semi_join_filter_reads_an_outer_only_variable() {
+    // `?price` is bound by the outer pattern only: the inner FILTER sees the
+    // row's price, so the pattern cannot be answered from a table built
+    // without it.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?price \
+         FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x > ?price) } }",
+    );
+    let expected = (0..400)
+        .filter(|i| {
+            let price = 1 + (i * 11) % 10;
+            !semi_join_ratings(i % 40).iter().any(|x| *x > price)
+        })
+        .count();
+    assert_eq!(r.len(), expected);
+}
+
+#[test]
+fn exists_semi_join_two_shared_variables_and_union() {
+    // Shared `?p` and `?x` (the offer's price must equal a rating of the
+    // product), the inner pattern a UNION whose branches both bind them.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?x \
+         FILTER EXISTS { { ?r ex:reviewFor ?p ; ex:rating ?x } UNION { ?p ex:never ?x } } }",
+    );
+    let expected = (0..400)
+        .filter(|i| semi_join_ratings(i % 40).contains(&(1 + (i * 11) % 10)))
+        .count();
+    assert_eq!(r.len(), expected);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Category: optional
 // W3C tests: opt-simple-1..22

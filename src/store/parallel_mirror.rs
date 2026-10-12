@@ -546,8 +546,7 @@ impl ParallelMirror {
             return true;
         };
         let projected = (total as u64).saturating_mul(BYTES_PER_TRIPLE_BOTH_COPIES);
-        let fits = resident.saturating_add(projected)
-            <= limit / 100 * BUILD_HEADROOM_PERCENT;
+        let fits = resident.saturating_add(projected) <= limit / 100 * BUILD_HEADROOM_PERCENT;
         // Once per stretch of refusals, like the over-cap warning (a successful
         // build re-arms both).
         if !fits && !self.inner.over_cap_warned.swap(true, Ordering::AcqRel) {
@@ -875,7 +874,11 @@ fn ram_cap_for(bytes: u64) -> usize {
 
 /// Build a subject-sharded `ParallelStore` mirroring every quad in `store`
 /// (all graphs preserved, so `FROM`/default-graph scoping is identical per shard).
-fn build_from_store(store: &Store, shards: usize, stale: &dyn Fn() -> bool) -> Option<ParallelStore> {
+fn build_from_store(
+    store: &Store,
+    shards: usize,
+    stale: &dyn Fn() -> bool,
+) -> Option<ParallelStore> {
     let ps = ParallelStore::new(shards);
     ps.load_quads(until_stale(store, stale)).ok()?;
     Some(ps)
@@ -1257,7 +1260,11 @@ mod stale_read_tests {
     fn ram_cap_follows_the_memory_budget() {
         assert_eq!(ram_cap_for(4 << 30), 1_048_576);
         assert_eq!(ram_cap_for(16 << 30), 4_194_304);
-        assert_eq!(ram_cap_for(64 << 20), MIN_MAX_TRIPLES, "small budgets keep a floor");
+        assert_eq!(
+            ram_cap_for(64 << 20),
+            MIN_MAX_TRIPLES,
+            "small budgets keep a floor"
+        );
         assert_eq!(ram_cap_for(1 << 40), ABSOLUTE_MAX_TRIPLES);
     }
 
@@ -1272,7 +1279,10 @@ mod stale_read_tests {
             checks.set(checks.get() + 1);
             checks.get() > 1
         };
-        assert_eq!(until_stale(&store, &stale).count(), BUILD_CANCEL_CHECK_EVERY);
+        assert_eq!(
+            until_stale(&store, &stale).count(),
+            BUILD_CANCEL_CHECK_EVERY
+        );
         assert!(build_full_store(&store, &|| true).is_none());
     }
 
@@ -1304,7 +1314,9 @@ mod stale_read_tests {
         );
         // The real build path: a write in flight when it starts means no build.
         mirror.write_started();
-        assert!(mirror.build_and_publish(&store, store.len().unwrap()).is_none());
+        assert!(mirror
+            .build_and_publish(&store, store.len().unwrap())
+            .is_none());
         mirror.write_finished();
         assert!(mirror.inner.dirty.load(Ordering::Acquire));
     }
