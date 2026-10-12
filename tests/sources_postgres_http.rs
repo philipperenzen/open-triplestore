@@ -266,10 +266,10 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
     // the source wrote it.
     assert!(nt.contains("<http://example.org/products/product_2> <http://example.org/products/ontology#hasPrice> \"1.50\"^^<http://www.w3.org/2001/XMLSchema#decimal>"), "{nt}");
     assert!(nt.contains("\"Bolt\""), "{nt}");
-    // The timestamp arrived in XSD shape (a `T`, a full offset) and took the
-    // natural datatype; the store keeps it as written.
+    // The timestamp took the natural datatype in its canonical lexical form
+    // (R2RML §10.2: UTC written as `Z`).
     assert!(
-        nt.contains("\"2026-01-01T00:00:00+00:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"),
+        nt.contains("\"2026-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"),
         "{nt}"
     );
     // A NULL produced no triple.

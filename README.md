@@ -35,8 +35,6 @@
 
 **Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), **SHACL Core**, **ShEx 2.1** and **OWL 2** reasoning (RL, EL and QL natively; DL with the bundled OWL API + HermiT reasoner sidecar) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
-How it performs against Oxigraph, Apache Jena Fuseki, QLever, Virtuoso and RDF4J — same machine, same container limits, same data and queries, including where it is slower — is measured in [docs/performance-comparison.md](docs/performance-comparison.md).
-
 ## Demo
 
 The web UI is **served by the binary itself** at `http://localhost:7878/` — there's no separate frontend to deploy. At a glance:
@@ -201,10 +199,8 @@ Docker image, not in `full`; see docs/build-features.md). On Debian/Ubuntu:
 ```bash
 # macOS · Linux · WSL
 # The default feature set is `full` — every capability in the Highlights table
-# above except SAML sign-in and the SQL datasource connectors. `--features image`
-# builds exactly what the Docker image has (adds those; SAML needs the libraries
-# above). `--no-default-features` gives the minimal core (SPARQL 1.1 +
-# GeoSPARQL 2D) if you want a smaller binary.
+# above. `cargo build --release --no-default-features` gives the minimal core
+# (SPARQL 1.1 + GeoSPARQL 2D) if you want a smaller binary.
 cargo build --release
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 ```
@@ -718,7 +714,7 @@ curl -X POST http://localhost:7878/api/shaclc/parse \
 curl -X POST http://localhost:7878/api/shaclc/serialize \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
-     -d '{"shapes_graph_iri": "urn:dataset:my-dataset:shapes"}'
+     -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
 ```
 
 See [docs/shacl.md](docs/shacl.md) for the full SHACL guide.
@@ -924,8 +920,8 @@ licence policy allows no performance claims on a subset.
 | RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
 | RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality) | 1 | 10 corpus cases: 9 pass, 0 known failures, 1 expecting behaviour outside the spec (reported as the failure the spec requires), 0 runner-side skips (floor ≥9 asserted) |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 67 |  |
-| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 74 |  |
+| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 44 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 17 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 21 |  |
 | ShEx 2.1 | `tests/shextest_conformance.rs` | **vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven) | 6 | 1917 corpus cases: 1795 pass, 0 known failures, 122 runner-side skips (floor ≥1795 asserted) |
@@ -949,7 +945,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1256 conformance tests across 44 suites; a further 853 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
+1264 conformance tests across 44 suites; a further 855 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

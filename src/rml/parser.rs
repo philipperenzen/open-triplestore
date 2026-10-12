@@ -425,21 +425,20 @@ impl Ctx<'_> {
             other => other.to_string(),
         };
         let types: Vec<String> = self.objects(node, RDF_TYPE);
-        for unsupported in ["http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#Database"] {
-            if types.iter().any(|t| t == unsupported)
-                || !self
-                    .objects(
-                        node,
-                        "http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#jdbcDSN",
-                    )
-                    .is_empty()
-            {
-                return Err(
-                    "a D2RQ database description names its connection in the mapping; register \
-                     the database as a datasource and name it rml:source <urn:source:…> instead"
-                        .to_string(),
-                );
-            }
+        const D2RQ_DATABASE: &str = "http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#Database";
+        if types.iter().any(|t| t == D2RQ_DATABASE)
+            || !self
+                .objects(
+                    node,
+                    "http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#jdbcDSN",
+                )
+                .is_empty()
+        {
+            return Err(
+                "a D2RQ database description names its connection in the mapping; register \
+                 the database as a datasource and name it rml:source <urn:source:…> instead"
+                    .to_string(),
+            );
         }
         if types
             .iter()

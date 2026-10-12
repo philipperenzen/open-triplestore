@@ -1,4 +1,5 @@
-//! The S3 asset store against a real S3-compatible server (MinIO in CI).
+//! The S3 asset store against a real S3-compatible server (Versity S3 Gateway
+//! in CI).
 //!
 //! S3 is the documented store for assets on a replicated deployment, yet the
 //! only storage tests were the local backend's path-safety checks: nothing ever
@@ -8,10 +9,10 @@
 //! fault), and wrong credentials failing loudly.
 //!
 //! They skip at run time unless `OTS_TEST_S3_ENDPOINT` is set. The CI job that
-//! starts MinIO also sets `OTS_TEST_LIVE_REQUIRED`, so a missing or renamed
+//! starts the S3 server also sets `OTS_TEST_LIVE_REQUIRED`, so a missing or renamed
 //! variable fails there instead of skipping. The variables:
 //!
-//! - `OTS_TEST_S3_ENDPOINT` — e.g. `http://127.0.0.1:9000`
+//! - `OTS_TEST_S3_ENDPOINT` — e.g. `http://127.0.0.1:7070`
 //! - `OTS_TEST_S3_ACCESS_KEY`, `OTS_TEST_S3_SECRET_KEY` — credentials allowed
 //!   to create buckets
 //! - `OTS_TEST_S3_REGION` — default `us-east-1`
