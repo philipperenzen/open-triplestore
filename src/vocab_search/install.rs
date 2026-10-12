@@ -30,8 +30,6 @@
 //! them publicly, and given a licence record that does not claim more than is
 //! known about them.  Their graphs and notes are never changed.
 
-use std::collections::BTreeSet;
-
 use serde::Serialize;
 
 use crate::data_models::models::{
@@ -193,21 +191,12 @@ fn corpus_origin(vocab: &LovVocab) -> String {
 
 /// What the stored copy is, for a version whose graph was checked against
 /// LOV's copy in this instance's corpus (`unchanged`) or could not be.
-/// `canonical_forms`: the store holds some of the copy's typed literals in
-/// its canonical form (see [`content_digest::as_stored`]).
-fn stored_copy_text(vocab: &LovVocab, unchanged: bool, canonical_forms: bool) -> String {
+fn stored_copy_text(vocab: &LovVocab, unchanged: bool) -> String {
     if unchanged {
-        let forms = if canonical_forms {
-            " The store writes some of its typed literals in its canonical form, with the same \
-             values (for example \"1\"^^xsd:nonNegativeInteger as \"1\"^^xsd:integer, or a \
-             +00:00 time zone as Z)."
-        } else {
-            ""
-        };
         format!(
             "The store holds the triples of the graph <{}> of this instance's LOV corpus \
-             (lov.nq.gz), unchanged: loaded verbatim and checked against it.{forms} API \
-             downloads are serialized anew from them.",
+             (lov.nq.gz), unchanged: loaded verbatim and checked against it. API downloads are \
+             serialized anew from them.",
             vocab.uri
         )
     } else {
@@ -263,14 +252,11 @@ fn attribution(
 }
 
 /// The registry's licence record for a copy of `vocab` this release
-/// installed.  `unchanged`: the stored graph was checked to hold LOV's copy;
-/// `canonical_forms`: the store holds some of its typed literals in canonical
-/// form.
+/// installed.  `unchanged`: the stored graph was checked to hold LOV's copy.
 pub fn lov_attribution(
     vocab: &LovVocab,
     source: &CatalogSource,
     unchanged: bool,
-    canonical_forms: bool,
 ) -> ContentAttribution {
     let changes = format!(
         "None by Open Triplestore: LOV's N-Quads serialization of the vocabulary, loaded \
@@ -283,26 +269,10 @@ pub fn lov_attribution(
     attribution(
         vocab,
         changes,
-        stored_copy_text(vocab, unchanged, canonical_forms),
+        stored_copy_text(vocab, unchanged),
         unchanged,
         licence_sentence(vocab),
     )
-}
-
-/// The typed literals among the objects of `triples`, as N-Triples terms.
-/// Comparing these before and after [`content_digest::as_stored`] tells
-/// whether the store rewrites any of them.
-fn typed_literals(triples: &[oxigraph::model::Triple]) -> BTreeSet<String> {
-    use oxigraph::model::{vocab::xsd, Term};
-    triples
-        .iter()
-        .filter_map(|t| match &t.object {
-            Term::Literal(l) if l.language().is_none() && l.datatype() != xsd::STRING => {
-                Some(l.to_string())
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// Whether the graph `graph_iri` holds exactly the triples of `quads`
@@ -434,16 +404,13 @@ pub fn install_lov_vocab(
     };
 
     let kind = kind_detector::detect(&quads).primary;
-    // What the store holds once the quads are loaded: the same triples, with
-    // typed literals in its canonical form ("1"^^xsd:nonNegativeInteger as
-    // xsd:integer, +00:00 as Z).  The copy check compares with that, or every
-    // OWL vocabulary with a cardinality restriction would read as altered.
+    // What the store holds once the quads are loaded: the same triples (it
+    // keeps typed literals as written). The copy check compares with that.
     let raw = content_digest::quads_as_triples(&quads);
     let expected = match content_digest::as_stored(&raw) {
         Ok(t) => t,
         Err(e) => return Err(rollback(&[], format!("copy check failed: {e}"))),
     };
-    let canonical_forms = typed_literals(&raw) != typed_literals(&expected);
     drop(raw);
 
     // Verbatim: a vocabulary's licence may allow only unaltered copies (CC
@@ -491,7 +458,7 @@ pub fn install_lov_vocab(
     // pages and the no-derivatives guard read.  "Unchanged" only once the
     // stored graph is checked to hold LOV's copy exactly.
     let unchanged = holds_exactly(store, &record.graph_iri, &expected);
-    let attribution = lov_attribution(&vocab, catalog.source(), unchanged, canonical_forms);
+    let attribution = lov_attribution(&vocab, catalog.source(), unchanged);
     let record_iri = registry::version_record_iri(base_url, &model_id, &result.version);
     if let Err(e) = registry::set_attribution(store, &record_iri, Some(&attribution)) {
         return Err(rollback(
@@ -1275,8 +1242,8 @@ mod tests {
         let catalog = VocabCatalog::bundled();
         let store = TripleStore::in_memory().unwrap();
         let base = "http://localhost:7878";
-        // An OWL cardinality and a +00:00 dateTime: the store keeps both in
-        // its canonical form, with the same values.
+        // An OWL cardinality and a +00:00 dateTime: the store keeps both as
+        // written, so the copy is LOV's exactly.
         let pna = catalog.lov_by_prefix("pna").expect("pna").clone();
         let nq = format!(
             "{}_:r <http://www.w3.org/2002/07/owl#cardinality> \
@@ -1296,13 +1263,21 @@ mod tests {
         )
         .expect("licence record");
         assert!(a.no_derivatives && a.unchanged, "{}", a.stored_copy);
-        assert!(
-            a.stored_copy.contains("canonical form"),
-            "{}",
-            a.stored_copy
-        );
+        assert!(!a.stored_copy.contains("canonical"), "{}", a.stored_copy);
+        let graph = format!("{base}/data-model/pna/version/{}", outcome.version);
+        let stored: Vec<String> = content_digest::graph_triples(&store, &graph)
+            .unwrap()
+            .iter()
+            .map(|t| t.object.to_string())
+            .collect();
+        for kept in [
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>",
+            "\"2014-08-28T15:00:00+00:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
+        ] {
+            assert!(stored.iter().any(|o| o == kept), "{kept}: {stored:?}");
+        }
 
-        // Without typed literals the record does not mention it.
+        // Without typed literals the same.
         let gr = catalog.lov_by_prefix("gr").expect("gr").clone();
         let path = corpus("typed-gr", &two_quads(&gr.uri));
         let outcome = install_lov_vocab(&store, base, &catalog, Some(&path), "gr", None)

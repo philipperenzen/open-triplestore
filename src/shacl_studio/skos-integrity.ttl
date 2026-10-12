@@ -1,0 +1,132 @@
+# SKOS integrity conditions as SHACL shapes — Open Triplestore's own
+# formulation of the seven integrity conditions of the SKOS Reference (W3C
+# Recommendation 18 August 2009, https://www.w3.org/TR/skos-reference/). Five
+# of them the SKOS RDF schema cannot state in OWL 2 RL at all:
+#
+#   S13  skos:prefLabel, skos:altLabel and skos:hiddenLabel are pairwise
+#        disjoint properties.
+#   S14  A resource has no more than one value of skos:prefLabel per
+#        language tag.
+#   S27  skos:related is disjoint with the property skos:broaderTransitive.
+#   S36  For any resource, every item in the list given as the value of the
+#        skos:memberList property is also a value of the skos:member property.
+#   S46  skos:exactMatch is disjoint with each of the properties
+#        skos:broadMatch and skos:relatedMatch.
+#
+# The other two are owl:disjointWith axioms of the schema, checked here as
+# well so that the shapes stand on their own (the `skos` entailment regime
+# detects them as OWL 2 RL inconsistencies):
+#
+#   S9   skos:ConceptScheme is disjoint with skos:Concept.
+#   S37  skos:Collection is disjoint with each of skos:Concept and
+#        skos:ConceptScheme.
+#
+# The checks read the asserted data plus the inverses and symmetric forms the
+# SKOS data model implies (S27 follows skos:broader / skos:narrower chains, so
+# they hold without first materialising the `skos` entailment regime). S14
+# treats literals without a language tag as one more "tag": two untagged
+# prefLabels on one resource are reported too.
+#
+# Seeded at boot into urn:system:shapes:skos-integrity as the built-in Library
+# shape graph "SKOS integrity": select it in a validation pipeline, or bind it
+# to a dataset's validation layer, like any other Library shape graph.
+
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix skosi: <https://opentriplestore.org/shapes/skos-integrity#> .
+
+skosi:S13-prefLabel a sh:NodeShape ;
+    rdfs:label "S13: preferred, alternative and hidden labels are pairwise disjoint" ;
+    sh:targetSubjectsOf skos:prefLabel ;
+    sh:property [
+        sh:path skos:prefLabel ;
+        sh:disjoint skos:altLabel , skos:hiddenLabel ;
+        sh:message "S13: a value of skos:prefLabel is also a skos:altLabel or skos:hiddenLabel of the same resource" ;
+    ] .
+
+skosi:S13-altLabel a sh:NodeShape ;
+    rdfs:label "S13: alternative and hidden labels are disjoint" ;
+    sh:targetSubjectsOf skos:altLabel ;
+    sh:property [
+        sh:path skos:altLabel ;
+        sh:disjoint skos:hiddenLabel ;
+        sh:message "S13: a value of skos:altLabel is also a skos:hiddenLabel of the same resource" ;
+    ] .
+
+skosi:S14 a sh:NodeShape ;
+    rdfs:label "S14: at most one preferred label per language tag" ;
+    sh:targetSubjectsOf skos:prefLabel ;
+    sh:property [
+        sh:path skos:prefLabel ;
+        sh:uniqueLang true ;
+        sh:message "S14: more than one skos:prefLabel with the same language tag" ;
+    ] ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "S14: more than one skos:prefLabel without a language tag" ;
+        sh:select """
+            SELECT DISTINCT $this WHERE {
+                $this <http://www.w3.org/2004/02/skos/core#prefLabel> ?a , ?b .
+                FILTER (?a != ?b && LANG(?a) = "" && LANG(?b) = "")
+            }
+        """ ;
+    ] .
+
+skosi:S27 a sh:NodeShape ;
+    rdfs:label "S27: skos:related is disjoint with skos:broaderTransitive" ;
+    sh:targetSubjectsOf skos:related ;
+    sh:targetObjectsOf skos:related ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "S27: {?value} is both related to and (transitively) broader than this concept" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this <http://www.w3.org/2004/02/skos/core#related>|^<http://www.w3.org/2004/02/skos/core#related> ?value .
+                $this (<http://www.w3.org/2004/02/skos/core#broader>|<http://www.w3.org/2004/02/skos/core#broaderTransitive>|^<http://www.w3.org/2004/02/skos/core#narrower>|^<http://www.w3.org/2004/02/skos/core#narrowerTransitive>)+ ?value .
+            }
+        """ ;
+    ] .
+
+skosi:S36 a sh:NodeShape ;
+    rdfs:label "S36: every item of skos:memberList is a skos:member" ;
+    sh:targetSubjectsOf skos:memberList ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "S36: {?value} is in the skos:memberList but is not a skos:member" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this <http://www.w3.org/2004/02/skos/core#memberList>/<http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>*/<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> ?value .
+                FILTER NOT EXISTS { $this <http://www.w3.org/2004/02/skos/core#member> ?value }
+            }
+        """ ;
+    ] .
+
+skosi:S46 a sh:NodeShape ;
+    rdfs:label "S46: skos:exactMatch is disjoint with skos:broadMatch and skos:relatedMatch" ;
+    sh:targetSubjectsOf skos:exactMatch ;
+    sh:targetObjectsOf skos:exactMatch ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "S46: {?value} is an exact match and also a broader or related match" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this <http://www.w3.org/2004/02/skos/core#exactMatch>|^<http://www.w3.org/2004/02/skos/core#exactMatch> ?value .
+                $this <http://www.w3.org/2004/02/skos/core#broadMatch>|^<http://www.w3.org/2004/02/skos/core#narrowMatch>|<http://www.w3.org/2004/02/skos/core#relatedMatch>|^<http://www.w3.org/2004/02/skos/core#relatedMatch> ?value .
+            }
+        """ ;
+    ] .
+
+skosi:S9 a sh:NodeShape ;
+    rdfs:label "S9: skos:ConceptScheme is disjoint with skos:Concept" ;
+    sh:targetClass skos:ConceptScheme ;
+    sh:not [ sh:class skos:Concept ] ;
+    sh:message "S9: a concept scheme is also a skos:Concept" .
+
+skosi:S37 a sh:NodeShape ;
+    rdfs:label "S37: skos:Collection is disjoint with skos:Concept and skos:ConceptScheme" ;
+    sh:targetClass skos:Collection , skos:OrderedCollection ;
+    sh:not [ sh:class skos:Concept ] ;
+    sh:not [ sh:class skos:ConceptScheme ] ;
+    sh:message "S37: a collection is also a skos:Concept or skos:ConceptScheme" .

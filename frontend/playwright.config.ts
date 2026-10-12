@@ -24,6 +24,8 @@ const backendCmd =
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.spec.ts',
+  // The sub-path smoke test brings its own build and server (playwright.subpath.config.ts).
+  testIgnore: '**/subpath.spec.ts',
   timeout: 30_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

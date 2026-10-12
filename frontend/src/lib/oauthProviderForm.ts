@@ -16,9 +16,63 @@
  * - The client secret and the SAML IdP certificate are never sent back by the
  *   server. Left blank, they are omitted from the body and the server keeps
  *   the stored value.
+ * - `saml_config` is sent whole for a SAML provider (the server replaces it)
+ *   and not at all for OIDC (the server keeps what is stored).
  */
 
 export type ProviderType = 'oidc' | 'saml';
+
+/** `saml_config` as the API reads and writes it (`SamlConfig` in models.rs). */
+export interface SamlConfig {
+  sp_entity_id?: string | null;
+  idp_metadata_url?: string | null;
+  idp_slo_url?: string | null;
+  idp_slo_response_url?: string | null;
+  name_id_format?: string | null;
+  subject_attribute?: string | null;
+  email_attributes?: string[];
+  name_attributes?: string[];
+  group_attributes?: string[];
+  allow_idp_initiated?: boolean;
+  clock_skew_seconds?: number | null;
+  sign_authn_requests?: boolean;
+  require_encrypted_assertions?: boolean;
+  contact_email?: string | null;
+}
+
+/** What `POST /api/admin/oauth/saml-metadata` returns. */
+export interface IdpMetadata {
+  entity_id: string;
+  sso_url: string;
+  slo_url: string | null;
+  slo_response_url: string | null;
+  certificates_pem: string;
+  certificates: { sha256_fingerprint?: string; subject?: string; not_after?: string }[];
+  want_authn_requests_signed: boolean;
+}
+
+export const NAMEID_PERSISTENT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent';
+export const NAMEID_TRANSIENT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:transient';
+export const NAMEID_EMAIL = 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress';
+export const NAMEID_UNSPECIFIED = 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified';
+
+/** The SAML part of the form. Lists are edited as one name per line. */
+export interface SamlForm {
+  sp_entity_id: string;
+  idp_metadata_url: string;
+  idp_slo_url: string;
+  idp_slo_response_url: string;
+  name_id_format: string;
+  subject_attribute: string;
+  email_attributes: string;
+  name_attributes: string;
+  group_attributes: string;
+  allow_idp_initiated: boolean;
+  clock_skew_seconds: string;
+  sign_authn_requests: boolean;
+  require_encrypted_assertions: boolean;
+  contact_email: string;
+}
 
 /** A provider as `GET /api/admin/oauth/providers` returns it. */
 export interface OauthProvider {
@@ -36,6 +90,7 @@ export interface OauthProvider {
   auto_provision: boolean;
   default_role: string;
   is_active: boolean;
+  saml_config?: SamlConfig | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -57,6 +112,8 @@ export interface OauthProviderBody {
   auto_provision: boolean;
   default_role: string;
   is_active: boolean;
+  /** Sent for SAML providers only; absent keeps the stored settings. */
+  saml_config?: SamlConfig;
 }
 
 /** What the form edits. Every text field is a string, never null. */
@@ -77,6 +134,7 @@ export interface ProviderForm {
   role_claim_map: string;
   auto_provision: boolean;
   is_active: boolean;
+  saml: SamlForm;
 }
 
 /** Slug of the provider row the server creates for `OIDC_ISSUER`. The server
@@ -92,6 +150,102 @@ export class ProviderFormError extends Error {
     super(key);
     this.key = key;
   }
+}
+
+export function emptySamlForm(): SamlForm {
+  return {
+    sp_entity_id: '',
+    idp_metadata_url: '',
+    idp_slo_url: '',
+    idp_slo_response_url: '',
+    name_id_format: NAMEID_PERSISTENT,
+    subject_attribute: '',
+    email_attributes: '',
+    name_attributes: '',
+    group_attributes: '',
+    allow_idp_initiated: false,
+    clock_skew_seconds: '',
+    sign_authn_requests: false,
+    require_encrypted_assertions: false,
+    contact_email: '',
+  };
+}
+
+function samlToForm(c: SamlConfig | null | undefined): SamlForm {
+  const f = emptySamlForm();
+  if (!c) return f;
+  const lines = (v?: string[]) => (v ?? []).join('\n');
+  return {
+    sp_entity_id: c.sp_entity_id ?? '',
+    idp_metadata_url: c.idp_metadata_url ?? '',
+    idp_slo_url: c.idp_slo_url ?? '',
+    idp_slo_response_url: c.idp_slo_response_url ?? '',
+    name_id_format: c.name_id_format || NAMEID_PERSISTENT,
+    subject_attribute: c.subject_attribute ?? '',
+    email_attributes: lines(c.email_attributes),
+    name_attributes: lines(c.name_attributes),
+    group_attributes: lines(c.group_attributes),
+    allow_idp_initiated: c.allow_idp_initiated === true,
+    clock_skew_seconds: c.clock_skew_seconds == null ? '' : String(c.clock_skew_seconds),
+    sign_authn_requests: c.sign_authn_requests === true,
+    require_encrypted_assertions: c.require_encrypted_assertions === true,
+    contact_email: c.contact_email ?? '',
+  };
+}
+
+/** One attribute name per line (commas also separate). */
+function names(text: string): string[] {
+  return text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** `saml_config` for the request body. Throws {@link ProviderFormError}. */
+export function samlFormToConfig(f: SamlForm): SamlConfig {
+  let skew: number | null = null;
+  if (f.clock_skew_seconds.trim() !== '') {
+    skew = Number(f.clock_skew_seconds.trim());
+    if (!Number.isInteger(skew) || skew < 0 || skew > 600) {
+      throw new ProviderFormError('pages.adminSecurity.samlClockSkewInvalid');
+    }
+  }
+  if (f.name_id_format === NAMEID_TRANSIENT && !f.subject_attribute.trim()) {
+    throw new ProviderFormError('pages.adminSecurity.samlTransientNeedsSubject');
+  }
+  return {
+    sp_entity_id: opt(f.sp_entity_id),
+    idp_metadata_url: opt(f.idp_metadata_url),
+    idp_slo_url: opt(f.idp_slo_url),
+    idp_slo_response_url: opt(f.idp_slo_response_url),
+    name_id_format: f.name_id_format === NAMEID_PERSISTENT ? null : opt(f.name_id_format),
+    subject_attribute: opt(f.subject_attribute),
+    email_attributes: names(f.email_attributes),
+    name_attributes: names(f.name_attributes),
+    group_attributes: names(f.group_attributes),
+    allow_idp_initiated: f.allow_idp_initiated,
+    clock_skew_seconds: skew,
+    sign_authn_requests: f.sign_authn_requests,
+    require_encrypted_assertions: f.require_encrypted_assertions,
+    contact_email: opt(f.contact_email),
+  };
+}
+
+/** Fill the form from imported IdP metadata. `url` is where it came from. */
+export function applyIdpMetadata(form: ProviderForm, md: IdpMetadata, url?: string): ProviderForm {
+  return {
+    ...form,
+    entity_id: md.entity_id,
+    sso_url: md.sso_url,
+    idp_certificate: md.certificates_pem,
+    saml: {
+      ...form.saml,
+      idp_metadata_url: url ?? form.saml.idp_metadata_url,
+      idp_slo_url: md.slo_url ?? '',
+      idp_slo_response_url: md.slo_response_url ?? '',
+      sign_authn_requests: form.saml.sign_authn_requests || md.want_authn_requests_signed,
+    },
+  };
 }
 
 export function emptyProviderForm(): ProviderForm {
@@ -111,6 +265,7 @@ export function emptyProviderForm(): ProviderForm {
     role_claim_map: '',
     auto_provision: true,
     is_active: true,
+    saml: emptySamlForm(),
   };
 }
 
@@ -137,6 +292,7 @@ export function providerToForm(p: OauthProvider): ProviderForm {
     role_claim_map: prettyRoleClaimMap(p.role_claim_map),
     auto_provision: p.auto_provision !== false,
     is_active: p.is_active !== false,
+    saml: samlToForm(p.saml_config),
   };
 }
 
@@ -205,5 +361,6 @@ export function formToBody(form: ProviderForm): OauthProviderBody {
   // when the field is absent, and would store an empty one if it were sent.
   if (form.client_secret.trim()) body.client_secret = form.client_secret.trim();
   if (form.idp_certificate.trim()) body.idp_certificate = form.idp_certificate.trim();
+  if (form.provider_type === 'saml') body.saml_config = samlFormToConfig(form.saml);
   return body;
 }

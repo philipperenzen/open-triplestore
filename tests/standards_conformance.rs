@@ -79,6 +79,7 @@ fn test_state() -> AppState {
         query_timeout_secs: 30,
         write_timeout_secs: 120,
         secure_cookies: false,
+        serve_frontend: true,
         trusted_proxies: open_triplestore::server::client_ip::TrustedProxies::default(),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -798,6 +799,156 @@ PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
     );
 }
 
+// GeoSPARQL Query Rewrite Extension over HTTP (11-052r4 R28, 22-047r1 Req 50): a
+// relation pattern on /sparql matches a relation that follows from the geometries.
+#[tokio::test]
+async fn geosparql_query_rewrite_over_http() {
+    let (state, token) = admin_state();
+    let g = "http://ex.org/std/places";
+    state
+        .store
+        .update(&format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+             INSERT DATA {{ GRAPH <{g}> {{
+               <http://ex.org/std/park> geo:hasDefaultGeometry <http://ex.org/std/parkGeom> .
+               <http://ex.org/std/parkGeom> geo:asWKT \"POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))\"^^geo:wktLiteral .
+               <http://ex.org/std/city> geo:hasDefaultGeometry <http://ex.org/std/cityGeom> .
+               <http://ex.org/std/cityGeom> geo:asWKT \"POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))\"^^geo:wktLiteral .
+             }} }}"
+        ))
+        .unwrap();
+    let query = format!(
+        "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+         ASK {{ GRAPH <{g}> {{ <http://ex.org/std/park> geo:sfWithin <http://ex.org/std/city> }} }}"
+    );
+    let resp = sparql_get(&state, &token, &query, "application/sparql-results+json").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["boolean"], true, "derived sfWithin: {json}");
+}
+
+// GeoSPARQL RDFS Entailment Extension over HTTP (11-052r4 R25–R27, 22-047r1 Req
+// 47–49): a dataset whose graphs use GeoSPARQL terms reasons over the GeoSPARQL
+// ontology and the Simple Features and GML geometry hierarchies, with no
+// conformance declaration of its own.
+#[cfg(feature = "rdfs-entailment")]
+#[tokio::test]
+async fn geosparql_rdfs_entailment_over_http() {
+    use open_triplestore::auth::models::{GraphKind, OwnerType, Visibility};
+
+    let (state, token) = admin_state();
+    open_triplestore::data_models::seed_vocab::seed_standard_vocabularies(&state);
+    let g = "http://ex.org/std/geo-instances";
+    state
+        .auth_db
+        .create_dataset(
+            "geo",
+            "Geo",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("geo", g).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("geo", g, Some(GraphKind::Instances))
+        .unwrap();
+    state
+        .store
+        .update(&format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+             PREFIX sf: <http://www.opengis.net/ont/sf#>
+             PREFIX gml: <http://www.opengis.net/ont/gml#>
+             INSERT DATA {{ GRAPH <{g}> {{
+               <http://ex.org/std/f> geo:hasDefaultGeometry <http://ex.org/std/p> .
+               <http://ex.org/std/p> a sf:Polygon .
+               <http://ex.org/std/q> a gml:Polygon .
+             }} }}"
+        ))
+        .unwrap();
+
+    let send = |method: Method, uri: String, body: String| {
+        let state = state.clone();
+        let token = token.clone();
+        async move {
+            let resp = app(state)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(
+                            header::ACCEPT,
+                            "application/sparql-results+json, application/json",
+                        )
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            (status, body_json(resp.into_body()).await)
+        }
+    };
+
+    // The conformance layer names the three vocabularies as premises.
+    let (st, layer) = send(
+        Method::GET,
+        "/api/datasets/geo/conformance".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{layer}");
+    let premises: Vec<String> = layer["vocabulary_premises"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    for id in ["geosparql", "sf", "gml-geometries"] {
+        assert!(
+            premises
+                .iter()
+                .any(|p| p.contains(&format!("/data-model/{id}/"))),
+            "{id} is a premise: {layer}"
+        );
+    }
+
+    let (st, v) = send(
+        Method::PUT,
+        "/api/datasets/geo/entailment".into(),
+        serde_json::json!({ "regime": "rdfs", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    for pattern in [
+        "<http://ex.org/std/f> a <http://www.opengis.net/ont/geosparql#Feature>",
+        "<http://ex.org/std/f> <http://www.opengis.net/ont/geosparql#hasGeometry> <http://ex.org/std/p>",
+        "<http://ex.org/std/p> a <http://www.opengis.net/ont/sf#Surface>",
+        "<http://ex.org/std/p> a <http://www.opengis.net/ont/geosparql#Geometry>",
+        "<http://ex.org/std/q> a <http://www.opengis.net/ont/gml#AbstractSurface>",
+        "<http://ex.org/std/q> a <http://www.opengis.net/ont/geosparql#Geometry>",
+    ] {
+        let (st, v) = send(
+            Method::GET,
+            format!(
+                "/sparql?query={}&entailment_dataset=geo",
+                url_encode(&format!("ASK {{ {pattern} }}"))
+            ),
+            String::new(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["boolean"], true, "{pattern}: {v}");
+    }
+}
+
 // ─── 10. SHACL Core: structural constraint validation ───────────────────────────
 
 #[tokio::test]
@@ -1172,7 +1323,7 @@ async fn shaclc_compact_syntax_parses() {
     let shaclc = "PREFIX schema: <http://schema.org/>\n\
                   PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\n\
                   shape schema:PersonShape -> schema:Person {\n\
-                  \tschema:name xsd:string [1..1] ;\n\
+                  \tschema:name xsd:string [1..1] .\n\
                   }\n";
     let resp = app(state)
         .oneshot(

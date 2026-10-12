@@ -972,15 +972,24 @@ fn apply_manifest_visibility(
     }
 }
 
+/// What the `stored_copy` of an unchanged record said before the store kept
+/// lexical forms: "… checked against the files (typed literals in the store's
+/// canonical form, the same values)." Such a record is checked once more.
+const EARLIER_STORE_FORM_TEXT: &str = "typed literals in the store's canonical form";
+
 /// Record the licence a bundle declares for model `dm` on its version and,
 /// when the bundle owns it, its entry — like the licence record of a bundled
 /// vocabulary. Nothing in the model's graphs is changed.
 ///
 /// The record calls the content unchanged only when every graph holds exactly
-/// its payload file's triples (compared in the store's canonical literal
-/// forms). A start whose files and graphs are the ones checked before (same
-/// file SHA-256, same stored digest) reads the graphs once and parses
-/// nothing. A graph that differs from its file (an admin's edit, a re-fetched
+/// its payload file's triples. A start whose files and graphs are the ones
+/// checked before (same file SHA-256, same stored digest) reads the graphs
+/// once and parses nothing. A graph that holds its file's triples as the store
+/// wrote them before it kept lexical forms (typed literals in a canonical
+/// form, [`content_digest::CopyForm::EarlierStore`]) is nobody's edit: it is
+/// loaded from its file again, once (its record from then says so; the first
+/// start after the upgrade re-checks every record that does not). A graph
+/// that differs from its file otherwise (an admin's edit, a re-fetched
 /// release) is left as it is, and the record says the content may have been
 /// modified; with `no_derivatives` the registry then serves the version to no
 /// one who may not write the entry.
@@ -1042,14 +1051,20 @@ fn record_bundle_licence(
     }
     let file_sha = content_digest::file_sha256(&concatenated);
     let content_graphs = content_digest::version_graphs(&graphs[0], &graphs[1..]);
-    let stored_digest = content_digest::graphs_digest(&state.store, &content_graphs)?;
+    let mut stored_digest = content_digest::graphs_digest(&state.store, &content_graphs)?;
     let recorded: Option<ContentAttribution> = p
         .attribution_json
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
+    // A record written before the store kept lexical forms says it compared
+    // "in the store's canonical form": its graphs may be in that form, so they
+    // are checked once more.
     let checked_before = p.seed_source_sha256.as_deref() == Some(file_sha.as_str())
         && p.seed_content_digest.as_deref() == Some(stored_digest.as_str())
-        && recorded.as_ref().is_some_and(|a| a.unchanged);
+        && recorded
+            .as_ref()
+            .is_some_and(|a| a.unchanged && !a.stored_copy.contains(EARLIER_STORE_FORM_TEXT));
+    let mut reloaded = false;
     let unchanged = checked_before
         || {
             let mut all = true;
@@ -1060,12 +1075,27 @@ fn record_bundle_licence(
                 };
                 let stored = content_digest::graph_triples(&state.store, iri)?;
                 match payload_as_stored(state, iri, d, *fmt) {
-                    Ok(expected) if content_digest::same_triples(&stored, &expected) => {}
-                    Ok(_) => {
-                        tracing::warn!(bundle = %bundle.id, model = %dm.id, graph = %iri, "graph differs from its payload file; kept as it is, and its licence record says it may have been modified");
-                        all = false;
-                        break;
-                    }
+                    Ok(expected) => match content_digest::compare_copy(&stored, &expected) {
+                        content_digest::CopyForm::Exact => {}
+                        content_digest::CopyForm::EarlierStore => {
+                            reload_graph(state, iri, d, *fmt)?;
+                            reloaded = true;
+                            let now = content_digest::graph_triples(&state.store, iri)?;
+                            if content_digest::compare_copy(&now, &expected)
+                                != content_digest::CopyForm::Exact
+                            {
+                                tracing::warn!(bundle = %bundle.id, model = %dm.id, graph = %iri, "graph held its payload's triples in an earlier store's literal forms and does not match it after a reload");
+                                all = false;
+                                break;
+                            }
+                            tracing::info!(bundle = %bundle.id, model = %dm.id, graph = %iri, "graph held its payload's triples in the canonical literal forms an earlier version of the store wrote; loaded from the payload again, exactly");
+                        }
+                        content_digest::CopyForm::Differs => {
+                            tracing::warn!(bundle = %bundle.id, model = %dm.id, graph = %iri, "graph differs from its payload file; kept as it is, and its licence record says it may have been modified");
+                            all = false;
+                            break;
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(bundle = %bundle.id, model = %dm.id, graph = %iri, error = %e, "payload could not be compared");
                         all = false;
@@ -1075,6 +1105,9 @@ fn record_bundle_licence(
             }
             all
         };
+    if reloaded {
+        stored_digest = content_digest::graphs_digest(&state.store, &content_graphs)?;
+    }
     registry::set_seed_check(
         &state.store,
         &ver_iri,
@@ -1086,7 +1119,7 @@ fn record_bundle_licence(
     let stored_copy = if unchanged {
         format!(
             "The store holds the triples of the payload files of {file}, unchanged: checked \
-             against the files (typed literals in the store's canonical form, the same values)."
+             against the files."
         )
     } else {
         let withheld = if license.no_derivatives {
@@ -1157,8 +1190,7 @@ fn record_bundle_licence(
 
 /// A payload's triples as the store holds them after [`load_graph`]: parsed
 /// like the Graph Store PUT parses it (no base IRI, into `graph_iri`, blank
-/// nodes as the store's mode treats them), typed literals in the store's
-/// canonical form.
+/// nodes as the store's mode treats them).
 fn payload_as_stored(
     state: &AppState,
     graph_iri: &str,
@@ -1170,13 +1202,15 @@ fn payload_as_stored(
         .rdf_format()
         .ok_or_else(|| anyhow::anyhow!("payload format cannot be compared"))?;
     let graph = GraphName::NamedNode(NamedNode::new(graph_iri)?);
-    let quads: Vec<Quad> = oxigraph::io::RdfParser::from_format(format)
-        .for_reader(std::io::BufReader::new(data.as_bytes()))
-        .map(|r| {
-            r.map(|q| Quad::new(q.subject, q.predicate, q.object, graph.clone()))
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        })
-        .collect::<anyhow::Result<_>>()?;
+    let quads: Vec<Quad> = crate::jsonld::with_loader(
+        oxigraph::io::RdfParser::from_format(format)
+            .for_reader(std::io::BufReader::new(data.as_bytes())),
+    )
+    .map(|r| {
+        r.map(|q| Quad::new(q.subject, q.predicate, q.object, graph.clone()))
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .collect::<anyhow::Result<_>>()?;
     let quads = match state.store.blank_node_mode() {
         crate::store::engine::BlankNodeMode::Skolem => {
             opengraph::skolem::skolemize(&quads, opengraph::DEFAULT_SKOLEM_BASE).0
@@ -1213,6 +1247,21 @@ fn load_graph(state: &AppState, graph_iri: &str, data: &str, fmt: Fmt) -> anyhow
         }
     }
     Ok(())
+}
+
+/// Replace one graph's content with its payload, in one write: the Graph
+/// Store PUT path replaces the graph already; a SPARQL-star payload is
+/// inserted in the same update that clears the graph.
+fn reload_graph(state: &AppState, graph_iri: &str, data: &str, fmt: Fmt) -> anyhow::Result<()> {
+    match fmt {
+        Fmt::SparqlStarUpdate => state
+            .store
+            .update(&format!(
+                "CLEAR SILENT GRAPH <{graph_iri}> ;\nINSERT DATA {{ GRAPH <{graph_iri}> {{ {data} }} }}"
+            ))
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        other => load_graph(state, graph_iri, data, other),
+    }
 }
 
 /// Register `shapes_iri` in the SHACL Studio library (if it is not yet a
@@ -2065,6 +2114,65 @@ mod tests {
             )
             .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
             .unwrap());
+    }
+
+    /// A graph an earlier version loaded, with the payload's typed literals
+    /// in canonical form (`"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`),
+    /// is nobody's edit: the next start loads it from the payload again,
+    /// exactly, and the record calls it unchanged without the old caveat.
+    #[test]
+    fn a_graph_in_the_earlier_store_form_is_loaded_again_once() {
+        use crate::data_models::{content_digest, registry};
+        let state = test_state();
+        let b = model_bundle("crow", "crow-otl", Some(nd_license()));
+        apply_bundle(&state, &b).unwrap();
+        let g = "https://example.org/otl/def/";
+        let ver_iri = registry::version_record_iri(&state.base_url, "crow-otl", "2025");
+        let card =
+            "<https://example.org/otl/def/Boom> <http://www.w3.org/2002/07/owl#minCardinality>";
+        state
+            .store
+            .update(&format!(
+                "DELETE DATA {{ GRAPH <{g}> {{ {card} \"1\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> }} }} ;\n\
+                 INSERT DATA {{ GRAPH <{g}> {{ {card} 1 }} }}"
+            ))
+            .unwrap();
+        let mut old = registry::get_attribution(&state.store, &ver_iri).unwrap();
+        old.stored_copy = format!(
+            "The store holds the triples of the payload files of {}, unchanged: checked against \
+             the files ({EARLIER_STORE_FORM_TEXT}, the same values).",
+            old.file
+        );
+        let json = registry::attribution_json(&state.store, &ver_iri);
+        assert!(registry::replace_attribution_if(
+            &state.store,
+            &ver_iri,
+            json.as_deref(),
+            Some(&old)
+        )
+        .unwrap());
+        let (_, versions) = registry::record_provenance(&state.store, &state.base_url, "crow-otl");
+        let sha = versions["2025"].seed_source_sha256.clone().unwrap();
+        let digest = content_digest::graphs_digest(&state.store, &[g.to_string()]).unwrap();
+        registry::set_seed_check(&state.store, &ver_iri, &sha, Some(&digest)).unwrap();
+
+        apply_bundle(&state, &b).unwrap();
+        let ask = |q: &str| {
+            matches!(
+                state.store.query(q),
+                Ok(oxigraph::sparql::QueryResults::Boolean(true))
+            )
+        };
+        assert!(ask(&format!(
+            "ASK {{ GRAPH <{g}> {{ {card} \"1\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> }} }}"
+        )));
+        assert!(!ask(&format!("ASK {{ GRAPH <{g}> {{ {card} 1 }} }}")));
+        let a = registry::get_attribution(&state.store, &ver_iri).unwrap();
+        assert!(a.unchanged, "{}", a.stored_copy);
+        assert!(!a.stored_copy.contains(EARLIER_STORE_FORM_TEXT));
+        let json = registry::attribution_json(&state.store, &ver_iri);
+        apply_bundle(&state, &b).unwrap();
+        assert_eq!(registry::attribution_json(&state.store, &ver_iri), json);
     }
 
     /// A licensed model whose id an entry of someone else already holds is

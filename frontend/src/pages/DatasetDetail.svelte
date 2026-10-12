@@ -1,4 +1,5 @@
 <script>
+  import { withBase, absoluteUrl } from '../lib/basePath';
   import { onMount, onDestroy } from 'svelte';
   import {
     getDataset,
@@ -75,10 +76,11 @@
   import CommitHistory from '../components/CommitHistory.svelte';
   import DatasetVersions from '../components/DatasetVersions.svelte';
   import SectionNav from '../components/SectionNav.svelte';
+  import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
   import Select from '../components/Select.svelte';
   import PartialRunNote from '../components/PartialRunNote.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
-  import { findTheme, findAdmsStatus } from '../lib/vocab/themes';
+  import { findTheme, findAdmsStatus, findFrequency } from '../lib/vocab/themes';
 
   // Ontology registry removed — detection/linking no longer available
 
@@ -441,6 +443,7 @@
   // Whether there is any rich metadata worth showing beyond the basics.
   $: hasRichMetadata = !!(dataset && (dataset.license || mdThemes.length || mdKeywords.length
     || dataset.adms_status || dataset.version_notes || dataset.spatial || dataset.landing_page
+    || dataset.temporal_start || dataset.temporal_end || dataset.accrual_periodicity
     || hasContact || dataset.conforms_to_model));
 
   // Breadcrumb: org name when dataset is org-owned
@@ -454,7 +457,7 @@
   // Copy-to-clipboard state per service
   let copiedSlug = null;
   async function copyEndpoint(slug) {
-    const url = `${window.location.origin}/api/datasets/${id}/services/${slug}/sparql`;
+    const url = absoluteUrl(`/api/datasets/${id}/services/${slug}/sparql`);
     if (await copyToClipboard(url)) {
       copiedSlug = slug;
       setTimeout(() => { copiedSlug = null; }, 2000);
@@ -1258,6 +1261,7 @@
     { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
     { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
     { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'identity', label: $i18nT('components.identityPolicy.navLabel'), visible: $isAuthenticated },
     { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
   ]} />
 {/if}
@@ -1660,6 +1664,20 @@
       </div>
     {/if}
 
+    {#if dataset.temporal_start || dataset.temporal_end}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.temporalCoverage')}</dt>
+        <dd>{dataset.temporal_start || $i18nT('pages.datasetDetail.openEnded')} – {dataset.temporal_end || $i18nT('pages.datasetDetail.openEnded')}</dd>
+      </div>
+    {/if}
+
+    {#if dataset.accrual_periodicity}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.updateFrequency')}</dt>
+        <dd>{findFrequency(dataset.accrual_periodicity)?.label || dataset.accrual_periodicity}</dd>
+      </div>
+    {/if}
+
     {#if dataset.landing_page}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.landingPage')}</dt>
@@ -1671,7 +1689,7 @@
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
         <dd>
-          <a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
+          <a href={withBase(`/models/${dataset.conforms_to_model}`)} class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
           {#if conformance?.conforms_to_model?.update_available}
             <span class="model-update-badge" title={$i18nT('pages.datasetDetail.modelUpdateAvailableHint')}>
               ⬆ {$i18nT('pages.datasetDetail.modelUpdateAvailable', { values: { version: conformance.conforms_to_model.latest_published } })}
@@ -1763,7 +1781,7 @@
             {:else}
               {#if svc.is_active}
                 <div class="svc-endpoint-row">
-                  <code class="endpoint-url">{window.location.origin}/api/datasets/{id}/services/{svc.slug}/sparql</code>
+                  <code class="endpoint-url">{absoluteUrl(`/api/datasets/${id}/services/${svc.slug}/sparql`)}</code>
                   <button class="btn btn-xs btn-ghost copy-btn" on:click={() => copyEndpoint(svc.slug)} title={$i18nT('pages.datasetDetail.copyEndpointUrl')}>
                     {#if copiedSlug === svc.slug}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
                   </button>
@@ -1941,6 +1959,12 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- Identity policy (owl:sameAs) for reasoning — every identity route needs a
+     sign-in; the card hides itself when the server will not show the setting. -->
+{#if $isAuthenticated}
+  <IdentityPolicyCard scope="dataset" {id} canManage={canWrite} />
 {/if}
 
 <!-- Access management (users + teams, role-based) -->

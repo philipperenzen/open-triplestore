@@ -946,16 +946,18 @@ fn test_ql_data_value_ranges() {
         &format!("{int} ex:a ex:n \"1.5\"^^xsd:decimal ."),
         "ql-dt-range",
     );
-    // Storage limit (D4): oxigraph stores every integer-derived type as
-    // xsd:integer, so the value decides. A well-typed xsd:byte fits a
-    // nonNegativeInteger range; "-5"^^xsd:nonNegativeInteger is read back
-    // as the integer -5, and is caught as a value outside the range.
+    // The value decides across integer-derived types: a well-typed
+    // xsd:byte fits a nonNegativeInteger range. The store keeps
+    // "-5"^^xsd:nonNegativeInteger as written, so it is caught as the
+    // ill-typed literal it is (it used to be read back as the integer -5 and
+    // caught as a value outside the range); an xsd:integer -5 still is.
     let nni = "ex:n rdfs:range xsd:nonNegativeInteger . ";
     ok(&format!("{nni} ex:a ex:n \"7\"^^xsd:byte ."));
     bad(
         &format!("{nni} ex:a ex:n \"-5\"^^xsd:nonNegativeInteger ."),
-        "ql-dt-range",
+        "ql-dt-not-type",
     );
+    bad(&format!("{nni} ex:a ex:n -5 ."), "ql-dt-range");
     // Strings: a language-tagged string is no xsd:string; NCName has no colon.
     let st = "ex:n rdfs:range xsd:string . ";
     ok(&format!("{st} ex:a ex:n \"abc\" ."));

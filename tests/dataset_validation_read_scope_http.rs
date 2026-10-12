@@ -650,3 +650,58 @@ async fn shex_inline_discovers_only_readable_nodes() {
         );
     }
 }
+
+/// `IMPORT <g>` reads a ShExR schema from the store, through the caller's
+/// read scope: a schema in another tenant's private graph imports for an
+/// admin and is "no readable graph" for everyone else — the same answer as
+/// for a graph that does not exist, so an import probes nothing.
+#[cfg(feature = "shex")]
+#[tokio::test]
+async fn shex_imports_read_only_graphs_the_caller_may_read() {
+    let (state, admin, _alice, bob) = shex_fixture();
+    // carol's private dataset also holds a schema.
+    let lib = "http://other.example/schema";
+    load(
+        &state.store,
+        lib,
+        "PREFIX sx: <http://www.w3.org/ns/shex#>\n\
+         [] a sx:Schema ; sx:shapes ( <http://ex.org/Lib> ) .\n\
+         <http://ex.org/Lib> a sx:ShapeDecl ; sx:shapeExpr [ a sx:Shape ;\n\
+           sx:expression [ a sx:TripleConstraint ; sx:predicate <http://ex.org/ssn> ] ] .",
+    );
+    state.auth_db.add_dataset_graph("other-ds", lib).unwrap();
+    let body = |imported: &str| {
+        json!({
+            "schema": format!(
+                "PREFIX ex: <http://ex.org/>\nIMPORT <{imported}>\nex:S @ex:Lib"
+            ),
+            "shape_map": { "http://ex.org/S": ["http://ex.org/p0"] }
+        })
+    };
+    for uri in ["/api/datasets/pub-ds/shex/validate", "/api/shex/validate"] {
+        let (st, text) = send(&state, Method::POST, uri, &admin, body(lib)).await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "{uri}: the admin reads the schema: {text}"
+        );
+        assert!(text.contains("\"Conformant\""), "{uri}: {text}");
+
+        let (st, hidden) = send(&state, Method::POST, uri, &bob, body(lib)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{uri}: {hidden}");
+        let (st, missing) = send(
+            &state,
+            Method::POST,
+            uri,
+            &bob,
+            body("http://other.example/none"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{uri}: {missing}");
+        assert_eq!(
+            hidden.replace(lib, "<g>"),
+            missing.replace("http://other.example/none", "<g>"),
+            "{uri}: a private graph answers like a missing one"
+        );
+    }
+}

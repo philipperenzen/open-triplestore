@@ -434,8 +434,8 @@ async fn tiles3d_tileset_and_glb_follow_writes() {
         serde_json::json!([0.0, 0.0, d, d, 0.0, 0.0])
     );
     assert_eq!(
-        tileset["root"]["content"]["uri"],
-        "/api/datasets/ds1/3dtiles/content.glb"
+        tileset["root"]["content"]["uri"], "content.glb",
+        "relative to tileset.json, so it survives a path prefix"
     );
     assert!(
         tileset["asset"].get("extras").is_none(),

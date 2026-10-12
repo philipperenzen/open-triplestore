@@ -1,0 +1,3 @@
+# Vendored verbatim: keep every byte as upstream has it (no line-ending
+# conversion), so the copy stays byte-identical.
+* -text

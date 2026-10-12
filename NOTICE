@@ -115,6 +115,37 @@ Bundled binaries and frontend libraries:
     them all, with each package's licence and the verbatim text of every
     LICENSE, COPYING and NOTICE file it ships.
 
+Vendored source code:
+
+  - Oxigraph 0.5.11 (vendor/oxigraph/), the `oxigraph` crate as published on
+    crates.io (upstream https://github.com/oxigraph/oxigraph, path lib/oxigraph,
+    commit df37a5c98e2497135cdd4cfce01a049b78ca6740) — dual-licensed MIT or
+    Apache-2.0, at your option; Copyright (c) 2018 Oxigraph developers. Both
+    licence texts are beside it (vendor/oxigraph/LICENSE-MIT and LICENSE-APACHE).
+    Modified: its literal encoder keeps the lexical form and exact datatype of
+    typed literals.
+  - spargebra 0.4.7 (vendor/spargebra/), spareval 0.2.7 (vendor/spareval/) and
+    sparopt 0.3.7 (vendor/sparopt/), the SPARQL parser, evaluator and optimizer
+    crates of Oxigraph as published on crates.io (upstream
+    https://github.com/oxigraph/oxigraph, paths lib/spargebra, lib/spareval and
+    lib/sparopt, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
+    dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
+    Oxigraph developers. Both licence texts are beside each crate
+    (LICENSE-MIT and LICENSE-APACHE). Modified: SPARQL 1.1 and SPARQL 1.2
+    conformance fixes, some backported from upstream Oxigraph; spareval also
+    rebuilds triple terms without reading their literals as values.
+  - oxjsonld 0.2.6 (vendor/oxjsonld/), Oxigraph's JSON-LD parser and
+    serializer, the crate as published on crates.io (same repository, path
+    lib/oxjsonld, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
+    dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
+    Oxigraph developers. Both licence texts are beside it. Modified: IRI
+    resolution removes the dot segments of the whole target path; an @base
+    in absolute form is the base even when it is not a valid IRI; a type map
+    applies the type's scoped context to the map context; the parser takes
+    the JSON-LD 1.1 rdfDirection option.
+    vendor/README.md describes every change in the five crates, and
+    vendor/*/UPSTREAM-PR*.md the changes as proposed upstream.
+
 OWL 2 DL reasoner sidecar image (sidecars/reasoner/; published separately as
 ghcr.io/philipperenzen/open-triplestore-reasoner, started by docker-compose.yml
 only under the `reasoner` profile; nothing below is linked into the
@@ -262,8 +293,10 @@ Bundled datasets and vocabularies:
         (LICENSES/Apache-2.0.txt) — PAV 2.3.1 (pav.ttl, Copyright 2008-2014
         Massachusetts General Hospital; Harvard Medical School; Balboa Systems;
         University of Manchester); OGC GeoSPARQL 1.1 (geosparql.ttl, (c) 2021
-        Open Geospatial Consortium) and GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
-        Copyright (c) 2012 Open Geospatial Consortium), both from
+        Open Geospatial Consortium), GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
+        Copyright (c) 2012 Open Geospatial Consortium) and the OGC Simple
+        Features Vocabulary 1.1.1 (sf.ttl, (c) 2022 Open Geospatial
+        Consortium), all three from
         https://github.com/opengeospatial/geosemantics-semantic-resources; the
         DOAP vocabulary (doap.ttl, Copyright © 2004-2016 Edd Dumbill, 2016-2017
         Edd Wilder-James, 2018- The DOAP Authors), from
@@ -296,6 +329,30 @@ Bundled datasets and vocabularies:
         https://docs.crow.nl/imbor/beheerplan/) names CC BY-ND 4.0
         (https://creativecommons.org/licenses/by-nd/4.0/). The file is therefore
         redistributed only unmodified, with no header added.
+  - JSON-LD contexts bundled in src/jsonld/contexts/ and compiled into the
+    server binary, so documents that name them parse offline:
+    activitystreams.jsonld (https://www.w3.org/ns/activitystreams.jsonld),
+    csvw.jsonld (https://www.w3.org/ns/csvw.jsonld), ldp.jsonld
+    (https://www.w3.org/ns/ldp.jsonld) and odrl.jsonld
+    (https://www.w3.org/ns/odrl.jsonld), downloaded 2026-10-03, byte-identical.
+    W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+    (W3C's intellectual-rights statement; the files state no other licence);
+    text in LICENSES/W3C-Document-License-2023.txt. Copyright © 2023 World Wide
+    Web Consortium. This software or document includes material copied from or
+    derived from the Activity Streams 2.0, CSVW, LDP and ODRL 2.2 JSON-LD
+    contexts at the URLs above. Copyright © 2023 W3C®. Details and checksums in
+    src/jsonld/contexts/PROVENANCE.md.
+  - Controlled-vocabulary labels compiled into the server (src/dcat/authority.rs)
+    and emitted as the skos:prefLabel of the concepts the DCAT catalogue
+    references: the English and Dutch labels of the EU Publications Office
+    authority tables data-theme, dataset-status, access-right and frequency
+    (EU Vocabularies, https://op.europa.eu/en/web/eu-vocabularies), © European
+    Union, reused under Commission Decision 2011/833/EU on the reuse of
+    Commission documents, which licenses them under CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ ; and the English labels of
+    the ADMS status and publisher-type vocabularies (http://purl.org/adms/),
+    © European Union, ISA Open Metadata Licence v1.1
+    (LICENSES/ISA-Open-Metadata-Licence-1.1.txt). Unmodified.
   - Linked Open Vocabularies (LOV): vocabulary catalogue and vocabulary corpus.
     Paths: assets/vocab/lov-catalog.json.gz (compiled into the server binary)
     and assets/vocab/lov-redistributable.txt; in the Docker image
@@ -582,9 +639,15 @@ Bundled datasets and vocabularies:
     JSON by scripts/build_prefix_dataset.py. Credit and licence as in the LOV
     entry above: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/.
   - IFC schema names — entity names and EXPRESS-ordered attribute names
-    (src/ifc/names.rs) and the IfcSIUnitName, IfcSIPrefix and IfcUnitEnum
-    enumeration values (src/ifc/units.rs), from the IFC2X3, IFC4 and IFC4.3
-    schemas. Copyright © 1996-2020 buildingSMART International Limited. All
+    (src/ifc/names.rs), the IfcSIUnitName, IfcSIPrefix and IfcUnitEnum
+    enumeration values (src/ifc/units.rs), and the per-schema tables
+    src/ifc/schema/IFC2X3.txt, IFC4.txt and IFC4X3_ADD2.txt (entity, type and
+    attribute names, attribute order, optionality and declared types,
+    enumeration values and select members, generated by
+    scripts/gen_ifc_schema_tables.py from the IFC2X3 TC1 and IFC4 ADD2 TC1
+    EXPRESS schemas in buildingSMART's IFC4.x-development repository and the
+    IFC4X3 ADD2 schema as redistributed by web-ifc), from the IFC2X3, IFC4 and
+    IFC4.3 schemas. Copyright © 1996-2020 buildingSMART International Limited. All
     rights reserved. Used in software development under buildingSMART's
     copyright notice, which permits that use without prior written consent
     provided full attribution is given (the notice in LICENSE.md on the
@@ -595,6 +658,17 @@ Bundled datasets and vocabularies:
     reformatted as Rust string tables; buildingSMART provides the material as
     is, without warranty. Industry Foundation Class™, IFC™ and ifcXML™ are
     trademarks of buildingSMART International Limited.
+  - IDS documentation tables — src/ifc/schema/ids_datatypes.txt (the data
+    types an IDS dataType may name and their XSD base types),
+    src/ifc/schema/ids_units.txt (the measures IDS compares in SI units and
+    their IFC unit types) and src/ifc/schema/ifc2x3_type_map.txt (the IFC2X3
+    occurrence/type mapping table), extracted unchanged by
+    scripts/gen_ifc_schema_tables.py from DataTypes.md, units.md and
+    ifc2x3-occurrence-type-mapping-table.md of
+    https://github.com/buildingSMART/IDS (commit 870f9c4e) — © buildingSMART
+    International Ltd., CC BY-ND 4.0,
+    https://creativecommons.org/licenses/by-nd/4.0/; reformatted as tab-separated
+    tables.
   - EPSG parameters in frontend/src/lib/viewer/crs.ts (proj4 definitions for
     EPSG:28992, 2154, 27700, 31370 and 2056, and the ETRS89, WGS 84 and NAD83
     UTM zone families) — derived from the EPSG Geodetic Parameter Dataset,
@@ -632,6 +706,32 @@ Bundled test data:
     bug tracking only: no results are published for these tests, because a
     subset of a W3C test suite does not allow claims of performance or the use
     of the name W3C (https://www.w3.org/copyright/test-suites-licenses/).
+  - W3C SPARQL 1.2 test suite — tests/fixtures/w3c-sparql12/ (360 test
+    files: manifest.ttl, README.md and the ten directories it includes).
+    Copyright © 2010 W3C® (MIT, ERCIM, Keio), All Rights Reserved; Copyright
+    © 2015 W3C® (MIT, ERCIM, Keio, Beihang); from the W3C RDF & SPARQL
+    Working Group. From https://github.com/w3c/rdf-tests (sparql/sparql12),
+    commit 5e5da96bb06c551ae3ac57d30fec8116f7161b9b. An unmodified subset:
+    every file is byte-identical to upstream; the implementation reports and
+    the cover-page template are not included. Redistributed under the W3C
+    3-clause BSD License, https://www.w3.org/copyright/3-clause-bsd-license-2008/.
+    The original notice, disclaimer and licence text are in
+    tests/fixtures/w3c-sparql12/LICENSE.md. Used for development and bug
+    tracking only: no results are published for these tests.
+  - W3C RDF 1.2 and RDF 1.1 syntax test suites — tests/fixtures/w3c-rdf12/
+    (1901 test files: rdf/rdf12/manifest.ttl and the N-Triples, N-Quads,
+    Turtle, TriG and RDF/XML suites of rdf/rdf12 and of rdf/rdf11).
+    Copyright © 2004-2026 World Wide Web Consortium; some files carry their
+    own W3C copyright comment, kept unchanged. From
+    https://github.com/w3c/rdf-tests (rdf/rdf12, rdf/rdf11), commit
+    5e5da96bb06c551ae3ac57d30fec8116f7161b9b. An unmodified subset: every file
+    is byte-identical to upstream; the semantics (entailment) suites, the
+    implementation reports, templates and archives are not included.
+    Redistributed under the W3C 3-clause BSD License,
+    https://www.w3.org/copyright/3-clause-bsd-license-2008/. The original
+    notice, disclaimer and licence text are in
+    tests/fixtures/w3c-rdf12/LICENSE.md. Used for development and bug tracking
+    only: no results are published for these tests.
   - W3C OWL 2 test cases, approved — tests/fixtures/w3c-owl2/approved/all.rdf,
     byte-identical to https://www.w3.org/2009/11/owl-test/approved/all.rdf
     (Last-Modified 18 Nov 2009; SHA-256 in
@@ -660,6 +760,17 @@ Bundled test data:
     core and 10 sparql files; the suite's root tests/manifest.ttl is not
     included; otherwise unmodified. The notice of changes is in
     tests/fixtures/w3c-shacl/PROVENANCE.md.
+  - W3C JSON-LD 1.1 API test suite, toRdf and fromRdf sections —
+    tests/fixtures/w3c-jsonld-api/ (toRdf/, fromRdf/ and their two
+    manifests). Copyright © 2010–2026 World Wide Web Consortium. From
+    https://github.com/w3c/json-ld-api (tests/), commit
+    ffdb326121ea89b7b8280e76a5caea923834bcef. Unmodified. W3C Software and
+    Document License, https://www.w3.org/copyright/software-license-2023/; full
+    text in tests/fixtures/w3c-jsonld-api/LICENSE-W3C-Software-and-Document-2023.txt
+    and LICENSES/W3C-Software-and-Document-License-2023.txt; upstream LICENSE.md
+    kept unchanged; details in tests/fixtures/w3c-jsonld-api/PROVENANCE.md. A
+    subset of a W3C test suite, used for development and bug tracking only: no
+    results are published for it.
   - TopQuadrant SHACL API, SHACL Advanced Features tests —
     tests/fixtures/shacl-af-topquadrant/{expression,function,rules,target}/
     (11 files). TopBraid SHACL API; original commit content Copyright
@@ -684,6 +795,39 @@ Bundled test data:
     the OGC Document License Agreement
     (https://www.ogc.org/about/policies/document-license-agreement/). Test
     results are not an OGC compliance certification.
+  - SEMIC DCAT-AP 3.0.1 SHACL shapes — tests/fixtures/semic-dcat-ap-3.0.1/
+    dcat-ap-SHACL.ttl and ranges.ttl. © European Union, SEMIC, from
+    https://github.com/SEMICeu/DCAT-AP (releases/3.0.1/shacl/), commit
+    4470b8ea907b7eb9ec55ab22befd1ecd2210ff32. Licensed under CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ ; the licence text is in
+    tests/fixtures/semic-dcat-ap-3.0.1/LICENSE-CC-BY-4.0.txt, details in its
+    LICENSE.md and PROVENANCE.md. Unmodified. Test results are not a
+    certification by SEMIC or the European Commission.
+  - RML-Core test cases — tests/fixtures/rml-core/ (76 case directories and
+    manifest.ttl). RML-Core (c) by W3C Community Group on Knowledge Graph
+    Construction. From https://github.com/kg-construct/rml-core
+    (test-cases/), commit 82ab28d46803ba66a83c133f1db371a60116f84d. The
+    repository's LICENSE file is CC BY 4.0 and its README says CC BY-SA 4.0;
+    used under the stricter, CC BY-SA 4.0,
+    https://creativecommons.org/licenses/by-sa/4.0/ . Unmodified (byte-identical
+    files; each case's README.md and the suite's documentation not included).
+    Details in tests/fixtures/rml-core/LICENSE.md and PROVENANCE.md.
+  - RML-IO source test cases — tests/fixtures/rml-io/ (the 32 RMLSTC* case
+    directories and manifest.ttl). RML-IO (c) by W3C Community Group on
+    Knowledge Graph Construction. From https://github.com/kg-construct/rml-io
+    (test-cases/), commit c0c5902bc547f7867afe746625ed18d418b06cdb. Licensed
+    as the RML-Core cases above (CC BY 4.0 file, CC BY-SA 4.0 README; used
+    under CC BY-SA 4.0). Unmodified (byte-identical files; the logical-target
+    cases and each case's README.md not included). Details in
+    tests/fixtures/rml-io/LICENSE.md and PROVENANCE.md.
+  - Legacy RML test cases for CSV, JSON and XML sources —
+    tests/fixtures/rml-legacy/ (118 case directories and metadata.csv).
+    Copyright (c) 2019–present RML.io, IDLab, Ghent University – imec. From
+    https://github.com/kg-construct/rml-test-cases (test-cases/), commit
+    803dd3ec6b7185801cf19ebecaa18513baf78613. CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ . Unmodified (byte-identical
+    files; the database and SPARQL cases not included). Details in
+    tests/fixtures/rml-legacy/LICENSE.md and PROVENANCE.md.
 
 Demo content (seeded datasets):
 
@@ -753,6 +897,35 @@ Fetched at run time, not redistributed:
     no licence (RIONED's CC0 covers the data on the GWSW Server) and quotes
     definitions from NEN and EN standards, so it is downloaded by fetch.sh and
     not redistributed.
+  - DCAT-AP-NL 3 SHACL shapes (tests/fixtures/geonovum-dcat-ap-nl-3/) — by
+    Geonovum, https://github.com/Geonovum/DCAT-AP-NL30 (shapes/), commit
+    5106d18720fbe6ad56905f43e87fa9fe544104a7. The specification is published
+    under CC BY 4.0, but the repository has no licence file, so the shapes are
+    downloaded by that folder's fetch.sh for a test run (sha256-checked) and
+    not redistributed.
+
+  - W3C R2RML test cases (RDB2RDF Working Group, W3C Recommendation test
+    cases of 2012) — Copyright © 2012 W3C® (MIT, ERCIM, Keio), All Rights
+    Reserved, under W3C's test-suite licences
+    (https://www.w3.org/copyright/test-suites-licenses/). Downloaded by
+    scripts/fetch-w3c-r2rml-tests.sh, for the conformance runner
+    tests/w3c_r2rml_conformance.rs, from the copy with per-database SQL
+    scripts that the W3C Knowledge Graph Construction Community Group keeps at
+    https://github.com/kg-construct/r2rml-test-cases-support, commit
+    976098802e9bb0e297d196b26a4c2e0b95fd7644; every file is checked against
+    scripts/w3c-r2rml-tests.sha256. Not redistributed: whether the 3-clause BSD
+    option covers this suite is unconfirmed. Used for development and bug
+    tracking only; no results are published for these tests.
+
+  - buildingSMART IDS 1.0 test corpus (Documentation/ImplementersDocumentation/
+    TestCases of https://github.com/buildingSMART/IDS, commit 870f9c4e) — ©
+    buildingSMART International Ltd., licensed under CC BY-ND 4.0
+    (https://creativecommons.org/licenses/by-nd/4.0/); its IFC files derive
+    from IfcOpenShell's ifctester work. Downloaded by
+    tests/buildingsmart_ids_conformance.rs, which checks each file against
+    tests/fixtures/buildingsmart-ids/MANIFEST.sha256 (this project's list of
+    paths and digests); never committed or shipped. Results on it are
+    development results, not a buildingSMART certification.
 
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.

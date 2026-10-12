@@ -102,8 +102,7 @@ fn slugify_last_segment(iri: &str) -> String {
 /// Parse bytes as RDF quads.
 pub fn parse_quads(bytes: &[u8], format: RdfFormat) -> Result<Vec<Quad>, String> {
     let reader = BufReader::new(bytes);
-    RdfParser::from_format(format)
-        .for_reader(reader)
+    crate::jsonld::with_loader(RdfParser::from_format(format).for_reader(reader))
         .map(|r| r.map_err(|e| e.to_string()))
         .collect::<Result<Vec<Quad>, String>>()
 }

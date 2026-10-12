@@ -10,7 +10,10 @@ Open Triplestore instance and is seeded automatically on a fresh install.
 ## 1. The dataset-structure SHACL model
 
 Every dataset has a metadata graph at `urn:system:metadata:dataset:{id}` — a
-`dcat:Dataset` description (DCAT 2 / VoID / ADMS). The built-in shapes graph
+`dcat:Dataset` description (DCAT 3 / VoID / ADMS), built through the same
+triple builder as the public catalogue: an `adms_status` code becomes its EU
+dataset-status IRI, temporal coverage and update frequency are described, and a
+malformed IRI is dropped instead of breaking the whole graph. The built-in shapes graph
 `urn:system:shapes:dataset-structure` (visible in **SHACL Studio → Shapes
 Library** as *"Dataset structure (governance)"*) asserts the contract a dataset
 must satisfy:

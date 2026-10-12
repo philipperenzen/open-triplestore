@@ -74,6 +74,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "LLM", description = "Natural-language → SPARQL assistance and feedback"),
         (name = "Linked Data", description = "IRI dereferencing and VoID/DCAT discovery"),
         (name = "LDP", description = "Linked Data Platform container and resource interaction"),
+        (name = "Property States", description = "Time-evolving properties per the Ontology for Property Management (OPM): states with history, deletion, reliability, canonical OPM exchange and the OPM profile shapes"),
         (name = "Geo", description = "Map and 3D-viewer feeds, geo capability probes and 3D Tiles"),
         (name = "OGC API Features", description = "OGC API – Features Part 1 (Core): each readable dataset with geometry is a collection of GeoJSON features"),
         (name = "OIDC Provider", description = "The built-in OpenID Connect provider for client apps: discovery, keys, token, userinfo and logout"),
@@ -177,6 +178,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::shacl::report::ValidationReport,
             crate::shacl::report::RunMetrics,
             crate::shacl::report::ValidationResult,
+            crate::shacl::report::ResultAnnotationValue,
             crate::shacl::report::Severity,
             // Route-level types
             super::routes::SparqlQueryParams,
@@ -471,15 +473,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     // ═══════════════════════════════════════════════════════════════════════
     mount(paths, "/sparql", vec![
         (M::Get, o("SPARQL", "SPARQL query (GET)",
-            "Execute a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE). The result format is content-negotiated via the Accept header.",
-            vec![qp("query", true, "SPARQL query string"),
-                 qp("default-graph-uri", false, "Default graph IRI(s)"),
-                 qp("named-graph-uri", false, "Named graph IRI(s)"),
+            "Execute a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE). The result format is content-negotiated via the Accept header. Without `query`, returns the SPARQL 1.1 Service Description (Turtle, scoped to the graphs the caller may read), as SPARQL 1.1 Service Description §2 recommends.",
+            vec![qp("query", false, "SPARQL query string; omit it for the service description"),
+                 qp("default-graph-uri", false, "A graph of the query's default graph (repeatable). With named-graph-uri it replaces the query's FROM / FROM NAMED; graphs the caller may not read are dropped"),
+                 qp("named-graph-uri", false, "A named graph of the query's dataset (repeatable)"),
                  qp("entailment", false, "Entailment regime: rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl")],
-            vec![("200", "Query results in the negotiated format"), ("400", "Invalid query syntax")], false)),
+            vec![("200", "Query results in the negotiated format, or the service description (text/turtle) without `query`"), ("400", "Invalid query syntax")], false)),
         (M::Post, o("SPARQL", "SPARQL query or update (POST)",
-            "Content-Type selects the operation:\n- `application/sparql-query` — query in body\n- `application/sparql-update` — update in body (requires authentication)\n- `application/x-www-form-urlencoded` — `query` or `update` form field",
-            vec![],
+            "Content-Type selects the operation:\n- `application/sparql-query` — query in body\n- `application/sparql-update` — update in body (requires authentication)\n- `application/x-www-form-urlencoded` — `query` or `update` form field\n\nThe dataset parameters ride in the URL, or in the form body for a form-encoded request.",
+            vec![qp("default-graph-uri", false, "Query: a graph of the default graph (repeatable); replaces the query's FROM / FROM NAMED"),
+                 qp("named-graph-uri", false, "Query: a named graph of the dataset (repeatable)"),
+                 qp("using-graph-uri", false, "Update: a graph of the WHERE clause's default graph (repeatable); 400 with an operation that has its own USING, USING NAMED or WITH"),
+                 qp("using-named-graph-uri", false, "Update: a named graph of the WHERE clause's dataset (repeatable)")],
             vec![("200", "Query results"), ("204", "Update executed"), ("401", "Authentication required for updates"), ("403", "The target graph holds a model version whose licence allows no altered copies")], false)),
     ]);
     mount(paths, "/sparql/batch", vec![
@@ -587,7 +592,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Management",
                 "Health check",
-                "Liveness probe with status and version.",
+                "Liveness probe with status, version, store counters and `capabilities` (the standards this build serves).",
                 vec![],
                 vec![("200", "Health status JSON")],
                 false,
@@ -1067,72 +1072,37 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple.",
             vec![], vec![("200", "PROV-O (text/turtle)"), ("404", "Dataset not found or not visible")], false)),
     ]);
-    mount(paths, "/api/datasets/:dataset_id/properties/state", vec![
-        (M::Post, ob("Datasets", "Record a property state",
-            "Record a new value of a time-evolving property as an `opm:PropertyState` in the dataset's states graph, and set it as the current value in the data graph. Needs write access to the dataset. See docs/datasets.md (Time-evolving properties).",
-            vec![], json_body(ObjectBuilder::new()
-                .property("entity", ObjectBuilder::new().schema_type(Type::String).description(Some("Subject IRI.")))
-                .property("property", ObjectBuilder::new().schema_type(Type::String).description(Some("Property IRI.")))
-                .property("value", ObjectBuilder::new().schema_type(Type::String))
-                .property("datatype", ObjectBuilder::new().schema_type(Type::String).description(Some("XSD datatype (`xsd:decimal` or a full IRI), or `iri` for an IRI value.")))
-                .property("language", ObjectBuilder::new().schema_type(Type::String))
-                .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph holding the current value; defaults to the dataset's instances graph.")))
-                .property("valid_from", ObjectBuilder::new().schema_type(Type::String).description(Some("When the value became true; default now.")))
-                .property("reliability", ObjectBuilder::new().schema_type(Type::String).description(Some("`assumed` | `confirmed` | `derived`.")))
-                .property("note", ObjectBuilder::new().schema_type(Type::String))
-                .required("entity").required("property").required("value"),
-                json!({"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"})),
-            vec![("200", "The recorded state"), ("400", "Invalid body"), ("401", "Authentication required"), ("403", "Write access required")], true)),
-    ]);
-    mount(
-        paths,
-        "/api/datasets/:dataset_id/properties/history",
-        vec![(
-            M::Get,
-            o(
-                "Datasets",
-                "Property history",
-                "Every recorded state of one property of one entity, newest first.",
-                vec![
-                    qp("entity", true, "Subject IRI"),
-                    qp("property", true, "Property IRI"),
-                ],
-                vec![
-                    ("200", "Array of states"),
-                    ("404", "Dataset not found or not visible"),
-                ],
-                false,
-            ),
-        )],
-    );
-    mount(
-        paths,
-        "/api/datasets/:dataset_id/properties/as-of",
-        vec![(
-            M::Get,
-            o(
-                "Datasets",
-                "Property value as of a time",
-                "The state of one property of one entity that was valid at `at`.",
-                vec![
-                    qp("entity", true, "Subject IRI"),
-                    qp("property", true, "Property IRI"),
-                    qp("at", true, "Point in time (xsd:date or xsd:dateTime)"),
-                ],
-                vec![
-                    ("200", "The state valid at that time"),
-                    ("400", "`at` missing or not a date/dateTime"),
-                    ("404", "Dataset not visible, or no state valid at that time"),
-                ],
-                false,
-            ),
-        )],
-    );
+    // A container archive as the request body.
+    fn zip_body() -> RequestBody {
+        RequestBodyBuilder::new()
+            .required(Some(Required::True))
+            .description(Some("The container archive (ZIP; an `.icdd` file is one)."))
+            .content(
+                "application/zip",
+                ContentBuilder::new()
+                    .schema(Some(ObjectBuilder::new().schema_type(Type::String).format(
+                        Some(utoipa::openapi::schema::SchemaFormat::KnownFormat(
+                            utoipa::openapi::schema::KnownFormat::Binary,
+                        )),
+                    )))
+                    .build(),
+            )
+            .build()
+    }
     mount(paths, "/api/datasets/:dataset_id/containers/import", vec![
-        (M::Post, o("Import", "Import a linked-document container",
-            "Import an ISO 21597 ICDD container (`?profile=icdd`, body: the ZIP). Payload documents become assets of the dataset, RDF payloads role-typed graphs, and the index a catalogue graph. Needs write access and the `asset-archive` feature. See docs/containers.md.",
-            vec![qp("profile", false, "Container profile; `icdd` (default)")],
-            vec![("200", "Import summary"), ("400", "Not a valid container"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+        (M::Post, ob("Import", "Import a linked-document container",
+            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_MB` (512 MB). See docs/containers.md.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected)"),
+                 qp("strict", false, "`true`: refuse (422) a container the validator finds a violation in; nothing is stored")],
+            zip_body(),
+            vec![("201", "Import summary with the validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found, or unknown profile"), ("422", "No profile recognises the archive, the index is unreadable or has several container descriptions, or (strict=true) the container is not conformant — `{error, validation}`"), ("503", "The container carries documents but no object storage is configured")], true)),
+    ]);
+    mount(paths, "/api/containers/validate", vec![
+        (M::Post, ob("Import", "Validate a linked-document container",
+            "Validate an archive against a container profile without storing anything. For ICDD: Open Triplestore's own SHACL shapes for the Part 1 index and linksets (container description, documents, parties, links, link elements, identifiers — derived from the ontology restrictions, not ISO's annexes) plus structural checks (the root `Index.rdf`, the three folders, `Container.rdf` / `Linkset.rdf` in `Ontology resources/`, every listed file present at its path, duplicate names, path traversal, checksums, link elements naming listed documents, and no extension of the ICDD classes in a Part 1 container). Returns `{profile, conforms, violations, warnings, findings[]}`; `conforms` means no violation.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected, else `icdd`)")],
+            zip_body(),
+            vec![("200", "Validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("404", "Unknown profile")], true)),
     ]);
     mount(
         paths,
@@ -1142,11 +1112,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Import",
                 "Export as a linked-document container",
-                "The dataset as an ICDD container (ZIP): its readable graphs, assets and an index.",
+                "The dataset as an ICDD container (`<dataset>.icdd`, a ZIP): `Index.rdf` (RDF/XML, `ICDD-Part1-Container`) with typed parties, every document's `ct:name`, `ct:filename` relative to `Payload documents/` (asset folders kept, names made unique), `ct:filetype`, `ct:format` and `ct:belongsToContainer`; linkset graphs as RDF/XML under `Payload triples/`; other data graphs as RDF documents under `Payload documents/`; model graphs under `Ontology resources/`, plus ISO's `Container.rdf` and `Linkset.rdf` when the operator sets `OTS_ICDD_ONTOLOGY_DIR`. Documents an earlier import brought in keep their IRIs, names, versions, alternatives, parties and kinds. Private graphs and non-public assets only reach callers who may see them. The export runs the validator on itself: `X-Container-Conforms`, `X-Container-Validation` (`violations=…; warnings=…`) and `X-Container-Findings` (finding codes; `ontology-resource-missing` when the ISO files are not configured — not Part 1-conformant).",
                 vec![qp("profile", false, "Container profile; `icdd` (default)")],
                 vec![
                     ("200", "The container (application/zip)"),
-                    ("404", "Dataset not found or not visible"),
+                    ("404", "Dataset not found or not visible, or unknown profile"),
                 ],
                 false,
             ),
@@ -1848,11 +1818,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Get shapes graph",
-                    "The dataset's SHACL shapes graph in Turtle. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
-                    vec![],
+                    "The dataset's SHACL shapes graph in Turtle, or with `?format=shaclc` / `Accept: text/shaclc` in the W3C SHACL Compact Syntax: lossless, or a 422 whose `losses` list names every triple (subject, predicate, object, reason) the syntax cannot carry. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
+                    vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle"), qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
                     vec![
-                        ("200", "Shapes graph (text/turtle)"),
+                        ("200", "Shapes graph (text/turtle or text/shaclc)"),
+                        ("400", "SHACL-C requested for a dataset that resolves to several shapes graphs"),
                         ("401", "Authentication required"),
+                        ("422", "SHACL-C cannot express the whole graph (`losses` listed)"),
                         ("404", "No shapes graph, or none the caller may read"),
                     ],
                     true,
@@ -1863,12 +1835,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
-                    vec![qp(
-                        "lenient",
-                        false,
-                        "SHACL-C only: `true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
-                    )],
+                    "Replace the dataset's SHACL shapes graph (Turtle, or the W3C SHACL Compact Syntax with Content-Type: text/shaclc). SHACL-C is parsed strictly: input the grammar does not allow is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
+                    vec![qp("dialect", false, "SHACL-C grammar: `w3c` (default, the W3C SHACL Compact Syntax) or `legacy` (the dialect of 0.7 and earlier; deprecated, logged, accepted for one more release)."), qp("lenient", false, "With `dialect=legacy` only: `true` or `1` ignores unrecognised input instead of failing on it. Refused (400) for the W3C grammar, which is always strict.")],
                     vec![
                         ("204", "Shapes graph updated"),
                         ("400", "SHACL-C parse error (position named)"),
@@ -2180,11 +2148,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Deleted"), ("403", "Not manageable"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/turtle", vec![
-        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to SHACL Compact Syntax instead.",
-            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle")],
-            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found")], true)),
-        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
-            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters")],
+        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to the W3C SHACL Compact Syntax instead: lossless, or a 422 listing what the syntax cannot carry.",
+            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle"), qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
+            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")], true)),
+        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or the W3C SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored; `?dialect=legacy` for the deprecated 0.7 dialect). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
+            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters"), qp("dialect", false, "SHACL-C grammar: `w3c` (default) or `legacy` (deprecated 0.7 dialect)")],
             vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
@@ -2412,19 +2380,21 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Validate dataset (ShEx)",
-                "Validate the dataset against a ShEx schema.",
+                "Validate the dataset's graphs the caller may read against a ShEx 2.1 schema. Body: `schema` (ShExC or ShExJ text, or a ShExJ object), optional `schema_format` (`shexc`|`shexj`), `base`, and `shape_map` (ShapeMap language string, `[{node, shape}]`, or `{shape: [nodes]}`; absent: every shape on the nodes using its predicates). `IMPORT` reads ShExR from readable named graphs, never the network.",
                 vec![],
                 vec![
                     ("200", "ShEx validation result"),
+                    ("400", "Invalid schema, import or shape map"),
                     ("401", "Authentication required"),
+                    ("422", "Validation stopped: references nest deeper than the engine allows"),
                 ],
                 true,
             ),
         )],
     );
     mount(paths, "/api/shex/validate", vec![
-        (M::Post, o("Validation", "Validate (ShEx, inline)", "Validate inline data against an inline ShEx schema. Body carries data, schema and a shape map.",
-            vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema or data")], false)),
+        (M::Post, o("Validation", "Validate (ShEx, inline)", "Validate the graphs the caller may read (as `/sparql` would) against a ShEx 2.1 schema. Body: `schema` (ShExC or ShExJ text, or a ShExJ object), optional `schema_format` (`shexc`|`shexj`), `base`, and `shape_map` (ShapeMap language string, `[{node, shape}]`, or `{shape: [nodes]}`; absent: every shape on the nodes using its predicates). `IMPORT` reads ShExR from readable named graphs, never the network.",
+            vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema, import or shape map"), ("422", "Validation stopped: references nest deeper than the engine allows")], false)),
     ]);
 
     // Constraint-specification import/export (buildingSMART IDS today).
@@ -2616,6 +2586,393 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Property states (OPM)
+    // ═══════════════════════════════════════════════════════════════════════
+    let ps_errors_write = || {
+        vec![
+            ("400", "Not an IRI, an unknown reliability, a bad time or language tag, or a graph that is not one of the dataset's data graphs"),
+            ("401", "Authentication required"),
+            ("403", "Write access required"),
+            ("404", "Dataset not found"),
+        ]
+    };
+    let ps_lifecycle_body = |example: Value| {
+        json_body(
+            ObjectBuilder::new()
+                .property(
+                    "entity",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("The item (feature of interest) IRI.")),
+                )
+                .property(
+                    "property",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("The property kind IRI.")),
+                )
+                .property(
+                    "valid_from",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("RFC 3339 or YYYY-MM-DD; default now.")),
+                )
+                .property("note", ObjectBuilder::new().schema_type(Type::String))
+                .property(
+                    "documentation",
+                    ArrayBuilder::new()
+                        .items(ObjectBuilder::new().schema_type(Type::String))
+                        .description(Some("`opm:documentation` IRIs.")),
+                )
+                .property(
+                    "graph",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some(
+                            "The data graph of the plain value (default: where the value was).",
+                        )),
+                )
+                .required("entity")
+                .required("property"),
+            example,
+        )
+    };
+    let ps_select = || {
+        vec![
+            qp("entity", true, "Item (feature of interest) IRI"),
+            qp("property", true, "Property kind IRI"),
+        ]
+    };
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "List properties and their states",
+                "Every property of the dataset — of one item (`entity`), of one kind (`property`), or both — with its latest state (`history=latest`, default), every state (`history=full`, newest first) or the state valid at a time (`at`; with `entity` this is the item's snapshot). Reads the server's own states and canonical OPM (`<item> <kind> <property>` with `opm:hasPropertyState`) loaded into any graph of the dataset the caller may read; a state whose value lives in a graph withheld from the caller is left out. Each entry is `{entity, property, property_iri, states}`; a state is `{state, value, datatype, language, valid_from, recorded_at, attributed_to, reliability, note, current, deleted, documentation, canonical}`, plus `expression`, `derived_from`, `calculation` and `revision_of` when set. A deleted state has `value: null`.",
+                vec![
+                    qp("entity", false, "Only this item's properties"),
+                    qp("property", false, "Only properties of this kind"),
+                    qp("reliability", false, "assumed | confirmed | derived | required"),
+                    qp("deleted", false, "false (default for latest and `at`) | true (only deleted) | any (default for `history=full`)"),
+                    qp("derived", false, "true: only derived states (opm:Derived or with an expression) | false: none | any (default)"),
+                    qp("history", false, "latest (default) | full"),
+                    qp("at", false, "Snapshot time (RFC 3339 or YYYY-MM-DD)"),
+                    qp("limit", false, "Properties per page, 1–10000 (default 1000)"),
+                    qp("offset", false, "Properties to skip (default 0)"),
+                ],
+                vec![
+                    ("200", "`{dataset_id, history, at, total, offset, limit, properties}`"),
+                    ("400", "Bad filter value or time"),
+                    ("404", "Dataset not found or not visible"),
+                    ("422", "The read matched too many rows; narrow it with `entity` or `property`"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/state",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Set a property state",
+                "Record a new current `opm:PropertyState` of (`entity`, `property`) in the dataset's states graph (`urn:ots:property-states:<id>`, role `provenance`, registered on first use); the previous current state becomes `opm:OutdatedPropertyState` and the data graph's plain value is replaced. The value is typed from the string (boolean, integer, decimal, else string) unless `datatype` (an XSD type or `iri`) or `language` says otherwise. One commit.",
+                vec![],
+                json_body(
+                    ObjectBuilder::new()
+                        .property("entity", ObjectBuilder::new().schema_type(Type::String))
+                        .property("property", ObjectBuilder::new().schema_type(Type::String))
+                        .property("value", ObjectBuilder::new().schema_type(Type::String))
+                        .property("datatype", ObjectBuilder::new().schema_type(Type::String).description(Some("`xsd:…`, a datatype IRI, or `iri`.")))
+                        .property("language", ObjectBuilder::new().schema_type(Type::String))
+                        .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph for the plain value (default: where the current value is, else the instances graph).")))
+                        .property("valid_from", ObjectBuilder::new().schema_type(Type::String))
+                        .property("reliability", ObjectBuilder::new().schema_type(Type::String).description(Some("assumed | confirmed | derived | required")))
+                        .property("note", ObjectBuilder::new().schema_type(Type::String))
+                        .property("documentation", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)).description(Some("`opm:documentation` IRIs.")))
+                        .required("entity")
+                        .required("property")
+                        .required("value"),
+                    json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "documentation": ["https://example.org/docs/inspection-2026"] }),
+                ),
+                {
+                    let mut r = vec![("201", "`{state, property_iri, value, valid_from, recorded_at, data_graph, states_graph, reliability, documentation}`")];
+                    r.extend(ps_errors_write());
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/delete",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Delete a property (opm:Deleted)",
+                "OPM deletes a property without removing it: a new current state typed `opm:Deleted`, with no value, ends the chain and the plain triple leaves the data graph. History and as-of report it; restore undoes it.",
+                vec![],
+                ps_lifecycle_body(json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "note": "superseded by the new design" })),
+                {
+                    let mut r = vec![("201", "`{state, property_iri, deleted: true, valid_from, recorded_at, data_graph}`"), ("409", "Already deleted")];
+                    r.extend(ps_errors_write());
+                    r.push(("404", "Dataset not found, or nothing to delete"));
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/restore",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Restore a deleted property",
+                "A new current state carrying the value, reliability and documentation of the last state before the deletion (`prov:wasRevisionOf` it), and the plain triple back in the data graph.",
+                vec![],
+                ps_lifecycle_body(json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating" })),
+                {
+                    let mut r = vec![("201", "`{state, restored_from, value, datatype, language, valid_from, recorded_at, data_graph}`"), ("409", "Not deleted, or no earlier value")];
+                    r.extend(ps_errors_write());
+                    r.push(("404", "Dataset not found, or the property has no recorded state"));
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/history",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Property history",
+                "Every state of (`entity`, `property`), newest first by validity then recording time, including deletions (`deleted: true`, `value: null`) and canonical OPM states found in the dataset's graphs.",
+                ps_select(),
+                vec![("200", "`{entity, property, property_iri, states}`"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/as-of",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Property state at a time",
+                "The state of (`entity`, `property`) valid at `at`: the latest `ots:validFrom` (for canonical data without one, `prov:generatedAtTime`) not after it. A property deleted by then answers with its `opm:Deleted` state.",
+                {
+                    let mut v = ps_select();
+                    v.push(qp("at", true, "RFC 3339 or YYYY-MM-DD"));
+                    v
+                },
+                vec![("200", "`{entity, property, at, state}`"), ("400", "Missing or malformed `at`"), ("404", "No state valid at that time, or dataset not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/export",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Export as canonical OPM",
+                "The dataset's property states as canonical OPM — `<item> <kind> <property>`, `<property> a opm:Property ; opm:hasPropertyState <state>`, each state with `schema:value`, `prov:generatedAtTime`, `prov:wasAttributedTo`, its OPM classes, `opm:documentation`, notes, derivations and `ots:validFrom` — in Turtle (default), N-Triples, JSON-LD or RDF/XML by `Accept`. The server's own `ots:propertyOf` bookkeeping is left out. States whose value lives in a graph withheld from the caller are omitted.",
+                vec![],
+                vec![("200", "OPM document"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/import",
+        vec![(
+            M::Post,
+            o(
+                "Property States",
+                "Import canonical OPM",
+                "Body: RDF (Turtle by default; N-Triples, TriG, N-Quads, RDF/XML or JSON-LD by `Content-Type`; named graphs are merged), at most 500 000 triples. Every `<item> <kind> <property>` whose property has `opm:hasPropertyState` (and the server's own `ots:propertyOf` form) is read. States keep their IRIs (a blank node gets one); a state already in the dataset is skipped; a state without `prov:generatedAtTime`, or without a value unless it is `opm:Deleted`, is rejected and listed. Per property the newest-recorded state becomes current and its value the plain triple in the data graph. One commit.",
+                vec![qp("graph", false, "Data graph for the current values (default: the dataset's instances graph)")],
+                {
+                    let mut r = vec![
+                        ("200", "`{properties, imported_states, skipped_duplicates, rejected_count, rejected, data_graph, states_graph}`"),
+                        ("413", "More than 500 000 triples"),
+                        ("415", "Not an RDF media type"),
+                        ("422", "No OPM property states in the body"),
+                    ];
+                    r.extend(ps_errors_write());
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/validate",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Validate against the OPM profile",
+                "Run the OPM profile shapes (`GET /api/properties/profile`) over the dataset's states graph, in a scratch store: one current state per property, current/outdated and assumed/confirmed disjoint, a `prov:generatedAtTime` on every state, a value on every state that is not deleted, the structure of derived states and calculations.",
+                vec![],
+                vec![("200", "`{dataset_id, states_graph, report}` — a SHACL validation report"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    let calc_errors = |extra: Vec<(&'static str, &'static str)>| {
+        let mut r = extra;
+        r.extend([
+            ("401", "Authentication required"),
+            ("403", "Write access required"),
+            ("404", "Dataset or calculation not found"),
+        ]);
+        r
+    };
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Property States",
+                    "List calculations",
+                    "The dataset's `opm:Calculation`s, each re-validated as it is loaded: `{calculation, id, label, inferred_property, argument_paths, arguments, expression, foi_restriction, path_restriction, graph, valid}`, plus `error` when a stored definition no longer passes the allow-list.",
+                    vec![],
+                    vec![("200", "`{dataset_id, calculations}`"), ("404", "Dataset not found or not visible")],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                ob(
+                    "Property States",
+                    "Define a calculation",
+                    "Store an `opm:Calculation` in the states graph. Each argument path is triple patterns and property paths from `?foi` binding one argument variable as the object of a last step with a plain predicate; the path restriction may use `?foi` and blank nodes only; the expression may use arithmetic, comparisons, `&&` `||` `!`, `IF`, `COALESCE`, `BOUND`, `IN`, `ABS`, `CEIL`, `FLOOR`, `ROUND`, `isNumeric`, `isLiteral`, `STR`, `DATATYPE` and XSD numeric/boolean/string casts over the arguments. `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, `OPTIONAL`, `UNION`, `VALUES`, `BIND`, subqueries, aggregates and other functions are refused. Prefixed names resolve with `prefixes`; the definition is stored with full IRIs. Nothing runs until POST or PUT on the calculation.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("label", ObjectBuilder::new().schema_type(Type::String))
+                            .property("inferred_property", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:inferredProperty`: the property kind derived.")))
+                            .property("argument_paths", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)).description(Some("`opm:argumentPaths`, e.g. `?foi ex:width ?w`.")))
+                            .property("expression", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:expression` over the arguments, e.g. `?w * ?h`.")))
+                            .property("prefixes", ObjectBuilder::new().description(Some("Prefix → namespace map for the paths, restriction and expression.")))
+                            .property("foi_restriction", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:foiRestriction`: the one feature of interest to derive for.")))
+                            .property("path_restriction", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:pathRestriction`: a pattern every feature of interest must match, e.g. `?foi a ex:Window`.")))
+                            .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph for derived values (default: where the property's value is, else the instances graph).")))
+                            .required("inferred_property")
+                            .required("argument_paths")
+                            .required("expression"),
+                        json!({ "label": "Window area", "inferred_property": "ex:area", "argument_paths": ["?foi ex:width ?w", "?foi ex:height ?h"], "expression": "?w * ?h", "path_restriction": "?foi a ex:Window", "prefixes": { "ex": "https://example.org/" } }),
+                    ),
+                    calc_errors(vec![("201", "The stored definition, canonical"), ("400", "A path, restriction or expression outside the allow-list, or a bad IRI")]),
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations/:calc",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Property States",
+                    "Get a calculation",
+                    "One calculation; `calc` is its id or its full IRI, percent-encoded.",
+                    vec![],
+                    vec![("200", "The definition"), ("404", "Dataset or calculation not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Property States",
+                    "Run a calculation (OPM POST)",
+                    "Derive the inferred property for every feature of interest that has all arguments and does not have the property yet (as a state or a plain value). Matching runs over the dataset's own data graphs only, capped at `OTS_OPM_CALC_MAX_ROWS` rows (default 10 000; more is a 422, nothing derived) and the query timeout; arguments must be current, not deleted and numeric XSD values; the expression is evaluated in an empty scratch store. Each derived state is `opm:Derived` with the `opm:expression` and `prov:wasDerivedFrom` an `rdf:Seq` of the argument states; one commit per run.",
+                    vec![],
+                    calc_errors(vec![("200", "`{calculation, mode, derived_count, derived, skipped_count, skipped}`"), ("422", "The stored definition is invalid, the match exceeds the row cap or timeout, or the expression cannot be evaluated")]),
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Property States",
+                    "Recompute a calculation (OPM PUT)",
+                    "Recompute every current derived state of this calculation one of whose argument states is no longer current. Same rules and report as POST.",
+                    vec![],
+                    calc_errors(vec![("200", "`{calculation, mode, derived_count, derived, skipped_count, skipped}`"), ("422", "The stored definition is invalid, or the run hit a cap")]),
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Property States",
+                    "Remove a calculation",
+                    "Remove the definition from the states graph. The states it derived stay.",
+                    vec![],
+                    calc_errors(vec![("204", "Removed")]),
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations/:calc/outdated",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Outdated derived states",
+                "The current derived states of this calculation one of whose argument states has since been outdated (what PUT would recompute): `{foi, state, outdated_arguments}`.",
+                vec![],
+                vec![("200", "`{calculation, outdated_count, outdated}`"), ("404", "Dataset or calculation not found"), ("422", "The stored definition is invalid")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/properties/profile",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "OPM profile shapes",
+                "The SHACL shapes of the OPM profile as Turtle, for use as a dataset shapes graph. Also shipped as the `opm-profile` seed bundle.",
+                vec![],
+                vec![("200", "Shapes graph (text/turtle)")],
+                false,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
     // SHACL-C
     // ═══════════════════════════════════════════════════════════════════════
     mount(
@@ -2626,12 +2983,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Parse SHACL Compact Syntax",
-                "Parse SHACL-C text and return the equivalent SHACL RDF. Strict by default: unrecognised input is a 400 naming its line and column.",
-                vec![qp(
-                    "lenient",
-                    false,
-                    "`true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
-                )],
+                "Parse W3C SHACL Compact Syntax (the SHACL Community Group report's grammar and production rules) and return the equivalent SHACL RDF. Strict: input the grammar does not allow is a 400 naming its line and column.",
+                vec![qp("dialect", false, "SHACL-C grammar: `w3c` (default, the W3C SHACL Compact Syntax) or `legacy` (the dialect of 0.7 and earlier; deprecated, logged, accepted for one more release)."), qp("lenient", false, "With `dialect=legacy` only: `true` or `1` ignores unrecognised input instead of failing on it. Refused (400) for the W3C grammar, which is always strict."), qp("base", false, "Initial base IRI (the report's optional base URI); a `BASE` directive replaces it. Without either, no `owl:Ontology` triple is produced and relative IRIs are an error.")],
                 vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)"), ("401", "Authentication required")],
                 true,
             ),
@@ -2645,9 +2998,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Serialize to SHACL Compact Syntax",
-                "Serialise a SHACL RDF graph into SHACL-C text.",
-                vec![],
-                vec![("200", "SHACL-C text"), ("400", "Unsupported shapes")],
+                "Serialise a stored shapes graph (body: its IRI, or `{\"shapesGraphIri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
+                vec![qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
+                vec![("200", "SHACL-C text"), ("400", "Invalid body"), ("403", "No read access to that graph"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")],
                 false,
             ),
         )],
@@ -2688,7 +3041,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/api/reasoning/materialize", vec![
         (M::Post, o("Reasoning", "Materialise entailments",
-            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?}` (`eq_ref`, `owl2-rl` only, default false: also write `x owl:sameAs x` for every term): without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for `owl2-rl`/`owl2-el`/`owl2-ql`/`owl2-dl`, `null` for a regime without inconsistency rules); `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none; `owl2-el` adds `ignored` — `[{construct, count, example}]`, the axioms outside the EL profile it left out — when there are any; an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
+            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?}` (`eq_ref`, `owl2-rl` only, default false: also write `x owl:sameAs x` for every term): without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for every regime: `rdfs` checks datatype clashes, the OWL regimes their inconsistency rules); `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none; `owl2-el` adds `ignored` — `[{construct, count, example}]`, the axioms outside the EL profile it left out — when there are any; an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
             vec![qp("async", false, "`true`: run as a background job and answer 202 with its id")],
             vec![("200", "Reasoning report"), ("202", "Queued as a job: `{job_id, status, location}`"), ("400", "Unknown regime"), ("401", "Authentication required"), ("403", "No write access to the target graph or no read access to a source graph"), ("404", "Dataset not found"), ("413", "More triples than the DL backend accepts (`OTS_REASONER_MAX_TRIPLES`)"), ("422", "The ontology is inconsistent — `{consistent: false, rule, detail, regime, target_graph}`, the derived triples stay in the target graph — or the run did not reach its fixed point within 500 iterations (`{converged: false, iterations, regime, target_graph}`), or (`owl2-dl`) the input is not in OWL 2 DL (`{in_profile: false, violations: [{rule, detail}]}`) or the identity policy cannot be honoured"), ("502", "The DL backend failed"), ("503", "`owl2-dl`: no DL backend configured, or it cannot be reached"), ("504", "The DL backend did not answer in time; the result is unknown (`{result: \"unknown\"}`)")], true)),
     ]);
@@ -2747,19 +3100,34 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Execute SWRL rules",
-                "Run SWRL rules (format `text` or OWL/XML `xml`) to a fixed point and \
-                 materialise their consequences into `target_graph` (an absolute IRI; \
-                 default graph when omitted). Every rule is checked before any runs: an \
-                 element the OWL/XML reader does not understand, an unsafe rule, a \
-                 built-in in the head or an unsupported built-in refuses the request \
-                 and nothing is written. The report carries `converged` and \
-                 `stop_reason` (`fixpoint`, `max_iterations` or `timeout`).",
+                "Run SWRL rules to a fixed point and materialise their consequences. \
+                 `format`: `text`, `xml`/`owlxml` (OWL/XML), `rdf` (SWRL RDF syntax in \
+                 `rdf_format`, default turtle), `functional` (OWL 2 functional syntax), \
+                 `swrlapi` (human-readable; `prefixes` then the server's registry) or \
+                 `ruleml` (SWRL §4 XML). Rule bodies read the default graph, or a \
+                 `dataset`'s reasoning sources and `source_graphs`, read-checked like \
+                 /api/reasoning/materialize. Derived triples go to `target_graph` (an \
+                 absolute IRI), else the dataset's inference graph (its writers only), \
+                 else the default graph. All SWRL §8 built-ins are evaluated natively and \
+                 may bind variables; data-range atoms are evaluated natively; class-expression \
+                 atoms need `regime` (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl), which runs \
+                 the rules and that regime to one joint fixed point. Every rule is checked \
+                 before any runs: an element a reader does not understand, an unsafe rule, \
+                 a built-in in the head, an unknown built-in, a built-in pattern with \
+                 infinitely many solutions or a class expression without a regime refuses \
+                 the request and nothing is written. The report carries `converged`, \
+                 `stop_reason` (`fixpoint`, `max_iterations` or `timeout`), `target_graph` \
+                 and `sources`; with a regime also `rounds` and `regime_triples`.",
                 vec![],
                 vec![
                     ("200", "Rule execution report"),
-                    ("400", "Rules, format or target graph refused"),
+                    ("400", "Rules, format, scope or target graph refused"),
                     ("401", "Authentication required"),
-                    ("403", "No write access to the target graph"),
+                    (
+                        "403",
+                        "No write access to the target, or no read access to a source graph",
+                    ),
+                    ("404", "Dataset not found"),
                     ("503", "Server overloaded or execution timed out"),
                 ],
                 true,
@@ -2806,7 +3174,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Mappings",
                 "Execute RML mapping",
-                "Run the stored RML mapping against its sources and load the resulting triples.",
+                "Run the stored RML mapping against its source files — multipart parts named \
+                 as the logical sources name them, decompressed and decoded as the mapping \
+                 declares (rml:compression, rml:encoding) — and load the resulting triples.",
                 vec![
                     qp(
                         "preview",
@@ -4377,6 +4747,40 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         true,
                     ),
                 ),
+                (
+                    M::Delete,
+                    o(
+                        tag,
+                        &format!("Delete version ({tag})"),
+                        "Delete one version: its graphs and its registry record, in one \
+                         transaction (a graph another version record also names is kept). \
+                         Admins, and publishers who may write the entry. A published version \
+                         (or one with a published subgraph) answers 409 unless `force=true`. \
+                         While datasets depend on the version (pinned to it, floating on it as \
+                         the latest published one, or a dataset version that is not deprecated \
+                         records it) the answer is 409 whatever `force` says, with `reasons`: \
+                         each `{code, message}`, the dependents one listing the datasets the \
+                         caller may read and counting the rest (`hidden_datasets`); \
+                         `force_allowed` says whether repeating with `force=true` would \
+                         succeed. Recorded on the entry's commit log and in the audit log.",
+                        vec![qp(
+                            "force",
+                            false,
+                            "Delete a published version too (never overrides dependents)",
+                        )],
+                        vec![
+                            ("200", "Deleted: graphs dropped and kept, triples removed"),
+                            ("401", "Authentication required"),
+                            (
+                                "403",
+                                "Not an admin, or a publisher who may write the entry",
+                            ),
+                            ("404", "Entry or version not found"),
+                            ("409", "Published (without force) or datasets depend on it"),
+                        ],
+                        true,
+                    ),
+                ),
             ],
         );
         mount(
@@ -4555,9 +4959,19 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "Logout",
-                "Revoke the supplied refresh token.",
+                "Revoke the supplied refresh token (body `refresh_token`, else the cookie). \
+                 For a SAML session the whole refresh-token family is revoked, and when the \
+                 IdP has a Single Logout endpoint the answer carries `saml_logout_url`, \
+                 where the browser goes next. Issued access tokens stay valid until they \
+                 expire.",
                 vec![],
-                vec![("204", "Logged out")],
+                vec![
+                    (
+                        "200",
+                        "Logged out here; `{saml_logout_url}` ends the IdP session",
+                    ),
+                    ("204", "Logged out"),
+                ],
                 false,
             ),
         )],
@@ -5101,9 +5515,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "SAML SP metadata",
-                "Service-provider SAML metadata XML for this provider.",
+                "Service-provider SAML metadata of an active provider: our entity ID (by \
+                 default this URL), the ACS and Single Logout endpoints, the signing and \
+                 encryption keys, the NameID format and the contact.",
                 vec![],
-                vec![("200", "SAML metadata (application/xml)")],
+                vec![
+                    ("200", "SAML metadata (application/samlmetadata+xml)"),
+                    ("404", "No active SAML provider with this slug"),
+                ],
                 false,
             ),
         )],
@@ -5116,17 +5535,55 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "SAML assertion consumer",
-                "SAML ACS endpoint; accepts a signed response answering the AuthnRequest \
-                 this browser started, once, and redirects to the app with a session.",
+                "SAML ACS endpoint (HTTP-POST). Accepts a response signed with SHA-256 or \
+                 stronger, plain or with an encrypted assertion, that answers the AuthnRequest \
+                 this browser started, once, and redirects to the app with a session. \
+                 IdP-initiated responses only when the provider allows them, each assertion once.",
                 vec![],
                 vec![
                     ("303", "Redirect to /oauth/callback with the session tokens"),
                     ("400", "Bad or missing state binding"),
-                    ("401", "Response rejected"),
+                    ("401", "Response rejected (the reason is in the audit log)"),
                 ],
                 false,
             ),
         )],
+    );
+    mount(
+        paths,
+        "/api/auth/saml/:slug/slo",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Auth",
+                    "SAML Single Logout (redirect)",
+                    "HTTP-Redirect binding. A signed LogoutRequest from the IdP revokes the \
+                     named subject's sessions and answers with a signed LogoutResponse; a \
+                     LogoutResponse to our request lands the browser on the app.",
+                    vec![],
+                    vec![
+                        ("303", "To the IdP with our LogoutResponse, or to the app"),
+                        ("400", "LogoutRequest refused"),
+                    ],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Auth",
+                    "SAML Single Logout (POST)",
+                    "HTTP-POST binding of the same exchange; the message must carry an XML signature.",
+                    vec![],
+                    vec![
+                        ("303", "To the IdP with our LogoutResponse, or to the app"),
+                        ("400", "LogoutRequest refused"),
+                    ],
+                    false,
+                ),
+            ),
+        ],
     );
 
     mount(paths, "/api/me/dataset-usage", vec![
@@ -6187,6 +6644,103 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 ),
             ),
         ],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/saml-metadata",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Read SAML IdP metadata",
+                "Read IdP metadata from `{url}` (https, no redirects) or `{xml}` and return the \
+                 entity ID, SSO and SLO URLs and every signing certificate, to fill in a provider.",
+                vec![],
+                vec![("200", "IdP fields"), ("400", "Not usable IdP metadata")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "SAML provider overview",
+                "Our entity ID, metadata, ACS and SLO URLs, our SP keys and the IdP certificates.",
+                vec![],
+                vec![("200", "Overview"), ("404", "No such SAML provider")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/metadata",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "SAML SP metadata (admin)",
+                "The SP metadata, also for a provider that is not active yet.",
+                vec![],
+                vec![("200", "SAML metadata"), ("404", "No such SAML provider")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Add SAML SP key",
+                "Generate a key pair, or import `{private_key, certificate}` (the key as a \
+                 secret reference, or PEM outside production). The first key signs; later \
+                 ones are published and decrypt until activated.",
+                vec![],
+                vec![("201", "Key added"), ("400", "Unusable key or certificate")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys/:kid/activate",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Activate SAML SP key",
+                "Make this key the one that signs (key rollover).",
+                vec![],
+                vec![("204", "Activated"), ("404", "No such key")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys/:kid",
+        vec![(
+            M::Delete,
+            o(
+                "Admin",
+                "Delete SAML SP key",
+                "Retire a key that no longer signs.",
+                vec![],
+                vec![
+                    ("204", "Deleted"),
+                    ("404", "No such key"),
+                    ("409", "The current key cannot be deleted"),
+                ],
+                true,
+            ),
+        )],
     );
 
     mount(paths, "/api/admin/dataset-usage", vec![

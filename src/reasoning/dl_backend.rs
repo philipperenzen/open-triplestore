@@ -47,6 +47,8 @@ pub struct DlOutcome {
     pub inferred: Vec<Triple>,
     pub version: Option<String>,
     pub warnings: Vec<String>,
+    /// The backend may have missed entailments (`warnings` says why).
+    pub incomplete: bool,
 }
 
 /// A yes/no/unknown answer (OWL 2 Conformance §2.2).
@@ -147,7 +149,8 @@ pub struct DlRun {
     pub report: ReasoningReport,
     pub backend: &'static str,
     pub version: Option<String>,
-    /// `false` for the native rules: they are sound but not complete.
+    /// `false` for the native rules (sound but not complete) and for a backend
+    /// that says it may have missed entailments.
     pub complete: bool,
     pub warnings: Vec<String>,
 }
@@ -337,7 +340,7 @@ pub fn materialize(
         },
         backend: backend.name(),
         version: outcome.version,
-        complete: true,
+        complete: !outcome.incomplete,
         warnings,
     })
 }

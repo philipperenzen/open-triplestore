@@ -145,6 +145,39 @@ async fn ldp_post_creates_member_with_location() {
     );
 }
 
+// DELETE removes the member from the container it was POSTed into. A container
+// created by POSTing to `/ldp/c1` (no trailing slash) is `…/ldp/c1`, while the
+// handler derived the parent of `/ldp/c1/x` as `…/ldp/c1/`, so the
+// `ldp:contains` triple survived and the container kept listing the member.
+#[tokio::test]
+async fn ldp_delete_removes_member_from_slashless_container() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let (st, hdrs) = post_member(&app, &token, "gone").await;
+    assert_eq!(st, StatusCode::CREATED);
+    let member = hdrs
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("Location")
+        .to_string();
+    assert!(member.ends_with("/ldp/c1/gone"), "{member}");
+
+    let (st, _, body) = send(&app, Method::DELETE, "/ldp/c1/gone", Some(&token), &[], "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+
+    let (st, _, listing) = send(&app, Method::GET, "/ldp/c1", Some(&token), &[], "").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        !listing.contains(&member),
+        "the container must no longer list the deleted member: {listing}"
+    );
+    let (_, _, body) = send(&app, Method::GET, "/ldp/c1/gone", Some(&token), &[], "").await;
+    assert!(
+        body.trim().is_empty(),
+        "the deleted member must have no triples left: {body}"
+    );
+}
+
 // OPTIONS on an LDP resource advertises Allow + Accept-Post + Accept-Patch.
 //
 // NOTE: this drives the LDP router directly. In the full application the global

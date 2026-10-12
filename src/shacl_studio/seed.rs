@@ -67,6 +67,60 @@ pub fn seed_shacl_shacl(store: &TripleStore, auth_db: &AuthDb) -> anyhow::Result
     Ok(set.id)
 }
 
+/// System graph holding the built-in SKOS integrity shapes (S9, S13, S14,
+/// S27, S36, S37 and S46 of the SKOS Reference). Public, like the
+/// meta-shapes.
+pub const SKOS_INTEGRITY_GRAPH: &str = "urn:system:shapes:skos-integrity";
+
+/// The SKOS integrity shapes (see the file header).
+pub const SKOS_INTEGRITY_TTL: &str = include_str!("skos-integrity.ttl");
+
+/// Idempotently load the SKOS integrity shapes and ensure their Library
+/// shape graph exists, so any validation pipeline or dataset validation can
+/// select them as a profile. Returns the built-in shape graph's id.
+pub fn seed_skos_integrity(store: &TripleStore, auth_db: &AuthDb) -> anyhow::Result<String> {
+    store
+        .graph_store_put(
+            Some(SKOS_INTEGRITY_GRAPH),
+            SKOS_INTEGRITY_TTL,
+            oxigraph::io::RdfFormat::Turtle,
+        )
+        .map_err(|e| anyhow::anyhow!("seed SKOS integrity graph: {e}"))?;
+
+    let studio = ShaclStudioStore::new(auth_db.pool());
+    if let Some(existing) = studio.get_shape_graph_by_iri(SKOS_INTEGRITY_GRAPH)? {
+        return Ok(existing.id);
+    }
+    let set = studio.create_shape_graph(
+        "SKOS integrity",
+        Some(
+            "Built-in shapes for the integrity conditions of the SKOS Reference: S9 and \
+             S37 (concept schemes, concepts and collections are disjoint), S13 (label \
+             properties pairwise disjoint), S14 (one prefLabel per language tag), S27 \
+             (related disjoint with broaderTransitive), S36 (memberList items are members) \
+             and S46 (exactMatch disjoint with broadMatch and relatedMatch).",
+        ),
+        OwnerType::User,
+        SYSTEM_OWNER,
+        Visibility::Public,
+        SKOS_INTEGRITY_GRAPH,
+        &["skos".to_string(), "builtin".to_string()],
+        ShapeSource::Imported,
+        None,
+    )?;
+    let (targets, count) = super::run::analyze_shapes_graph(store, SKOS_INTEGRITY_GRAPH);
+    studio.save_shape_graph_revision(
+        &set.id,
+        SKOS_INTEGRITY_TTL,
+        &targets,
+        count,
+        Some("Built-in"),
+        None,
+    )?;
+    tracing::info!("shacl_studio: seeded built-in SKOS integrity shape graph");
+    Ok(set.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +239,179 @@ mod tests {
             outcome.violation_count,
             outcome.report.results
         );
+    }
+
+    // ── SKOS integrity shapes ────────────────────────────────────────────
+
+    /// The focus nodes the SKOS integrity shapes report for `data` (Turtle
+    /// with the `skos:` and `ex:` prefixes declared).
+    fn skos_violations(data: &str) -> Vec<String> {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        seed_skos_integrity(&store, &auth).unwrap();
+        let ttl = format!(
+            "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .\n\
+             @prefix ex: <http://example.org/> .\n{data}"
+        );
+        store
+            .graph_store_put(Some("urn:test:skos"), &ttl, oxigraph::io::RdfFormat::Turtle)
+            .unwrap();
+        let outcome = super::super::run::run_validation(
+            &store,
+            &[SKOS_INTEGRITY_GRAPH.to_string()],
+            &["urn:test:skos".to_string()],
+            SeverityThreshold::Violation,
+            false,
+        )
+        .expect("SKOS integrity validation runs");
+        let mut focus: Vec<String> = outcome
+            .report
+            .results
+            .iter()
+            .map(|r| format!("{} {}", r.focus_node, r.message))
+            .collect();
+        focus.sort();
+        focus
+    }
+
+    #[test]
+    fn skos_integrity_shapes_are_valid_shacl() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        seed_shacl_shacl(&store, &auth).unwrap();
+        let a = seed_skos_integrity(&store, &auth).unwrap();
+        assert_eq!(a, seed_skos_integrity(&store, &auth).unwrap(), "idempotent");
+        let outcome = validate_against_meta(&store, SKOS_INTEGRITY_GRAPH);
+        assert!(outcome.report.conforms, "{:?}", outcome.report.results);
+    }
+
+    #[test]
+    fn a_well_formed_scheme_meets_every_condition() {
+        let v = skos_violations(
+            r#"
+            ex:animals a skos:ConceptScheme .
+            ex:mammal a skos:Concept ; skos:inScheme ex:animals ;
+                skos:prefLabel "mammal"@en , "zoogdier"@nl ; skos:altLabel "mammalian"@en .
+            ex:whale a skos:Concept ; skos:broader ex:mammal ; skos:related ex:krill ;
+                skos:prefLabel "whale"@en ; skos:hiddenLabel "wale"@en ;
+                skos:exactMatch <http://example.com/Whale> ; skos:closeMatch <http://example.com/Cetacean> .
+            ex:krill a skos:Concept ; skos:prefLabel "krill"@en .
+            ex:big a skos:OrderedCollection ;
+                skos:memberList ( ex:whale ex:mammal ) ; skos:member ex:whale , ex:mammal .
+            "#,
+        );
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn s13_labels_are_pairwise_disjoint() {
+        let v = skos_violations(
+            r#"
+            ex:a skos:prefLabel "lion"@en ; skos:altLabel "lion"@en .
+            ex:b skos:prefLabel "tiger"@en ; skos:hiddenLabel "tiger"@en .
+            ex:c skos:altLabel "puma"@en ; skos:hiddenLabel "puma"@en .
+            ex:ok skos:prefLabel "cat"@en ; skos:altLabel "cat"@nl .
+            "#,
+        );
+        assert_eq!(v.len(), 3, "{v:#?}");
+        for (s, f) in v.iter().zip(["ex:a", "ex:b", "ex:c"]) {
+            let iri = f.replace("ex:", "http://example.org/");
+            assert!(s.starts_with(&iri) && s.contains("S13"), "{s}");
+        }
+    }
+
+    #[test]
+    fn s14_one_preferred_label_per_language() {
+        let v = skos_violations(
+            r#"
+            ex:a skos:prefLabel "car"@en , "automobile"@en .
+            ex:b skos:prefLabel "bike" , "bicycle" .
+            ex:ok skos:prefLabel "boat"@en , "boot"@nl , "ship" .
+            "#,
+        );
+        assert_eq!(v.len(), 2, "{v:#?}");
+        assert!(v[0].starts_with("http://example.org/a") && v[0].contains("S14"));
+        assert!(v[1].starts_with("http://example.org/b") && v[1].contains("S14"));
+    }
+
+    #[test]
+    fn s27_related_is_disjoint_with_broader_transitive() {
+        let v = skos_violations(
+            r#"
+            ex:poodle skos:broader ex:dog . ex:dog skos:broader ex:mammal .
+            ex:poodle skos:related ex:mammal .
+            ex:cat skos:related ex:mouse .
+            "#,
+        );
+        assert!(
+            v.iter()
+                .any(|s| s.starts_with("http://example.org/poodle") && s.contains("S27")),
+            "{v:#?}"
+        );
+        assert!(
+            v.iter().all(|s| !s.contains("http://example.org/cat ")),
+            "{v:#?}"
+        );
+        // Through skos:narrower and the symmetric form of skos:related.
+        let v = skos_violations(
+            r#"
+            ex:mammal skos:narrower ex:dog . ex:mammal skos:related ex:dog .
+            "#,
+        );
+        assert!(v.iter().any(|s| s.contains("S27")), "{v:#?}");
+    }
+
+    #[test]
+    fn s36_member_list_items_are_members() {
+        let v = skos_violations(
+            r#"
+            ex:list skos:memberList ( ex:a ex:b ) ; skos:member ex:a .
+            "#,
+        );
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(
+            v[0].starts_with("http://example.org/list") && v[0].contains("http://example.org/b")
+        );
+    }
+
+    #[test]
+    fn s9_and_s37_concepts_schemes_and_collections_are_disjoint() {
+        let v = skos_violations(
+            r#"
+            ex:s a skos:ConceptScheme , skos:Concept .
+            ex:c a skos:Collection , skos:ConceptScheme .
+            ex:o a skos:OrderedCollection , skos:Concept .
+            ex:ok a skos:Collection .
+            "#,
+        );
+        for (f, cond) in [("s", "S9"), ("c", "S37"), ("o", "S37")] {
+            assert!(
+                v.iter().any(|s| s.starts_with(&format!("http://example.org/{f} "))
+                    && s.contains(cond)),
+                "{f}: {v:#?}"
+            );
+        }
+        assert!(v.iter().all(|s| !s.contains("example.org/ok")), "{v:#?}");
+    }
+
+    #[test]
+    fn s46_exact_match_is_disjoint_with_broad_and_related_match() {
+        let v = skos_violations(
+            r#"
+            ex:a skos:exactMatch ex:x ; skos:broadMatch ex:x .
+            ex:b skos:exactMatch ex:y . ex:y skos:relatedMatch ex:b .
+            ex:c skos:exactMatch ex:z . ex:z skos:narrowMatch ex:c .
+            ex:ok skos:exactMatch ex:w ; skos:closeMatch ex:w .
+            "#,
+        );
+        for f in ["a", "b", "c"] {
+            assert!(
+                v.iter().any(
+                    |s| s.starts_with(&format!("http://example.org/{f} ")) && s.contains("S46")
+                ),
+                "{f}: {v:#?}"
+            );
+        }
+        assert!(v.iter().all(|s| !s.contains("example.org/ok")), "{v:#?}");
     }
 }

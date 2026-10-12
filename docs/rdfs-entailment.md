@@ -1,39 +1,56 @@
 # RDFS Entailment
 
-The `rdfs-entailment` feature enables RDFS entailment via a forward-chaining materialiser that
-runs the rdfs1–rdfs13 patterns of the W3C RDF 1.1 Semantics as SPARQL `INSERT` rules. A few
-parts of the specification are not covered; see [Gaps](#gaps).
+The `rdfs-entailment` feature materialises RDFS entailment (RDF 1.1 Semantics §8–9) with a
+forward-chaining engine: the RDF pattern `rdfD2`, the RDFS patterns `rdfs1`–`rdfs13`, and the
+RDF and RDFS axiomatic triples, in one fixed-point loop.
 
-## Rules Implemented
+## Patterns implemented
 
-| Rule | Description | Type |
-|------|-------------|------|
-| rdfs1 | The datatype of every literal in the data is a subclass of `rdfs:Literal` (RDF 1.1's rdfs1 types it `rdfs:Datatype` instead) | Axiomatic |
-| rdfs2 | `?x rdf:type ?a` if `?p rdfs:domain ?a` and `?x ?p ?y` | Chained |
-| rdfs3 | `?y rdf:type ?a` if `?p rdfs:range ?a` and `?x ?p ?y` | Chained |
-| rdfs4a | Every subject → `rdf:type rdfs:Resource` | Axiomatic |
-| rdfs4b | Every IRI/bnode object → `rdf:type rdfs:Resource` | Axiomatic |
-| rdfs5 | `rdfs:subPropertyOf` transitivity | Chained |
-| rdfs6 | Every property → `rdfs:subPropertyOf` itself | Axiomatic |
-| rdfs7 | Property inheritance through `rdfs:subPropertyOf` | Chained |
-| rdfs8 | Every class → `rdfs:subClassOf rdfs:Resource` | Axiomatic |
-| rdfs9 | Type inheritance through `rdfs:subClassOf` | Chained |
-| rdfs10 | Every class → `rdfs:subClassOf` itself | Axiomatic |
-| rdfs11 | `rdfs:subClassOf` transitivity | Chained |
-| rdfs12 | Every `rdfs:ContainerMembershipProperty` → `rdfs:subPropertyOf rdfs:member` | Chained |
-| rdfs13 | Every `rdfs:Datatype` → `rdfs:subClassOf rdfs:Literal` | Chained |
+| Pattern | Concludes | Notes |
+|---------|-----------|-------|
+| rdfD2 | the predicate of every triple is an `rdf:Property` | |
+| rdfs1 | each recognized datatype in use is an `rdfs:Datatype` | see [exemptions](#exemptions-decision-d11) |
+| rdfs2 | `rdfs:domain`: the subject has the class | |
+| rdfs3 | `rdfs:range`: the object has the class | not for a literal object (a literal subject is no RDF triple) |
+| rdfs4a / rdfs4b | subjects and non-literal objects are `rdfs:Resource` | |
+| rdfs5 / rdfs11 | `rdfs:subPropertyOf` / `rdfs:subClassOf` are transitive | |
+| rdfs6 / rdfs10 | properties / classes are their own sub-property / sub-class | |
+| rdfs7 / rdfs9 | triples and types follow sub-properties and sub-classes | |
+| rdfs8 | classes are sub-classes of `rdfs:Resource` | |
+| rdfs12 | container-membership properties are sub-properties of `rdfs:member` | |
+| rdfs13 | datatypes are sub-classes of `rdfs:Literal` | |
 
-**Axiomatic** rules run once after the fixed-point loop, so their output does not feed the
-chained rules (`rdfs:Resource rdfs:subClassOf ex:X`, say, never types anything as `ex:X`).
-**Chained** rules run inside the loop until no new triples are derived.
+The axiomatic triples (the domains and ranges of the RDF and RDFS vocabulary, `rdf:nil a
+rdf:List`, `rdfs:Datatype rdfs:subClassOf rdfs:Class`, …) are written to the entailment graph
+before the loop, so they chain with the patterns: `rdfs:Resource rdfs:subClassOf ex:Thing`
+types every resource `ex:Thing`, and a class used only as the object of `rdf:type` is a class
+(the range of `rdf:type`), hence a sub-class of `rdfs:Resource`. The patterns that scan every
+triple (`rdfD2`, `rdfs4a`, `rdfs4b`) run once the others reach their fixed point, and the loop
+goes on while they add anything.
 
-### Gaps
+### Exemptions (decision D11)
 
-- `rdfD2` (`?p` of every triple is an `rdf:Property`) is not run.
-- RDF 1.1's `rdfs1` (`?dt rdf:type rdfs:Datatype` for each recognised datatype) is replaced by
-  the subclass form above.
-- The RDF and RDFS axiomatic triples (`rdf:type rdf:type rdf:Property`, `rdfs:domain rdfs:domain
-  rdf:Property`, …) and the `rdf:_n` membership properties are not added.
+The RDFS closure of any graph is infinite; the materialiser writes a finite part of it that is
+bounded by the data:
+
+- **`rdf:_n`.** The container-membership axioms (`rdf:_n a rdf:Property`, `a
+  rdfs:ContainerMembershipProperty`, domain and range `rdfs:Resource`) are written for
+  `rdf:_1` … `rdf:_N`, where `N` is the largest index any IRI in scope uses (none when no
+  `rdf:_n` is used).
+- **`rdfs1`.** The recognized datatypes (`D`) are the OWL 2 datatype map's types and
+  `rdf:langString`; the materialiser declares those that literals in scope use, plus
+  `xsd:string` and `rdf:langString`, which every RDF 1.1 interpretation recognizes.
+- **`rdfD1`** (a typed literal entails a blank node of its datatype) is not materialised: its
+  conclusions are existential and no query can tell them from the literal itself.
+
+### Datatype clashes
+
+A graph with an ill-typed literal of a recognized datatype (`"ten"^^xsd:integer`), or with a
+literal whose property's range (or a superclass of it) is a recognized datatype that does not
+hold the literal's value (`ex:n rdfs:range xsd:integer . ex:a ex:n "ten"`), has no RDFS
+interpretation. The run then ends in an inconsistency (`ill-typed-literal`,
+`datatype-clash`; HTTP 422 from `POST /api/reasoning/materialize`); the triples derived up to
+that point stay in the entailment graph.
 
 ## Configuration
 
@@ -54,13 +71,13 @@ open-triplestore = { features = ["owl2-rl"] }
 ## API Usage
 
 ```rust
+use open_triplestore::reasoning::common::RDFS_ENTAILMENT_GRAPH;
 use open_triplestore::reasoning::rdfs::RdfsMaterializer;
 use open_triplestore::store::TripleStore;
 use std::path::Path;
 
 let store = TripleStore::open(Path::new("./data"))?;
-let materialiser = RdfsMaterializer::with_target(&store, "urn:entailment:rdfs");
-let report = materialiser.materialize()?;
+let report = RdfsMaterializer::with_target(&store, RDFS_ENTAILMENT_GRAPH).materialize()?;
 
 println!(
     "RDFS: {} triples in {} iterations ({} ms)",
@@ -68,12 +85,31 @@ println!(
 );
 ```
 
-Entailed triples are stored in the named graph `urn:entailment:rdfs`.  To include them in
-query answers, add the graph to the dataset in your SPARQL query:
+Without `with_sources(graphs)` the patterns read the unnamed default graph and the entailment
+graph; with it, only those graphs and the entailment graph. Over HTTP,
+`POST /api/reasoning/materialize` with `"regime": "rdfs"` runs it (see
+[reasoning.md](reasoning.md)).
+
+## Querying the entailed triples
+
+Entailed triples are stored in the named graph `urn:entailment:rdfs`. Add
+`?entailment=rdfs` to a SPARQL request to fold that graph into the query's default graph (their
+RDF merge, so a triple both asserted and derived matches once), or name it in the query:
 
 ```sparql
 SELECT * FROM <urn:entailment:rdfs> WHERE { ?s rdf:type ?c }
 ```
+
+A dataset can select `rdfs` as its regime and keep its own entailment graph up to date
+(`PUT /api/datasets/<id>/entailment`, [reasoning.md](reasoning.md#per-dataset-entailment-selectable-regime-materialisation-toggle)).
+
+## Conformance
+
+`tests/rdfs_conformance.rs` tests each pattern, the axiomatic triples and the exemptions.
+`tests/w3c_rdf_mt_manifests.rs` runs the W3C RDF 1.1 Semantics test cases and
+`tests/w3c_sparql11_entailment_manifests.rs` the RDFS cases of the SPARQL 1.1 entailment-regime
+tests; known gaps are in [conformance/entailment.md](conformance/entailment.md). No score is
+published (W3C test-suite policy).
 
 ## SPARQL Endpoint
 
@@ -106,8 +142,9 @@ CLEAR GRAPH <urn:entailment:rdfs>
 
 ## Performance Notes
 
-- Axiomatic rules (rdfs4a, rdfs4b, rdfs6, rdfs8, rdfs10) add about one triple per distinct
-  resource, property or class in the data.
-- No benchmark of the materialiser is published. Each round re-runs every chained rule over the
+- `rdfD2`, `rdfs4a` and `rdfs4b` generate one triple per distinct predicate, subject and
+  object, and each scans every triple in scope once per round in which the other patterns
+  have reached their fixed point (usually two rounds).
+- No benchmark of the materialiser is published. Each round re-runs every pattern over the
   whole scope, so the number of rounds grows with the depth of the class and property
   hierarchies.

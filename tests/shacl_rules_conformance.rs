@@ -1187,9 +1187,8 @@ ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
 
 /// `?v = $this` compares values: a literal focus node `1` equals `1.0`. When
 /// `$this` occurs in the expression only, the optimizer turned `=` into
-/// `sameTerm`, which compares the terms. (Two lexical forms of one `xsd:int`
-/// would not show it: the store keeps derived integer types as canonical
-/// `xsd:integer`.)
+/// `sameTerm`, which compares the terms. The inferred triple carries the focus
+/// node as written, `"1"^^xsd:int`.
 #[test]
 fn sparql_rule_compares_a_literal_focus_node_by_value() {
     let shapes = r#"
@@ -1202,8 +1201,15 @@ ex:b ex:alt "1.0"^^xsd:decimal .
 ex:c ex:alt "2"^^xsd:int ."#;
     let store = store_with(shapes, data);
     infer(&store, "urn:shapes", &[]).unwrap();
-    assert!(ask(&store, "ASK { ex:b ex:sameCode 1 }"), "1.0 = 1");
-    assert!(!ask(&store, "ASK { ex:c ex:sameCode 1 }"), "2 != 1");
+    let one = "\"1\"^^<http://www.w3.org/2001/XMLSchema#int>";
+    assert!(
+        ask(&store, &format!("ASK {{ ex:b ex:sameCode {one} }}")),
+        "1.0 = 1"
+    );
+    assert!(
+        !ask(&store, &format!("ASK {{ ex:c ex:sameCode {one} }}")),
+        "2 != 1"
+    );
 }
 
 /// A triple-term focus node has no constant form in an expression; the rule
@@ -1217,4 +1223,60 @@ ex:S a sh:NodeShape ; sh:targetObjectsOf ex:about ;
     let store = store_with(shapes, "ex:note ex:about <<( ex:s ex:p ex:o )>> .");
     infer(&store, "urn:shapes", &[]).unwrap();
     assert!(ask(&store, "ASK { ex:s ex:mentioned true }"));
+}
+
+// ──────────────────── sh:entailment sh:Rules (SHACL-AF §8.3) ────────────────────
+
+/// Validating under `sh:entailment sh:Rules` reports what running the rules
+/// with `/infer` and then validating reports — but leaves the data alone,
+/// while `/infer` still materialises (the declaration does not change it).
+#[test]
+fn entailment_rules_validation_matches_infer_then_validate() {
+    let rules_and_shapes = r#"
+        ex:R a sh:NodeShape ; sh:targetClass ex:Person ;
+            sh:rule [ a sh:SPARQLRule ;
+                sh:construct "CONSTRUCT { $this a ex:Adult } WHERE { $this ex:age ?a . FILTER(?a >= 18) }" ;
+                sh:prefixes ex: ] ;
+            sh:rule [ a sh:TripleRule ; sh:order 1 ;
+                sh:condition ex:AdultShape ;
+                sh:subject sh:this ; sh:predicate ex:mayVote ; sh:object true ] .
+        ex: sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        ex:AdultShape a sh:NodeShape ; sh:class ex:Adult .
+        ex:VoterShape a sh:NodeShape ; sh:targetSubjectsOf ex:mayVote ;
+            sh:property [ sh:path ex:registered ; sh:minCount 1 ] ."#;
+    let data = r#"
+        ex:alice a ex:Person ; ex:age 30 .
+        ex:carol a ex:Person ; ex:age 50 ; ex:registered true .
+        ex:bob   a ex:Person ; ex:age 12 ."#;
+    let focus = |r: &open_triplestore::shacl::report::ValidationReport| {
+        let mut f: Vec<String> = r.results.iter().map(|v| v.focus_node.clone()).collect();
+        f.sort();
+        f
+    };
+
+    // Under the regime: the rules' output is validated, nothing is stored.
+    let store = store_with(
+        &format!("<urn:shapes> sh:entailment sh:Rules .\n{rules_and_shapes}"),
+        data,
+    );
+    let len = store.len().unwrap();
+    let entailed = open_triplestore::shacl::validate(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(store.len().unwrap(), len, "validation stored nothing");
+    assert!(!ask(&store, "ASK { ?s ex:mayVote true }"));
+
+    // The same rules materialised first, then validated without the regime.
+    let reference = store_with(rules_and_shapes, data);
+    infer(&reference, "urn:shapes", &[]).unwrap();
+    assert!(ask(&reference, "ASK { ex:alice ex:mayVote true }"));
+    let expected = open_triplestore::shacl::validate(&reference, "urn:shapes", &[]).unwrap();
+    assert_eq!(focus(&entailed), focus(&expected));
+    assert_eq!(
+        focus(&entailed),
+        vec!["http://example.org/alice".to_string()]
+    );
+
+    // `/infer` over a shapes graph that declares the regime still materialises.
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(n >= 1);
+    assert!(ask(&store, "ASK { ex:alice ex:mayVote true }"));
 }

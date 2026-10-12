@@ -4,6 +4,11 @@
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
 members = [".", "opengraph", "plugins/*", "tools/*"]
+# The vendored Oxigraph crates (see vendor/README.md) are path dependencies
+# inside the workspace directory, which would otherwise make them members: they
+# would then be linted, formatted and tested as our own code, and their
+# dev-dependencies would enter Cargo.lock.
+exclude = ["vendor/oxigraph", "vendor/oxjsonld", "vendor/spargebra", "vendor/spareval", "vendor/sparopt"]
 resolver = "2"
 
 [package]
@@ -12,7 +17,8 @@ version = "0.7.0"
 edition = "2021"
 # Floor set by the AWS SDK stack: aws-credential-types 1.3.0 / aws-smithy-runtime
 # 1.12 and friends declare `rust-version = "1.94.1"`. Bump the `rust:<ver>` images
-# in Dockerfile and .gitlab-ci.yml in lockstep with this.
+# in Dockerfile, .gitlab-ci.yml and the sfcgal3d job of .github/workflows/ci.yml
+# in lockstep with this.
 rust-version = "1.94.1"
 description = "A modern, high-performance RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support"
 authors = ["Philippe Renzen <philipperenzen@gmail.com>"]
@@ -66,16 +72,16 @@ geometry3d      = ["dep:parry3d-f64"]
 ## Certified constructive solid geometry (boolean union/intersection/difference
 ## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
 ## `full`: it links the native libSFCGAL C library (>= 2.0), which the Docker
-## image and the GitHub feature-list builds do not provide. Only the GitLab
-## `--all-features` job compiles it (on a trixie-based rust image — see
-## .gitlab-ci.yml).
+## image and the GitHub feature-list builds do not provide. The GitHub
+## `sfcgal3d` job and the GitLab `--all-features` job compile it, both on a
+## trixie-based rust image (Ubuntu's libsfcgal-dev is 1.5).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
-## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
-## EXPERIMENTAL and deliberately NOT in `full`: the SP-initiated flow (login
-## route → AuthnRequest → ACS bound to that request) is covered by tests against
-## a simulated IdP (tests/security_federated.rs) but has not been verified
-## against a real one. CI enables it explicitly; see docs/auth.md.
-saml            = ["dep:samael", "samael/xmlsec"]
+## SAML 2.0 SSO, our side as the service provider (web-browser sign-in,
+## encrypted assertions, signed requests, single logout; docs/auth.md). Needs
+## libxml2, libxmlsec1, pkg-config and libclang at build time, so it is NOT in
+## `full`: a plain native build never needs them. The Docker image enables it
+## through the Dockerfile's CARGO_FEATURES, and CI builds it explicitly.
+saml            = ["dep:samael", "samael/xmlsec", "dep:openssl"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
 ## Template/example compile-time plugin (plugins/hello), mounted at /ext/hello.
@@ -135,7 +141,10 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
-# XSD lexical-space checks for R2RML's ill-typed literals; the version Oxigraph itself uses.
+# XSD/XPath value types (numbers, dates, durations), the version Oxigraph
+# itself uses: the SWRL built-ins, lexical-space checks for R2RML's ill-typed
+# literals, and the form an older store wrote typed literals in
+# (data_models::content_digest).
 oxsdatatypes = "0.2"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
 # Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
@@ -285,6 +294,18 @@ sfcgal = { version = "0.8", optional = true }
 # RML mapping sources
 csv = "1"
 quick-xml = "0.42"
+# RFC 9535 JSONPath for JSON logical sources (RML-IO registry).
+serde_json_path = "0.7"
+# XPath 1.0 over a DOM for XML logical sources: attributes, parent axes,
+# namespaces. Picked over xee-xpath (XPath 3.1), which pulls in the
+# unmaintained `json` crate (RUSTSEC-2022-0081) and ICU.
+sxd-document = "0.3"
+sxd-xpath = "0.4"
+# `rml:compression` (RML-IO): tar archives, xz (pure Rust), and decoding an
+# `rml:encoding` other than UTF-8. gzip is flate2's; zip is behind asset-archive.
+tar = { version = "0.4.46", default-features = false }
+lzma-rs = "0.3"
+encoding_rs = "0.8"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"
@@ -323,8 +344,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Full-text search (text-search feature)
 tantivy = { version = "0.26", optional = true }
 
-# SAML 2.0 SSO (saml feature)
+# SAML 2.0 SSO (saml feature). openssl is already linked through samael and
+# webauthn-rs; the SP uses it directly for XML decryption, redirect-binding
+# signatures and its own key pairs.
 samael = { version = "0.0.22", optional = true }
+openssl = { version = "0.10", optional = true }
 
 # OAuth 2.0 / OIDC
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
@@ -347,6 +371,11 @@ percent-encoding = "2"
 # Software FIDO2 authenticator for passkey integration tests (no hardware).
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 webauthn-rs-proto = "0.5"
+# The JSON-LD processor behind oxigraph's RdfParser (vendored, see
+# vendor/README.md), called directly by tests/w3c_jsonld_api_manifests.rs for
+# the `rdfDirection` option RdfParser does not expose. No features here: its
+# `rdf-12` comes with ours through oxigraph.
+oxjsonld = "0.2.6"
 
 # Test targets that use probes the library only exports with `test-utils`
 # (`InProcessLeader`, `AppState::test_default_with_store`, `query_cache_len`).
@@ -403,3 +432,18 @@ debug = false
 # give it the same treatment so `cargo test` / `cargo nextest` link faster too.
 [profile.test.package."*"]
 debug = false
+
+# Oxigraph 0.5.11 and the SPARQL parser, evaluator and optimizer it pins
+# (spargebra 0.4.7, spareval 0.2.7, sparopt 0.3.7), changed so typed literals
+# keep their lexical form and exact datatype, and with SPARQL conformance fixes
+# backported from upstream main or written here (vendor/README.md lists each,
+# with the upstream PR text in vendor/*/UPSTREAM-PR*.md). Path patches, not git
+# ones, so cargo-deny's `unknown-git = "deny"` keeps holding; the rest of the
+# oxigraph family (oxrdf, sparesults, oxrocksdb-sys...) still comes from
+# crates.io at the versions oxigraph 0.5.11 pins.
+[patch.crates-io]
+oxigraph = { path = "vendor/oxigraph" }
+oxjsonld = { path = "vendor/oxjsonld" }
+spargebra = { path = "vendor/spargebra" }
+spareval = { path = "vendor/spareval" }
+sparopt = { path = "vendor/sparopt" }

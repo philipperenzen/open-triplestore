@@ -129,12 +129,10 @@ The relay listens only on the compose network (no host port is published, so it 
 
 ## SSO provider setup (OIDC / SAML)
 
-> **SAML is experimental and not in the default build.** The `saml` feature is
-> excluded from `full` (and therefore from the published image) because the
-> flow has been tested only against a simulated identity provider, not a real
-> one. Builds that enable it support SP-initiated sign-in (see
-> [SAML 2.0](#saml-20) below). The provider type is listed in the admin UI,
-> marked experimental. Prefer OIDC where the IdP offers it.
+> **SAML needs the `saml` build feature.** The published Docker image has it
+> (the Dockerfile's `CARGO_FEATURES`). `full`, and so a plain `cargo build`,
+> does not: the feature links libxml2 and libxmlsec1 and needs pkg-config and
+> libclang to build ([build features](build-features.md)).
 
 
 Providers are configured by admins under **Security & Access Control → Identity providers**. Any standards-compliant OIDC or SAML 2.0 IdP works; the callback/redirect URL to register at the IdP is always:
@@ -167,50 +165,146 @@ Any IdP exposing a `.well-known/openid-configuration` works with the generic OID
 
 ### SAML 2.0
 
-Requires a build with the `saml` feature. Add a provider with type **SAML** and
-these values from the IdP's metadata:
+This store acts as the SAML **service provider** (SP) for the web-browser
+sign-in profile (SAML 2.0 Profiles §4.1), following the Kantara saml2int
+deployment profile. In scope: sign-in started here (AuthnRequest over
+HTTP-Redirect, optionally signed; response over HTTP-POST) or at the IdP (off
+by default), signed responses with SHA-256 or stronger, encrypted assertions,
+IdP metadata import with several signing certificates, SP key rollover,
+persistent NameIDs, attribute-to-role mapping and Single Logout started from
+either side. Out of scope: the Artifact binding, ECP, attribute queries,
+NameID management, and federation metadata aggregates or MDQ (paste the one IdP
+you trust instead).
 
-- **Entity ID**: the IdP's entity ID. Responses must carry it as `Issuer`.
-- **SSO URL**: the IdP's single sign-on endpoint for the HTTP-Redirect binding
-  (`https`, or `http` on loopback only).
-- **IdP certificate**: the IdP's signing certificate, PEM or bare base64.
+#### Connect an IdP
 
-Register the store at the IdP as a service provider:
+1. Add a provider with type **SAML**. Under **Import IdP metadata**, give the
+   IdP's metadata URL (fetched over https, redirects not followed) or paste its
+   XML. That fills in the IdP's entity ID, SSO URL (HTTP-Redirect binding),
+   logout URL and every signing certificate. You can also type them:
+   - **Entity ID**: the IdP's entity ID. Responses must carry it as `Issuer`.
+   - **SSO URL**: `https`, or `http` on loopback only.
+   - **IdP signing certificates**: one or more, PEM or bare base64. During an
+     IdP key rollover keep the old and the new one; responses signed with
+     either are accepted. A provider without one never starts a sign-in.
+2. Save, then register the store at the IdP. Either import our SP metadata
+   from `https://<your-host>/api/auth/saml/<slug>/metadata` (served once the
+   provider is active; admins can download it before from
+   `GET /api/admin/oauth/providers/<id>/saml/metadata`), or enter:
 
-```
-Entity ID:  https://<your-host>/api/auth/saml/<slug>/metadata
-ACS URL:    https://<your-host>/api/auth/saml/<slug>/acs   (HTTP-POST binding)
-```
+   ```
+   Entity ID:  https://<your-host>/api/auth/saml/<slug>/metadata
+   ACS URL:    https://<your-host>/api/auth/saml/<slug>/acs   (HTTP-POST)
+   SLO URL:    https://<your-host>/api/auth/saml/<slug>/slo   (HTTP-Redirect or HTTP-POST)
+   ```
 
-The metadata URL also serves the SP metadata XML, for IdPs that import it.
+   The provider form shows these, our signing/encryption certificate and the
+   transport check under **This store as service provider**.
 
-Sign-in is **SP-initiated only**. The login page button sends the browser to
-`/api/auth/saml/<slug>/login`, which redirects to the IdP with an AuthnRequest
+#### What the store checks
+
+The login button sends the browser to `/api/auth/saml/<slug>/login`, which
+redirects to the IdP with an AuthnRequest (a 128-bit ID and a NameID policy)
 and binds the attempt to the browser with a short-lived `saml_state` cookie.
-The ACS accepts a response only if it comes back within 10 minutes, from the
-same browser, answers that AuthnRequest (`InResponseTo`) and is signed with
-the configured certificate, and only once. A response started at the IdP
-(for example from its app portal) is refused. The browser then lands on
-`/oauth/callback`, signed in.
+The ACS accepts a response only if:
 
-IdP settings that matter:
+- it comes back within 10 minutes, from the same browser, answers that
+  AuthnRequest (`InResponseTo`), and only once;
+- the response or the assertion is signed by one of the configured IdP
+  certificates, with RSA or ECDSA and SHA-256, -384 or -512 (SHA-1 is refused);
+- its issuer, audience (our entity ID), destination and recipient (our ACS) are
+  right, and it is inside its validity window (`clock_skew_seconds` tolerance,
+  default 180 s, at most 600 s);
+- the XML has no DOCTYPE and is at most 1 MiB;
+- the NameID is not transient, unless a **subject attribute** identifies the
+  account instead.
 
-- The store sends **unsigned** AuthnRequests. Turn off "require signed
-  requests" for this client (in Keycloak: *Client signature required*).
-- Sign the response or the assertion, and give the bearer subject
-  confirmation a `NotOnOrAfter`.
-- Send the email as `email`, `mail` or the `…/claims/emailaddress` attribute,
-  the display name as `displayName`, `cn` or `…/claims/name`, and groups as
-  `groups`, `memberOf` or `…/claims/groups` (for the role claim map).
-- The IdP returns the browser with a cross-site POST, so the `saml_state`
-  cookie is sent as `SameSite=None; Secure`. That needs HTTPS with
-  `SECURE_COOKIES=true`. Without it the cookie is `SameSite=Lax`, which only
-  works when the IdP is on the same site (for example a local test IdP on
-  `localhost`).
+A refused response gets a generic `401 {"error":"SAML sign-in failed"}`; the
+reason goes to the audit log (`LoginFailure`, `detail`) and the server log. On
+success the browser lands on `/oauth/callback`, signed in.
+
+**IdP-initiated sign-in** (from the IdP's app portal) is off by default: an
+unsolicited response is not tied to a browser, so it allows login CSRF. Turn
+on *Accept sign-ins started at the IdP* to accept them; each assertion is then
+accepted once (replay cache), and one that carries an `InResponseTo` is refused.
+
+#### Encrypted assertions, signed requests and SP keys
+
+Each provider gets its own SP key pair (RSA-3072, self-signed certificate) the
+first time it is needed. The private key is stored like an OAuth client secret
+(`auth::secret`): encrypted with a key derived from `JWT_SECRET`, or, for a key
+you import, as a secret reference (`env:`, `file:`, `vault:`). The metadata
+publishes every key with `use="signing"` and with `use="encryption"`.
+
+- **Encrypted assertions** are accepted with AES-128/192/256-GCM or -CBC and
+  RSA-OAEP key transport (`rsa-oaep-mgf1p`, or xmlenc 1.1 `rsa-oaep` with
+  SHA-1/256/384/512). RSA PKCS#1 v1.5 key transport is refused. Either the
+  whole response must be signed or the assertion inside the encryption must
+  be. *Require encrypted assertions* refuses plain ones.
+- **Signed AuthnRequests**: *Sign authentication requests* signs the
+  HTTP-Redirect query with RSA-SHA256 and the metadata says
+  `AuthnRequestsSigned="true"`. Logout messages are always signed.
+- **Key rollover**: add a key (`POST /api/admin/oauth/providers/<id>/saml/keys`,
+  generated, or `{private_key, certificate}`); it is published and decrypts at
+  once. When the IdP has read the new metadata, activate it
+  (`…/keys/<kid>/activate`) so it signs, then delete the old key
+  (`DELETE …/keys/<kid>`; the signing key cannot be deleted).
+
+#### Attributes and roles
+
+Attribute names are matched against `Name` and `FriendlyName`. By default:
+
+| Field | Attributes |
+|---|---|
+| Email | `urn:oid:0.9.2342.19200300.100.1.3`, `…/claims/emailaddress`, `email`, `mail`, `emailAddress` |
+| Display name | `urn:oid:2.16.840.1.113730.3.1.241`, `urn:oid:2.5.4.3`, `…/identity/claims/displayname`, `…/claims/name`, `displayName`, `cn` |
+| Groups | `urn:oid:1.3.6.1.4.1.5923.1.5.1.1` (isMemberOf), `urn:oid:1.3.6.1.4.1.5923.1.1.1.7` (eduPersonEntitlement), `…/claims/groups`, `…/claims/role`, `memberOf`, `groups`, `role`, `Role` |
+
+Each list can be replaced per provider. Group values go through the role claim
+map. As with OIDC, the mapped role is set when the account is created; later
+sign-ins keep the account's role (an admin changes it), the `publisher` grant
+is only ever added, and sign-in never grants `super_admin`.
 
 SAML has no standard `email_verified` assertion, so a SAML sign-in never links
 to an existing local account by email. A new subject gets a new account (with
 auto-provisioning on).
+
+#### Single Logout
+
+Signing out of a SAML session revokes its whole refresh-token family. When the
+provider has an IdP logout URL, `POST /api/auth/logout` answers
+`{"saml_logout_url": …}` and the web UI sends the browser there with a signed
+LogoutRequest naming the NameID and SessionIndex; the IdP's signed
+LogoutResponse brings it back. A signed LogoutRequest from the IdP (redirect
+or POST binding) revokes the sessions it names (by SessionIndex when it lists
+any), is accepted once, and is answered with a signed LogoutResponse.
+
+**Limit:** access tokens are stateless JWTs. One issued before the logout
+stays valid until it expires (`ACCESS_TOKEN_EXPIRY_MINUTES`, default 30); only
+the refresh token is revoked. Shorten the access-token lifetime if that window
+matters.
+
+#### Transport
+
+The IdP returns the browser to the ACS with a cross-site POST, which only a
+`SameSite=None; Secure` cookie survives, so SAML needs an `https` `BASE_URL`.
+The `saml_state` cookie is `SameSite=None; Secure` whenever `BASE_URL` is
+https, whatever `SECURE_COOKIES` says. With a plain-http `BASE_URL` the login
+route refuses to start, except on `localhost`, where the cookie is
+`SameSite=Lax` and an IdP on the same site works.
+
+#### IdP settings that matter
+
+- Sign the response or the assertion with SHA-256; give the bearer subject
+  confirmation a `NotOnOrAfter`.
+- Release a persistent NameID (or a stable attribute, configured as the
+  subject attribute).
+- For Keycloak: set *Name ID format* to `persistent`; *Client signature
+  required* only if you turn on signed requests; *Encrypt assertions* works
+  with the metadata's encryption key; set the *Logout Service Redirect Binding
+  URL* to our SLO URL.
+- For Microsoft Entra ID: the default NameID is persistent per application;
+  map groups through the `…/claims/groups` claim.
 
 ## OIDC resource-server mode (IdP access tokens)
 

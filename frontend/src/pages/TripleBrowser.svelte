@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount, onDestroy } from 'svelte';
   import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
@@ -1809,7 +1810,7 @@
                 <li><code>"steel bridge"</code> — {$i18nT('pages.tripleBrowser.syntaxExactPhrase')}</li>
               </ul>
               <p class="sh-note">{$i18nT('pages.tripleBrowser.syntaxNote')}</p>
-              <a class="sh-link" href="/docs/search-syntax" on:click={() => (syntaxHelpOpen = false)}>{$i18nT('pages.tripleBrowser.fullDocumentation')}</a>
+              <a class="sh-link" href={withBase('/docs/search-syntax')} on:click={() => (syntaxHelpOpen = false)}>{$i18nT('pages.tripleBrowser.fullDocumentation')}</a>
             </div>
           {/if}
         </div>
@@ -1951,7 +1952,7 @@
             <p>{$i18nT('pages.tripleBrowser.noMatchFilters')}</p>
             <button class="btn btn-sm" on:click={clearFilters}>{$i18nT('pages.tripleBrowser.clearFilters')}</button>
           {:else}
-            <p>{$i18nT('pages.tripleBrowser.storeEmpty')} <a href="/import">{$i18nT('pages.tripleBrowser.importToStart')}</a> {$i18nT('pages.tripleBrowser.toGetStarted')}</p>
+            <p>{$i18nT('pages.tripleBrowser.storeEmpty')} <a href={withBase('/import')}>{$i18nT('pages.tripleBrowser.importToStart')}</a> {$i18nT('pages.tripleBrowser.toGetStarted')}</p>
           {/if}
         </div>
       {:else}

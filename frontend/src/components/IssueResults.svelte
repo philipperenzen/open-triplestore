@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { shortenIRI, downloadFile } from '../lib/rdf-utils.js';
   import { Download, ClipboardCopy, Search, Filter, ChevronRight, ChevronDown, Info, Boxes } from 'lucide-svelte';
   import { toastSuccess, toastError } from '../lib/toast.ts';
@@ -197,10 +198,10 @@
               <div class="issue-main">
                 <div class="issue-top">
                   <span class="sev-badge sev-{s}">{r.severity}</span>
-                  <a class="focus-link" href={`/resource?iri=${encodeURIComponent(r.focus_node)}`} title={r.focus_node}>{shortenIRI(r.focus_node)}</a>
+                  <a class="focus-link" href={withBase(`/resource?iri=${encodeURIComponent(r.focus_node)}`)} title={r.focus_node}>{shortenIRI(r.focus_node)}</a>
                   {#if r.path}<span class="issue-sep">·</span><span class="issue-path" title={r.path}>{formatShaclPath(r.path)}</span>{/if}
                   {#if viewerEnabled && datasetId && r.focus_node}
-                    <a class="show3d-link" href={`/datasets/${datasetId}/viewer?focus=${encodeURIComponent(r.focus_node)}`} target="_blank" rel="noopener" title={$t('components.issueResults.showIn3dTitle')}>
+                    <a class="show3d-link" href={withBase(`/datasets/${datasetId}/viewer?focus=${encodeURIComponent(r.focus_node)}`)} target="_blank" rel="noopener" title={$t('components.issueResults.showIn3dTitle')}>
                       <Boxes size={12} /> {$t('components.issueResults.showIn3d')}
                     </a>
                   {/if}

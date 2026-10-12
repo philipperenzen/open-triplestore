@@ -24,6 +24,17 @@ pub struct DatasetDesc {
     pub graphs: Vec<String>,
 }
 
+/// A function IRI as Turtle: `geof:name` in the GeoSPARQL function namespace,
+/// `<iri>` otherwise.
+fn geof_name(iri: &str) -> String {
+    match iri.strip_prefix(crate::geo::vocabulary::GEOF_NS) {
+        Some(local) if !local.is_empty() && local.chars().all(|c| c.is_ascii_alphanumeric()) => {
+            format!("geof:{local}")
+        }
+        _ => format!("<{iri}>"),
+    }
+}
+
 /// Escape a string for a Turtle double-quoted literal.
 fn ttl_lit(s: &str) -> String {
     format!(
@@ -43,6 +54,11 @@ pub fn generate(
 ) -> String {
     let mut desc = String::new();
 
+    // `sd:UnionDefaultGraph` holds for `/sparql`: a query that names no dataset
+    // (no FROM / FROM NAMED, no default-graph-uri / named-graph-uri) gets as its
+    // default graph the RDF merge of every named graph the caller may read
+    // (`routes::scope_query_dataset`), a set since the vendored spareval merges
+    // several graphs without duplicates.
     desc.push_str(
         r#"@prefix sd: <http://www.w3.org/ns/sparql-service-description#> .
 @prefix void: <http://rdfs.org/ns/void#> .
@@ -71,63 +87,27 @@ pub fn generate(
 "#,
     );
 
-    // List all GeoSPARQL extension functions
-    let geo_functions = [
-        "sfContains",
-        "sfCrosses",
-        "sfDisjoint",
-        "sfEquals",
-        "sfIntersects",
-        "sfOverlaps",
-        "sfTouches",
-        "sfWithin",
-        "ehContains",
-        "ehCoveredBy",
-        "ehCovers",
-        "ehDisjoint",
-        "ehEquals",
-        "ehInside",
-        "ehMeet",
-        "ehOverlap",
-        "rcc8dc",
-        "rcc8ec",
-        "rcc8po",
-        "rcc8tppi",
-        "rcc8tpp",
-        "rcc8ntpp",
-        "rcc8ntppi",
-        "rcc8eq",
-        "boundary",
-        "buffer",
-        "convexHull",
-        "difference",
-        "envelope",
-        "intersection",
-        "symDifference",
-        "union",
-        "distance",
-        "area",
-        "getSRID",
-        "relate",
-        "transform",
-        "asGeoJSON",
-        "metricDistance",
-        "metricArea",
-        "metricLength",
-        "metricPerimeter",
-        "metricBuffer",
-    ];
-
-    for (i, func) in geo_functions.iter().enumerate() {
-        let sep = if i < geo_functions.len() - 1 {
-            " ,"
-        } else {
-            " ;"
-        };
-        desc.push_str(&format!("        geof:{}{}\n", func, sep));
+    // The GeoSPARQL extension functions and aggregates, straight from the
+    // registries the engine installs — a hand-kept list drifted from them.
+    let functions: Vec<String> = crate::geo::functions::all_functions()
+        .into_iter()
+        .map(|(iri, _)| geof_name(iri.as_str()))
+        .collect();
+    for (i, func) in functions.iter().enumerate() {
+        let sep = if i + 1 < functions.len() { " ," } else { " ;" };
+        desc.push_str(&format!("        {func}{sep}\n"));
     }
     // GeoSPARQL aggregates (SPARQL 1.1 Service Description `sd:extensionAggregate`).
-    desc.push_str("    sd:extensionAggregate geof:aggUnion ;\n");
+    let aggregates: Vec<String> = crate::geo::aggregates::all_aggregates()
+        .into_iter()
+        .map(|(iri, _)| geof_name(iri.as_str()))
+        .collect();
+    if !aggregates.is_empty() {
+        desc.push_str(&format!(
+            "    sd:extensionAggregate {} ;\n",
+            aggregates.join(", ")
+        ));
+    }
 
     // Dataset description
     desc.push_str(&format!(
@@ -234,29 +214,29 @@ mod tests {
             .unwrap_or_else(|e| panic!("service description must be Turtle: {e}\n{desc}"));
     }
 
-    /// Every advertised `geof:` function is one the engine registers.
+    /// The description advertises exactly the functions the engine registers.
     #[test]
-    fn advertised_functions_are_registered() {
-        let registered: Vec<String> = crate::geo::functions::all_functions()
-            .into_iter()
-            .map(|(iri, _)| iri.as_str().to_string())
-            .collect();
+    fn advertised_functions_are_the_registered_ones() {
         let desc = generate(0, &[], &[], false);
-        let listed = desc
+        let listed: Vec<String> = desc
             .lines()
             .map(str::trim)
             .filter_map(|l| l.strip_prefix("geof:"))
-            .map(|l| l.trim_end_matches([',', ';', ' ']));
-        let mut n = 0;
-        for name in listed {
-            n += 1;
-            let iri = format!("http://www.opengis.net/def/function/geosparql/{name}");
-            assert!(
-                registered.contains(&iri),
-                "advertised but not registered: {name}"
-            );
+            .map(|l| l.trim_end_matches([',', ';', ' ']).to_string())
+            .collect();
+        let registered: Vec<String> = crate::geo::functions::all_functions()
+            .into_iter()
+            .map(|(iri, _)| {
+                iri.as_str()
+                    .strip_prefix(crate::geo::vocabulary::GEOF_NS)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(listed, registered);
+        for name in ["asWKT", "asGML", "asKML", "asGeoJSON"] {
+            assert!(listed.iter().any(|l| l == name), "{name}");
         }
-        assert!(n > 30, "the list was read: {n}");
     }
 
     #[test]

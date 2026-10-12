@@ -76,7 +76,18 @@ impl AuthExt {
         }
     }
 
+    /// [`Self::from_env_with_base_url`] with no configured base URL, so
+    /// federated assertions from `OTS_TRUSTED_ISSUERS` are refused. The server
+    /// passes its own; this form is for callers that only need the rest.
     pub fn from_env() -> Self {
+        Self::from_env_with_base_url(None)
+    }
+
+    /// The resource-server settings from the environment. `base_url` is this
+    /// instance's configured public base URL (`--base-url` / `BASE_URL`, as the
+    /// server parsed it), or `None` when only the built-in default applies; it
+    /// is the audience federated identity assertions are checked against.
+    pub fn from_env_with_base_url(base_url: Option<&str>) -> Self {
         let issuer = std::env::var("OIDC_ISSUER")
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_string())
@@ -151,8 +162,7 @@ impl AuthExt {
             Some(iss) => Some(OidcVerifier::new(iss, audience)),
             None => None,
         };
-        let base_url = std::env::var("BASE_URL")
-            .ok()
+        let base_url = base_url
             .map(|b| b.trim().trim_end_matches('/').to_string())
             .filter(|b| !b.is_empty());
         let trusted_issuers = crate::federation::trusted_issuers()
@@ -528,6 +538,7 @@ pub fn ensure_env_provider(
         auto_provision: true,
         default_role: Some(default_role.to_string()),
         is_active: true,
+        saml_config: None,
     };
     auth_db.create_oauth_provider(&create)
 }
@@ -620,6 +631,24 @@ mod tests {
         assert!(ext.oidc.is_none());
         assert!(ext.accept_legacy_tokens);
         assert_eq!(ext.default_role, "user");
+    }
+
+    /// Federated assertions are audience-checked against the base URL the
+    /// server parsed (`--base-url` included), not a second read of `BASE_URL`;
+    /// with none configured there is no audience and they are refused.
+    #[test]
+    fn trusted_issuers_take_the_audience_from_the_passed_base_url() {
+        std::env::set_var("OTS_TRUSTED_ISSUERS", "https://peer.example.org");
+        let with = AuthExt::from_env_with_base_url(Some("https://store.example.org/"));
+        let without = AuthExt::from_env_with_base_url(None);
+        std::env::remove_var("OTS_TRUSTED_ISSUERS");
+        assert_eq!(with.trusted_issuers.len(), 1);
+        assert_eq!(
+            with.trusted_issuers[0].audience.as_deref(),
+            Some("https://store.example.org")
+        );
+        assert_eq!(without.trusted_issuers.len(), 1);
+        assert_eq!(without.trusted_issuers[0].audience, None);
     }
 
     #[test]

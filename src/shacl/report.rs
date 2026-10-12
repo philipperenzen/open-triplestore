@@ -55,11 +55,24 @@ pub struct ValidationResult {
     #[serde(default)]
     pub source_constraint_component: String,
     pub message: String,
+    /// The result annotations (SHACL-AF §4) a SPARQL-based constraint or
+    /// validator declared with `sh:resultAnnotation`, as display strings.
+    /// Omitted from the JSON when empty, which is every result but those.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<ResultAnnotationValue>,
     /// The typed terms behind the display strings. Not serialised: a report
     /// read back from JSON has none, and the RDF writer falls back to the
     /// strings.
     #[serde(skip)]
     pub terms: ResultTerms,
+}
+
+/// One result annotation value: `property` (an IRI) set to `value` (a
+/// literal's lexical form, an IRI, or `_:label`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ResultAnnotationValue {
+    pub property: String,
+    pub value: String,
 }
 
 /// The typed RDF terms of a validation result, as the engine saw them.
@@ -70,11 +83,14 @@ pub struct ResultTerms {
     pub path: Option<PropertyPath>,
     /// The shape that declared the constraint (an IRI or a shapes-graph blank node).
     pub source_shape: Option<Term>,
-    /// `sh:sourceConstraint`: the `sh:sparql` node of a SPARQL-based constraint.
+    /// `sh:sourceConstraint`: the `sh:sparql` node of a SPARQL-based
+    /// constraint, the node expression of an expression constraint.
     pub source_constraint: Option<Term>,
     /// The declared `sh:severity` IRI when it is not one of the three built-in
     /// ones ([`Severity`] keeps only those); `None` means `severity.iri()`.
     pub severity: Option<String>,
+    /// The result annotations behind [`ValidationResult::annotations`].
+    pub annotations: Vec<(oxigraph::model::NamedNode, Term)>,
 }
 
 impl ResultTerms {
