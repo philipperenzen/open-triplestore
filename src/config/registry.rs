@@ -67,7 +67,9 @@ fn allow_entry(v: &str) -> Result<(), String> {
 }
 
 fn allow_list(v: &str) -> Result<(), String> {
-    super::parse::list(v).iter().try_for_each(|e| allow_entry(e))
+    super::parse::list(v)
+        .iter()
+        .try_for_each(|e| allow_entry(e))
 }
 
 fn host_port(v: &str) -> Result<(), String> {
@@ -769,13 +771,31 @@ settings! {
 /// Names that no longer mean anything: setting one stops the start, with
 /// the name to use instead. (They are not aliases: the old name is refused.)
 pub static RETIRED: &[(&str, &str)] = &[
-    ("ACCESS_TOKEN_EXPIRY_MINUTES", "renamed ACCESS_TOKEN_EXPIRY_SECS (seconds)"),
-    ("BACKUP_SCHEDULE_HOURS", "renamed BACKUP_SCHEDULE_SECS (seconds)"),
+    (
+        "ACCESS_TOKEN_EXPIRY_MINUTES",
+        "renamed ACCESS_TOKEN_EXPIRY_SECS (seconds)",
+    ),
+    (
+        "BACKUP_SCHEDULE_HOURS",
+        "renamed BACKUP_SCHEDULE_SECS (seconds)",
+    ),
     ("LLM_TIMEOUT_SECONDS", "renamed LLM_TIMEOUT_SECS"),
-    ("OTS_MAX_UPLOAD_MB", "renamed OTS_MAX_UPLOAD_BYTES (bytes; 512MiB is accepted)"),
-    ("SMTP_STARTTLS", "removed: use SMTP_TLS=starttls|implicit|none"),
-    ("OTS_EXTERNAL_REASONER", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
-    ("OTS_EXTERNAL_REASONER_BIN", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
+    (
+        "OTS_MAX_UPLOAD_MB",
+        "renamed OTS_MAX_UPLOAD_BYTES (bytes; 512MiB is accepted)",
+    ),
+    (
+        "SMTP_STARTTLS",
+        "removed: use SMTP_TLS=starttls|implicit|none",
+    ),
+    (
+        "OTS_EXTERNAL_REASONER",
+        "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN",
+    ),
+    (
+        "OTS_EXTERNAL_REASONER_BIN",
+        "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN",
+    ),
 ];
 
 /// Checks across settings, run once every setting has validated on its own.
@@ -798,7 +818,10 @@ pub(super) fn checks(config: &super::Config) -> Vec<ConfigError> {
     if value(DL_BACKEND.name()).as_deref() == Some("sidecar")
         && value(REASONER_URL.name()).is_none()
     {
-        fail(REASONER_URL.name(), "is required with OTS_DL_BACKEND=sidecar");
+        fail(
+            REASONER_URL.name(),
+            "is required with OTS_DL_BACKEND=sidecar",
+        );
     }
     match value(REPLICATION_ROLE.name()).as_deref() {
         Some("follower") if value(REPLICATION_LEADER_URL.name()).is_none() => fail(

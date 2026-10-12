@@ -31,7 +31,7 @@
 //!
 //! Signing out ends the refresh-token family the SAML sign-in issued.
 //! Access tokens already issued stay valid until they expire
-//! (`ACCESS_TOKEN_EXPIRY_MINUTES`): they are stateless JWTs.
+//! (`ACCESS_TOKEN_EXPIRY_SECS`): they are stateless JWTs.
 //!
 //! ## Transport
 //! The IdP returns the browser to the ACS with a cross-site POST, which only a

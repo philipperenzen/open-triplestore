@@ -212,7 +212,9 @@ impl ParallelMirror {
                 base: Instant::now(),
                 last_write_ms: AtomicU64::new(0),
                 rebuild_quiet_ms: AtomicU64::new(
-                    crate::config::PARALLEL_QUERY_REBUILD_QUIET.get().as_millis() as u64,
+                    crate::config::PARALLEL_QUERY_REBUILD_QUIET
+                        .get()
+                        .as_millis() as u64,
                 ),
                 inline_rebuild_max: AtomicUsize::new(DEFAULT_INLINE_REBUILD_MAX_TRIPLES),
                 background_building: AtomicBool::new(false),

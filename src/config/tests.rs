@@ -29,7 +29,10 @@ fn one_boolean_parser_for_every_spelling() {
 #[test]
 fn every_key_type_reads_its_kind() {
     for (name, ok) in registry::type_checks() {
-        assert!(ok, "{name}: the key's Rust type cannot read the setting's kind");
+        assert!(
+            ok,
+            "{name}: the key's Rust type cannot read the setting's kind"
+        );
     }
 }
 
@@ -208,7 +211,11 @@ fn empty_means_unset() {
 fn retired_names_stop_the_start_with_their_replacement() {
     let e = errors_of(&[("LLM_TIMEOUT_SECONDS", "60")]);
     assert_eq!(e[0].name, "LLM_TIMEOUT_SECONDS");
-    assert!(e[0].message.contains("LLM_TIMEOUT_SECS"), "{}", e[0].message);
+    assert!(
+        e[0].message.contains("LLM_TIMEOUT_SECS"),
+        "{}",
+        e[0].message
+    );
     assert!(load(&[("BACKUP_SCHEDULE_HOURS", "24")]).is_err());
     assert!(load(&[("ACCESS_TOKEN_EXPIRY_MINUTES", "30")]).is_err());
 }

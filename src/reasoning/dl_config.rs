@@ -85,9 +85,7 @@ impl DlConfig {
     pub fn from_env() -> Self {
         use crate::config as cfg;
         let mut c = DlConfig {
-            backend: cfg::DL_BACKEND
-                .get()
-                .and_then(|b| DlBackendKind::parse(&b)),
+            backend: cfg::DL_BACKEND.get().and_then(|b| DlBackendKind::parse(&b)),
             konclude_bin: cfg::KONCLUDE_BIN.get(),
             sidecar_url: cfg::REASONER_URL
                 .get()

@@ -445,7 +445,10 @@ async fn main() -> anyhow::Result<()> {
             &config::S3_REGION.get(),
         )
         .await?;
-        info!("Asset storage: S3 (endpoint={}, bucket={})", endpoint, bucket);
+        info!(
+            "Asset storage: S3 (endpoint={}, bucket={})",
+            endpoint, bucket
+        );
         Arc::new(obj_store)
     } else {
         let assets_dir = cli.data_dir.join("assets");

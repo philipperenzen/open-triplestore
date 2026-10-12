@@ -1071,7 +1071,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(llm_guard::admin_list_llm_requests),
         )
         .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
-        .route("/api/admin/config", get(crate::config::admin::admin_get_config))
+        .route(
+            "/api/admin/config",
+            get(crate::config::admin::admin_get_config),
+        )
         .route(
             "/api/admin/settings/guest-registration",
             get(handlers::admin_get_guest_registration).put(handlers::admin_set_guest_registration),

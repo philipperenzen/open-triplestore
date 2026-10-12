@@ -326,7 +326,10 @@ impl FromSetting for String {
         required(spec, raw).map(str::to_string)
     }
     fn accepts(kind: &Kind) -> bool {
-        !matches!(kind, Kind::Bool | Kind::List | Kind::Int { .. } | Kind::Bytes { .. })
+        !matches!(
+            kind,
+            Kind::Bool | Kind::List | Kind::Int { .. } | Kind::Bytes { .. }
+        )
     }
 }
 

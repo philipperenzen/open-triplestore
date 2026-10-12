@@ -1717,10 +1717,7 @@ fn void_description(
         let Some(ls) = g.iri(&e.graph_iri, "linkset graph") else {
             continue;
         };
-        let links = store.void_linkset(
-            &e.graph_iri,
-            crate::config::VOID_PARTITION_LIMIT.get(),
-        );
+        let links = store.void_linkset(&e.graph_iri, crate::config::VOID_PARTITION_LIMIT.get());
         g.typ(ls.clone(), &p(VOID, "Linkset"));
         g.add(ls.clone(), &p(VOID, "subjectsTarget"), s.clone());
         if let Some(space) = &links.object_space {

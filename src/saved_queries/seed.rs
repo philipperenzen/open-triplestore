@@ -702,6 +702,8 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v17: SHACL Advanced is Full (validation under sh:entailment, round-2
+// merge train); the other rows are as v16 left them.
 // v16: the capabilities graph follows the second round of 2026-10-03
 // regrades in docs/standards.md: SPARQL 1.1 Query, SPARQL 1.2, RDF 1.2 (named
 // by their dated drafts), OWL 2 RL, GeoSPARQL 1.0 (a new row) and 1.1, SHACL
@@ -742,7 +744,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 16;
+const DEMO_CONTENT_VERSION: u32 = 17;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -1163,9 +1165,9 @@ mod tests {
 
         let caps = format!("{}/capabilities/capabilities", seed_data::DEMO_BASE);
         let ots = "https://opentriplestore.org/ns#";
-        let shacladv_grade = |state: &AppState| -> Vec<String> {
+        let icdd_grade = |state: &AppState| -> Vec<String> {
             let q = format!(
-                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}shacladv> <{ots}conformance> ?c }} }}"
+                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}icdd> <{ots}conformance> ?c }} }}"
             );
             match state.store.query(&q).unwrap() {
                 oxigraph::sparql::QueryResults::Solutions(sols) => sols
@@ -1177,14 +1179,14 @@ mod tests {
                 _ => panic!("not a SELECT result"),
             }
         };
-        assert_eq!(shacladv_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(icdd_grade(&state), vec!["Partial".to_string()]);
 
         // What a v13 install holds: every standard "Full", version 13 recorded.
         state
             .store
             .graph_store_put(
                 Some(caps.as_str()),
-                &format!("<{ots}shacladv> <{ots}conformance> \"Full\" .\n"),
+                &format!("<{ots}icdd> <{ots}conformance> \"Full\" .\n"),
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
@@ -1201,10 +1203,10 @@ mod tests {
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
-        assert_eq!(shacladv_grade(&state), vec!["Full".to_string()]);
+        assert_eq!(icdd_grade(&state), vec!["Full".to_string()]);
 
         run_seed(&state).await;
-        assert_eq!(shacladv_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(icdd_grade(&state), vec!["Partial".to_string()]);
     }
 
     /// A stand-in S3 endpoint on its own runtime, alive for the rest of the test

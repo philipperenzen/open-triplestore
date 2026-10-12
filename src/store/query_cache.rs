@@ -39,7 +39,6 @@ use oxigraph::sparql::{
     QueryEvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable,
 };
 
-
 /// A materialised, cheaply-cloneable query result.
 #[derive(Clone)]
 enum Cached {
