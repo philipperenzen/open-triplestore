@@ -550,7 +550,11 @@ logical source lists it under `rml:null`, or the version runs under the
 type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
 `time`, `dateTime`, `hexBinary`). Text, UUID and JSON columns stay plain
 literals — inventing a datatype for them would be a claim the source never
-made. An explicit `rr:datatype` always wins.
+made. An explicit `rr:datatype` always wins, and its literal carries the
+value's natural lexical form too (R2RML §10.3): a `REAL` 0.25 typed
+`xsd:decimal` is `"2.5E-1"`, outside `xsd:decimal`'s lexical space, so a data
+error — never an ill-typed literal. Type a decimal from a `DECIMAL` /
+`NUMERIC` column, or convert in the query.
 
 **Joins** are planned per reference, one of two ways:
 

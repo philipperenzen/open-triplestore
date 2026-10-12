@@ -505,9 +505,11 @@ fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_,
 /// written, so this is the one place the canonical form is made.
 ///
 /// A literal whose datatype the mapping overrides (`rr:datatype`, a datatype
-/// map) keeps the source's own spelling instead, which the override's
-/// lexical-space check then judges: a `REAL` 0.25 typed `xsd:decimal` stays
-/// the valid `0.25` rather than becoming the ill-typed `2.5E-1`.
+/// map) carries this form too (R2RML §10.3: "a typed literal whose lexical
+/// form is the natural RDF lexical form corresponding to v"), and the
+/// override's lexical-space check judges it: a `REAL` 0.25 typed
+/// `xsd:decimal` is `"2.5E-1"`, ill-typed, so a data error, handled by the
+/// run's data-error policy — never written as an ill-typed literal.
 fn canonical_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     let value = natural_lexical(value, kind);
@@ -589,7 +591,8 @@ fn render_value<R: Record + ?Sized>(
                     }
                 }
             } else if let Some(dt) = &tm.datatype {
-                out.extend(typed_literal(tm, &raw_value, dt, gen));
+                let lexical = canonical_lexical(&raw_value, kind);
+                out.extend(typed_literal(tm, &lexical, dt, gen));
             } else if let Some(dm) = &tm.datatype_map {
                 let mut datatypes = Vec::new();
                 eval_terms(
@@ -606,7 +609,8 @@ fn render_value<R: Record + ?Sized>(
                     let Some(dt) = dt.strip_prefix('<').and_then(|d| d.strip_suffix('>')) else {
                         continue;
                     };
-                    out.extend(typed_literal(tm, &raw_value, dt, gen));
+                    let lexical = canonical_lexical(&raw_value, kind);
+                    out.extend(typed_literal(tm, &lexical, dt, gen));
                 }
             } else if let Some(dt) = natural_datatype_for(tm, kind) {
                 let lexical = canonical_lexical(&raw_value, kind);
@@ -622,8 +626,9 @@ fn render_value<R: Record + ?Sized>(
     }
 }
 
-/// A datatype-override literal (R2RML §10.3): a data error when the value is
-/// not in the datatype's lexical space.
+/// A datatype-override literal (R2RML §10.3) of `lexical`, the value's
+/// natural RDF lexical form: a data error when it is not in the datatype's
+/// lexical space.
 fn typed_literal(tm: &TermMap, raw_value: &str, dt: &str, gen: &mut TermGen) -> Option<String> {
     if let Some(why) = super::xsd::ill_typed(raw_value, dt) {
         gen.data_error(format!(

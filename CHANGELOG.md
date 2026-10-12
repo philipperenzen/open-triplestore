@@ -693,6 +693,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their rules through the new `SourceConnection::identifier_rules`
   (`plugins/api`); a connector that does not is read as SQL 2008. W3C
   R2RMLTC0002f now passes on PostgreSQL. See `docs/sources.md`.
+- **A datatype-override literal carries the value's natural lexical form**
+  (R2RML §10.3). With `rr:datatype` or a datatype map, the literal's lexical
+  form is the canonical form of the SQL value, as for a natural literal, not
+  the source's own spelling, and a form the datatype does not accept is a
+  data error handled by the run's `on_data_error` policy, never written as an
+  ill-typed literal. **Breaking:** a `REAL` 0.25 typed `xsd:decimal` is now
+  `"2.5E-1"`, a data error; type decimals from `DECIMAL` / `NUMERIC` columns.
 - **A JSON-LD download follows the JSON-LD 1.1 serialisation algorithm.** A
   well-formed RDF list is written as `@list`, without the `rdf:type rdf:List`
   quads of its nodes (the algorithm drops them; RDF Schema entails them); an
