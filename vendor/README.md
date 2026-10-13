@@ -283,6 +283,9 @@ One commit each, in this order:
     `geof:aggConcaveHull(?geom, targetPercent)` needs it
     (`tests/geosparql_conformance.rs`, `ogc_req42_agg_concave_hull_*`). Draft:
     `spargebra/UPSTREAM-PR-custom-aggregate-arguments.md`.
+12. **The extra arguments through the optimizer** (`sparopt` algebra). The same
+    field on sparopt's `AggregateExpression::FunctionCall`, mapped both ways.
+    Draft: `sparopt/UPSTREAM-PR-custom-aggregate-arguments.md`.
 
 ### Verifying the fork
 
