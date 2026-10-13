@@ -61,10 +61,10 @@ the QL map (`rdfs:Literal`, `owl:real`, `owl:rational`, `xsd:decimal`, `xsd:inte
   inside `xsd:integer`.
 - Disjoint data properties compare values: `x U 1` and `x V "1.0"^^xsd:decimal` clash.
 
-Oxigraph stores every integer-derived literal (`xsd:byte`, `xsd:long`, …) as `xsd:integer` and
-`xsd:dateTimeStamp` as `xsd:dateTime`. The checks therefore read the value: `"7"^^xsd:byte` fits
-an `xsd:nonNegativeInteger` range, and `"-5"^^xsd:nonNegativeInteger`, read back as the integer
-`-5`, is out of it.
+The checks read the value, whatever datatype wrote it: `"7"^^xsd:byte` fits an
+`xsd:nonNegativeInteger` range, and `"-5"^^xsd:nonNegativeInteger` is ill-typed. The store keeps
+integer-derived literals (`xsd:byte`, `xsd:long`, …) and `xsd:dateTimeStamp` as written; data
+loaded before it did holds them as `xsd:integer` and `xsd:dateTime`, which reads the same way.
 
 Axioms outside the profile are not used, for example `owl:TransitiveProperty`, functional
 properties, `owl:hasKey`, property chains, `owl:sameAs`, unions, cardinalities, and datatypes

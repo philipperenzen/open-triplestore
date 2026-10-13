@@ -72,6 +72,12 @@ pub struct ConformanceLayer {
     /// plus the conformed model version's graphs. Shapes, entailment, system,
     /// catalog and provenance graphs are not premises.
     pub reasoning_sources: Vec<String>,
+    /// Standard vocabularies added to `reasoning_sources` because the data
+    /// uses their terms: the GeoSPARQL ontology and the Simple Features and
+    /// GML geometry hierarchies when any layer graph uses a GeoSPARQL term
+    /// (the RDFS Entailment Extension, [`crate::geo::premises`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vocabulary_premises: Vec<String>,
     /// What validation should apply: the bound shape graphs' IRIs.
     pub validation_shapes: Vec<String>,
 }
@@ -164,6 +170,8 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
         ds,
     );
 
+    let vocabulary_premises = crate::geo::premises::rdfs_premises(&state.store, base, &sources);
+    sources.extend(vocabulary_premises.iter().cloned());
     sources.sort();
     sources.dedup();
     ConformanceLayer {
@@ -182,6 +190,7 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
             .collect(),
         validation_shapes: shapes.iter().map(|s| s.graph_iri.clone()).collect(),
         reasoning_sources: sources,
+        vocabulary_premises,
     }
 }
 

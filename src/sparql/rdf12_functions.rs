@@ -1,5 +1,4 @@
 //! SPARQL 1.2 / RDF-star built-in function registration.
-#![allow(dead_code)]
 //!
 //! Oxigraph 0.5 with its `rdf-12` feature (enabled by this crate's `rdf-12`
 //! feature, which also turns on `spargebra/sparql-12`) handles the native
@@ -302,6 +301,9 @@ pub fn triple_term_to_json(tt: &oxrdf::Triple) -> serde_json::Value {
                 });
                 if let Some(lang) = lit.language() {
                     obj["xml:lang"] = serde_json::json!(lang);
+                    if let Some(dir) = lit.direction() {
+                        obj["its:dir"] = serde_json::json!(dir.to_string());
+                    }
                 } else {
                     let dt = lit.datatype().as_str();
                     if dt != "http://www.w3.org/2001/XMLSchema#string" {

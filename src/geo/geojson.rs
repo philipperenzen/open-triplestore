@@ -9,14 +9,16 @@
 //!
 //! Reading goes GeoJSON → WKT, the bridge [`super::gml`] already uses for GML,
 //! so every consumer of a geometry literal — the `geof:` functions, the spatial
-//! index, the viewer feed — reaches GEOS by the one WKT path. Positions keep
-//! their first two ordinates: an altitude is dropped, as the GML reader drops
-//! Z, because the `geof:` surface is two-dimensional. An empty `coordinates`
-//! (or `geometries`) array reads as the empty geometry of that type.
+//! index, the viewer feed — reaches GEOS by the one WKT path. An altitude (the
+//! third number of a position) is kept as Z when every position of the
+//! geometry has one; a geometry mixing 2D and 3D positions is read in 2D
+//! rather than with an invented altitude. Further numbers are dropped. An empty
+//! `coordinates` (or `geometries`) array reads as the empty geometry of that
+//! type.
 //!
 //! Writing (`geof:asGeoJSON`) walks a GEOS geometry and emits the object,
 //! mapping every coordinate through a caller-supplied transform so the output
-//! is CRS84 whatever the source CRS was.
+//! is CRS84 whatever the source CRS was, and writing Z as the altitude.
 //!
 //! Malformed input yields `None`, never a panic: invalid JSON, an unknown or
 //! missing `type`, a position with fewer than two numbers, a line with fewer
@@ -30,13 +32,44 @@ use serde_json::{json, Map, Value};
 pub fn geojson_to_wkt(json: &str) -> Option<String> {
     let value: Value = serde_json::from_str(json.trim()).ok()?;
     let mut out = String::new();
-    write_geometry(&value, &mut out)?;
+    let z = all_positions_3d(&value) == Some(true);
+    write_geometry(&value, &mut out, z)?;
     Some(out)
+}
+
+/// Whether every position of a geometry object has an altitude: `Some(true)`
+/// when all do (and there is one), `Some(false)` when one does not, `None` for
+/// a geometry with no position at all.
+fn all_positions_3d(value: &Value) -> Option<bool> {
+    fn walk(v: &Value, seen: &mut bool) -> bool {
+        match v.as_array() {
+            Some(a) if a.first().is_some_and(Value::is_number) => {
+                *seen = true;
+                a.len() >= 3
+            }
+            Some(a) => a.iter().all(|m| walk(m, seen)),
+            None => true,
+        }
+    }
+    let obj = value.as_object()?;
+    let mut seen = false;
+    let all = if let Some(members) = obj.get("geometries").and_then(Value::as_array) {
+        members.iter().all(|m| match all_positions_3d(m) {
+            Some(z) => {
+                seen = true;
+                z
+            }
+            None => true,
+        })
+    } else {
+        walk(obj.get("coordinates")?, &mut seen)
+    };
+    seen.then_some(all)
 }
 
 /// Write one geometry object as WKT. Nesting (a `GeometryCollection` inside
 /// another) is bounded by serde_json's own recursion limit on the input.
-fn write_geometry(value: &Value, out: &mut String) -> Option<()> {
+fn write_geometry(value: &Value, out: &mut String, z: bool) -> Option<()> {
     let obj = value.as_object()?;
     let kind = obj.get("type")?.as_str()?;
     if kind == "GeometryCollection" {
@@ -50,24 +83,27 @@ fn write_geometry(value: &Value, out: &mut String) -> Option<()> {
             if i > 0 {
                 out.push_str(", ");
             }
-            write_geometry(member, out)?;
+            write_geometry(member, out, z)?;
         }
         out.push(')');
         return Some(());
     }
     let coords = obj.get("coordinates")?.as_array()?;
     let (tag, body) = match kind {
-        "Point" => ("POINT", point(coords)?),
-        "MultiPoint" => ("MULTIPOINT", list(coords, |p| point(p.as_array()?))?),
-        "LineString" => ("LINESTRING", line(coords)?),
-        "MultiLineString" => ("MULTILINESTRING", list(coords, |l| line(l.as_array()?))?),
-        "Polygon" => ("POLYGON", polygon(coords)?),
-        "MultiPolygon" => ("MULTIPOLYGON", list(coords, |p| polygon(p.as_array()?))?),
+        "Point" => ("POINT", point(coords, z)?),
+        "MultiPoint" => ("MULTIPOINT", list(coords, |p| point(p.as_array()?, z))?),
+        "LineString" => ("LINESTRING", line(coords, z)?),
+        "MultiLineString" => ("MULTILINESTRING", list(coords, |l| line(l.as_array()?, z))?),
+        "Polygon" => ("POLYGON", polygon(coords, z)?),
+        "MultiPolygon" => ("MULTIPOLYGON", list(coords, |p| polygon(p.as_array()?, z))?),
         _ => return None,
     };
     out.push_str(tag);
     match body {
         Some(body) => {
+            if z {
+                out.push_str(" Z ");
+            }
             out.push_str(&body);
         }
         None => out.push_str(" EMPTY"),
@@ -77,43 +113,51 @@ fn write_geometry(value: &Value, out: &mut String) -> Option<()> {
 
 /// `(x y)` for a position, or `None` (outer) when it is not one; the inner
 /// `None` is the empty point (`"coordinates": []`).
-fn point(coords: &[Value]) -> Option<Option<String>> {
+fn point(coords: &[Value], z: bool) -> Option<Option<String>> {
     if coords.is_empty() {
         return Some(None);
     }
-    Some(Some(format!("({})", position(coords)?)))
+    Some(Some(format!("({})", position(coords, z)?)))
 }
 
-/// `x y` from a position: two or more numbers, the first two finite.
-fn position(p: &[Value]) -> Option<String> {
+/// `x y` (with `z`, `x y z`) from a position: two or more numbers, those used
+/// finite.
+fn position(p: &[Value], z: bool) -> Option<String> {
     if p.len() < 2 || !p.iter().all(Value::is_number) {
         return None;
     }
     let (x, y) = (p[0].as_f64()?, p[1].as_f64()?);
-    (x.is_finite() && y.is_finite()).then(|| format!("{x} {y}"))
+    if !(x.is_finite() && y.is_finite()) {
+        return None;
+    }
+    if z {
+        let alt = p.get(2)?.as_f64().filter(|v| v.is_finite())?;
+        return Some(format!("{x} {y} {alt}"));
+    }
+    Some(format!("{x} {y}"))
 }
 
 /// `(x y, x y, …)` from an array of positions.
-fn positions(coords: &[Value]) -> Option<String> {
+fn positions(coords: &[Value], z: bool) -> Option<String> {
     let parts = coords
         .iter()
-        .map(|p| position(p.as_array()?))
+        .map(|p| position(p.as_array()?, z))
         .collect::<Option<Vec<_>>>()?;
     Some(format!("({})", parts.join(", ")))
 }
 
 /// A LineString's coordinates: two or more positions (or none — empty).
-fn line(coords: &[Value]) -> Option<Option<String>> {
+fn line(coords: &[Value], z: bool) -> Option<Option<String>> {
     match coords.len() {
         0 => Some(None),
         1 => None,
-        _ => Some(Some(positions(coords)?)),
+        _ => Some(Some(positions(coords, z)?)),
     }
 }
 
 /// A Polygon's coordinates: linear rings, each closed with four or more
 /// positions (or no rings — empty).
-fn polygon(rings: &[Value]) -> Option<Option<String>> {
+fn polygon(rings: &[Value], z: bool) -> Option<Option<String>> {
     if rings.is_empty() {
         return Some(None);
     }
@@ -122,7 +166,7 @@ fn polygon(rings: &[Value]) -> Option<Option<String>> {
         .map(|r| {
             let r = r.as_array()?;
             let closed = r.len() >= 4 && same_position(r.first()?, r.last()?);
-            closed.then(|| positions(r)).flatten()
+            closed.then(|| positions(r, z)).flatten()
         })
         .collect::<Option<Vec<_>>>()?;
     Some(Some(format!("({})", parts.join(", "))))
@@ -216,6 +260,11 @@ fn point_coords(geom: &impl Geom, xy: &dyn Fn(f64, f64) -> Option<(f64, f64)>) -
         return Some(json!([]));
     }
     let (x, y) = xy(geom.get_x().ok()?, geom.get_y().ok()?)?;
+    if geom.has_z().ok()? {
+        if let Some(z) = geom.get_z().ok().filter(|z| z.is_finite()) {
+            return Some(json!([x, y, z]));
+        }
+    }
     Some(json!([x, y]))
 }
 
@@ -226,10 +275,18 @@ fn sequence(geom: &impl Geom, xy: &dyn Fn(f64, f64) -> Option<(f64, f64)>) -> Op
     }
     let cs = geom.get_coord_seq().ok()?;
     let n = cs.size().ok()?;
+    let has_z = geom.has_z().ok()?;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let (x, y) = xy(cs.get_x(i).ok()?, cs.get_y(i).ok()?)?;
-        out.push(json!([x, y]));
+        match has_z
+            .then(|| cs.get_z(i).ok())
+            .flatten()
+            .filter(|z| z.is_finite())
+        {
+            Some(z) => out.push(json!([x, y, z])),
+            None => out.push(json!([x, y])),
+        }
     }
     Some(Value::Array(out))
 }
@@ -316,13 +373,33 @@ mod tests {
     }
 
     #[test]
-    fn altitude_and_foreign_members_are_dropped() {
-        // A third ordinate (altitude) is dropped; bbox, crs and any other
-        // foreign member do not change the geometry.
+    fn altitude_is_kept_and_foreign_members_are_dropped() {
+        // A third ordinate (altitude) is Z; bbox, crs and any other foreign
+        // member do not change the geometry.
         assert_eq!(
             wkt(r#"{"type":"Point","coordinates":[5.86,51.85,12.5],"bbox":[0,0,1,1],"crs":{"type":"name"}}"#)
                 .as_deref(),
-            Some("POINT(5.86 51.85)")
+            Some("POINT Z (5.86 51.85 12.5)")
+        );
+        assert_eq!(
+            wkt(r#"{"type":"LineString","coordinates":[[0,0,1],[1,1,2]]}"#).as_deref(),
+            Some("LINESTRING Z (0 0 1, 1 1 2)")
+        );
+        // Mixed 2D and 3D positions: read in 2D, no altitude invented.
+        assert_eq!(
+            wkt(r#"{"type":"LineString","coordinates":[[0,0,1],[1,1]]}"#).as_deref(),
+            Some("LINESTRING(0 0, 1 1)")
+        );
+        assert_eq!(
+            wkt(r#"{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[0,0,5]}]}"#)
+                .as_deref(),
+            Some("GEOMETRYCOLLECTION(POINT Z (0 0 5))")
+        );
+        // Z written back as the altitude.
+        let g = Geometry::new_from_wkt("LINESTRING Z (0 0 1, 1 1 2)").unwrap();
+        assert_eq!(
+            geometry_to_geojson(&g, &identity).unwrap(),
+            json!({ "type": "LineString", "coordinates": [[0.0, 0.0, 1.0], [1.0, 1.0, 2.0]] })
         );
     }
 

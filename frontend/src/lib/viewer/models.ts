@@ -17,6 +17,7 @@ import { guidsSignature } from './refsSignature';
 export type { ModelFormat, ModelRef } from './detect';
 export { modelFormatFromUrl, modelRefOf } from './detect';
 import type { ModelFormat } from './detect';
+import { withBase } from '../basePath';
 
 /** Extra facts loadModel() records on the group for georeferenced placement. */
 export interface ModelGeoData {
@@ -70,10 +71,10 @@ export function loadModel(
       let anchorLonLat: [number, number] | null = null;
       let cityObjects: CityObject[] = [];
       if (format === 'gltf') {
-        const gltf = await new GLTFLoader().loadAsync(url);
+        const gltf = await new GLTFLoader().loadAsync(withBase(url));
         group.add(gltf.scene);
       } else if (format === 'stl') {
-        const geom = await new STLLoader().loadAsync(url);
+        const geom = await new STLLoader().loadAsync(withBase(url));
         geom.computeVertexNormals();
         group.add(new THREE.Mesh(geom, defaultMaterial(false)));
       } else if (format === 'ifc') {
@@ -86,7 +87,7 @@ export function loadModel(
         // CityJSON analogue of an IFC element fragment); the fetch drops it.
         const frag = cityObjectFragment(url);
         const only = frag ? new Set([frag]) : undefined;
-        const res = await fetch(cityBaseUrl(url));
+        const res = await fetch(withBase(cityBaseUrl(url)));
         if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
         const city =
           format === 'cityjson'

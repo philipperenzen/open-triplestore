@@ -5,6 +5,7 @@
   // properties, BOT/IFC substructure (all navigable) and an interactive 3D
   // viewer. Datasets without any located element fall back to a pure 3D
   // explorer over their models. Light/dark follows the app theme.
+  import { withBase, absoluteUrl } from '../lib/basePath';
   import { onDestroy, tick } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
@@ -71,7 +72,7 @@
     { key: 'rdfxml', label: 'RDF/XML' },
     { key: 'ntriples', label: 'N-Triples' },
   ];
-  $: ifcUrl = (elements.find((e) => e.ifc_url)?.ifc_url || '').split('#')[0];
+  $: ifcUrl = withBase((elements.find((e) => e.ifc_url)?.ifc_url || '').split('#')[0]);
   // 3DBAG's CC BY credit (linked, bottom-right) whenever the feed shows its block.
   $: mapAttribution = mapAttributionFor(elements);
 
@@ -576,7 +577,7 @@
   // the chrome-less variants of this explorer (see docs/embedding.md).
   let embedOpen = false;
   let embedCopied = false;
-  $: embedUrl = `${window.location.origin}/embed/${canvasMode === 'cesium' ? 'cesium' : 'map'}/${encodeURIComponent(id)}`;
+  $: embedUrl = absoluteUrl(`/embed/${canvasMode === 'cesium' ? 'cesium' : 'map'}/${encodeURIComponent(id)}`);
   $: embedSnippet = `<iframe src="${embedUrl}" width="100%" height="480" style="border:0;border-radius:12px" loading="lazy" allowfullscreen></iframe>`;
   async function copyEmbed() {
     embedCopied = await copyToClipboard(embedSnippet);
@@ -644,7 +645,7 @@
                   <span class="dl-gname" title={g.graph_iri}>{shortenIRI(g.graph_iri)}</span>
                   <span class="dl-fmts">
                     {#each LD_FORMATS as f}
-                      <a href={`/store?graph=${encodeURIComponent(g.graph_iri)}&format=${f.key}`}>{f.label}</a>
+                      <a href={withBase(`/store?graph=${encodeURIComponent(g.graph_iri)}&format=${f.key}`)}>{f.label}</a>
                     {/each}
                   </span>
                 </div>

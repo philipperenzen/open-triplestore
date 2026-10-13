@@ -20,6 +20,7 @@
 import { modelFormatFromUrl } from './viewer/detect';
 import { parseWktGeometry } from './ontology/valueType';
 import { safeExternalUrl } from './safeUrl';
+import { stripBase } from './basePath';
 
 /** A fence opener/closer: ``` or ~~~, optionally with a language tag. */
 const FENCE_RE = /^\s*(```+|~~~+)\s*([\w+-]*)\s*$/;
@@ -223,7 +224,8 @@ export function parseApiEndpoint(line) {
   if (/^https?:\/\//i.test(target)) {
     try {
       const u = new URL(target);
-      path = u.pathname + u.search;
+      // A pasted full URL of this deployment carries the sub-path base.
+      path = stripBase(u.pathname) + u.search;
     } catch {
       return null;
     }

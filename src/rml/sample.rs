@@ -31,11 +31,11 @@ use serde::Serialize;
 use super::checks::DataErrors;
 use super::model::*;
 use super::sql::{
-    apply_own_nulls, check_relational_columns, collect_unique_keys, eval_subject, flush, index_key,
-    join_key, plan_triples_map, pushdown_subject, row_triples, sanitise_label, split_row,
-    JoinStrategy, ParentIndex, RefKey, TmPlan,
+    apply_own_nulls, check_relational_columns, collect_unique_keys, flush, index_key, join_key,
+    lookup, plan_triples_map, pushdown_subject, row_triples, same_row_subject, sanitise_label,
+    split_row, JoinStrategy, ParentIndex, ParentIndexBuilder, RefKey, TmPlan,
 };
-use super::terms::{At, Kinds, Row, TermGen};
+use super::terms::{Cells, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
 
 /// Most rows one triples map contributes directly. Parents pulled in by key
@@ -170,16 +170,28 @@ pub fn execute_sample(
             .find(&tm_iri)
             .ok_or_else(|| format!("unknown TriplesMap <{tm_iri}>"))?;
         for r in tm.refs() {
-            // A join-less reference over the same logical source resolves to
-            // the parent map's own sample; there is no key to pull in by.
+            // A join-less reference resolves from the child's own row; there
+            // is no parent row to pull in.
             if r.joins.is_empty() {
                 continue;
             }
             let parent = mapping
                 .find(&r.parent_triples_map)
                 .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
-            let child_cols: Vec<String> = r.joins.iter().map(|j| j.child.clone()).collect();
-            let parent_cols: Vec<String> = r.joins.iter().map(|j| j.parent.clone()).collect();
+            // Rows are pulled in by column value; a join on a template or a
+            // constant (RML-Core) has no column to fetch by, and resolves
+            // against the parent's own sample instead.
+            let columns = |side: fn(&JoinCondition) -> &JoinSide| -> Option<Vec<String>> {
+                r.joins
+                    .iter()
+                    .map(|j| side(j).column().map(str::to_string))
+                    .collect()
+            };
+            let (Some(child_cols), Some(parent_cols)) =
+                (columns(|j| &j.child), columns(|j| &j.parent))
+            else {
+                continue;
+            };
 
             let wanted: HashSet<Vec<String>> = rows_of
                 .get(&tm_iri)
@@ -239,29 +251,11 @@ pub fn execute_sample(
             let parent = mapping
                 .find(&r.parent_triples_map)
                 .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
-            let parent_cols: Vec<String> = r.joins.iter().map(|j| j.parent.clone()).collect();
-            let mut index = ParentIndex::new();
+            let mut builder = ParentIndexBuilder::new(parent, &r.joins, mapping.base_for(parent));
             for (row, kinds) in rows_of.get(&parent.iri).map(Vec::as_slice).unwrap_or(&[]) {
-                let mut row = row.clone();
-                gen.apply_nulls(&parent.logical_source, &mut row);
-                let row = &row;
-                let Some(k) = join_key(row, &parent_cols) else {
-                    continue;
-                };
-                gen.start_row();
-                let at = At {
-                    base: mapping.base_for(parent),
-                    graph: None,
-                };
-                if let Some(subject) =
-                    eval_subject(&parent.subject_map, row, Some(kinds), &mut gen, at)?
-                {
-                    let entry = index.entry(k).or_default();
-                    if !entry.contains(&subject) {
-                        entry.push(subject);
-                    }
-                }
+                builder.push(&mut row.clone(), Some(kinds), &mut gen)?;
             }
+            let index = builder.finish();
             indexes.insert(key, index);
             // A parent row's data error is reported by the parent's own rows.
             gen.take_errors();
@@ -288,32 +282,29 @@ pub fn execute_sample(
             gen.start_row();
             let generated = row_triples(
                 tm,
-                row,
-                Some(kinds),
+                &Cells {
+                    row,
+                    kinds: Some(kinds),
+                },
                 &mut gen,
                 mapping.base_for(tm),
-                &|r, child_row| match plan.strategies.get(&index_key(r)) {
+                &|r, child: &Cells<'_>, at| match plan.strategies.get(&index_key(r)) {
                     Some(JoinStrategy::Pushdown { alias, witness }) => {
                         let parent = mapping.find(&r.parent_triples_map)?;
                         pushdown_subject(
                             parent,
                             alias,
                             witness,
-                            child_row,
+                            child.row,
                             &mut parent_gen.borrow_mut(),
                             mapping.base_for(parent),
                         )
                         .map(|s| vec![s])
                     }
-                    _ => {
-                        let index = indexes.get(&index_key(r))?;
-                        let child_cols: Vec<String> =
-                            r.joins.iter().map(|j| j.child.clone()).collect();
-                        if child_cols.is_empty() {
-                            return Some(index.values().flatten().cloned().collect());
-                        }
-                        index.get(&join_key(child_row, &child_cols)?).cloned()
+                    Some(JoinStrategy::SameRow) => {
+                        same_row_subject(mapping, r, child, &mut parent_gen.borrow_mut(), at)
                     }
+                    _ => lookup(indexes.get(&index_key(r))?, r, child),
                 },
             )?;
             parent_gen.borrow_mut().take_errors();

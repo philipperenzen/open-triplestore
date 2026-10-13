@@ -43,6 +43,24 @@ pub fn iri_safe(value: &str) -> String {
     out
 }
 
+/// The URI-safe version of a template value (RML-Core, `rml:URI`): every
+/// character outside RFC 3986 `unreserved` (`ALPHA / DIGIT / "-" / "." / "_"
+/// / "~"`) is UTF-8 percent-encoded, non-ASCII ones included.
+pub fn uri_safe(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut buf = [0u8; 4];
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
+            out.push(c);
+        } else {
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
 /// `value` as an IRI: itself when it is absolute, otherwise appended to
 /// `base` (R2RML resolves by concatenation, not by RFC 3986 reference
 /// resolution). `None` when neither is a valid absolute IRI.
@@ -69,6 +87,16 @@ pub fn blank_node_label(prefix: &str, graph: Option<&str>, value: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_iri_and_uri_safe_examples_of_rml_core() {
+        // RML-Core §IRI encoding, the table of IRI-safe and URI-safe versions.
+        assert_eq!(iri_safe("~A_17.1-2¢"), "~A_17.1-2¢");
+        assert_eq!(uri_safe("~A_17.1-2¢"), "~A_17.1-2%C2%A2");
+        assert_eq!(iri_safe("Zoë Krüger"), "Zoë%20Krüger");
+        assert_eq!(uri_safe("Zoë Krüger"), "Zo%C3%AB%20Kr%C3%BCger");
+        assert_eq!(uri_safe("Hello World!"), "Hello%20World%21");
+    }
 
     #[test]
     fn the_iri_safe_examples_of_r2rml_7_3() {

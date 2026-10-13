@@ -1886,6 +1886,63 @@ fn cx13_copy_preserves_source_and_self_copy_noop() {
     );
 }
 
+// Dataset: several FROM (or USING) graphs make one default graph, their RDF
+// merge (SPARQL 1.1 Query §13.2, §18.3; Update §3.1.3): a triple held in two
+// of them is one triple. Four quads, three distinct triples, two of which
+// share the value 10 (so deduplicating values instead of triples would fail).
+#[test]
+fn dataset_from_graphs_merge_as_a_set() {
+    let s = ts();
+    s.update(
+        r#"INSERT DATA {
+             GRAPH <http://ex/g1> { <http://ex/a> <http://ex/v> 10 . <http://ex/b> <http://ex/v> 20 }
+             GRAPH <http://ex/g2> { <http://ex/a> <http://ex/v> 10 . <http://ex/c> <http://ex/v> 10 }
+           }"#,
+    )
+    .unwrap();
+    let rows = select(
+        &s,
+        "SELECT (COUNT(*) AS ?n) (SUM(?v) AS ?sum) FROM <http://ex/g1> FROM <http://ex/g2> \
+         WHERE { ?s <http://ex/v> ?v }",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+            "\"40\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        ]],
+        "the merge holds <a> <v> 10 once"
+    );
+    // A self-join over the merge keeps every distinct match: the shared triple
+    // joins with itself once, not four times.
+    let joined = select(
+        &s,
+        "SELECT ?s FROM <http://ex/g1> FROM <http://ex/g2> \
+         WHERE { ?s <http://ex/v> ?v . ?s <http://ex/v> ?w }",
+    );
+    assert_eq!(joined.len(), 3);
+    // UPDATE with two USING graphs sees the same merge, and leaves them as they were.
+    s.update(
+        "INSERT { GRAPH <http://ex/total> { <http://ex/all> <http://ex/sum> ?sum } } \
+         USING <http://ex/g1> USING <http://ex/g2> \
+         WHERE { { SELECT (SUM(?v) AS ?sum) WHERE { ?s <http://ex/v> ?v } } }",
+    )
+    .unwrap();
+    assert_eq!(
+        select(
+            &s,
+            "SELECT ?sum WHERE { GRAPH <http://ex/total> { ?x <http://ex/sum> ?sum } }"
+        ),
+        vec![vec![
+            "\"40\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        ]]
+    );
+    assert_eq!(
+        select(&s, "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s <http://ex/v> ?v } } GROUP BY ?g ORDER BY ?g").len(),
+        2
+    );
+}
+
 // cx-15: GRAPH ?g respects FROM NAMED; FROM-without-FROM-NAMED yields empty named graphs.
 #[test]
 fn cx15_graph_var_respects_from_named() {

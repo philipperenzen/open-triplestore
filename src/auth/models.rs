@@ -734,6 +734,18 @@ pub struct Dataset {
     pub version_notes: Option<String>,
     pub spatial: Option<String>,
     pub landing_page: Option<String>,
+    /// Start of the period the data covers (`dct:temporal`): an `xsd:date`
+    /// (`2020-01-01`) or `xsd:dateTime`.
+    #[serde(default)]
+    pub temporal_start: Option<String>,
+    /// End of the period the data covers; same forms as `temporal_start`.
+    #[serde(default)]
+    pub temporal_end: Option<String>,
+    /// How often the dataset is updated (`dct:accrualPeriodicity`): an IRI of
+    /// the EU frequency table, e.g.
+    /// `http://publications.europa.eu/resource/authority/frequency/ANNUAL`.
+    #[serde(default)]
+    pub accrual_periodicity: Option<String>,
 }
 
 /// A persisted SHACL validation run, including the full report.
@@ -911,6 +923,10 @@ pub struct OauthProvider {
     pub auto_provision: bool,
     pub default_role: String,
     pub is_active: bool,
+    /// SAML settings beyond the IdP's entity ID, SSO URL and certificates
+    /// (unused for OIDC). Stored as JSON in `oauth_providers.saml_config`.
+    #[serde(default)]
+    pub saml_config: SamlConfig,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -932,8 +948,10 @@ pub struct OauthProviderCreate {
     pub tenant_id: Option<String>,
     pub entity_id: Option<String>,
     pub sso_url: Option<String>,
-    /// SAML IdP signing certificate (PEM). Never returned by a read; absent on
-    /// an update keeps the stored certificate.
+    /// SAML IdP signing certificate(s): one or more PEM blocks (or bare
+    /// base64 DER, one per line), so a certificate rollover can trust the old
+    /// and the new key at once. Never returned by a read; absent on an update
+    /// keeps the stored certificates.
     pub idp_certificate: Option<String>,
     /// Space-separated, e.g. `openid email profile`.
     pub scopes: Option<String>,
@@ -942,6 +960,190 @@ pub struct OauthProviderCreate {
     pub auto_provision: bool,
     pub default_role: Option<String>,
     pub is_active: bool,
+    /// SAML settings (see [`SamlConfig`]). Absent on an update keeps the
+    /// stored settings.
+    #[serde(default)]
+    pub saml_config: Option<SamlConfig>,
+}
+
+/// One of the store's own SAML key pairs for a provider (SP side): signs
+/// AuthnRequests and logout messages, and decrypts encrypted assertions.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SamlSpKey {
+    pub kid: String,
+    pub provider_id: String,
+    /// The private key (PKCS#8 PEM) as stored: a secret reference, or
+    /// encrypted. Never serialised.
+    #[serde(skip_serializing, default)]
+    pub private_key_enc: String,
+    /// The X.509 certificate published in the SP metadata, base64 DER.
+    pub certificate: String,
+    /// The key that signs; the others are published and decrypt.
+    pub is_current: bool,
+    pub created_at: String,
+}
+
+/// The IdP session behind a refresh-token family that a SAML sign-in issued.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamlSession {
+    pub family_id: String,
+    pub provider_id: String,
+    pub user_id: String,
+    pub name_id: String,
+    pub name_id_format: Option<String>,
+    pub name_qualifier: Option<String>,
+    pub sp_name_qualifier: Option<String>,
+    pub session_index: Option<String>,
+    pub created_at: String,
+}
+
+/// NameID formats a SAML provider may ask for.
+pub const SAML_NAMEID_PERSISTENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent";
+pub const SAML_NAMEID_TRANSIENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient";
+pub const SAML_NAMEID_EMAIL: &str = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
+pub const SAML_NAMEID_UNSPECIFIED: &str = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified";
+
+/// Largest clock difference to the IdP a SAML provider may tolerate.
+pub const SAML_MAX_CLOCK_SKEW_SECONDS: u32 = 600;
+
+/// Per-provider SAML settings, beyond the IdP's entity ID (`entity_id`), SSO
+/// URL (`sso_url`) and signing certificates (`idp_certificate`), which keep
+/// their own columns. Every field is optional; the defaults are the
+/// recommended policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct SamlConfig {
+    /// The store's entity ID towards this IdP. Default: the provider's SP
+    /// metadata URL, `{BASE_URL}/api/auth/saml/{slug}/metadata`.
+    pub sp_entity_id: Option<String>,
+    /// Where the IdP metadata was imported from (https), kept for re-import.
+    pub idp_metadata_url: Option<String>,
+    /// The IdP's Single Logout endpoint (HTTP-Redirect binding). Without it,
+    /// signing out here ends only the local session.
+    pub idp_slo_url: Option<String>,
+    /// Where LogoutResponses go when the IdP names a separate
+    /// `ResponseLocation`. Default: `idp_slo_url`.
+    pub idp_slo_response_url: Option<String>,
+    /// NameID format the AuthnRequest asks for. Default: persistent. A
+    /// transient NameID changes on every sign-in, so it is accepted only with
+    /// `subject_attribute` set.
+    pub name_id_format: Option<String>,
+    /// An attribute whose value identifies the account instead of the NameID
+    /// (for example `urn:oid:1.3.6.1.4.1.5923.1.1.1.6`, eduPersonPrincipalName).
+    pub subject_attribute: Option<String>,
+    /// Attribute names (`Name` or `FriendlyName`) read as the email address,
+    /// display name and groups. Empty: the built-in list, which covers the
+    /// `urn:oid:` names, the Microsoft claim URIs and the plain names.
+    pub email_attributes: Vec<String>,
+    pub name_attributes: Vec<String>,
+    pub group_attributes: Vec<String>,
+    /// Accept sign-ins the IdP starts (unsolicited responses). Off by
+    /// default: such a response is not bound to a browser, so it permits login
+    /// CSRF. When on, each assertion is accepted once (replay cache).
+    pub allow_idp_initiated: bool,
+    /// Tolerated clock difference to the IdP, in seconds (default 180, at
+    /// most 600).
+    pub clock_skew_seconds: Option<u32>,
+    /// Sign AuthnRequests (HTTP-Redirect binding, RSA-SHA256) with the
+    /// provider's SP key. LogoutRequests and LogoutResponses are always signed.
+    pub sign_authn_requests: bool,
+    /// Refuse responses whose assertion is not encrypted to our SP key.
+    pub require_encrypted_assertions: bool,
+    /// Technical contact published in the SP metadata.
+    pub contact_email: Option<String>,
+}
+
+impl SamlConfig {
+    /// The NameID format to request.
+    pub fn name_id_format_or_default(&self) -> &str {
+        self.name_id_format
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .unwrap_or(SAML_NAMEID_PERSISTENT)
+    }
+
+    /// The tolerated clock skew.
+    pub fn clock_skew(&self) -> u32 {
+        self.clock_skew_seconds
+            .unwrap_or(180)
+            .min(SAML_MAX_CLOCK_SKEW_SECONDS)
+    }
+
+    /// Check the settings an admin supplied. The message names the field.
+    pub fn validate(&self) -> Result<(), String> {
+        fn https_or_loopback(field: &str, v: &Option<String>) -> Result<(), String> {
+            match v.as_deref().map(str::trim) {
+                None | Some("") => Ok(()),
+                Some(u) if u.len() > 2048 => Err(format!("saml_config.{field} is too long")),
+                Some(u) if crate::auth::oidc_rs::is_secure_idp_url(u) => Ok(()),
+                Some(_) => Err(format!(
+                    "saml_config.{field} must be an https URL (http only for localhost)"
+                )),
+            }
+        }
+        https_or_loopback("idp_metadata_url", &self.idp_metadata_url)?;
+        https_or_loopback("idp_slo_url", &self.idp_slo_url)?;
+        https_or_loopback("idp_slo_response_url", &self.idp_slo_response_url)?;
+        if let Some(id) = self.sp_entity_id.as_deref().map(str::trim) {
+            if !id.is_empty() && (id.len() > 1024 || url::Url::parse(id).is_err()) {
+                return Err("saml_config.sp_entity_id must be an absolute URI".into());
+            }
+        }
+        let format = self.name_id_format_or_default();
+        match format {
+            SAML_NAMEID_PERSISTENT | SAML_NAMEID_EMAIL | SAML_NAMEID_UNSPECIFIED => {}
+            SAML_NAMEID_TRANSIENT => {
+                if self
+                    .subject_attribute
+                    .as_deref()
+                    .is_none_or(|a| a.trim().is_empty())
+                {
+                    return Err("a transient NameID changes on every sign-in; set \
+                                saml_config.subject_attribute to identify accounts"
+                        .into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "saml_config.name_id_format `{other}` is not supported"
+                ))
+            }
+        }
+        if let Some(skew) = self.clock_skew_seconds {
+            if skew > SAML_MAX_CLOCK_SKEW_SECONDS {
+                return Err(format!(
+                    "saml_config.clock_skew_seconds must be at most {SAML_MAX_CLOCK_SKEW_SECONDS}"
+                ));
+            }
+        }
+        for (field, list) in [
+            ("email_attributes", &self.email_attributes),
+            ("name_attributes", &self.name_attributes),
+            ("group_attributes", &self.group_attributes),
+        ] {
+            if list.len() > 32 || list.iter().any(|a| a.trim().is_empty() || a.len() > 512) {
+                return Err(format!(
+                    "saml_config.{field} takes up to 32 non-empty attribute names"
+                ));
+            }
+        }
+        if let Some(mail) = self.contact_email.as_deref().map(str::trim) {
+            if !mail.is_empty()
+                && (mail.len() > 254 || !mail.contains('@') || mail.contains(char::is_whitespace))
+            {
+                return Err("saml_config.contact_email is not an email address".into());
+            }
+        }
+        if self
+            .subject_attribute
+            .as_deref()
+            .is_some_and(|a| a.len() > 512)
+        {
+            return Err("saml_config.subject_attribute is too long".into());
+        }
+        Ok(())
+    }
 }
 
 impl OauthProvider {

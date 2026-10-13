@@ -29,6 +29,7 @@ on:
     paths:
       - 'src/**'
       - 'opengraph/**'
+      - 'vendor/**'
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,6 +44,7 @@ on:
     paths:
       - 'src/**'
       - 'opengraph/**'
+      - 'vendor/**'
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'

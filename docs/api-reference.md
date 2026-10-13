@@ -45,7 +45,7 @@ Three facts worth knowing before an instance is exposed:
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | `GET` | `/` | **none** | SPARQL 1.1 Service Description of this node. |
-| `GET` | `/health` | **none** | Liveness plus store counters. |
+| `GET` | `/health` | **none** | Liveness plus store counters and the build's `capabilities` (standards it serves). |
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones: the graphs of public datasets and of every published version of a public model-registry entry (the bundled vocabularies included). A private entry's version graphs are read by its owner, the owner organisation's members and admins, exactly as `/api/models/{id}/versions/{ver}/data` serves them. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**; writing a model-registry graph is refused unless the caller may write the entry, whether or not they may read it. |
@@ -82,6 +82,7 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
+| `DELETE` | `/api/models/{id}/versions/{ver}` | **token** | Delete one version, its graphs and its registry record: admins, and publishers who may write the entry (`403` otherwise). `409` for a published version without `?force=true`, and while datasets depend on it whatever `force` says; see [models.md](models.md#deleting-a-version). |
 | `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
@@ -97,11 +98,11 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
-| `POST` | `/api/shaclc/parse` | **token** | SHACLC → SHACL. Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
+| `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
 | `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |
 | `POST` | `/api/reasoning/check` | **token** | OWL 2 DL consistency, entailment, satisfiability or profile check over graphs the caller may read, or over Turtle in the body; `?async=true` queues it as a job. |
 | `GET` | `/api/reasoning/jobs/{job_id}` | **token** | A background reasoning job, to the user who started it and admins (`404` to anyone else). |
-| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACLC of a graph named by the caller. Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
+| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
 | `GET` | `/api/admin/prefixes` | **admin** | What this deployment has decided its prefixes mean. |
@@ -142,11 +143,37 @@ and the level the router enforces cannot drift apart.
 - `/store` — Graph Store HTTP Protocol (GET/PUT/POST/DELETE, with `?graph=<iri>`)
 - `/api/{datasets|organisations|groups}/{id}/api-services/{slug}/run` — run a saved API service
 - `/resource/<path>` — content-negotiated IRI dereference
-- `/.well-known/void` — DCAT 2 / VoID dataset catalog (content-negotiated RDF)
+- `/.well-known/void` — DCAT 3 / VoID dataset catalog (content-negotiated RDF)
 - `/api/models/{id}/versions` — list model versions
 - `/api/models/{id}/latest/data` — latest published model (content-negotiated RDF)
 
 Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.
+
+## The dataset of a `/sparql` query
+
+A query's RDF dataset is the one SPARQL 1.1 defines, confined to the graphs the
+caller may read:
+
+- **The request names a dataset** with `FROM` / `FROM NAMED` in the query, or with
+  the protocol parameters `default-graph-uri` / `named-graph-uri` (each repeatable;
+  they take precedence over the query's own clauses, SPARQL 1.1 Protocol §2.1.4).
+  The clauses keep their meaning: `FROM <a>` alone makes `<a>` the default graph
+  and leaves no named graphs, `FROM NAMED <b>` alone gives an empty default graph
+  and the one named graph `<b>`, and several `FROM` graphs merge into one default
+  graph (a triple held in two of them counts once). A graph the caller may not read
+  is dropped, as if it were empty, so the answer does not reveal whether it exists.
+  An admin's dataset is used as written (admins may name any graph).
+- **The request names no dataset:** the default graph is the merge of every graph
+  the caller may read (every registered graph, for an admin), and those graphs are
+  also the named graphs, so a plain `SELECT * { ?s ?p ?o }` sees the data, which
+  this store keeps in named graphs. The service description advertises this as
+  `sd:UnionDefaultGraph`.
+- `?entailment=<regime>` adds the regime's entailment graph to the default graph
+  (and to the named graphs when no dataset is named).
+
+GET carries the parameters in the URL; a form-encoded POST in its body (or the URL);
+a POST with an `application/sparql-query` body in the URL. A parameter that is not
+an absolute IRI is a `400`.
 
 ## Batched SPARQL updates — `/sparql/batch`
 
@@ -195,14 +222,28 @@ with back-off, and any other error status is a `502`. The report gains
 client did not fetch again (those are in `nodes_skipped_immutable`). See
 [ldes.md](ldes.md#syncing-a-stream-into-a-dataset).
 
-## SHACL Compact Syntax — `?lenient`
+## SHACL Compact Syntax — `?dialect`, `?lenient`, `?base`, `?lossy`
 
-`PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and
-`POST /api/shaclc/parse` parse SHACLC **strictly**: input the grammar does not
-recognise is a `400` whose body names the line, column and offending text, and
-nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
-the previous behaviour, in which unrecognised input is ignored and whatever parsed
-is kept. Status codes and response bodies are otherwise unchanged.
+`PUT /api/datasets/{dataset_id}/shapes`, `PUT /api/shacl/shape-graphs/{id}/turtle`
+(both with `Content-Type: text/shaclc`) and `POST /api/shaclc/parse` parse the
+**W3C SHACL Compact Syntax** (the SHACL Community Group report's grammar)
+**strictly**: input the grammar does not allow is a `400` whose body names the
+line, column and offending token, and nothing is stored. **Changed after 0.7:** a
+bare non-XSD IRI after a path is `sh:class` (it was `sh:node`), and the old
+dialect's keywords are refused. `dialect=legacy` (deprecated, accepted for one
+more release, logged on every use) parses the 0.7 dialect instead, and only
+with it does `lenient=true` (or `1`) keep its old meaning of ignoring
+unrecognised input; `lenient` without it is a `400`. `POST /api/shaclc/parse`
+also takes `base=<iri>`, the initial base IRI.
+
+Every SHACL-C read — `GET /api/datasets/{dataset_id}/shapes?format=shaclc`,
+`GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` (or
+`Accept: text/shaclc`) and `POST /api/shaclc/serialize` — is lossless or a
+**`422`** `{"error": …, "losses": [{"subject", "predicate", "object",
+"reason"}, …]}` listing every triple the compact syntax cannot express (it used
+to answer `200` with those constraints silently missing). `lossy=true` returns
+the partial document with `200`, an `X-SHACLC-Losses` count header and the
+losses named in a leading comment block.
 
 ## Browse scope — `dataset_id`, `dataset_ids`, `org_id`, `org_ids`
 

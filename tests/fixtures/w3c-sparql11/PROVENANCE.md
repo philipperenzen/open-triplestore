@@ -25,9 +25,9 @@
   federation sections `service/` and `syntax-fed/` (every file, the
   `service/README` included). Not vendored: the protocol, service
   description, graph-store-protocol (`graph-store-protocol/`, and its
-  deprecated predecessor `http-rdf-update/`), result-format (`csv-tsv-res/`,
-  `json-res/`) and entailment-regime (`entailment/`) sections, which test
-  surfaces these runners do not cover; the other top-level manifests
+  deprecated predecessor `http-rdf-update/`) and result-format
+  (`csv-tsv-res/`, `json-res/`) sections, which test surfaces these runners
+  do not cover; the other top-level manifests
   (`manifest.ttl`, `manifest-all.ttl`, `manifest-sparql11-results.ttl`); and
   the cover-page template `template.haml`.
 - Runner: `tests/w3c_sparql11_manifests.rs` — walks the two top-level
@@ -51,3 +51,11 @@
   isomorphism; syntax tests assert that the query parses. Same ratchet
   (KNOWN_FAILURES, two-way) and the same rule: no pass count or rate is
   published.
+- Entailment regimes: `entailment/` was added on 2026-10-03 from the same
+  commit, byte-identical (checked file by file). Its runner is
+  `tests/w3c_sparql11_entailment_manifests.rs`: it materializes each case's
+  data with the RDFS engine (`RDFS`, `RDF`, `D` regimes) or the OWL 2 RL
+  engine (`OWL-RDF-Based`), runs the query over the data and the derived
+  triples, and compares the results. Cases for the OWL Direct Semantics and
+  RIF regimes only are skipped. Known gaps: its KNOWN_FAILURES list, in
+  docs/conformance/entailment.md.

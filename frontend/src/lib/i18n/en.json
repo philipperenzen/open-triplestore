@@ -114,7 +114,10 @@
     "warning": "Warning",
     "info": "Info",
     "selectAll": "Select all",
-    "deselectAll": "Deselect all"
+    "deselectAll": "Deselect all",
+    "restore": "Restore",
+    "areYouSure": "Are you sure?",
+    "discard": "Discard changes"
   },
   "search": {
     "placeholder": "Jump to resource IRI or search…",
@@ -197,7 +200,8 @@
         "validateTitle": "Resolve SHACL issues",
         "validateDesc": "Run conformance reports and inspect failing nodes in one workflow.",
         "validateCta": "Review validation"
-      }
+      },
+      "capabilitiesLabel": "Standards this server supports"
     },
     "tripleBrowser": {
       "title": "Triple Browser",
@@ -889,11 +893,6 @@
       "filterPlaceholder": "Filter datasets…",
       "countOf": "{shown} of {total}",
       "roleAll": "All",
-      "roleInstances": "Instances",
-      "roleModel": "Model",
-      "roleVocabulary": "Vocabulary",
-      "roleShapes": "Shapes",
-      "roleEntailment": "Entailment",
       "roleColumn": "Role",
       "validationColumn": "Validation",
       "selectAllWritable": "Select all writable datasets",
@@ -936,7 +935,11 @@
         "vocabulary": "Vocabulary",
         "shapes": "Shapes",
         "entailment": "Entailment",
-        "system": "System"
+        "system": "System",
+        "catalog": "Catalog",
+        "provenance": "Provenance",
+        "domain-values": "Domain values",
+        "linkset": "Linkset"
       },
       "emptyCta": "Create your first dataset"
     },
@@ -987,6 +990,9 @@
       "themes": "Themes",
       "keywords": "Keywords",
       "spatialCoverage": "Spatial coverage",
+      "temporalCoverage": "Temporal coverage",
+      "updateFrequency": "Update frequency",
+      "openEnded": "open",
       "landingPage": "Landing page",
       "conformsToModel": "Conforms to model",
       "contactPoint": "Contact point",
@@ -1878,7 +1884,7 @@
       "slugHint": "(URL-safe, unique)",
       "providerType": "Provider Type",
       "providerTypeOidc": "OIDC (including Azure AD / Entra ID)",
-      "providerTypeSaml": "SAML 2.0 (experimental)",
+      "providerTypeSaml": "SAML 2.0",
       "clientId": "Client ID",
       "clientIdPlaceholder": "Application (client) ID",
       "clientSecret": "Client secret",
@@ -1889,9 +1895,56 @@
       "scopesHint": "(space-separated)",
       "samlEntityId": "IdP entity ID",
       "samlSsoUrl": "IdP SSO URL",
-      "samlCertificate": "IdP signing certificate",
-      "samlCertificateHint": "(PEM, from the IdP metadata)",
-      "samlCertificateKeep": "(leave blank to keep the stored certificate)",
+      "samlCertificate": "IdP signing certificates",
+      "samlCertificateHint": "(PEM; several during a key rollover)",
+      "samlCertificateKeep": "(leave blank to keep the stored certificates)",
+      "samlImportTitle": "Import IdP metadata",
+      "samlImportHint": "Fills in the entity ID, SSO and logout URLs and every signing certificate. Fetched over https; redirects are not followed.",
+      "samlImportUrl": "Metadata URL",
+      "samlImportXml": "or paste the metadata XML",
+      "samlImportButton": "Import",
+      "samlImported": "Filled in from the metadata ({count} signing certificates). Save to apply.",
+      "samlSloUrl": "IdP logout URL (Single Logout)",
+      "samlSloUrlHint": "(without it, signing out ends only the session here)",
+      "samlNameIdFormat": "NameID format",
+      "samlNameIdPersistent": "Persistent (recommended)",
+      "samlNameIdEmail": "Email address",
+      "samlNameIdUnspecified": "Unspecified",
+      "samlNameIdTransient": "Transient (needs a subject attribute)",
+      "samlSubjectAttribute": "Subject attribute",
+      "samlSubjectAttributeHint": "(identifies accounts instead of the NameID, e.g. urn:oid:1.3.6.1.4.1.5923.1.1.1.6)",
+      "samlEmailAttributes": "Email attributes",
+      "samlNameAttributes": "Display-name attributes",
+      "samlGroupAttributes": "Group attributes",
+      "samlAttributesHint": "(one name per line; empty uses the built-in list of urn:oid, Microsoft claim and plain names)",
+      "samlClockSkew": "Clock skew (seconds)",
+      "samlClockSkewHint": "(default 180, at most 600)",
+      "samlSpEntityId": "Our entity ID",
+      "samlSpEntityIdHint": "(default: the SP metadata URL)",
+      "samlContactEmail": "Technical contact (published in the metadata)",
+      "samlAllowIdpInitiated": "Accept sign-ins started at the IdP",
+      "samlAllowIdpInitiatedDesc": "Off by default: such a sign-in is not tied to a browser, so it permits login CSRF. When on, each assertion is accepted once.",
+      "samlSignRequests": "Sign authentication requests",
+      "samlSignRequestsDesc": "Sign each AuthnRequest with this store's SP key (RSA-SHA256). Logout messages are always signed.",
+      "samlRequireEncrypted": "Require encrypted assertions",
+      "samlRequireEncryptedDesc": "Refuse responses whose assertion is not encrypted to this store's SP key.",
+      "samlSpTitle": "This store as service provider",
+      "samlSpHint": "Register the metadata URL with the IdP, or the entity ID, ACS and logout URLs below.",
+      "samlSpEntity": "Entity ID",
+      "samlMetadataUrl": "Metadata URL",
+      "samlAcsUrl": "Assertion Consumer Service (HTTP-POST)",
+      "samlSloEndpoint": "Single Logout (HTTP-Redirect and HTTP-POST)",
+      "samlTransportWarning": "SAML needs an https BASE_URL (plain http only on localhost): the IdP returns to the ACS with a cross-site POST, which only a SameSite=None; Secure cookie survives.",
+      "samlKeys": "SP keys",
+      "samlKeysHint": "Every key is published for signing and encryption and decrypts; the current one signs. Rollover: add a key, let the IdP read the new metadata, activate the key, then delete the old one.",
+      "samlKeysNone": "No key yet: the first one is created when the metadata is first fetched.",
+      "samlKeyCurrent": "Current",
+      "samlKeyActivate": "Activate",
+      "samlKeyDelete": "Delete",
+      "samlKeyAdd": "Add key",
+      "samlKeyExpires": "Expires",
+      "samlClockSkewInvalid": "Clock skew must be a whole number of seconds from 0 to 600.",
+      "samlTransientNeedsSubject": "A transient NameID changes on every sign-in: set a subject attribute to identify accounts.",
       "nameSlugRequired": "A display name and a slug are required.",
       "roleClaimMapInvalid": "The role claim map must be a JSON object that maps each claim value to a role name, written as text.",
       "defaultRole": "Default role",
@@ -2286,6 +2339,15 @@
       "subGraphCountPlural": "{count} sub-graphs",
       "deleteVersionConfirmTitle": "Delete version {version}?",
       "deleteVersionConfirmMessage": "This also removes its named graph data and cannot be undone.",
+      "deleteVersionBlockedTitle": "Version {version} cannot be deleted yet",
+      "deleteVersionPublished": "This version is published, so consumers may rely on it. Delete it anyway only if nobody does.",
+      "deleteVersionDependents": "{count} dataset(s) depend on this version. Re-pin them to another version first.",
+      "deleteVersionHidden": "…and {count} dataset(s) you cannot see.",
+      "deleteVersionReasonPinned": "pinned to this version",
+      "deleteVersionReasonFloating": "follows the latest published version, which is this one",
+      "deleteVersionReasonDatasetVersion": "dataset version {version} conforms to it",
+      "deleteVersionForce": "Delete anyway",
+      "deleteVersionClose": "Close",
       "status": {
         "published": "published",
         "staged": "staged",
@@ -2314,7 +2376,8 @@
       },
       "dependents": "Used by {count} dataset(s)",
       "dependentBehind": "Pinned to an older version — latest published is {latest}",
-      "dependentCurrent": "Pinned to the latest published version"
+      "dependentCurrent": "Pinned to the latest published version",
+      "versionFieldLabel": "Version"
     },
     "modelDiff": {
       "heading": "Diff:",
@@ -2656,7 +2719,7 @@
       "historyButton": "History",
       "editDetailsButton": "Edit details",
       "addShapesHeading": "Add existing shapes",
-      "addShapesHint": "Pick shapes from any graph — including shapes joined with data — to copy into {name}.",
+      "addShapesHint": "Pick shapes from any graph — including shapes joined with data — to copy into <strong>{name}</strong>.",
       "metaValidationHeading": "Meta-validation (SHACL-SHACL)",
       "validatingShapes": "Validating the shapes…",
       "shapesWellFormed": "These shapes are well-formed.",
@@ -3435,6 +3498,12 @@
       "deleteTitle": "Delete this report?",
       "deleteMessage": "“{title}” will be removed permanently, for the reporter as well.",
       "kind": "Type"
+    },
+    "notFound": {
+      "detail": "Nothing lives at this address. The link may be out of date, or the page may have moved.",
+      "docs": "Open the documentation",
+      "title": "Page not found",
+      "home": "Go to the overview"
     }
   },
   "toast": {
@@ -3587,7 +3656,7 @@
     },
     "attachShapesDialog": {
       "title": "Attach shapes",
-      "intro": "Validate {target} with one or more shape graphs. Bindings become part of the data (a queryable validation layer) and",
+      "intro": "Validate <strong>{target}</strong> with one or more shape graphs. Bindings become part of the data (a queryable validation layer) and",
       "introGraphTail": "travel with the graph — any dataset that includes it inherits these shapes.",
       "introDefaultTail": "apply on write and in pipelines.",
       "filterPlaceholder": "Filter shape graphs…",
@@ -3816,6 +3885,14 @@
       "spatialHelp": "Geographic region the data is about, ideally as a GeoNames IRI.",
       "landingPageLabel": "Landing page",
       "landingPageHelp": "Human-readable page about the dataset (e.g. on your data portal).",
+      "temporalLabel": "Temporal coverage",
+      "temporalHelp": "The period the data covers (dct:temporal). Either end may stay open.",
+      "temporalStart": "From",
+      "temporalEnd": "Until",
+      "temporalOrder": "The end date is before the start date.",
+      "periodicityLabel": "Update frequency",
+      "periodicityHelp": "How often the dataset is updated, from the EU frequency vocabulary (dct:accrualPeriodicity).",
+      "periodicityNotSpecified": "— Not specified —",
       "dangerZone": "Danger zone",
       "deleteHeading": "Delete this dataset",
       "deleteDescription": "Permanently removes the dataset and the named graphs it owns. This cannot be undone.",
@@ -4135,7 +4212,7 @@
       "deleteThis": "Delete this organisation",
       "deleteDesc": "Permanently removes the organisation and all its datasets. This cannot be undone.",
       "deleteOrg": "Delete organisation",
-      "deleteConfirmWarn": "This will permanently delete {name} and all its datasets. Type the organisation name to confirm.",
+      "deleteConfirmWarn": "This will permanently delete <strong>{name}</strong> and all its datasets. Type the organisation name to confirm.",
       "deleteConfirmAria": "Type the organisation name to confirm deletion",
       "deleting": "Deleting…",
       "deletePermanently": "Delete permanently",
@@ -4170,14 +4247,6 @@
     },
     "select": {
       "noOptions": "No options"
-    },
-    "shaclShapePanel": {
-      "colPath": "Path",
-      "colCardinality": "Cardinality",
-      "colType": "Type",
-      "colExtra": "Extra",
-      "valuesCount": "{count} values",
-      "noPropertyShapes": "No property shapes declared."
     },
     "shaclStudioNav": {
       "navLabel": "SHACL Studio sections",
@@ -4572,6 +4641,38 @@
       "signInTitle": "Sign in to send feedback",
       "signInBody": "Reports are linked to your account so the administrators can follow up with you.",
       "readFaq": "Read the FAQ"
+    },
+    "identityPolicy": {
+      "option": {
+        "sameas-narrow": "Narrow",
+        "sameas-full": "Full",
+        "sameas-off": "Off"
+      },
+      "source": {
+        "organisation": "inherited from the organisation",
+        "default": "built-in default",
+        "organisationOwn": "set on this organisation",
+        "dataset": "set on this dataset"
+      },
+      "introDataset": "What owl:sameAs may do when this dataset is reasoned over. A setting here overrides the organisation's.",
+      "description": {
+        "sameas-narrow": "owl:sameAs merges IRIs within the dataset's own graphs; linkset graphs are not used as premises.",
+        "sameas-full": "Every owl:sameAs merges, linksets included, and properties flow both ways between the merged IRIs.",
+        "sameas-off": "owl:sameAs never merges two IRIs; it stays plain data."
+      },
+      "selectLabel": "Setting",
+      "navLabel": "Identity policy",
+      "orgInheritHint": "Datasets with their own setting keep it. Inheriting datasets that materialise their entailments are re-run.",
+      "inheritOrganisation": "Built-in default",
+      "readOnly": "Changing it needs write access.",
+      "inheritDataset": "Inherit (organisation or default)",
+      "inForce": "In force",
+      "heading": "Identity policy (owl:sameAs)",
+      "rematerialiseHint": "When this dataset materialises its entailments, saving re-runs the reasoner at once.",
+      "introOrganisation": "The owl:sameAs policy every dataset of this organisation inherits, unless the dataset sets its own.",
+      "neverIdentity": "Never treated as identity, whatever the setting:",
+      "saved": "Identity policy saved",
+      "docsLink": "How the identity policy works"
     }
   },
   "viewer": {

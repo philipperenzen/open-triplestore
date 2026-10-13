@@ -156,7 +156,10 @@ pub(crate) async fn chat_completion(
         "{}/v1/chat/completions",
         gateway_base().trim_end_matches('/')
     );
-    let mut rb = http().post(&url).json(&payload);
+    let mut rb = http()
+        .post(&url)
+        .json(&payload)
+        .timeout(chat_completion_timeout());
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -1392,7 +1395,10 @@ async fn forward_feedback(
     )?;
 
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
-    let mut rb = http().post(&url).json(&signal);
+    let mut rb = http()
+        .post(&url)
+        .json(&signal)
+        .timeout(chat_completion_timeout());
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -2369,7 +2375,7 @@ async fn llm_chat_stream(
             Err(e) => {
                 let _ = tx
                     .send(ChatStreamEvent::Error {
-                        message: e.message(),
+                        message: e.client_message(),
                     })
                     .await;
             }
@@ -3011,7 +3017,7 @@ async fn execute_chat_query(
             (true, format!("Query results:\n{table}{hint}"))
         }
         Err(e) => {
-            let emsg = e.message();
+            let emsg = e.client_message();
             sink.send(ChatStreamEvent::QueryResult {
                 round,
                 ok: false,
@@ -3082,6 +3088,11 @@ async fn dispatch_tool_call(
             let term = call.arguments["term"].as_str().unwrap_or("").trim();
             if term.is_empty() {
                 return "vocab_term_search needs a non-empty \"term\" string argument.".to_string();
+            }
+            // Without the term index every lookup comes back empty; say so
+            // rather than claim no installed vocabulary defines the term.
+            if !vocab_term_search_available(state) {
+                return VOCAB_SEARCH_UNAVAILABLE.to_string();
             }
             let lines = vocab_term_lines(state, &[term.to_string()], &[]).await;
             if lines.is_empty() {
@@ -4318,6 +4329,25 @@ async fn vocab_term_lines(
     })
     .await
     .unwrap_or_default()
+}
+
+/// What the `vocab_term_search` tool answers when there is no term index to
+/// search (the vocab-search feature is off, or the engine failed to start).
+const VOCAB_SEARCH_UNAVAILABLE: &str = "Vocabulary term search is not available on this \
+     platform — take term IRIs from the Graph vocabulary and Registered models sections, \
+     or find them with run_sparql.";
+
+/// Whether the installed-vocabulary term index can answer `vocab_term_search`.
+fn vocab_term_search_available(state: &AppState) -> bool {
+    #[cfg(feature = "vocab-search")]
+    {
+        state.vocab_engine.is_some()
+    }
+    #[cfg(not(feature = "vocab-search"))]
+    {
+        let _ = state;
+        false
+    }
 }
 
 #[cfg(not(feature = "vocab-search"))]

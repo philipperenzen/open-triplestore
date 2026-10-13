@@ -59,7 +59,7 @@ pub fn data_model_auth_routes() -> Router<AppState> {
         .route("/api/models/:id/versions", post(handlers::upload_version))
         .route(
             "/api/models/:id/versions/:ver",
-            patch(handlers::update_version_notes),
+            patch(handlers::update_version_notes).delete(handlers::delete_version),
         )
         .route(
             "/api/models/:id/versions/:ver/data",

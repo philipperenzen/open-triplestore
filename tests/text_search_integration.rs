@@ -393,3 +393,315 @@ async fn concurrent_searches_share_one_rebuild() {
         "the index should be clean once the rebuild finished"
     );
 }
+
+// ── Writers that never touch the index ──────────────────────────────────────
+//
+// The index used to be kept in step only by the writers that remembered to
+// (SPARQL UPDATE, the Graph Store Protocol, imports, versions, seeds); LDP,
+// RDF Patch, entailment materialisation, RML runs, SHACL rule output,
+// replication, LDES sync and repair left it stale. Every store write is now
+// recorded in the store's search journal, which the index drains before it
+// answers. These pin that for a bare store write and for three of the
+// writers that had no hook.
+
+/// An admin, a store and a live index that has caught up once (which is what
+/// switches the store's search journal on, as the boot-time sync does).
+async fn admin_with_index() -> (AppState, String, tempfile::TempDir) {
+    let (mut state, token) = common::admin_state();
+    let dir = tempfile::tempdir().unwrap();
+    state.text_index = Some(Arc::new(TextIndex::open(dir.path()).unwrap()));
+    state.text_dirty.store(true, Ordering::Relaxed);
+    let _ = indexed(&state, "nothing").await;
+    assert!(
+        !state.text_index_stale(),
+        "the first sync must catch up fully"
+    );
+    (state, token, dir)
+}
+
+/// What the index finds for `term` in every graph, as `(subject, graph)`,
+/// after the same catch-up a `text:search` query runs first.
+async fn indexed(state: &AppState, term: &str) -> Vec<(String, String)> {
+    let st = state.clone();
+    let term = term.to_string();
+    tokio::task::spawn_blocking(move || {
+        st.sync_text_index_if_dirty();
+        st.text_index
+            .as_ref()
+            .unwrap()
+            .search(
+                &term,
+                None,
+                open_triplestore::text_search::index::GraphScope::All,
+                50,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.subject, h.graph))
+            .collect()
+    })
+    .await
+    .unwrap()
+}
+
+async fn call(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    token: &str,
+    content_type: Option<&str>,
+    body: &str,
+) -> (StatusCode, String) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"));
+    if let Some(ct) = content_type {
+        req = req.header("content-type", ct);
+    }
+    let resp = test_app(state.clone())
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+#[tokio::test]
+async fn a_store_write_reaches_the_index_without_any_caller_hook() {
+    let (state, _token, _dir) = admin_with_index().await;
+    let g = "http://example.org/graphs/bare";
+
+    // A bulk load and a ground update, neither followed by an index call.
+    state
+        .store
+        .load_str(
+            "<http://example.org/a> <http://example.org/p> \"Armadillo\" .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(g),
+        )
+        .unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{g}> {{ <http://example.org/b> <{LABEL}> \"Armadillo shell\" }} }}"
+        ))
+        .unwrap();
+    assert!(state.text_index_stale(), "the writes must be recorded");
+    let hits = indexed(&state, "armadillo").await;
+    assert_eq!(hits.len(), 2, "both writes must be searchable: {hits:?}");
+    assert!(!state.text_index_stale());
+
+    // A pattern update with no ground quads is recorded by graph.
+    state
+        .store
+        .update(&format!(
+            "DELETE {{ GRAPH <{g}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{g}> {{ ?s ?p ?o FILTER(?s = <http://example.org/a>) }} }}"
+        ))
+        .unwrap();
+    let hits = indexed(&state, "armadillo").await;
+    assert_eq!(
+        hits,
+        vec![("http://example.org/b".to_string(), g.to_string())],
+        "a deleted literal must leave the index"
+    );
+
+    // A literal in the default graph is keyed by the stand-in graph IRI,
+    // as the full rebuild keys it.
+    state
+        .store
+        .update("INSERT DATA { <http://example.org/c> <http://example.org/p> \"Armadillo den\" }")
+        .unwrap();
+    let hits = indexed(&state, "den").await;
+    assert_eq!(
+        hits,
+        vec![(
+            "http://example.org/c".to_string(),
+            open_triplestore::text_search::index::DEFAULT_GRAPH_IRI.to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn literals_that_share_a_key_survive_one_of_them_being_deleted() {
+    // The index keys documents on (subject, predicate, graph, text), so
+    // "Kea"@en and "Kea"@mi are one key; deleting one must keep the other.
+    let (state, _token, _dir) = admin_with_index().await;
+    let g = "http://example.org/graphs/lang";
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{g}> {{ <http://example.org/kea> <{LABEL}> \"Kea\"@en, \"Kea\"@mi }} }}"
+        ))
+        .unwrap();
+    assert_eq!(indexed(&state, "kea").await.len(), 2);
+    state
+        .store
+        .update(&format!(
+            "DELETE DATA {{ GRAPH <{g}> {{ <http://example.org/kea> <{LABEL}> \"Kea\"@en }} }}"
+        ))
+        .unwrap();
+    assert_eq!(indexed(&state, "kea").await.len(), 1);
+}
+
+#[cfg(feature = "ldp")]
+#[tokio::test]
+async fn an_ldp_write_is_searchable() {
+    // The LDP resource itself (the test state's base URL is localhost:7878):
+    // DELETE removes the resource's own triples.
+    const QUOKKA: &str = "http://localhost:7878/ldp/quokka";
+    let (state, token, _dir) = admin_with_index().await;
+    let (st, body) = call(
+        &state,
+        "PUT",
+        "/ldp/quokka",
+        &token,
+        Some("text/turtle"),
+        "<http://localhost:7878/ldp/quokka> <http://www.w3.org/2000/01/rdf-schema#label> \"Quokka\" .",
+    )
+    .await;
+    assert!(st.is_success(), "{st} {body}");
+    let hits = indexed(&state, "quokka").await;
+    assert!(
+        hits.iter().any(|(s, _)| s == QUOKKA),
+        "an LDP PUT must be searchable: {hits:?}"
+    );
+
+    let (st, body) = call(&state, "DELETE", "/ldp/quokka", &token, None, "").await;
+    assert!(st.is_success(), "{st} {body}");
+    let hits = indexed(&state, "quokka").await;
+    assert!(
+        !hits.iter().any(|(s, _)| s == QUOKKA),
+        "an LDP DELETE must leave the index: {hits:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_rdf_patch_is_searchable() {
+    let (state, token, _dir) = admin_with_index().await;
+    let g = "https://example.org/patch/text";
+    state
+        .auth_db
+        .create_dataset(
+            "pt",
+            "pt",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("pt", g).unwrap();
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/datasets/pt/patch",
+        &token,
+        Some("application/rdf-patch"),
+        &format!("TX .\nA <urn:t:okapi> <{LABEL}> \"Okapi\" <{g}> .\nTC .\n"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let in_g = |hits: Vec<(String, String)>| -> Vec<String> {
+        hits.into_iter()
+            .filter(|(_, graph)| graph == g)
+            .map(|(s, _)| s)
+            .collect()
+    };
+    assert_eq!(in_g(indexed(&state, "okapi").await), vec!["urn:t:okapi"]);
+    let (st, body) = call(
+        &state,
+        "POST",
+        "/api/datasets/pt/patch",
+        &token,
+        Some("application/rdf-patch"),
+        &format!("TX .\nD <urn:t:okapi> <{LABEL}> \"Okapi\" <{g}> .\nTC .\n"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(in_g(indexed(&state, "okapi").await).is_empty());
+}
+
+#[tokio::test]
+async fn materialised_entailments_are_searchable() {
+    use open_triplestore::auth::models::GraphKind;
+    let (state, token, _dir) = admin_with_index().await;
+    let model = "https://example.org/ent/text-model";
+    let data = "https://example.org/ent/text-data";
+    state
+        .auth_db
+        .create_dataset(
+            "entx",
+            "entx",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    for (g, kind) in [(model, GraphKind::Model), (data, GraphKind::Instances)] {
+        state.auth_db.add_dataset_graph("entx", g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("entx", g, Some(kind))
+            .unwrap();
+    }
+    state
+        .store
+        .load_str(
+            &format!("<https://example.org/ent/name> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <{LABEL}> ."),
+            oxigraph::io::RdfFormat::Turtle,
+            Some(model),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            "<https://example.org/ent/n1> <https://example.org/ent/name> \"Narwhal\" .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(data),
+        )
+        .unwrap();
+    let (st, body) = call(
+        &state,
+        "PUT",
+        "/api/datasets/entx/entailment",
+        &token,
+        Some("application/json"),
+        r#"{ "regime": "rdfs", "mode": "materialize" }"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let inferred = "urn:entailment:rdfs:entx";
+    let hits = indexed(&state, "narwhal").await;
+    assert!(
+        hits.contains(&(
+            "https://example.org/ent/n1".to_string(),
+            inferred.to_string()
+        )),
+        "the derived rdfs:label must be searchable in the entailment graph: {hits:?}"
+    );
+
+    // A later write re-materialises after the writer's own index work; the
+    // re-materialised graph must be searchable too.
+    let (st, body) = call(
+        &state,
+        "POST",
+        &format!("/store?graph={}", common::url_encode(data)),
+        &token,
+        Some("text/turtle"),
+        "<https://example.org/ent/n2> <https://example.org/ent/name> \"Narwhal calf\" .",
+    )
+    .await;
+    assert!(st.is_success(), "{st} {body}");
+    let hits = indexed(&state, "calf").await;
+    assert!(
+        hits.contains(&(
+            "https://example.org/ent/n2".to_string(),
+            inferred.to_string()
+        )),
+        "re-materialised entailments must be searchable: {hits:?}"
+    );
+}

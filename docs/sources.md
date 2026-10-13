@@ -507,6 +507,7 @@ ex:SuppliersMap a rr:TriplesMap ;
 | `rml:query` / `rr:sqlQuery` | Used verbatim; the connection is read-only, so it cannot write |
 | `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A delimited column name (`rr:column "\"ID\""`, `{"ID"}` in a template, a join column) reads the column `ID`. An IRI template value is IRI-safe encoded; `\{` and `\}` are literal braces |
 | `rr:parentTriplesMap` + `rr:joinCondition` | The object is the subject the parent map generates for the joined row |
+| `rr:parentTriplesMap` without a join condition | Both maps read the same table or query, and each row joins to itself: the object is the parent's subject for the same row (R2RML §8), not a cross join |
 | `fnml:functionValue` | An enumeration or code-list lookup — see below |
 | A second triples map on the same source | Just another `rr:TriplesMap`; this is how a nested structure is expressed |
 

@@ -4,8 +4,8 @@
 //! JSON. The shape follows the W3C SHACL results vocabulary
 //! (<https://www.w3.org/TR/shacl/#results-validation-report>): typed focus
 //! nodes and values, `sh:resultPath` as a SHACL path structure, the
-//! constraint component IRI, and `sh:sourceConstraint` for SPARQL-based
-//! constraints.
+//! constraint component IRI, `sh:sourceConstraint` for SPARQL-based and
+//! expression constraints, and SHACL-AF result annotations.
 //!
 //! The typed terms come from [`ValidationResult::terms`]. A report without
 //! them (read back from stored JSON, or built outside the engine) falls back
@@ -160,6 +160,19 @@ impl Writer {
         if let Some(constraint) = &r.terms.source_constraint {
             self.add(node.clone(), sh("sourceConstraint"), constraint.clone());
         }
+        // SHACL-AF §4 result annotations: the typed terms, else (a report
+        // read back from JSON) the display strings.
+        if r.terms.annotations.is_empty() {
+            for a in &r.annotations {
+                if let Ok(property) = NamedNode::new(&a.property) {
+                    self.add(node.clone(), property, term_from_display(&a.value));
+                }
+            }
+        } else {
+            for (property, value) in &r.terms.annotations {
+                self.add(node.clone(), property.clone(), value.clone());
+            }
+        }
         if !r.message.is_empty() {
             self.add(
                 node,
@@ -246,6 +259,7 @@ mod tests {
                 source_constraint_component:
                     "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent".into(),
                 message: "Must be at least 18.".into(),
+                annotations: Vec::new(),
                 terms: Default::default(),
             }],
             results_count: 1,
@@ -383,6 +397,7 @@ mod tests {
             source_shape: Some(nn("PersonShape")),
             source_constraint: Some(nn("PersonShape-sparql")),
             severity: Some(ex("MySeverity")),
+            annotations: Vec::new(),
         };
         let mut second = r.results[0].clone();
         second.terms.value = Some(Term::Literal(
@@ -416,6 +431,51 @@ mod tests {
         ));
         // Exactly one value per result: no display-string duplicate.
         assert!(!ask(&ttl, g, "?res sh:value \"15\""));
+    }
+
+    /// Result annotations (SHACL-AF §4) are written as properties of the
+    /// result node, typed; a report without typed terms (read back from JSON)
+    /// writes the display strings.
+    #[test]
+    fn result_annotations_are_written() {
+        use crate::shacl::report::ResultAnnotationValue;
+        use oxigraph::model::{Literal, NamedNode, Term};
+        let time = NamedNode::new_unchecked("http://example.org/time");
+        let note = NamedNode::new_unchecked("http://example.org/note");
+        let mut r = sample();
+        r.results[0].terms.annotations = vec![
+            (
+                time.clone(),
+                Term::Literal(Literal::new_typed_literal(
+                    "2015-03-27T10:58:00",
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime"),
+                )),
+            ),
+            (note.clone(), Term::NamedNode(note.clone())),
+            (note.clone(), Literal::new_simple_literal("second").into()),
+        ];
+        let ttl = report_to_turtle(&r, "urn:system:reports:test#run-10");
+        assert!(ask(
+            &ttl,
+            "urn:test:ann",
+            "?res a sh:ValidationResult ; ex:time \"2015-03-27T10:58:00\"^^xsd:dateTime ; \
+             ex:note ex:note , \"second\"",
+        ));
+
+        let mut r = sample();
+        r.results[0].annotations = vec![
+            ResultAnnotationValue {
+                property: "http://example.org/note".into(),
+                value: "http://example.org/thing".into(),
+            },
+            ResultAnnotationValue {
+                property: "not an IRI".into(),
+                value: "dropped".into(),
+            },
+        ];
+        let ttl = report_to_turtle(&r, "urn:system:reports:test#run-11");
+        assert!(ask(&ttl, "urn:test:ann2", "?res ex:note ex:thing"));
+        assert!(!ask(&ttl, "urn:test:ann3", "?res ?p \"dropped\""));
     }
 
     /// A message with quotes, backslashes and newlines stays valid Turtle.

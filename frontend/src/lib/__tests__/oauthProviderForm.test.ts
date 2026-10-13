@@ -16,6 +16,8 @@ import {
   formToBody,
   normaliseRoleClaimMap,
   ProviderFormError,
+  applyIdpMetadata,
+  NAMEID_TRANSIENT,
   type OauthProvider,
 } from '../oauthProviderForm';
 
@@ -42,6 +44,11 @@ const api = vi.hoisted(() => ({
   adminListOauthClients: vi.fn(),
   adminUpsertOauthClient: vi.fn(),
   adminDeleteOauthClient: vi.fn(),
+  adminReadSamlMetadata: vi.fn(),
+  adminSamlOverview: vi.fn(),
+  adminCreateSamlKey: vi.fn(),
+  adminActivateSamlKey: vi.fn(),
+  adminDeleteSamlKey: vi.fn(),
 }));
 vi.mock('../api.js', () => api);
 
@@ -161,6 +168,77 @@ describe('provider ↔ form mapping', () => {
   it('requires a name and a slug', () => {
     expect(() => formToBody(emptyProviderForm())).toThrow(ProviderFormError);
   });
+
+  it('sends saml_config for SAML providers only, defaults as nulls and empty lists', () => {
+    expect('saml_config' in formToBody(providerToForm(CORP))).toBe(false);
+    const body = formToBody(providerToForm(SAML));
+    expect(body.saml_config).toEqual({
+      sp_entity_id: null,
+      idp_metadata_url: null,
+      idp_slo_url: null,
+      idp_slo_response_url: null,
+      name_id_format: null,
+      subject_attribute: null,
+      email_attributes: [],
+      name_attributes: [],
+      group_attributes: [],
+      allow_idp_initiated: false,
+      clock_skew_seconds: null,
+      sign_authn_requests: false,
+      require_encrypted_assertions: false,
+      contact_email: null,
+    });
+  });
+
+  it('round-trips saml_config, attribute lists one per line', () => {
+    const stored = {
+      ...SAML,
+      saml_config: {
+        idp_slo_url: 'https://idp.example.org/slo',
+        group_attributes: ['urn:oid:1.3.6.1.4.1.5923.1.5.1.1', 'groups'],
+        allow_idp_initiated: true,
+        clock_skew_seconds: 60,
+      },
+    };
+    const f = providerToForm(stored);
+    expect(f.saml.group_attributes).toBe('urn:oid:1.3.6.1.4.1.5923.1.5.1.1\ngroups');
+    const cfg = formToBody(f).saml_config!;
+    expect(cfg.idp_slo_url).toBe('https://idp.example.org/slo');
+    expect(cfg.group_attributes).toEqual(['urn:oid:1.3.6.1.4.1.5923.1.5.1.1', 'groups']);
+    expect(cfg.allow_idp_initiated).toBe(true);
+    expect(cfg.clock_skew_seconds).toBe(60);
+  });
+
+  it('refuses a bad clock skew and a transient NameID without a subject attribute', () => {
+    const f = providerToForm(SAML);
+    expect(() => formToBody({ ...f, saml: { ...f.saml, clock_skew_seconds: '900' } })).toThrow(ProviderFormError);
+    expect(() => formToBody({ ...f, saml: { ...f.saml, clock_skew_seconds: 'soon' } })).toThrow(ProviderFormError);
+    expect(() => formToBody({ ...f, saml: { ...f.saml, name_id_format: NAMEID_TRANSIENT } })).toThrow(ProviderFormError);
+    const ok = { ...f, saml: { ...f.saml, name_id_format: NAMEID_TRANSIENT, subject_attribute: 'uid' } };
+    expect(formToBody(ok).saml_config!.name_id_format).toBe(NAMEID_TRANSIENT);
+  });
+
+  it('fills entity ID, SSO and SLO URLs and every certificate from IdP metadata', () => {
+    const f = applyIdpMetadata(
+      providerToForm(SAML),
+      {
+        entity_id: 'https://new-idp.example.org',
+        sso_url: 'https://new-idp.example.org/sso',
+        slo_url: 'https://new-idp.example.org/slo',
+        slo_response_url: null,
+        certificates_pem: '-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n',
+        certificates: [{}, {}],
+        want_authn_requests_signed: true,
+      },
+      'https://new-idp.example.org/metadata',
+    );
+    const body = formToBody(f);
+    expect(body.entity_id).toBe('https://new-idp.example.org');
+    expect(body.idp_certificate).toContain('BBB');
+    expect(body.saml_config!.idp_slo_url).toBe('https://new-idp.example.org/slo');
+    expect(body.saml_config!.idp_metadata_url).toBe('https://new-idp.example.org/metadata');
+    expect(body.saml_config!.sign_authn_requests).toBe(true);
+  });
 });
 
 beforeAll(() => {
@@ -228,6 +306,43 @@ describe('Identity providers page', () => {
     expect('enabled' in body).toBe(false);
     expect(body.role_claim_map).toBe(CORP.role_claim_map);
     expect(body.tenant_id).toBe('tenant-1');
+  });
+
+  it('imports IdP metadata into a SAML provider, shows its SP keys and saves saml_config', async () => {
+    api.adminListOauthProviders.mockResolvedValue([ENV_OIDC, SAML]);
+    api.adminSamlOverview.mockResolvedValue({
+      entity_id: 'http://localhost:7878/api/auth/saml/example-saml/metadata',
+      metadata_url: 'http://localhost:7878/api/auth/saml/example-saml/metadata',
+      acs_url: 'http://localhost:7878/api/auth/saml/example-saml/acs',
+      slo_url: 'http://localhost:7878/api/auth/saml/example-saml/slo',
+      transport_ok: true,
+      sp_keys: [{ kid: 'sp-1', is_current: true, certificate: { sha256_fingerprint: 'AA:BB', not_after: 'Oct  3 2036' } }],
+    });
+    api.adminReadSamlMetadata.mockResolvedValue({
+      entity_id: 'https://idp2.example.org',
+      sso_url: 'https://idp2.example.org/sso',
+      slo_url: 'https://idp2.example.org/slo',
+      slo_response_url: null,
+      certificates_pem: '-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n',
+      certificates: [{}],
+      want_authn_requests_signed: false,
+    });
+    const view = render(AdminSecurity);
+    await view.findByText('Example SAML');
+    await fireEvent.click(rowOf(view, 'Example SAML').querySelector('button[title="Edit"]') as HTMLElement);
+    await view.findByText('sp-1');
+    expect(api.adminSamlOverview).toHaveBeenCalledWith('p-saml');
+    await fireEvent.input(field(view, 'prov-saml-md-xml'), { target: { value: '<md:EntityDescriptor/>' } });
+    await fireEvent.click(view.getByText('Import'));
+    await waitFor(() => expect(field(view, 'prov-entity-id').value).toBe('https://idp2.example.org'));
+    expect(api.adminReadSamlMetadata).toHaveBeenCalledWith({ xml: '<md:EntityDescriptor/>' });
+    await fireEvent.click(view.getByText('Save Changes'));
+    await waitFor(() => expect(api.adminUpdateOauthProvider).toHaveBeenCalledTimes(1));
+    const [, body] = api.adminUpdateOauthProvider.mock.calls[0];
+    expect(body.sso_url).toBe('https://idp2.example.org/sso');
+    expect(body.idp_certificate).toContain('AAA');
+    expect(body.saml_config.idp_slo_url).toBe('https://idp2.example.org/slo');
+    expect(body.saml_config.allow_idp_initiated).toBe(false);
   });
 
   it('creates a provider with string scopes and role map', async () => {

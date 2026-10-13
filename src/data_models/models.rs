@@ -308,6 +308,14 @@ pub struct VersionDataParams {
     pub format: Option<String>,
 }
 
+/// `DELETE /api/models/:id/versions/:ver?force=true` — `force` lets a
+/// published version go; it never overrides datasets that depend on it.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteVersionParams {
+    #[serde(default)]
+    pub force: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DiffParams {
     pub from: String,

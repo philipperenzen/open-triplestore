@@ -149,9 +149,18 @@ impl Registry {
         self.cached = None;
     }
 
-    pub(crate) fn inherit(&mut self, functions: Functions) {
+    /// Take `functions` as this store's registered set, and `graphs` as its
+    /// designated function graphs (so a designated graph used as a shapes
+    /// graph here is recognised as one, as it is in the store handing down).
+    pub(crate) fn inherit(&mut self, functions: Functions, graphs: Vec<String>) {
         self.inherited = Some(functions);
+        self.graphs = graphs;
         self.cached = None;
+    }
+
+    /// The designated function graphs.
+    pub(crate) fn designated_graphs(&self) -> Vec<String> {
+        self.graphs.clone()
     }
 
     /// The registered set if it is known without reading the store: the
@@ -342,7 +351,7 @@ impl FunctionBody {
                 .and_then(|o| lexical(o).trim().parse::<f64>().ok());
             let optional = objects(&node, "optional")
                 .first()
-                .is_some_and(|o| matches!(lexical(o).as_str(), "true" | "1"));
+                .is_some_and(|o| lexical(o) == "true");
             params.push((order, local_name(&path), optional));
         }
         // §5.2: by sh:order (0 when unspecified) if any parameter has one,

@@ -5,6 +5,7 @@
   // signed-out visitor goes through /login first (with ?next= back here), a
   // signed-in one sees the consent card (first time per app), and approval
   // asks the backend to mint the single-use code and bounces back to the app.
+  import { stripBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { isAuthenticated, authInitialized, user } from '../lib/stores.js';
@@ -101,7 +102,7 @@
           window.location.replace(`${params.redirect_uri}${sep}error=login_required${state}`);
           return;
         }
-        const here = window.location.pathname + window.location.search;
+        const here = stripBase(window.location.pathname) + window.location.search;
         navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
       } else {
         void check();

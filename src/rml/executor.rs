@@ -2,25 +2,36 @@
 //!
 //! Core flow:
 //! ```text
-//! LogicalSource → Iterator<Row>
-//!   → TriplesMap: for each Row:
-//!       SubjectMap.eval(row) → subject IRI/BNode
+//! LogicalSource → bytes (decompressed, decoded) → logical iterations
+//!   → TriplesMap: for each iteration:
+//!       SubjectMap.eval(it) → subject IRIs / blank nodes
 //!       for each PredicateObjectMap:
-//!         PredicateMap.eval(row) → predicate IRI
-//!         ObjectMap.eval(row) → object (IRI/Literal/BNode)
-//!       → Quad(subject, predicate, object, graph)
+//!         PredicateMap.eval(it) → predicate IRIs
+//!         ObjectMap.eval(it) → objects (IRI/Literal/BNode)
+//!       → Quad(subject, predicate, object, graph) for every combination
 //! ```
 //!
-//! This is the **file-based** path (CSV / JSON / XML), where every row is
-//! self-contained. Relational sources stream through
-//! [`super::sql`](super::sql) instead, because they can join across triples
-//! maps; both share the term-map evaluation in [`super::terms`].
+//! This is the **file-based** path (CSV / JSON / XML). Relational sources
+//! stream through [`super::sql`](super::sql) instead; both share the
+//! term-map evaluation in [`super::terms`] and the join rules: a referencing
+//! object map with join conditions resolves through an index of the parent's
+//! iterations ([`ParentIndexBuilder`]), built once per parent and join, and
+//! one without resolves from the child's own iteration (R2RML §8).
+//!
+//! **Sources.** A logical source names its file by `rml:source "name"`, by an
+//! RML-IO `rml:RelativePathSource` / `rml:FilePath` (`rml:path`), or by a
+//! CSVW `csvw:Table` (`csvw:url`). The name is looked up among the files the
+//! run was given: as written, then without a leading `./`, then by its last
+//! path segment. A remote URL is never fetched: a run that needs one is given
+//! it as a file of that name.
 
-use super::checks::{check_columns, DataErrors, OnDataError};
+use super::checks::{check_columns, needed_columns, DataErrors, OnDataError};
 use super::model::*;
-use super::sources::load_rows;
-use super::terms::{Row, TermGen};
+use super::sources::ReadAs;
+use super::sql::{index_key, lookup, same_row_subject, ParentIndex, ParentIndexBuilder, RefKey};
+use super::terms::{Iteration, TermGen};
 use crate::store::engine::TripleStore;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// What a file-mapping run wrote, and the rows it skipped terms from.
@@ -33,11 +44,11 @@ pub struct FileOutcome {
 
 /// Execute an RML mapping, writing generated triples into `target_graph` in `store`.
 ///
-/// `source_data` is a map from logical source identifier (file path / name) →
-/// content string. `authorize` gates **every effective target graph** before
-/// any write. A graph map (on a subject map or a predicate-object map) sends
-/// triples to a graph other than `target_graph`, so a caller-supplied mapping
-/// can name an arbitrary destination graph; the dataset-scoped HTTP path passes an `authorize` that
+/// `source_data` maps a logical source's file name to its bytes. `authorize`
+/// gates **every effective target graph** before any write. A graph map (on a
+/// subject map or a predicate-object map) sends triples to a graph other than
+/// `target_graph`, so a caller-supplied mapping can name an arbitrary
+/// destination graph; the dataset-scoped HTTP path passes an `authorize` that
 /// keeps those targets inside the dataset's own graph boundary (preventing a
 /// cross-tenant write). Authorization runs over the full resolved set *before*
 /// the first insert, so a rejected mapping writes nothing.
@@ -46,15 +57,16 @@ pub struct FileOutcome {
 /// first row. A row value that cannot become its term (R2RML §4.3) aborts
 /// the run with the offending rows named, unless `on_data_error` is
 /// [`OnDataError::Skip`]; either way an aborted run writes nothing.
-pub fn execute_with<A>(
+pub fn execute_with<S, A>(
     mapping: &RmlMapping,
-    source_data: &HashMap<String, String>,
+    source_data: &HashMap<String, S>,
     store: &TripleStore,
     target_graph: Option<&str>,
     on_data_error: OnDataError,
     authorize: A,
 ) -> Result<FileOutcome, String>
 where
+    S: AsRef<[u8]>,
     A: Fn(&str) -> Result<(), String>,
 {
     // A relational mapping needs a connection and a join planner, neither of
@@ -67,38 +79,20 @@ where
                 .to_string(),
         );
     }
-    // The same goes for a referencing object map: `rr:parentTriplesMap` needs
-    // a join resolver, and a file row stands alone. Resolving it to nothing
-    // dropped every link the mapping asked for and still reported success.
-    if let Some((tm, r)) = mapping
-        .triples_maps
-        .iter()
-        .find_map(|tm| tm.refs().next().map(|r| (tm, r)))
-    {
-        return Err(format!(
-            "TriplesMap <{}> links to <{}> through rr:parentTriplesMap, which file sources \
-             (CSV, JSON, XML) cannot resolve; put the parent's subject in the child's own \
-             rows, or map a registered datasource, where joins run",
-            tm.iri, r.parent_triples_map
-        ));
-    }
+    let sources = Sources::new(mapping, source_data)?;
 
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
     let mut gen = TermGen::new(mapping.semantics, "b");
     let mut data_errors = DataErrors::default();
+    let indexes = build_indexes(mapping, &sources, &mut gen)?;
 
     for tm in &mapping.triples_maps {
-        let source_key = match &tm.logical_source.source {
-            SourceRef::File(path) => path.clone(),
-            SourceRef::Datasource(_) => unreachable!("guarded by has_sql_source above"),
-        };
-
         execute_triples_map(
             mapping,
             tm,
-            source_data,
-            &source_key,
+            &sources,
+            &indexes,
             &mut triples_by_graph,
             &mut gen,
             on_data_error,
@@ -155,39 +149,155 @@ where
     })
 }
 
+/// The files a run was given, looked up by the names its logical sources use.
+struct Sources<'a> {
+    mapping: &'a RmlMapping,
+    files: HashMap<&'a str, &'a [u8]>,
+    /// Each triples map's iterations, read once and shared by the map's own
+    /// run and every join index that needs them.
+    cache: RefCell<HashMap<String, std::rc::Rc<Vec<Iteration>>>>,
+}
+
+impl<'a> Sources<'a> {
+    fn new<S: AsRef<[u8]>>(
+        mapping: &'a RmlMapping,
+        data: &'a HashMap<String, S>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            mapping,
+            files: data.iter().map(|(k, v)| (k.as_str(), v.as_ref())).collect(),
+            cache: RefCell::new(HashMap::new()),
+        })
+    }
+
+    /// The bytes of the file a logical source names.
+    fn file(&self, name: &str) -> Result<&'a [u8], String> {
+        let candidates = [
+            Some(name),
+            name.strip_prefix("./"),
+            name.rsplit('/').next().filter(|b| !b.is_empty()),
+        ];
+        for c in candidates.into_iter().flatten() {
+            if let Some(d) = self.files.get(c) {
+                return Ok(*d);
+            }
+        }
+        if name.starts_with("http://") || name.starts_with("https://") {
+            return Err(format!(
+                "the logical source names the remote file <{name}>; this engine does not fetch \
+                 sources over the network — supply it as a part named \"{name}\""
+            ));
+        }
+        let mut names: Vec<&&str> = self.files.keys().collect();
+        names.sort();
+        Err(format!(
+            "Source data not found for key: {name} (the run was given {})",
+            if names.is_empty() {
+                "no files".to_string()
+            } else {
+                names
+                    .iter()
+                    .map(|n| format!("\"{n}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ))
+    }
+
+    /// The logical iterations of `tm`, after checking the columns the
+    /// mapping names against the source's own (a CSV header).
+    fn iterations(&self, tm: &TriplesMap) -> Result<std::rc::Rc<Vec<Iteration>>, String> {
+        if let Some(cached) = self.cache.borrow().get(&tm.iri) {
+            return Ok(cached.clone());
+        }
+        let mapping = self.mapping;
+        let name = match &tm.logical_source.source {
+            SourceRef::File(path) => path.as_str(),
+            SourceRef::Datasource(_) => unreachable!("guarded by has_sql_source"),
+        };
+        let data = self.file(name)?;
+        let references = iteration_references(mapping, tm);
+        let loaded = super::sources::load(
+            data,
+            name,
+            &tm.logical_source,
+            &references,
+            ReadAs {
+                rml_core: mapping.rml_core,
+                empty_is_value: mapping.semantics == Semantics::R2rml,
+            },
+        )?;
+        // A CSV header is the source's column list: a column the mapping
+        // names that it lacks is a mapping error, not a run of empty rows.
+        // JSON and XML records carry no fixed set, and a missing key there is
+        // a NULL.
+        if let Some(columns) = &loaded.columns {
+            check_columns(mapping, tm, columns)?;
+        }
+        let its = std::rc::Rc::new(loaded.iterations);
+        self.cache.borrow_mut().insert(tm.iri.clone(), its.clone());
+        Ok(its)
+    }
+}
+
+/// Every reference expression an iteration of `tm` is read for: what its
+/// own term maps, functions and joins read, and the subject references of
+/// each parent it reaches without a join condition — that subject is built
+/// from `tm`'s own iteration.
+fn iteration_references(mapping: &RmlMapping, tm: &TriplesMap) -> Vec<String> {
+    let mut out: Vec<String> = needed_columns(mapping, tm)
+        .into_iter()
+        .map(|n| n.column)
+        .collect();
+    let mut extra: Vec<String> = Vec::new();
+    for r in tm.refs().filter(|r| r.joins.is_empty()) {
+        let Some(parent) = mapping.find(&r.parent_triples_map) else {
+            continue;
+        };
+        extra.extend(parent.subject_map.term_map.referenced_columns());
+        if let Some(f) = &parent.subject_map.function {
+            for a in f.params.values().flatten() {
+                if let FunctionArg::Reference(c) = a {
+                    extra.push(c.clone());
+                }
+            }
+        }
+    }
+    // A `{x_slug}` placeholder of `otsfn:mintIri` reads `x`.
+    let slugs: Vec<String> = out
+        .iter()
+        .chain(extra.iter())
+        .filter_map(|c| c.strip_suffix("_slug").map(str::to_string))
+        .collect();
+    extra.extend(slugs);
+    for c in extra {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_triples_map(
     mapping: &RmlMapping,
     tm: &TriplesMap,
-    source_data: &HashMap<String, String>,
-    source_key: &str,
+    sources: &Sources<'_>,
+    indexes: &HashMap<RefKey, ParentIndex>,
     out: &mut HashMap<Option<String>, Vec<String>>,
     gen: &mut TermGen,
     on_data_error: OnDataError,
     data_errors: &mut DataErrors,
 ) -> Result<(), String> {
-    let content = source_data
-        .get(source_key)
-        .ok_or_else(|| format!("Source data not found for key: {source_key}"))?;
-
-    let (columns, rows) = load_rows(
-        content,
-        &tm.logical_source.reference_formulation,
-        tm.logical_source.iterator.as_deref(),
-        mapping.semantics == Semantics::R2rml,
-    )?;
-    // A CSV header is the source's column list: a column the mapping names
-    // that it lacks is a mapping error, not a run of empty rows. JSON and XML
-    // records carry no fixed set, and a missing key there is a NULL.
-    if let Some(columns) = columns {
-        check_columns(mapping, tm, &columns)?;
-    }
-
+    let iterations = sources.iterations(tm)?;
     let base = mapping.base_for(tm);
-    for (i, row_result) in rows.enumerate() {
-        let mut row = row_result?;
-        gen.apply_nulls(&tm.logical_source, &mut row);
-        execute_row(tm, &row, out, gen, base)?;
+    // A join-less parent's subject is computed from the child's iteration
+    // with a generator of its own, as the relational executor does.
+    let parent_gen = RefCell::new(TermGen::new(mapping.semantics, "b"));
+    for (i, it) in iterations.iter().enumerate() {
+        let mut it = it.clone();
+        gen.apply_nulls_to(&tm.logical_source, &mut it);
+        execute_iteration(mapping, tm, &it, out, gen, &parent_gen, indexes, base)?;
         data_errors.record(&tm.iri, i as u64 + 1, gen.take_errors());
         // An aborting run reads on only to name a few more offending rows.
         if on_data_error == OnDataError::Abort && data_errors.sample_full() {
@@ -198,21 +308,66 @@ fn execute_triples_map(
     Ok(())
 }
 
-fn execute_row(
+/// One index per distinct (parent, join conditions) a referencing object map
+/// with join conditions names: the parent's iterations read once, keyed by
+/// the parent side of the join. Built before the first triple, so an index
+/// over the `OTS_SOURCES_JOIN_MAX_ROWS` cap fails the run before anything is
+/// generated.
+fn build_indexes(
+    mapping: &RmlMapping,
+    sources: &Sources<'_>,
+    gen: &mut TermGen,
+) -> Result<HashMap<RefKey, ParentIndex>, String> {
+    let mut indexes: HashMap<RefKey, ParentIndex> = HashMap::new();
+    for tm in &mapping.triples_maps {
+        for r in tm.refs().filter(|r| !r.joins.is_empty()) {
+            let key = index_key(r);
+            if indexes.contains_key(&key) {
+                continue;
+            }
+            let parent = mapping
+                .find(&r.parent_triples_map)
+                .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
+            let mut builder = ParentIndexBuilder::new(parent, &r.joins, mapping.base_for(parent));
+            for it in sources.iterations(parent)?.iter() {
+                let mut it = it.clone();
+                gen.apply_nulls_to(&parent.logical_source, &mut it);
+                builder.push_record(&it, gen)?;
+            }
+            indexes.insert(key, builder.finish());
+        }
+    }
+    // A parent row's data error is reported when the parent's own rows run.
+    gen.take_errors();
+    Ok(indexes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_iteration(
+    mapping: &RmlMapping,
     tm: &TriplesMap,
-    row: &Row,
+    it: &Iteration,
     out: &mut HashMap<Option<String>, Vec<String>>,
     gen: &mut TermGen,
+    parent_gen: &RefCell<TermGen>,
+    indexes: &HashMap<RefKey, ParentIndex>,
     base: Option<&str>,
 ) -> Result<(), String> {
-    // Two term maps yielding the same blank-node value in this row denote the
-    // SAME node. Under R2RML so does the same value in another row of the same
-    // graph; a legacy mapping mints afresh per row, which this resets.
+    // Two term maps yielding the same blank-node value in this iteration
+    // denote the SAME node. Under R2RML so does the same value in another
+    // iteration of the same graph; a legacy mapping mints afresh per row,
+    // which this resets.
     gen.start_row();
 
-    // No column types (a file source reports none) and no join resolver: a
-    // mapping with an `rr:parentTriplesMap` was refused before the first row.
-    for triple in super::sql::row_triples(tm, row, None, gen, base, &|_, _| None)? {
+    let triples = super::sql::row_triples(tm, it, gen, base, &|r, child: &Iteration, at| {
+        if r.joins.is_empty() {
+            same_row_subject(mapping, r, child, &mut parent_gen.borrow_mut(), at)
+        } else {
+            lookup(indexes.get(&index_key(r))?, r, child)
+        }
+    })?;
+    parent_gen.borrow_mut().take_errors();
+    for triple in triples {
         out.entry(triple.graph).or_default().push(triple.text);
     }
     Ok(())
@@ -291,9 +446,10 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_triples_map_is_refused_not_dropped() {
-        // Resolving the reference to nothing used to write the person, drop the
-        // link to the organisation, and report success.
+    fn a_parent_triples_map_on_file_sources_resolves_the_link() {
+        // Resolving the reference to nothing used to write the person, drop
+        // the link to the organisation, and report success; then the file
+        // executor refused the mapping. Now the parent's rows are indexed.
         let mapping = parse_rml(
             r#"
             @prefix rr:  <http://www.w3.org/ns/r2rml#> .
@@ -319,14 +475,83 @@ mod tests {
         .expect("mapping parses");
 
         let mut sources = HashMap::new();
-        sources.insert("people.csv".to_string(), "id,org\n1,7\n".to_string());
-        sources.insert("orgs.csv".to_string(), "id\n7\n".to_string());
+        sources.insert(
+            "people.csv".to_string(),
+            "id,org\n1,7\n2,8\n3,7\n".to_string(),
+        );
+        sources.insert("orgs.csv".to_string(), "id\n7\n9\n".to_string());
 
         let store = TripleStore::in_memory().unwrap();
-        let err = execute(&mapping, &sources, &store, None).unwrap_err();
-        assert!(err.contains("<http://example.org/PersonMap>"), "{err}");
-        assert!(err.contains("rr:parentTriplesMap"), "{err}");
-        assert_eq!(store.len().unwrap(), 0, "a refused mapping writes nothing");
+        let inserted = execute(&mapping, &sources, &store, None).unwrap();
+        assert_eq!(
+            inserted, 2,
+            "persons 1 and 3 work for org 7; org 8 is absent"
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT ?p WHERE { ?p <http://example.org/worksFor> <http://example.org/org/7> }"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/2> ?p ?o }"
+            ),
+            0,
+            "a key with no parent row joins to nothing"
+        );
+    }
+
+    #[test]
+    fn a_join_less_reference_takes_the_parent_subject_of_the_same_row() {
+        // R2RML §8: no join condition joins each row to itself — not every
+        // parent row to every child row.
+        let mapping = parse_rml(
+            r#"
+            @prefix rr:  <http://www.w3.org/ns/r2rml#> .
+            @prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+            @prefix ql:  <http://semweb.mmlab.be/ns/ql#> .
+            @prefix ex:  <http://example.org/> .
+
+            ex:Person a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "p.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/person/{id}" ] ;
+                rr:predicateObjectMap [
+                    rr:predicate ex:address ;
+                    rr:objectMap [ rr:parentTriplesMap ex:Address ]
+                ] .
+            ex:Address a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "p.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/address/{city}" ] .
+        "#,
+        )
+        .expect("mapping parses");
+        let mut sources = HashMap::new();
+        sources.insert(
+            "p.csv".to_string(),
+            "id,city\n1,Ghent\n2,Delft\n".to_string(),
+        );
+        let store = TripleStore::in_memory().unwrap();
+        assert_eq!(execute(&mapping, &sources, &store, None).unwrap(), 2);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/1> <http://example.org/address> \
+                 <http://example.org/address/Ghent> }"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/1> <http://example.org/address> \
+                 <http://example.org/address/Delft> }"
+            ),
+            0,
+            "person 1's row is not joined to person 2's"
+        );
     }
 
     fn count(store: &TripleStore, q: &str) -> usize {

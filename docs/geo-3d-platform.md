@@ -1,6 +1,6 @@
 # 3D Linked-Data Geospatial Platform
 
-Open Triplestore extends its **GeoSPARQL 1.1** implementation (2D/2.5D; partial, not OGC-certified) with
+Open Triplestore extends its **GeoSPARQL 1.1** implementation (2D/2.5D; graded Full except the optional DGGS class, not OGC-certified) with
 an **additive, namespaced 3D layer** — volumetric geometry, an OGC API – Features
 facade, a 3D Tiles tiling plane, and a CesiumJS viewer with click-to-SPARQL.
 
@@ -134,12 +134,13 @@ web app — see **Embedding & Web Apps** (`docs/embedding.md`).
 
 ## 9. IFC → linked data: the lift
 
-An IFC file becomes two graphs. Upload it as a `file` part of
+An IFC file becomes three graphs. Upload it as a `file` part of
 `POST /api/import/bulk` together with a `dataset_id` field; the bulk importer
 recognises `.ifc` by name or content type, and there is no IFC-specific route.
-The two graphs are the **BOT layer** the platform queries — the file's target
-graph, by default `…/dataset/{id}/building` — and a complete **ifcOWL**
-instance lift beside it, `{target}/ifcowl`. The BOT layer is
+The three graphs are the **BOT layer** the platform queries — the file's target
+graph, by default `…/dataset/{id}/building` — the **IDS projection** an IDS is
+checked against, `{target}/ids` (see below), and a complete **ifcOWL**
+instance lift beside them, `{target}/ifcowl`. The BOT layer is
 the contract the viewer feed, the IDS importer and the SHACL Studio `ifc`
 shapes read, and it is stable: `bot:Site/Building/Storey/Space/Element`,
 `bot:hasBuilding/hasStorey/hasSpace/containsElement/hasSubElement`, the
@@ -169,8 +170,28 @@ lift-namespace term it produces is declared there.
 | Relations, beside every BOT edge | NEN 2660-2: containment is `nen2660:contains` (location, not parthood), spatial aggregation `nen2660:hasPart`, element decomposition and nesting `nen2660:hasTechnicalPart`, `IfcRelConnectsPathElements` / `IfcRelConnectsElements` `nen2660:connectsObject`. The `nen2660-relations` bundle's shapes run clean over a lifted model |
 | Map conversion (`IfcMapConversion` → `IfcProjectedCRS`) | `ifcl:mapConversion` → a node with eastings, northings, height, `ifcl:mapRotation` (`atan2(XAxisOrdinate, XAxisAbscissa)`, degrees), scale, `ifcl:projectedCrs` and the datums. When the EPSG code is one the CRS registry knows (28992, 7415, 4326, 3857) the node is also a `geo:Geometry` whose `geo:asWKT` is the origin as a CRS-qualified point, and a site without its own `RefLatitude`/`RefLongitude` gets its WGS84 anchor from that origin reprojected; an unknown code gets no CRS prefix. Read, never applied — the geometry a viewer receives is already placed (the TrueNorth argument in `src/ifc/rdf.rs` applies verbatim) |
 
-Not lifted: type-object property sets (`IfcRelDefinesByType`), derived units
-(`IfcDerivedUnit` is always unmapped), and `IfcRelNests` as distinct from
-aggregation (both are parthood here). No IFC 4.3 model exists in the
+Not lifted into the BOT layer: type-object property sets
+(`IfcRelDefinesByType`), derived units (`IfcDerivedUnit` is always unmapped),
+and `IfcRelNests` as distinct from aggregation (both are parthood here). The
+IDS projection has all three.
+
+**The IDS projection** (`src/ifc/ids_projection.rs`, graph `…/building/ids`)
+is a separate output, so the BOT layer above is the same set of triples with
+it or without it (`tests/ifc_lift.rs` checks that). It carries what an IDS 1.0
+checker reads, under `https://opentriplestore.org/ns/ifc-ids#`:
+
+| What | Emitted as |
+|---|---|
+| Every instance | `rdf:type` its exact class, schema-qualified — `<…/ifc-ids/IFC4#IFCWALL>` — with no subclass axioms, so a class target matches the class alone. An IFC2X3 occurrence typed by a type in the IDS IFC2X3 occurrence/type mapping table also gets the IFC4 name it stands for (`IfcFlowTerminal` + `IfcAirTerminalType` → `IFCAIRTERMINAL`) |
+| Explicit attributes | one triple each under `…/ifc-ids/attr#<Name>`, from the per-schema tables in `src/ifc/schema/` (generated from the IFC2X3, IFC4 and IFC4X3_ADD2 EXPRESS schemas): literals, references as IRIs, `ifcids:Aggregate` for a non-empty list, `ifcids:Empty` for an empty string, a logical UNKNOWN or an empty list |
+| Predefined type | `ifcids:predefinedType`: the type object's unless NOTDEFINED, else the instance's own, with the user-defined label beside `USERDEFINED` |
+| Property and quantity sets | `ifcids:pset` → a node per set name with `ifcids:name` and `ifcids:property` → each property's `ifcids:name`, `ifcids:dataType` (the IFC type) and `ifcids:value`(s) — measures in the SI units IDS nominates (2800 mm is 2.8, 36 in is 0.9144); the type's sets first, the occurrence's over them property by property; material and predefined property sets too; no value for a null, an empty string or UNKNOWN |
+| Part of | `ifcids:aggregatedIn`, `nestedIn`, `containedIn`, `inGroup` and `voidsFillsIn`, one predicate per relation, direct edges |
+| Classification | `ifcids:classification` → the reference (or classification) with `ifcids:system` and `ifcids:reference` for its identification and its parents'; the type's, overridden per system by the occurrence's; `IfcExternalReferenceRelationship` for resources |
+| Material | `ifcids:material` → the associated material definition with `ifcids:materialValue` for every name and category in it (layer, profile and constituent sets and lists included); the type's unless the occurrence has its own |
+| The model | `<…/building/ids-model> a ifcids:Model ; ifcids:schema "IFC4"` |
+
+Every instance is projected, so the graph is of the order of the ifcOWL
+lift's size for a model; the demo seed does not write it. No IFC 4.3 model exists in the
 repository or the boot seed, so 4.3 behaviour is verified against the
 hand-authored fixtures in `tests/fixtures/ifc` only.

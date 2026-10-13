@@ -13,11 +13,11 @@ The bundled vocabularies are third-party works. Each keeps its publisher's licen
 A file's comment header carries its notices, but the store keeps triples only, so the seeder records the licence next to the copy as registry metadata:
 
 - **`attribution` on every seeded entry and version.** `GET /api/models`, `/api/models/{id}`, `/api/models/{id}/versions` and `/api/models/{id}/versions/{ver}` return it. It holds the licence names and URIs, the copyright line, the notice the licence requires (for example the W3C derivative notice or DCMI's schema notice), the source document's status, the source URL, the changes, the bundled file's own header and a link to the full notice. It is `null` for your own models. An entry's record describes the content it serves as its latest: the latest published version's own record. The model page shows it as a *Licence and attribution* card, with a one-line credit under each version and in the viewer. The source pill on a term card links to the same notice.
-- **"Unchanged" is checked, not assumed.** A record's `unchanged` is `true` only when the seeder loaded the version verbatim or found its triples to be the bundled file's. The registry keeps, next to each seeded version's record, the SHA-256 of the file it was checked against and a digest of the stored triples, so the check is repeated whenever a build ships a different file. The store writes typed literals in a canonical form (for example `"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`, a `+00:00` time zone as `Z`); the check compares with the file in that form, and the record names the files where this changes how some triples read. Drafts, branches, merges and rebases keep the licence records of the versions they draw on, with `unchanged: false`. Editing a version in place, or publishing it (which stamps version metadata into its graph), sets `unchanged: false` too, and so does a direct write into a version's graph through SPARQL Update (`/sparql`, `/sparql/batch`) or the Graph Store Protocol (`/store`): the record is marked before the write runs. An admin's update that writes graphs it does not name (a variable graph in a DELETE/INSERT template, `CLEAR`/`DROP ALL` or `NAMED`) is followed by a re-check of every copy the seeder vouched for, and a copy that changed is marked. The re-check runs after the write itself, so it also runs when the request times out, and the leader's boot repeats it, so a crash cannot skip it. A `GRAPH ?g` read only in the WHERE clause needs none, because every graph such an update writes is named and guarded. The UI marks such copies *May have been modified*.
+- **"Unchanged" is checked, not assumed.** A record's `unchanged` is `true` only when the seeder loaded the version verbatim or found its triples to be the bundled file's. The registry keeps, next to each seeded version's record, the SHA-256 of the file it was checked against and a digest of the stored triples, so the check is repeated whenever a build ships a different file. The store keeps typed literals as written, so the check compares with the file exactly. Before it did, the store wrote them in a canonical form (`"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`, a `+00:00` time zone as `Z`), and records said so for the files it affected; on its first start a version that keeps lexical forms checks those copies again and, when they are the file's triples in that older form (nobody's edit), loads the file's triples in their place in one transaction. Drafts, branches, merges and rebases keep the licence records of the versions they draw on, with `unchanged: false`. Editing a version in place, or publishing it (which stamps version metadata into its graph), sets `unchanged: false` too, and so does a direct write into a version's graph through SPARQL Update (`/sparql`, `/sparql/batch`) or the Graph Store Protocol (`/store`): the record is marked before the write runs. An admin's update that writes graphs it does not name (a variable graph in a DELETE/INSERT template, `CLEAR`/`DROP ALL` or `NAMED`) is followed by a re-check of every copy the seeder vouched for, and a copy that changed is marked. The re-check runs after the write itself, so it also runs when the request times out, and the leader's boot repeats it, so a crash cannot skip it. A `GRAPH ?g` read only in the WHERE clause needs none, because every graph such an update writes is named and guarded. The UI marks such copies *May have been modified*.
 - **Downloads.** `/api/models/{id}/versions/{ver}/data` and `/latest/data` name the licence(s), the source and the full notice in `Link` headers (`rel="license"`, `rel="via"`, `rel="describedby"`). The body starts with the bundled file's header as `#` comments, then one line: either that the content is the triples of the bundled file, unchanged, or that it is derived from the file and may have been modified in this registry. Term look-ups (`/term`) carry the same `Link` headers.
 - **The graphs stay the files' triples.** The seeder loads each file verbatim and never writes the licence record into the vocabulary's graph.
 - **IMBOR (Stichting CROW)** allows no altered copies. Its downloads carry the `Link` headers but no added comment. In the `imbor` entry, the API refuses every way of making or publishing other content with `403`: uploading a version, editing one, creating a draft or branch, merging, rebasing and publishing. A direct write into the graph of a version whose licence record allows no altered copies (SPARQL Update, `/sparql/batch`, Graph Store `PUT`/`POST`/`DELETE`, reasoning and SWRL targets) is refused with `403` too, for admins as well. Only the checked, unchanged copy is served to everyone. Any other version there (one an earlier release let an admin make, or a copy the seeder kept aside, see below) is kept, but downloads, term look-ups, diffs and merge previews of it answer `403` to anyone who may not write the entry. The same rules hold for any entry whose licence record says it allows no altered copies. SHACL Studio applies them to a model graph that a seed bundle binds as a shape graph (nen2660-imbor binds the IMBOR Kern): saving, restoring or importing into it, cloning it or importing its shapes into another shape graph, and a pipeline's in-place inference or report into it answer `403`, for admins too. The Studio serves its Turtle to everyone only while it is the checked, unchanged copy, and its stored revisions only to users who may write the entry; deleting the Library entry leaves the graph's data in place. Model-registry graphs cannot be registered to a dataset, bulk-imported into or synced into over LDES.
-- **Seed bundles** can declare the licence of a model they ship (`[data_models.license]` in `manifest.toml`: `licenses`, `copyright`, `source`, `remarks`, `no_derivatives`). The bundle writes it as the model's licence record, calls the content unchanged only while every graph holds exactly its file's triples (checked on every start, in the store's canonical literal forms), and never changes a graph that differs. The `nen2660-imbor` example declares CROW's licence with `no_derivatives = true` for its `imbor-otl` model (IMBOR Kern and addenda), so the same rules apply there. A bundle model may not use the id of a vocabulary the server seeds, whatever the boot order.
+- **Seed bundles** can declare the licence of a model they ship (`[data_models.license]` in `manifest.toml`: `licenses`, `copyright`, `source`, `remarks`, `no_derivatives`). The bundle writes it as the model's licence record, calls the content unchanged only while every graph holds exactly its file's triples (checked on every start), and never changes a graph that differs. A graph that holds its file's triples in the canonical literal forms an earlier version of the store wrote is loaded from its file again, once. The `nen2660-imbor` example declares CROW's licence with `no_derivatives = true` for its `imbor-otl` model (IMBOR Kern and addenda), so the same rules apply there. A bundle model may not use the id of a vocabulary the server seeds, whatever the boot order.
 
 Queries over the vocabulary graphs (`/sparql`, the ontology browser) return triples only. Their licences are the ones listed in `/vocab/NOTICE.md`.
 
@@ -43,6 +43,50 @@ The Schema.org entry keeps the version label `29.0` it first shipped with, becau
 4. **Stage** — Promote a draft to *staged* for review before it goes live. Staging is optional but lets reviewers see a candidate without it becoming the canonical latest.
 5. **Publish** — Mark a version *published*. The published version becomes the canonical latest version and is served at `/api/models/{id}/latest/data`. On publish, version metadata is stamped into the graph by content: OWL `owl:versionIRI`/`owl:priorVersion` for class/property models and DCAT/PAV/SKOS metadata for vocabularies (both for mixed packages). A version still in **Draft** status is never served as "latest". Published versions are immutable.
 6. **Deprecate** — Older published versions can be deprecated to signal that consumers should upgrade.
+7. **Delete** — Remove a version that should not exist, see below.
+
+## Deleting a version
+
+`DELETE /api/models/{id}/versions/{ver}` removes one version: the named graphs that hold
+it (its base graph and sub-graphs) and its registry record (status, notes, licence record,
+seed checks, per-subgraph states, and the entry's `hasVersion`, `latestPublished` and
+`latestDraft` links to it), all in one transaction. A graph that another version record also
+names is left in place and reported under `graphs_kept`. Other versions that were derived
+from it, and the entry's commit log, keep naming it: they are history.
+
+- **Who.** Admins, and users with the publish permission who may write the entry (its owner,
+  or an admin of the owning organisation). Others get `403`; an entry the caller may not see
+  answers `404`.
+- **Published versions.** A version that is published (or has a published subgraph) answers
+  `409` unless the request says `?force=true`. Deleting the latest published version
+  leaves the entry with no latest published version until another one is published.
+- **Dependent datasets.** While datasets depend on the version, the answer is `409`, with or
+  without `force`. A dataset depends on it when its `conforms_to_version` names it, when it
+  has no pin and the version is the latest published one, or when one of its dataset versions
+  that is not deprecated records it as the model version it conformed to. The body lists the
+  datasets the caller may read and only counts the others (`hidden_datasets`), as
+  `GET /api/models/{id}/dependents` does. Re-pin them first.
+
+A refusal changes nothing. Its body says why, and whether `force` would help:
+
+```json
+{ "error": "Version '1.0.0' is published; …", "version": "1.0.0", "published": true,
+  "force_allowed": false,
+  "reasons": [ { "code": "published", "message": "…" },
+               { "code": "dependents", "message": "…", "hidden_datasets": 0,
+                 "datasets": [ { "dataset_id": "…", "name": "bridges-2026",
+                                 "reason": "pinned", "dataset_version": null } ] } ] }
+```
+
+`reason` is `pinned`, `floating` or `dataset_version` (with that dataset version's label). A
+successful delete answers `200` with `graphs_dropped`, `graphs_kept`, `triples_removed` and
+`forced`, and lands on the entry's commit log ("Deleted version 2.0.0", or "Deleted
+published version 1.0.0 (forced)") and in the audit log (`graph_deleted`, action
+`delete_model_version`). The model page's delete button shows the same reasons, and offers
+*Delete anyway* only when `force` would succeed.
+
+A version of a bundled vocabulary that the seeder owns is seeded again at the next start
+while `SEED_STANDARD_VOCABS` is on.
 
 ## Storage
 

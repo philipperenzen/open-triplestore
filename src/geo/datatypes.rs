@@ -1,23 +1,28 @@
 //! GeoSPARQL datatype handling: parsing and serialization of geometry literals.
 //!
-//! Three serialisations are geometries here: `geo:wktLiteral` (with its
-//! optional CRS URI prefix, `<http://...crs...> POINT(0 0)`), `geo:gmlLiteral`
-//! and `geo:geoJSONLiteral` (RFC 7946 — always CRS84). A plain string is read as
-//! WKT for convenience. GML and GeoJSON are translated to WKT, so every one of
-//! them reaches GEOS by the same path ([`literal_wkt`]).
+//! Four serialisations are geometries here: `geo:wktLiteral` (with its
+//! optional CRS URI prefix, `<http://...crs...> POINT(0 0)`), `geo:gmlLiteral`,
+//! `geo:geoJSONLiteral` (RFC 7946 — always CRS84) and `geo:kmlLiteral` (KML 2.2
+//! — always CRS84). A plain string is read as WKT for convenience. GML, GeoJSON
+//! and KML are translated to WKT, so every one of them reaches GEOS by the same
+//! path ([`literal_wkt`]); Z survives the translation.
+//!
+//! A geometry result is written back in its first operand's serialisation and
+//! CRS ([`geometry_to_literal_like`], GeoSPARQL 1.1 §10.9.1): a buffer of a GML
+//! literal is a GML literal with the same `srsName`.
 //!
 //! A literal's CRS comes from one place, [`literal_crs_uri`]: a WKT literal's
 //! `<crs>` prefix or a GML literal's `srsName`, and CRS84 otherwise. Every
 //! function — topology, constructive, `getSRID`, `transform`, the metric family
 //! and `aggUnion` — reads it there, so they all agree about one literal.
 //!
-//! An empty `geo:wktLiteral`, `geo:gmlLiteral` or `geo:geoJSONLiteral` is the
-//! empty geometry (GeoSPARQL 1.1 Req 17, 21 and 27).
+//! An empty `geo:wktLiteral`, `geo:gmlLiteral`, `geo:geoJSONLiteral` or
+//! `geo:kmlLiteral` is the empty geometry (GeoSPARQL 1.1 Req 17, 21, 27 and 32).
 
 use std::borrow::Cow;
 
 use dashmap::DashMap;
-use geos::{CoordDimensions, Geom, Geometry as GeosGeometry, WKTWriter};
+use geos::{CoordDimensions, Geom, Geometry as GeosGeometry, WKBWriter, WKTWriter};
 use oxrdf::{Literal, NamedNode, Term};
 use std::sync::OnceLock;
 use tracing::trace;
@@ -53,11 +58,22 @@ fn parse_wkt_cached(wkt_str: &str) -> Option<GeosGeometry> {
     }
     let g = GeosGeometry::new_from_wkt(wkt_str).ok()?;
     if cache.len() < WKB_CACHE_CAP {
-        if let Ok(wkb) = g.to_wkb() {
+        if let Some(wkb) = geometry_wkb(&g) {
             cache.insert(wkt_str.to_string(), wkb);
         }
     }
     Some(g)
+}
+
+/// A geometry's WKB, Z kept on every supported GEOS: GEOS 3.11 writes two
+/// dimensions unless told otherwise (3.12 keeps them), and a cached parse
+/// must not lose a Z the literal has.
+fn geometry_wkb(g: &GeosGeometry) -> Option<Vec<u8>> {
+    let mut writer = WKBWriter::new().ok()?;
+    if matches!(writer.get_out_dimension(), Ok(CoordDimensions::TwoD)) {
+        writer.set_output_dimension(CoordDimensions::ThreeD);
+    }
+    writer.write_wkb(g).ok()
 }
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -98,8 +114,107 @@ pub fn literal_wkt(term: &Term) -> Option<Cow<'_, str>> {
         vocabulary::GML_LITERAL => super::gml::gml_to_wkt(value).map(Cow::Owned),
         vocabulary::GEOJSON_LITERAL if value.trim().is_empty() => Some(Cow::Borrowed(EMPTY_WKT)),
         vocabulary::GEOJSON_LITERAL => super::geojson::geojson_to_wkt(value).map(Cow::Owned),
+        vocabulary::KML_LITERAL if value.trim().is_empty() => Some(Cow::Borrowed(EMPTY_WKT)),
+        vocabulary::KML_LITERAL => super::kml::kml_to_wkt(value).map(Cow::Owned),
         _ => None,
     }
+}
+
+/// A geometry literal's serialisation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Serialisation {
+    /// `geo:wktLiteral` (and a plain string read as WKT).
+    Wkt,
+    Gml,
+    GeoJson,
+    Kml,
+}
+
+impl Serialisation {
+    /// The serialisation of a geometry literal term; WKT for anything else.
+    pub fn of(term: &Term) -> Serialisation {
+        match term {
+            Term::Literal(l) => match l.datatype().as_str() {
+                vocabulary::GML_LITERAL => Serialisation::Gml,
+                vocabulary::GEOJSON_LITERAL => Serialisation::GeoJson,
+                vocabulary::KML_LITERAL => Serialisation::Kml,
+                _ => Serialisation::Wkt,
+            },
+            _ => Serialisation::Wkt,
+        }
+    }
+
+    /// Whether the serialisation is CRS84 by definition (GeoJSON, KML).
+    pub fn is_crs84_only(self) -> bool {
+        matches!(self, Serialisation::GeoJson | Serialisation::Kml)
+    }
+}
+
+/// A geometry as a literal of `serialisation` in the CRS `crs_uri` (`None`:
+/// CRS84). The geometry is already in that CRS: nothing is reprojected here.
+/// A GeoJSON or KML result outside CRS84 cannot exist, so it is written as a
+/// WKT literal with the CRS instead.
+pub fn geometry_to_literal(
+    geom: &GeosGeometry,
+    serialisation: Serialisation,
+    crs_uri: Option<&str>,
+) -> Option<Term> {
+    let crs84 = crs_uri.is_none_or(|uri| Crs::from_uri(uri) == Some(Crs::Wgs84));
+    let typed = |lexical: String, datatype: &str| {
+        Term::Literal(Literal::new_typed_literal(
+            lexical,
+            NamedNode::new_unchecked(datatype),
+        ))
+    };
+    let identity = |x: f64, y: f64| Some((x, y));
+    match serialisation {
+        Serialisation::Gml => Some(typed(
+            super::gml::geometry_to_gml(geom, crs_uri)?,
+            vocabulary::GML_LITERAL,
+        )),
+        Serialisation::GeoJson if crs84 => Some(typed(
+            super::geojson::geometry_to_geojson(geom, &identity)?.to_string(),
+            vocabulary::GEOJSON_LITERAL,
+        )),
+        Serialisation::Kml if crs84 => Some(typed(
+            super::kml::geometry_to_kml(geom, &identity)?,
+            vocabulary::KML_LITERAL,
+        )),
+        _ => geometry_to_wkt_literal_in(geom, crs_uri),
+    }
+}
+
+/// A geometry result as a literal like `template`, its first operand: the same
+/// serialisation, and the same CRS spelled the same way (a WKT prefix, or a GML
+/// `srsName`, as written). GeoSPARQL 1.1 §10.9.1: a function returning a
+/// geometry returns it in the serialisation and SRS of its first argument.
+pub fn geometry_to_literal_like(geom: &GeosGeometry, template: &Term) -> Option<Term> {
+    let serialisation = Serialisation::of(template);
+    let crs = match (serialisation, template) {
+        (Serialisation::Gml, Term::Literal(l)) => super::gml::gml_srs_name(l.value()),
+        (Serialisation::Wkt, Term::Literal(l)) => extract_crs(l.value()).map(str::to_string),
+        _ => None,
+    };
+    geometry_to_literal(geom, serialisation, crs.as_deref())
+}
+
+/// The coordinate dimensions a geometry literal is written with: whether it has
+/// Z and whether it has M. Read from the lexical form (the `wkt` crate sees a
+/// `POINT M`/`POINT ZM` that GEOS 3.11 cannot), falling back to GEOS for WKT the
+/// `wkt` crate does not read. GML, GeoJSON and KML have no M.
+pub fn literal_dimensions(term: &Term) -> Option<(bool, bool)> {
+    use std::str::FromStr;
+    let wkt = literal_wkt(term)?;
+    if let Ok(parsed) = wkt::Wkt::<f64>::from_str(&wkt) {
+        return Some(match parsed.dimension() {
+            wkt::types::Dimension::XY => (false, false),
+            wkt::types::Dimension::XYZ => (true, false),
+            wkt::types::Dimension::XYM => (false, true),
+            wkt::types::Dimension::XYZM => (true, true),
+        });
+    }
+    let g = parse_wkt_cached(&wkt)?;
+    Some((g.has_z().ok()?, false))
 }
 
 /// The CRS IRI a geometry literal names — `None` meaning GeoSPARQL's default,
@@ -120,6 +235,7 @@ pub fn literal_crs_uri(term: &Term) -> Option<Cow<'_, str>> {
         vocabulary::WKT_LITERAL | XSD_STRING => extract_crs(l.value()).map(Cow::Borrowed),
         vocabulary::GML_LITERAL => super::gml::gml_srs_name(l.value())
             .map(|name| Cow::Owned(normalise_crs_uri(&name).into_owned())),
+        // GeoJSON and KML are CRS84 by definition.
         _ => None,
     }
 }

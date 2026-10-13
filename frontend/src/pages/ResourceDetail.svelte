@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { browseResource } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { location } from '../lib/locationStore.js';
@@ -228,7 +229,8 @@
 
   $: localResourcePath = (() => {
     if (typeof window === 'undefined') return null;
-    const prefix = window.location.origin + '/resource/';
+    // Local IRIs are minted under BASE_URL, which carries the sub-path prefix.
+    const prefix = window.location.origin + withBase('/resource/');
     return iri.startsWith(prefix) ? iri.slice(prefix.length) : null;
   })();
 
@@ -744,10 +746,10 @@
               title={$i18nT('pages.resource.viewRawLinkedData')}>&lt;/&gt; {$i18nT('pages.resource.linkedData')} ▾</button>
             {#if showLdMenu}
               <div class="ld-dropdown">
-                <a href="/resource/{localResourcePath}?format=turtle" target="_blank" rel="noopener">Turtle</a>
-                <a href="/resource/{localResourcePath}?format=jsonld" target="_blank" rel="noopener">JSON-LD</a>
-                <a href="/resource/{localResourcePath}?format=ntriples" target="_blank" rel="noopener">N-Triples</a>
-                <a href="/resource/{localResourcePath}?format=rdfxml" target="_blank" rel="noopener">RDF/XML</a>
+                <a href={withBase(`/resource/${localResourcePath}?format=turtle`)} target="_blank" rel="noopener">Turtle</a>
+                <a href={withBase(`/resource/${localResourcePath}?format=jsonld`)} target="_blank" rel="noopener">JSON-LD</a>
+                <a href={withBase(`/resource/${localResourcePath}?format=ntriples`)} target="_blank" rel="noopener">N-Triples</a>
+                <a href={withBase(`/resource/${localResourcePath}?format=rdfxml`)} target="_blank" rel="noopener">RDF/XML</a>
               </div>
             {/if}
           </div>

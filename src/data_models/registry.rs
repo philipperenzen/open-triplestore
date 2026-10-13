@@ -526,7 +526,10 @@ pub fn update_version_notes(
 }
 
 /// Delete a data model record and all its version records from the registry.
-/// Does NOT delete the actual named graph data — call `delete_version_graphs` for that.
+/// Does NOT delete the actual named graph data: the caller drops the version
+/// graphs first (`DELETE /api/models/:id` does, with
+/// `TripleStore::bulk_delete_graphs`). One version, graphs and records
+/// together, is [`delete_version`].
 pub fn delete_data_model(
     store: &TripleStore,
     base_url: &str,
@@ -594,6 +597,83 @@ pub fn delete_data_model(
 }
 
 // ─── Version CRUD ─────────────────────────────────────────────────────────────
+
+/// The graphs of `graphs` that a version record other than `ver_iri` also
+/// names (`ver:graphIri` / `ver:subGraph`), of any entry: deleting `ver_iri`
+/// must leave those in place. `None` when the registry query fails, so the
+/// caller deletes nothing.
+pub fn graphs_held_by_other_versions(
+    store: &TripleStore,
+    ver_iri: &str,
+    graphs: &[String],
+) -> Option<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    if graphs.is_empty() {
+        return Some(out);
+    }
+    NamedNode::new(ver_iri).ok()?;
+    let mut values = String::new();
+    for g in graphs {
+        NamedNode::new(g.as_str()).ok()?;
+        values.push_str(&format!("<{g}> "));
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT DISTINCT ?g WHERE {{
+          VALUES ?g {{ {values} }}
+          GRAPH <{REGISTRY_GRAPH}> {{
+            {{ ?v ver:graphIri ?g }} UNION {{ ?v ver:subGraph ?g }}
+          }}
+          FILTER(?v != <{ver_iri}>)
+        }}
+        "#
+    );
+    let QueryResults::Solutions(solutions) = store.query(&q).ok()? else {
+        return None;
+    };
+    for row in solutions {
+        let vals: Vec<Option<Term>> = row.ok()?.values().to_vec();
+        if let Some(g) = var_str(&vals, 0) {
+            out.insert(g);
+        }
+    }
+    Some(out)
+}
+
+/// Delete one version: drop `graphs` (its content) and remove its registry
+/// rows in one transaction. The rows are the version record itself (status,
+/// graphs, notes, licence record, seed checks), its per-subgraph state
+/// entries, and the entry's links to it (`ver:hasVersion`, and the
+/// `ver:latestPublished` / `ver:latestDraft` pointers when they name it).
+/// Other versions' `prov:wasDerivedFrom` and the commit log keep naming it:
+/// they are history.
+pub fn delete_version(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version: &str,
+    graphs: &[String],
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    let ont_iri = data_model_iri(base_url, data_model_id);
+    let ver_iri = version_record_iri(base_url, data_model_id, version);
+    for iri in [&ont_iri, &ver_iri] {
+        NamedNode::new(iri.as_str())
+            .map_err(|e| StoreError::Parse(format!("invalid registry IRI {iri}: {e}")))?;
+    }
+    let update = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ ?e ?ep ?eo }} }}
+        WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> ver:subGraphState ?e . ?e ?ep ?eo }} }} ;
+        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> ?p ?o }} }} ;
+        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ont_iri}> ?p <{ver_iri}> }} }}
+        "#
+    );
+    let drops: Vec<&str> = graphs.iter().map(String::as_str).collect();
+    store.drop_graphs_with_update(&drops, &update, &[REGISTRY_GRAPH])
+}
 
 /// List all versions for a data model, ordered newest first.
 pub fn list_versions(

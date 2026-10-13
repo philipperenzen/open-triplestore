@@ -3,7 +3,7 @@
   import { t as i18nT } from 'svelte-i18n';
   import { Check, X as XIcon, Loader2, Info, ExternalLink, Tag, Image as ImageIcon, ImagePlus, Trash2, AlertTriangle } from 'lucide-svelte';
   import { LICENSES, LICENSE_CATEGORY_LABEL, findLicense, searchLicenses } from '../lib/vocab/licenses';
-  import { findTheme, searchThemes, ADMS_STATUSES, findAdmsStatus } from '../lib/vocab/themes';
+  import { findTheme, searchThemes, ADMS_STATUSES, findAdmsStatus, FREQUENCIES, findFrequency } from '../lib/vocab/themes';
   import Select from './Select.svelte';
   import BannerPicker from './BannerPicker.svelte';
 
@@ -70,6 +70,9 @@
   let contactUrl = '';
   let spatial = '';
   let landingPage = '';
+  let temporalStart = '';
+  let temporalEnd = '';
+  let periodicity = '';
 
   let dialogEl;
   let prevOpen = false;
@@ -119,6 +122,10 @@
     contactUrl = d.contact_url || '';
     spatial = d.spatial || '';
     landingPage = d.landing_page || '';
+    // A stored date-time shows as its date: the inputs edit whole days.
+    temporalStart = (d.temporal_start || '').slice(0, 10);
+    temporalEnd = (d.temporal_end || '').slice(0, 10);
+    periodicity = d.accrual_periodicity || '';
     deleteArmed = false;
     deleteConfirmText = '';
     tick().then(() => dialogEl?.focus());
@@ -202,7 +209,16 @@
     }
   }
 
+  $: temporalInvalid = !!(temporalStart && temporalEnd && temporalEnd < temporalStart);
+  $: periodicityOptions = [
+    { value: '', label: $i18nT('components.datasetMetadataDialog.periodicityNotSpecified') },
+    ...FREQUENCIES.map(f => ({ value: f.iri, label: f.label })),
+    // Keep a stored frequency outside the short list selectable.
+    ...(periodicity && !findFrequency(periodicity) ? [{ value: periodicity, label: periodicity }] : []),
+  ];
+
   function save() {
+    if (temporalInvalid) return;
     const themesOut = themes.length ? themes : null;
     const keywordsOut = keywords.length ? keywords : null;
     let admsOut = null;
@@ -222,6 +238,9 @@
       version_notes: versionNotes || null,
       spatial: spatial || null,
       landing_page: landingPage || null,
+      temporal_start: temporalStart || null,
+      temporal_end: temporalEnd || null,
+      accrual_periodicity: periodicity || null,
     });
   }
 </script>
@@ -516,6 +535,29 @@
             <input id="md-spatial" bind:value={spatial} placeholder="http://www.geonames.org/2635167/united-kingdom.html" />
           </div>
 
+          <div class="form-row two-col">
+            <div>
+              <label for="md-tstart">
+                {$i18nT('components.datasetMetadataDialog.temporalLabel')} · {$i18nT('components.datasetMetadataDialog.temporalStart')}
+                <span class="help" title={$i18nT('components.datasetMetadataDialog.temporalHelp')}><Info size={12} /></span>
+              </label>
+              <input id="md-tstart" type="date" bind:value={temporalStart} />
+            </div>
+            <div>
+              <label for="md-tend">{$i18nT('components.datasetMetadataDialog.temporalEnd')}</label>
+              <input id="md-tend" type="date" bind:value={temporalEnd} min={temporalStart || undefined} />
+            </div>
+          </div>
+          {#if temporalInvalid}<p class="err">{$i18nT('components.datasetMetadataDialog.temporalOrder')}</p>{/if}
+
+          <div class="form-row">
+            <label for="md-freq">
+              {$i18nT('components.datasetMetadataDialog.periodicityLabel')}
+              <span class="help" title={$i18nT('components.datasetMetadataDialog.periodicityHelp')}><Info size={12} /></span>
+            </label>
+            <Select id="md-freq" bind:value={periodicity} options={periodicityOptions} />
+          </div>
+
           <div class="form-row">
             <label for="md-landing">
               {$i18nT('components.datasetMetadataDialog.landingPageLabel')}
@@ -564,7 +606,7 @@
 
       <div class="modal-footer">
         <button class="btn btn-ghost" on:click={close} disabled={saving}>{$i18nT('system.cancel')}</button>
-        <button class="btn" on:click={save} disabled={saving || !name.trim()}>
+        <button class="btn" on:click={save} disabled={saving || !name.trim() || temporalInvalid}>
           {#if saving}<Loader2 size={14} class="animate-spin" /> {$i18nT('components.datasetMetadataDialog.saving')}{:else}<Check size={14} /> {$i18nT('system.save')}{/if}
         </button>
       </div>

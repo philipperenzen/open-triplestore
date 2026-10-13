@@ -22,10 +22,10 @@ const IDS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <ids:specification name="External walls need a fire rating" ifcVersion="IFC4">
       <ids:applicability>
         <ids:entity><ids:name><ids:simpleValue>IFCWALL</ids:simpleValue></ids:name></ids:entity>
-        <ids:property><ids:propertySet><ids:simpleValue>Pset_WallCommon</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>IsExternal</ids:simpleValue></ids:baseName><ids:value><ids:simpleValue>true</ids:simpleValue></ids:value></ids:property>
+        <ids:property dataType="IFCBOOLEAN"><ids:propertySet><ids:simpleValue>Pset_WallCommon</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>IsExternal</ids:simpleValue></ids:baseName><ids:value><ids:simpleValue>true</ids:simpleValue></ids:value></ids:property>
       </ids:applicability>
       <ids:requirements>
-        <ids:property cardinality="required"><ids:propertySet><ids:simpleValue>Pset_WallCommon</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>FireRating</ids:simpleValue></ids:baseName><ids:value><xs:restriction base="xs:string"><xs:enumeration value="REI30"/><xs:enumeration value="REI60"/></xs:restriction></ids:value></ids:property>
+        <ids:property cardinality="required" dataType="IFCLABEL"><ids:propertySet><ids:simpleValue>Pset_WallCommon</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>FireRating</ids:simpleValue></ids:baseName><ids:value><xs:restriction base="xs:string"><xs:enumeration value="REI30"/><xs:enumeration value="REI60"/></xs:restriction></ids:value></ids:property>
       </ids:requirements>
     </ids:specification>
   </ids:specifications>
@@ -101,8 +101,9 @@ async fn a_shape_graph_with_no_class_target_is_unprocessable() {
     assert!(body.contains("class-based"), "the reason is given: {body}");
 }
 
-/// import → export → import is a fixpoint on the subset both directions share:
-/// the second import produces the same shapes as the first.
+/// import → export → import is a fixpoint: the export writes back the
+/// specification the import recorded, and the second import produces exactly
+/// the shapes of the first.
 #[tokio::test]
 async fn ids_survives_an_import_export_import_round_trip() {
     let (state, token) = admin_state();
@@ -119,7 +120,7 @@ async fn ids_survives_an_import_export_import_round_trip() {
     assert_eq!(st, StatusCode::OK, "{first}");
     let v1: Value = serde_json::from_str(&first).unwrap();
     let ttl1 = v1["turtle"].as_str().unwrap().to_string();
-    assert!(ttl1.contains("IfcWall"), "{ttl1}");
+    assert!(ttl1.contains("IFC4#IFCWALL"), "{ttl1}");
 
     let (st, exported) = post(
         &app,
@@ -163,17 +164,11 @@ async fn ids_survives_an_import_export_import_round_trip() {
     assert_eq!(st, StatusCode::OK, "{second}");
     let v2: Value = serde_json::from_str(&second).unwrap();
     let ttl2 = v2["turtle"].as_str().unwrap();
-    for needle in [
-        "IfcWall",
-        "Pset_WallCommon_FireRating",
-        "Pset_WallCommon_IsExternal",
-        "REI30",
-    ] {
-        assert!(
-            ttl2.contains(needle),
-            "`{needle}` survives the round trip: {ttl2}"
-        );
-    }
+    assert_eq!(ttl2, ttl1, "the round trip is lossless");
+    assert!(
+        ev["losses"].as_array().is_some_and(|l| l.is_empty()),
+        "nothing is lost: {exported}"
+    );
     assert_eq!(
         v1["specifications"].as_array().map(|a| a.len()),
         v2["specifications"].as_array().map(|a| a.len()),

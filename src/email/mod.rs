@@ -23,19 +23,25 @@
 //! - `PUBLIC_BASE_URL` — base URL minted into email links (default: the
 //!   server's linked-data base URL).
 //!
-//! Note: the ops alerting module (`alerting` feature) has its own independent
-//! `ALERT_SMTP_*` configuration; this mailer is for user-facing account email.
+//! Note: the ops alerting module (`alerting` feature) has its own
+//! `ALERT_SMTP_*` configuration, and falls back to this relay (`SMTP_HOST`,
+//! `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `SMTP_FROM`)
+//! when `ALERT_SMTP_HOST` is unset; this mailer is for user-facing account
+//! email.
 
 use crate::secrets::env_secret_opt;
 
 use std::sync::Arc;
+
+/// The From mailbox when `SMTP_FROM` is unset.
+pub(crate) const DEFAULT_FROM: &str = "Open Triplestore <no-reply@localhost>";
 
 /// How long (seconds) an email send may take before it is abandoned.
 const SEND_TIMEOUT_SECS: u64 = 30;
 
 /// SMTP transport security for the relay hop.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SmtpTls {
+pub enum SmtpTls {
     /// Plaintext SMTP — only sane towards a relay on a trusted private network
     /// (e.g. the bundled compose `mail` service; nothing there is published on
     /// a host interface).
@@ -49,14 +55,13 @@ enum SmtpTls {
 /// Resolve the transport security mode: explicit `SMTP_TLS` wins, then the
 /// legacy `SMTP_STARTTLS` flag, then the port convention (465 ⇒ implicit TLS,
 /// anything else ⇒ STARTTLS).
-fn resolve_tls(port: u16, tls: Option<&str>, starttls: Option<&str>) -> SmtpTls {
+pub(crate) fn resolve_tls(port: u16, tls: Option<&str>, starttls: Option<&str>) -> SmtpTls {
     if let Some(v) = tls {
-        match v.trim().to_ascii_lowercase().as_str() {
-            "none" | "off" | "plain" => return SmtpTls::None,
-            "starttls" => return SmtpTls::StartTls,
-            "implicit" | "tls" | "smtps" => return SmtpTls::Implicit,
-            other => tracing::warn!(
-                "email: unrecognized SMTP_TLS value {other:?} (expected none|starttls|implicit) — falling back"
+        match parse_tls(v) {
+            Some(mode) => return mode,
+            None => tracing::warn!(
+                "email: unrecognized SMTP_TLS value {:?} (expected none|starttls|implicit) — falling back",
+                v.trim()
             ),
         }
     }
@@ -70,6 +75,33 @@ fn resolve_tls(port: u16, tls: Option<&str>, starttls: Option<&str>) -> SmtpTls 
                 SmtpTls::StartTls
             }
         }
+    }
+}
+
+/// One `SMTP_TLS`-style value (`none`|`starttls`|`implicit` and their
+/// aliases, case-insensitive), or `None` when it is not one of them.
+pub(crate) fn parse_tls(value: &str) -> Option<SmtpTls> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" | "plain" => Some(SmtpTls::None),
+        "starttls" => Some(SmtpTls::StartTls),
+        "implicit" | "tls" | "smtps" => Some(SmtpTls::Implicit),
+        _ => None,
+    }
+}
+
+/// The lettre transport builder for `host` under `tls` (port and credentials
+/// still to be set). Shared by this mailer and the ops alerting channel.
+pub(crate) fn smtp_transport(
+    host: &str,
+    tls: SmtpTls,
+) -> Result<lettre::transport::smtp::AsyncSmtpTransportBuilder, lettre::transport::smtp::Error> {
+    use lettre::{AsyncSmtpTransport, Tokio1Executor};
+    match tls {
+        SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
+        SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
+        SmtpTls::None => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+            host,
+        )),
     }
 }
 
@@ -116,8 +148,7 @@ impl Mailer {
             .unwrap_or_else(|| default_link_base.to_string())
             .trim_end_matches('/')
             .to_string();
-        let from = env_opt("SMTP_FROM")
-            .unwrap_or_else(|| "Open Triplestore <no-reply@localhost>".to_string());
+        let from = env_opt("SMTP_FROM").unwrap_or_else(|| DEFAULT_FROM.to_string());
 
         let backend = match env_opt("SMTP_HOST") {
             Some(host) => {
@@ -151,7 +182,7 @@ impl Mailer {
     pub fn log_only(link_base: &str) -> Self {
         Self {
             backend: Backend::Log,
-            from: "Open Triplestore <no-reply@localhost>".to_string(),
+            from: DEFAULT_FROM.to_string(),
             link_base: link_base.trim_end_matches('/').to_string(),
         }
     }
@@ -210,15 +241,8 @@ impl Mailer {
                 password,
                 tls,
             } => {
-                use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-                let builder = match tls {
-                    SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
-                    SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
-                    SmtpTls::None => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-                        host,
-                    )),
-                };
-                let builder = match builder {
+                use lettre::AsyncTransport;
+                let builder = match smtp_transport(host, *tls) {
                     Ok(b) => b.port(*port),
                     Err(e) => {
                         tracing::warn!("email: SMTP relay setup failed: {e}");
@@ -240,7 +264,7 @@ impl Mailer {
                         return false;
                     }
                 };
-                let transport = builder.build();
+                let transport = builder.build::<lettre::Tokio1Executor>();
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(SEND_TIMEOUT_SECS),
                     transport.send(msg),

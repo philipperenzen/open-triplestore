@@ -83,21 +83,21 @@ type UnitResolver<'a> = dyn Fn(Option<&Arg>, Option<&str>) -> Option<Unit> + 'a;
 type UnitEmitter<'a> = dyn Fn(&mut NtSink<'_>, &str, &Unit, &mut IfcStats) + 'a;
 
 /// A buffered N-Triples writer that flushes through a chunk callback.
-struct NtSink<'a> {
+pub(crate) struct NtSink<'a> {
     buf: String,
     count: usize,
     out: &'a mut dyn FnMut(&str),
 }
 
 impl<'a> NtSink<'a> {
-    fn new(out: &'a mut dyn FnMut(&str)) -> Self {
+    pub(crate) fn new(out: &'a mut dyn FnMut(&str)) -> Self {
         Self {
             buf: String::with_capacity(FLUSH_AT + 4096),
             count: 0,
             out,
         }
     }
-    fn triple(&mut self, s: &str, p: &str, o: &str) {
+    pub(crate) fn triple(&mut self, s: &str, p: &str, o: &str) {
         self.buf.push_str(s);
         self.buf.push(' ');
         self.buf.push_str(p);
@@ -110,7 +110,7 @@ impl<'a> NtSink<'a> {
             self.buf.clear();
         }
     }
-    fn finish(self) -> usize {
+    pub(crate) fn finish(self) -> usize {
         if !self.buf.is_empty() {
             (self.out)(&self.buf);
         }
@@ -118,11 +118,11 @@ impl<'a> NtSink<'a> {
     }
 }
 
-fn iri(v: &str) -> String {
+pub(crate) fn iri(v: &str) -> String {
     format!("<{v}>")
 }
 
-fn lit(v: &str) -> String {
+pub(crate) fn lit(v: &str) -> String {
     let mut out = String::with_capacity(v.len() + 2);
     out.push('"');
     for c in v.chars() {
@@ -139,7 +139,7 @@ fn lit(v: &str) -> String {
     out
 }
 
-fn typed_lit(v: &str, dt: &str) -> String {
+pub(crate) fn typed_lit(v: &str, dt: &str) -> String {
     format!("{}^^<{XSD}{dt}>", lit(v))
 }
 
@@ -174,7 +174,7 @@ fn lower_first(s: &str) -> String {
 }
 
 /// The 22-char GlobalId of a rooted instance (first attribute), when valid.
-fn guid_of(inst: &Instance) -> Option<&str> {
+pub(crate) fn guid_of(inst: &Instance) -> Option<&str> {
     match inst.args.first() {
         Some(Arg::Str(s))
             if s.len() == 22
@@ -189,7 +189,7 @@ fn guid_of(inst: &Instance) -> Option<&str> {
 
 /// Instance IRI: GlobalId-based for rooted entities (stable across exports of
 /// the same model), step-id-based otherwise.
-fn inst_iri(base: &str, inst: &Instance) -> String {
+pub(crate) fn inst_iri(base: &str, inst: &Instance) -> String {
     match guid_of(inst) {
         Some(g) => format!("<{base}{g}>"),
         None => format!("<{base}i{}>", inst.id),

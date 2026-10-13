@@ -12,6 +12,7 @@
   // Runs: trigger a run, read the history, roll back in one click — and the
   // review queue a refused run leaves: the fixer, a human's decision, the
   // model's suggestion, and promotion of the corrected candidate.
+  import { withBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
@@ -1091,7 +1092,7 @@
               </div>
               {#if r.error}<div class="run-error">{r.error}</div>{/if}
               <div class="run-actions">
-                <a class="btn btn-sm btn-ghost" href={`/api/runs/${r.id}/provenance`} target="_blank" rel="noopener">
+                <a class="btn btn-sm btn-ghost" href={withBase(`/api/runs/${r.id}/provenance`)} target="_blank" rel="noopener">
                   <FileCode size={12} /> {$t('pages.sourceDetail.provenance')}
                 </a>
                 {#if isProduction(r) && source.previous}

@@ -750,8 +750,8 @@ mappings:
         };
         assert_eq!(r.parent_triples_map, rml_out::map_iri("supplier"));
         assert_eq!(r.joins.len(), 1);
-        assert_eq!(r.joins[0].child, "supplier_id");
-        assert_eq!(r.joins[0].parent, "supplier_id");
+        assert_eq!(r.joins[0].child.column(), Some("supplier_id"));
+        assert_eq!(r.joins[0].parent.column(), Some("supplier_id"));
     }
 
     #[test]

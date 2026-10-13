@@ -14,11 +14,18 @@ const EMPTY_DATA_RANGE: &str = "DataIntersectionOf(<http://www.w3.org/2001/XMLSc
 #[derive(Default)]
 pub struct FsWriter {
     labels: HashMap<String, String>,
+    data_complement: bool,
 }
 
 impl FsWriter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether anything written so far kept a `DataComplementOf` (the ones
+    /// [`dr`] rewrites away do not count).
+    pub fn wrote_data_complement(&self) -> bool {
+        self.data_complement
     }
 
     /// The ontology document, with `extra` axioms appended (entailment and
@@ -96,9 +103,15 @@ impl FsWriter {
                 "DataPropertyDomain",
                 format!("{} {}", iri_ref(p), self.ce(c)),
             ),
-            DataPropertyRange(p, r) => ("DataPropertyRange", format!("{} {}", iri_ref(p), dr(r))),
+            DataPropertyRange(p, r) => (
+                "DataPropertyRange",
+                format!("{} {}", iri_ref(p), self.dr(r)),
+            ),
             FunctionalDataProperty(p) => ("FunctionalDataProperty", iri_ref(p)),
-            DatatypeDefinition(d, r) => ("DatatypeDefinition", format!("{} {}", iri_ref(d), dr(r))),
+            DatatypeDefinition(d, r) => (
+                "DatatypeDefinition",
+                format!("{} {}", iri_ref(d), self.dr(r)),
+            ),
             HasKey(c, os, ds) => (
                 "HasKey",
                 format!(
@@ -205,8 +218,8 @@ impl FsWriter {
                 Some(f) => format!("{name}({n} {} {})", ope(p), w.ce(f)),
                 None => format!("{name}({n} {})", ope(p)),
             };
-        let dcard = |name: &str, n: &u32, p: &str, f: &Option<DataRange>| match f {
-            Some(f) => format!("{name}({n} {} {})", iri_ref(p), dr(f)),
+        let dcard = |w: &mut Self, name: &str, n: &u32, p: &str, f: &Option<DataRange>| match f {
+            Some(f) => format!("{name}({n} {} {})", iri_ref(p), w.dr(f)),
             None => format!("{name}({n} {})", iri_ref(p)),
         };
         match c {
@@ -228,13 +241,19 @@ impl FsWriter {
             MinCardinality(n, p, f) => card(self, "ObjectMinCardinality", n, p, f),
             MaxCardinality(n, p, f) => card(self, "ObjectMaxCardinality", n, p, f),
             ExactCardinality(n, p, f) => card(self, "ObjectExactCardinality", n, p, f),
-            DataSomeValuesFrom(ps, r) => format!("DataSomeValuesFrom({} {})", iris(ps), dr(r)),
-            DataAllValuesFrom(ps, r) => format!("DataAllValuesFrom({} {})", iris(ps), dr(r)),
+            DataSomeValuesFrom(ps, r) => {
+                format!("DataSomeValuesFrom({} {})", iris(ps), self.dr(r))
+            }
+            DataAllValuesFrom(ps, r) => format!("DataAllValuesFrom({} {})", iris(ps), self.dr(r)),
             DataHasValue(p, l) => format!("DataHasValue({} {})", iri_ref(p), literal(l)),
-            DataMinCardinality(n, p, f) => dcard("DataMinCardinality", n, p, f),
-            DataMaxCardinality(n, p, f) => dcard("DataMaxCardinality", n, p, f),
-            DataExactCardinality(n, p, f) => dcard("DataExactCardinality", n, p, f),
+            DataMinCardinality(n, p, f) => dcard(self, "DataMinCardinality", n, p, f),
+            DataMaxCardinality(n, p, f) => dcard(self, "DataMaxCardinality", n, p, f),
+            DataExactCardinality(n, p, f) => dcard(self, "DataExactCardinality", n, p, f),
         }
+    }
+
+    fn dr(&mut self, r: &DataRange) -> String {
+        write_dr(r, &mut self.data_complement)
     }
 }
 
@@ -257,26 +276,71 @@ fn opes(v: &[ObjectProp]) -> String {
     v.iter().map(ope).collect::<Vec<_>>().join(" ")
 }
 
-pub fn dr(r: &DataRange) -> String {
+#[cfg(test)]
+fn dr(r: &DataRange) -> String {
+    write_dr(r, &mut false)
+}
+
+/// `true` for a data range with no values at all.
+fn is_empty_range(r: &DataRange) -> bool {
+    match r {
+        DataRange::UnionOf(v) => v.is_empty(),
+        DataRange::OneOf(ls) => ls.is_empty(),
+        _ => false,
+    }
+}
+
+/// `true` for a data range holding every value (`rdfs:Literal`).
+fn is_top_range(r: &DataRange) -> bool {
+    match r {
+        DataRange::Datatype(d) => d == RDFS_LITERAL,
+        DataRange::IntersectionOf(v) => v.is_empty(),
+        _ => false,
+    }
+}
+
+/// Writes `r`; sets `complement` when a `DataComplementOf` stays in the text.
+fn write_dr(r: &DataRange, complement: &mut bool) -> String {
+    let list = |v: &[DataRange], complement: &mut bool| {
+        v.iter()
+            .map(|x| write_dr(x, complement))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     match r {
         DataRange::Datatype(d) => iri_ref(d),
         // As in `ce`: one operand is the operand; no operands is everything or
         // nothing.
-        DataRange::IntersectionOf(v) | DataRange::UnionOf(v) if v.len() == 1 => dr(&v[0]),
+        DataRange::IntersectionOf(v) | DataRange::UnionOf(v) if v.len() == 1 => {
+            write_dr(&v[0], complement)
+        }
         DataRange::IntersectionOf(v) if v.is_empty() => iri_ref(RDFS_LITERAL),
         DataRange::UnionOf(v) if v.is_empty() => EMPTY_DATA_RANGE.into(),
         DataRange::OneOf(ls) if ls.is_empty() => EMPTY_DATA_RANGE.into(),
-        DataRange::IntersectionOf(v) => {
-            format!(
-                "DataIntersectionOf({})",
-                v.iter().map(dr).collect::<Vec<_>>().join(" ")
-            )
+        DataRange::IntersectionOf(v) => format!("DataIntersectionOf({})", list(v, complement)),
+        DataRange::UnionOf(v) => format!("DataUnionOf({})", list(v, complement)),
+        DataRange::ComplementOf(x) => {
+            // A one-operand list is its operand, here too.
+            let mut x = x.as_ref();
+            while let DataRange::IntersectionOf(v) | DataRange::UnionOf(v) = x {
+                match v.as_slice() {
+                    [only] => x = only,
+                    _ => break,
+                }
+            }
+            // Konclude v0.7.0 misses the clash of an empty complement
+            // (`∃p.¬rdfs:Literal` is satisfiable to it); write what these
+            // complements mean, and flag the ones that stay.
+            match x {
+                _ if is_top_range(x) => EMPTY_DATA_RANGE.into(),
+                _ if is_empty_range(x) => iri_ref(RDFS_LITERAL),
+                DataRange::ComplementOf(y) => write_dr(y, complement),
+                _ => {
+                    *complement = true;
+                    format!("DataComplementOf({})", write_dr(x, complement))
+                }
+            }
         }
-        DataRange::UnionOf(v) => format!(
-            "DataUnionOf({})",
-            v.iter().map(dr).collect::<Vec<_>>().join(" ")
-        ),
-        DataRange::ComplementOf(x) => format!("DataComplementOf({})", dr(x)),
         DataRange::OneOf(ls) => format!(
             "DataOneOf({})",
             ls.iter().map(literal).collect::<Vec<_>>().join(" ")
@@ -390,6 +454,54 @@ mod tests {
         assert_eq!(dr(&DataRange::IntersectionOf(vec![])), literal);
         assert_eq!(dr(&DataRange::UnionOf(vec![])), EMPTY_DATA_RANGE);
         assert_eq!(dr(&DataRange::OneOf(vec![])), EMPTY_DATA_RANGE);
+    }
+
+    #[test]
+    fn data_complements_konclude_misreads_are_written_as_what_they_mean() {
+        let dt = |d: &str| DataRange::Datatype(d.into());
+        let not = |r: DataRange| DataRange::ComplementOf(Box::new(r));
+        let int = || dt("http://www.w3.org/2001/XMLSchema#integer");
+        let literal = "<http://www.w3.org/2000/01/rdf-schema#Literal>";
+        let written = |r: &DataRange| {
+            let mut w = FsWriter::new();
+            let text = w.dr(r);
+            (text, w.wrote_data_complement())
+        };
+        // Nothing, everything, the operand: no complement left to misread.
+        for (r, want) in [
+            (not(dt(RDFS_LITERAL)), EMPTY_DATA_RANGE),
+            (not(DataRange::IntersectionOf(vec![])), EMPTY_DATA_RANGE),
+            (
+                not(DataRange::UnionOf(vec![dt(RDFS_LITERAL)])),
+                EMPTY_DATA_RANGE,
+            ),
+            (not(DataRange::UnionOf(vec![])), literal),
+            (not(DataRange::OneOf(vec![])), literal),
+            (
+                not(not(int())),
+                "<http://www.w3.org/2001/XMLSchema#integer>",
+            ),
+        ] {
+            assert_eq!(written(&r), (want.to_string(), false), "{r:?}");
+        }
+        // Any other complement stays, and the writer says so.
+        assert_eq!(
+            written(&DataRange::IntersectionOf(vec![int(), not(int())])),
+            (
+                "DataIntersectionOf(<http://www.w3.org/2001/XMLSchema#integer> \
+                 DataComplementOf(<http://www.w3.org/2001/XMLSchema#integer>))"
+                    .to_string(),
+                true
+            )
+        );
+        assert!(written(&not(not(not(int())))).1);
+        // Through a whole axiom.
+        let mut w = FsWriter::new();
+        w.axiom(&Axiom::new(AxiomKind::DataPropertyRange(
+            "http://example.org/p".into(),
+            not(int()),
+        )));
+        assert!(w.wrote_data_complement());
     }
 
     #[test]
