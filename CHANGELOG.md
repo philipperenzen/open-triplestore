@@ -683,6 +683,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+
+- **The in-memory query accelerator is sized from the memory budget and
+  never builds next to a bulk load** (#469). Its default cap is a quarter of
+  the memory limit at about 1 KiB a triple, with no 2M-triple floor: 1,048,576
+  triples in a 4 GiB container (2M only where no limit can be read). On Linux
+  a build waits until resident memory plus the projected copies fit in 80% of
+  the limit, stops as soon as a write starts, and for a store over 50k
+  triples waits for 5 s of quiet writes (`OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`).
+  Loading 3.5M triples over the Graph Store protocol into the shipped 4 GiB
+  container was OOM-killed in 2 of 6 attempts because a build ran in the gap
+  between two chunks.
+- **A correlated `EXISTS` / `NOT EXISTS` is answered as a hash semi-join**
+  (#471). The optimizer now orders the pattern inside an `EXISTS` (its joins
+  were cartesian products and its filters stayed on top), and once the outer
+  rows outnumber what one evaluation of the pattern costs, the evaluator
+  evaluates the pattern once and answers every later row with a hash lookup,
+  when the pattern only uses the outer bindings to restrict its own solutions.
+  Vendored `spareval`/`sparopt` changes 10 and 11 (`vendor/README.md`).
+- **SHACL paths over several data graphs** (#467): one quad scan per hop over
+  the merged data graphs instead of one per graph, `sh:class` from a prepared
+  instance set, and path closures memoised per run. Closure values come back
+  sorted by their N-Triples form.
+- **Per-query overhead** (#468, #527): the shared SPARQL parser is built once
+  and cloned (it was rebuilt with every declared custom aggregate on each
+  parse — six since the GeoSPARQL 1.1 aggregates, about 0.35 µs per query);
+  a default graph made of several graphs streams a pattern's matches without
+  the merge's hash set when only one graph has any; the accelerator's
+  columnar copy is not asked (no parse) while the store is over its cap; the
+  server sets `TCP_NODELAY`.
 - **`image` Cargo feature.** `image` is an alias for the published image's
   feature set — `full`, `saml` and the three SQL connector plugins — and the
   Dockerfile's default `CARGO_FEATURES` is now `image`, so
@@ -1799,6 +1828,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+
+- **A query that timed out kept running** (#468). `/sparql`, the dataset
+  service endpoints and saved queries answered "Query execution timed out"
+  and left the evaluation running on its blocking thread to the end; it is
+  now cancelled at the timeout, or when the client goes away before the first
+  result.
+- **A Graph Store POST held two extra copies of its body** (#469): the body is
+  checked as UTF-8 in place, and a load marks its new quads instead of cloning
+  them.
 - **R2RML: SQL values take their datatype's canonical lexical form.** The
   natural mapping (R2RML §10.2) writes a `DOUBLE` 30 as `"3.0E1"^^xsd:double`,
   a decimal as `1.5` / `2.0`, an integer without a sign or leading zeros, and

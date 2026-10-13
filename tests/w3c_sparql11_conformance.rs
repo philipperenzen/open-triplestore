@@ -896,21 +896,22 @@ fn w3c_negation_not_exists_scoping() {
 // table on the shared variables; these pin that it gives the substitution
 // semantics' answer in each case the table must and must not be used for.
 
-/// 400 offers over 40 products (offers 400..449 have none), 100 reviews over
-/// products 0..49 with ratings 1..10, a price 1..10 per offer.
+/// 4000 offers over 40 products (offers 4000..4499 have none), 1000 reviews
+/// over products 0..49 with ratings 1..10, a price 1..10 per offer: enough
+/// outer rows for the evaluator to build its table, also in a debug build.
 fn semi_join_store() -> open_triplestore::store::TripleStore {
     let s = ts();
     let mut ttl = String::from("@prefix ex: <http://example.org/> .\n");
-    for i in 0..450 {
+    for i in 0..4500 {
         ttl.push_str(&format!(
             "ex:o{i} a ex:Offer ; ex:price {} .\n",
             1 + (i * 11) % 10
         ));
-        if i < 400 {
+        if i < 4000 {
             ttl.push_str(&format!("ex:o{i} ex:product ex:p{} .\n", i % 40));
         }
     }
-    for j in 0..100 {
+    for j in 0..1000 {
         ttl.push_str(&format!(
             "ex:r{j} ex:reviewFor ex:p{} ; ex:rating {} .\n",
             (j * 7) % 50,
@@ -923,7 +924,7 @@ fn semi_join_store() -> open_triplestore::store::TripleStore {
 
 /// The ratings of the reviews of product `p`.
 fn semi_join_ratings(p: usize) -> Vec<usize> {
-    (0..100)
+    (0..1000)
         .filter(|j| (j * 7) % 50 == p)
         .map(|j| 1 + (j * 3) % 10)
         .collect()
@@ -937,12 +938,12 @@ fn exists_semi_join_correlated_not_exists() {
         "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
          FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
     );
-    let expected = (0..400)
+    let expected = (0..4000)
         .filter(|i| !semi_join_ratings(i % 40).iter().any(|x| *x >= 9))
         .count();
     assert_eq!(r.len(), expected);
     assert!(
-        expected > 0 && expected < 400,
+        expected > 0 && expected < 4000,
         "the data must split the offers"
     );
     let r = select(
@@ -950,12 +951,12 @@ fn exists_semi_join_correlated_not_exists() {
         "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
          FILTER EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
     );
-    assert_eq!(r.len(), 400 - expected);
+    assert_eq!(r.len(), 4000 - expected);
 }
 
 #[test]
 fn exists_semi_join_outer_variable_unbound_in_some_rows() {
-    // Offers 400..449 have no product: `?p` is unbound there, the pattern
+    // Offers 4000..4499 have no product: `?p` is unbound there, the pattern
     // `?r ex:reviewFor ?p` matches every review, so NOT EXISTS is false.
     let s = semi_join_store();
     let r = select(
@@ -963,7 +964,7 @@ fn exists_semi_join_outer_variable_unbound_in_some_rows() {
         "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o a ex:Offer \
          OPTIONAL { ?o ex:product ?p } FILTER NOT EXISTS { ?r ex:reviewFor ?p } }",
     );
-    let expected = (0..400)
+    let expected = (0..4000)
         .filter(|i| semi_join_ratings(i % 40).is_empty())
         .count();
     assert_eq!(r.len(), expected);
@@ -973,7 +974,7 @@ fn exists_semi_join_outer_variable_unbound_in_some_rows() {
             .trim_end_matches('>')
             .parse()
             .unwrap();
-        n < 400
+        n < 4000
     }));
 }
 
@@ -988,7 +989,7 @@ fn exists_semi_join_filter_reads_an_outer_only_variable() {
         "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?price \
          FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x > ?price) } }",
     );
-    let expected = (0..400)
+    let expected = (0..4000)
         .filter(|i| {
             let price = 1 + (i * 11) % 10;
             !semi_join_ratings(i % 40).iter().any(|x| *x > price)
@@ -1007,7 +1008,7 @@ fn exists_semi_join_two_shared_variables_and_union() {
         "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?x \
          FILTER EXISTS { { ?r ex:reviewFor ?p ; ex:rating ?x } UNION { ?p ex:never ?x } } }",
     );
-    let expected = (0..400)
+    let expected = (0..4000)
         .filter(|i| semi_join_ratings(i % 40).contains(&(1 + (i * 11) % 10)))
         .count();
     assert_eq!(r.len(), expected);

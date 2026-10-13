@@ -942,7 +942,7 @@ mod tests {
 
     /// A small in-memory store — enough to exercise a real mirror build without the
     /// cost mattering; the regression guard asserts the *number* of builds, not time.
-    fn store_with_quads(n: usize) -> Store {
+    pub(super) fn store_with_quads(n: usize) -> Store {
         let store = Store::new().unwrap();
         let p = NamedNode::new("http://example.org/p").unwrap();
         for i in 0..n {
@@ -1142,8 +1142,10 @@ mod tests {
 
 #[cfg(test)]
 mod stale_read_tests {
+    use super::tests::store_with_quads;
     use super::*;
     use oxigraph::model::{NamedNode, Quad};
+    use std::time::Duration;
 
     fn store_with(n: usize) -> Store {
         let store = Store::new().unwrap();
