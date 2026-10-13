@@ -1,5 +1,6 @@
 pub mod constraints;
 pub mod engine;
+pub(crate) mod entailment;
 pub mod node_expr;
 pub mod report;
 pub mod shapes;
