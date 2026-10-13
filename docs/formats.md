@@ -27,6 +27,7 @@ The Schema.org context is not bundled (it is licensed CC BY-SA 3.0); to use docu
 ## JSON-LD direction and downloads
 
 - A string with `@language` and `@direction` is stored as an RDF 1.2 directional language-tagged string (`"…"@ar--rtl`) and downloaded back with both keys. A JSON-LD 1.1 processor without its `rdfDirection` option would drop the direction.
-- A JSON-LD download writes every quad of the graph as it is, so it reads back as the same graph as the Turtle or N-Quads download: lists stay `rdf:first` / `rdf:rest` nodes rather than `@list`, and an `rdf:JSON` literal stays a typed literal, even one whose text is not valid JSON.
+- A JSON-LD download follows the JSON-LD 1.1 serialisation algorithm. A well-formed list (blank nodes with one `rdf:first` and one `rdf:rest` each, used once) is written as `@list`, and the `rdf:type rdf:List` its nodes may carry goes with them, as the algorithm says; a list node with any other property stays a node object with every quad. An `rdf:JSON` literal is written as its JSON value (`"@type": "@json"`), or typed with its text when that text is not in the canonical form `@json` reads back as, so it reads back as exactly the stored literal.
+- An `rdf:JSON` literal whose text is not JSON is ill-typed, and every write path refuses it with 400 ([datatypes](/docs/datatypes)), so no download can meet one.
 
 See also: [Import Auto-Detection](/docs/import) and [Supported Standards](/docs/standards).

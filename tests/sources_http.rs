@@ -79,7 +79,7 @@ fn fresh_sqlite(name: &str) -> PathBuf {
          CREATE TABLE products (
              product_id INTEGER PRIMARY KEY,
              name TEXT NOT NULL,
-             price REAL,
+             price DECIMAL(10,2),
              status TEXT,
              supplier_id INTEGER REFERENCES suppliers(supplier_id),
              updated_at TEXT

@@ -503,13 +503,42 @@ ex:SuppliersMap a rr:TriplesMap ;
 
 | Construct | Behaviour |
 |---|---|
-| `rr:tableName` | The whole table or view, optionally schema-qualified (`sales.products`). Delimited parts (`"Product Lines"`, `` `x` ``, `[x]`) lose their delimiters and every part is re-quoted by the dialect, never interpolated. A schema-qualified parent is not looked up for a unique key, so its joins are indexed |
+| `rr:tableName` | The whole table or view, optionally schema-qualified (`sales.products`). Each part is an SQL identifier (see below): a regular part is folded by the dialect, a delimited part (`"Product Lines"`, `` `x` ``, `[x]`) is its text, and every part is re-quoted by the dialect, never interpolated. A schema-qualified parent is not looked up for a unique key, so its joins are indexed |
 | `rml:query` / `rr:sqlQuery` | Used verbatim; the connection is read-only, so it cannot write |
-| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A delimited column name (`rr:column "\"ID\""`, `{"ID"}` in a template, a join column) reads the column `ID`. An IRI template value is IRI-safe encoded; `\{` and `\}` are literal braces |
+| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A column name — `rr:column`, a template placeholder, a join column — is an SQL identifier (see below): `rr:column "\"ID\""` and `{"ID"}` read exactly the column `ID`. An IRI template value is IRI-safe encoded; `\{` and `\}` are literal braces |
 | `rr:parentTriplesMap` + `rr:joinCondition` | The object is the subject the parent map generates for the joined row |
 | `rr:parentTriplesMap` without a join condition | Both maps read the same table or query, and each row joins to itself: the object is the parent's subject for the same row (R2RML §8), not a cross join |
 | `fnml:functionValue` | An enumeration or code-list lookup — see below |
 | A second triples map on the same source | Just another `rr:TriplesMap`; this is how a nested structure is expressed |
+
+**Column and table names are SQL identifiers** (R2RML §5), compared by SQL's
+rules the way the datasource's engine applies them. A *regular* identifier
+(`name`, `Name`) is case-insensitive and stands for its folded form; a
+*delimited* one (`"Name"`, `` `Name` ``, `[Name]`) is exactly its text. So
+on the engines whose names are case-sensitive, a mixed-case column created
+delimited must be written delimited:
+
+| Dialect | A regular identifier stands for | Names are compared |
+|---|---|---|
+| SQL 2008 (the default for a connector that says nothing else) | its upper-case form: `Name` is `NAME` | exactly |
+| `postgresql` | its lower-case form, PostgreSQL's own fold (`Name` is `name`) — or, failing that, SQL 2008's upper-case form (`sportcount` names a column `"SPORTCOUNT"`) | exactly |
+| `sqlite` | itself | without regard to ASCII case, delimited or not |
+| `mysql` (MariaDB too) | itself | column names without regard to case, delimited or not |
+| `mssql` | itself | by the database's collation: exactly under a `_CS` or `_BIN` one, without regard to case otherwise |
+| `sparql` (virtual) | not SQL: a name is taken as written | exactly |
+
+A column name that is not one SQL identifier (`rr:column "Unit Price"`) is a
+non-conforming mapping, refused with the delimited spelling to use instead
+(`rr:column "\"Unit Price\""`). A name that matches no column of the logical
+table is refused before the first row, naming the columns there are; when
+it differs from one only in case, the message says to write that column
+delimited. The query of an `rml:query` / `rr:sqlQuery` view runs verbatim,
+so the engine applies its own rules inside it; the mapping's names are then
+resolved against the columns the query reports. On SQLite and MySQL the W3C
+R2RML case R2RMLTC0002f cannot fail as it expects: it names the delimited
+column `"Name"` with the regular `Name`, which SQL 2008 folds to `NAME`, and
+those engines do not keep whether a name was declared delimited
+([issue](https://github.com/philipperenzen/open-triplestore/issues/511)).
 
 **A SQL NULL produces no triple.** It is an absent column, not an empty value,
 so a missing required value surfaces as a `sh:minCount` violation rather than
@@ -521,7 +550,11 @@ logical source lists it under `rml:null`, or the version runs under the
 type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
 `time`, `dateTime`, `hexBinary`). Text, UUID and JSON columns stay plain
 literals — inventing a datatype for them would be a claim the source never
-made. An explicit `rr:datatype` always wins.
+made. An explicit `rr:datatype` always wins, and its literal carries the
+value's natural lexical form too (R2RML §10.3): a `REAL` 0.25 typed
+`xsd:decimal` is `"2.5E-1"`, outside `xsd:decimal`'s lexical space, so a data
+error — never an ill-typed literal. Type a decimal from a `DECIMAL` /
+`NUMERIC` column, or convert in the query.
 
 **Joins** are planned per reference, one of two ways:
 

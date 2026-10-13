@@ -1,4 +1,5 @@
-//! Lexical-space checks for the XSD datatypes R2RML can validate.
+//! Lexical-space checks for the XSD datatypes, and `rdf:JSON`, that R2RML can
+//! validate.
 //!
 //! A literal whose datatype overrides the natural one and whose lexical form
 //! is not in that datatype's lexical space is *ill-typed*, and generating it
@@ -18,6 +19,12 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// Why `lexical` is not a `datatype` value, or `None` when it is (or when
 /// the datatype is not one this module validates).
 pub fn ill_typed(lexical: &str, datatype: &str) -> Option<&'static str> {
+    // rdf:JSON: a JSON text (JSON-LD 1.1 §10.2), which the store also refuses
+    // on every other write path (`store::literals`).
+    if datatype == crate::store::literals::RDF_JSON {
+        return crate::store::literals::json_lexical_error(lexical)
+            .map(|_| "not JSON, which rdf:JSON requires");
+    }
     let local = datatype.strip_prefix(XSD)?;
     let ok = match local {
         "boolean" => matches!(lexical, "true" | "false" | "1" | "0"),
@@ -273,6 +280,15 @@ mod tests {
         ] {
             assert!(ill_typed(v, &x(t)).is_some(), "{v:?} as xsd:{t}");
         }
+    }
+
+    #[test]
+    fn rdf_json_must_be_json() {
+        let json = crate::store::literals::RDF_JSON;
+        assert_eq!(ill_typed("{\"a\": [1, 2]}", json), None);
+        assert_eq!(ill_typed("\"text\"", json), None);
+        assert!(ill_typed("bareword", json).is_some());
+        assert!(ill_typed("[{]", json).is_some());
     }
 
     #[test]
