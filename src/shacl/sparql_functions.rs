@@ -149,9 +149,18 @@ impl Registry {
         self.cached = None;
     }
 
-    pub(crate) fn inherit(&mut self, functions: Functions) {
+    /// Take `functions` as this store's registered set, and `graphs` as its
+    /// designated function graphs (so a designated graph used as a shapes
+    /// graph here is recognised as one, as it is in the store handing down).
+    pub(crate) fn inherit(&mut self, functions: Functions, graphs: Vec<String>) {
         self.inherited = Some(functions);
+        self.graphs = graphs;
         self.cached = None;
+    }
+
+    /// The designated function graphs.
+    pub(crate) fn designated_graphs(&self) -> Vec<String> {
+        self.graphs.clone()
     }
 
     /// The registered set if it is known without reading the store: the
