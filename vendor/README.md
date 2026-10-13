@@ -132,6 +132,16 @@ non-canonical literal is false. Graph patterns are not affected.
    longer copies the in-scope variable set. Draft:
    `spargebra/UPSTREAM-PR-cheap-parser-clone.md`.
 
+14. **The RocksDB path of a merged default graph** (`oxigraph` storage and
+   `DatasetView`). Backport of the `oxigraph` half of upstream #1920, left out
+   of change 2: `quads_for_pattern_in_union` merges the per-graph scans, which
+   share a triple order, and deduplicates by key instead of a hash set of every
+   match; once one scan is left (or there is one graph) it is streamed without
+   keys. The memory backend keeps the hash set, after dropping graphs with no
+   match. With change 2's hash set, `COUNT(*)` over a 3.5M-triple data graph
+   merged with its shapes graph took 4.4 s in the store comparison (1.7 s before
+   change 2 deduplicated). Draft: `oxigraph/UPSTREAM-PR-merged-union-streaming.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
