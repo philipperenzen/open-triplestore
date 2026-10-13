@@ -286,6 +286,12 @@ One commit each, in this order:
 12. **The extra arguments through the optimizer** (`sparopt` algebra). The same
     field on sparopt's `AggregateExpression::FunctionCall`, mapped both ways.
     Draft: `sparopt/UPSTREAM-PR-custom-aggregate-arguments.md`.
+13. **Evaluating them** (`spareval`). `AggregateFunctionAccumulator` gets
+    `accumulate_arguments`, called with every argument's value per solution for
+    a call with several (its default takes exactly one; `false` makes the
+    result unbound), and the evaluator evaluates every argument, under
+    `DISTINCT` de-duplicating argument lists. Draft:
+    `spareval/UPSTREAM-PR-custom-aggregate-arguments.md`.
 
 ### Verifying the fork
 

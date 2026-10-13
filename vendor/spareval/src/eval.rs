@@ -1736,6 +1736,45 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                 name,
                 distinct,
                 expr,
+                extra_args,
+            } if !extra_args.is_empty() => {
+                // Several arguments: only a custom aggregate takes them. Every
+                // argument is evaluated per solution and the accumulator gets
+                // the values together (SPARQL 1.1 §18.5.1: an aggregate over a
+                // list of expressions).
+                let AggregateFunction::Custom(function_name) = name else {
+                    return Err(QueryEvaluationError::Unexpected(
+                        format!("the aggregate {name} takes one argument").into(),
+                    ));
+                };
+                let Some(function) = self.custom_aggregate_functions.get(function_name) else {
+                    return Err(QueryEvaluationError::UnsupportedCustomFunction(
+                        function_name.clone(),
+                    ));
+                };
+                let mut evaluators =
+                    vec![self.expression_evaluator(expr, encoded_variables, stat_children)?];
+                for arg in extra_args {
+                    evaluators.push(self.expression_evaluator(
+                        arg,
+                        encoded_variables,
+                        stat_children,
+                    )?);
+                }
+                let evaluators = Rc::new(evaluators);
+                let function = Arc::clone(function);
+                let distinct = *distinct;
+                Box::new(move || AccumulatorWrapper::Arguments {
+                    evaluators: Rc::clone(&evaluators),
+                    seen: distinct.then(FxHashSet::default),
+                    accumulator: Some(function()),
+                })
+            }
+            AggregateExpression::FunctionCall {
+                name,
+                distinct,
+                expr,
+                ..
             } => match name {
                 AggregateFunction::Count => {
                     if let Some(evaluator) =
@@ -2248,6 +2287,14 @@ enum AccumulatorWrapper<'a, T> {
         evaluator: Rc<dyn Fn(&InternalTuple<T>) -> Option<ExpressionTerm> + 'a>,
         accumulator: Option<Box<dyn Accumulator>>,
     },
+    /// A custom aggregate called with several arguments.
+    Arguments {
+        #[allow(clippy::type_complexity)]
+        evaluators: Rc<Vec<Rc<dyn Fn(&InternalTuple<T>) -> Option<ExpressionTerm> + 'a>>>,
+        /// The argument lists seen so far, under `DISTINCT`.
+        seen: Option<FxHashSet<Vec<ExpressionTerm>>>,
+        accumulator: Option<Box<dyn AggregateFunctionAccumulator + Send + Sync>>,
+    },
 }
 
 impl<T: Clone + Eq + Hash> AccumulatorWrapper<'_, T> {
@@ -2319,6 +2366,34 @@ impl<T: Clone + Eq + Hash> AccumulatorWrapper<'_, T> {
                     accumulator.accumulate(value);
                 }
             }
+            Self::Arguments {
+                evaluators,
+                seen,
+                accumulator,
+            } => {
+                if accumulator.is_none() {
+                    return; // Already failed
+                }
+                let Some(values) = evaluators
+                    .iter()
+                    .map(|evaluator| evaluator(tuple))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    *accumulator = None;
+                    return;
+                };
+                if let Some(seen) = seen {
+                    if !seen.insert(values.clone()) {
+                        return;
+                    }
+                }
+                let Some(function) = accumulator else {
+                    return;
+                };
+                if !function.accumulate_arguments(values.into_iter().map(Into::into).collect()) {
+                    *accumulator = None;
+                }
+            }
         }
     }
 
@@ -2334,6 +2409,7 @@ impl<T: Clone + Eq + Hash> AccumulatorWrapper<'_, T> {
             Self::Expression { accumulator, .. } | Self::DistinctExpression { accumulator, .. } => {
                 accumulator?.finish()
             }
+            Self::Arguments { accumulator, .. } => Some(accumulator?.finish()?.into()),
         }
     }
 }
