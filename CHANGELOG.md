@@ -705,6 +705,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the merged data graphs instead of one per graph, `sh:class` from a prepared
   instance set, and path closures memoised per run. Closure values come back
   sorted by their N-Triples form.
+- **The store comparison re-measured for Open Triplestore**
+  (`docs/performance-comparison.md` §5.8, data in `docs/perf-data/2026-10-13/`):
+  the 2026-10-03 commit and the fixed head built the same way and run back to
+  back, upstream Oxigraph re-run in the same window to cross-check every answer
+  (all agree). BSBM explore at 10k: 5,358 → 16,570 query mixes per hour
+  (Oxigraph 33,719 in the same window); correlated `NOT EXISTS` at 10k: a
+  timeout → 366 ms; no OOM in eight 10k loads into 4 GiB. The other stores'
+  numbers stay those of 2026-10-03. `scripts/bench-compare/Dockerfile.ots`
+  copies `vendor/`, caches `target/` and takes the LTO mode as a build argument.
 - **Per-query overhead** (#468, #527): the shared SPARQL parser is built once
   and cloned (it was rebuilt with every declared custom aggregate on each
   parse — six since the GeoSPARQL 1.1 aggregates, about 0.35 µs per query);
