@@ -462,3 +462,81 @@ async fn a_gate_stops_gating_when_its_creator_loses_write_access() {
         "a deactivated creator's gate gates nothing: {put} {body}"
     );
 }
+
+// ─── Entailment regimes in a gate ────────────────────────────────────────────
+
+/// Rules that make every `ex:age` subject an `ex:Person`, under
+/// `sh:entailment sh:Rules`, plus the person-needs-a-name shape.
+const ENTAILED_SHAPES: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+    @prefix ex: <http://ex.org/> .\n\
+    ex:shapes sh:entailment sh:Rules .\n\
+    ex:AgeRule a sh:NodeShape ; sh:targetSubjectsOf ex:age ;\n\
+      sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Person ] .\n\
+    ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;\n\
+      sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n";
+
+/// A gate validates the staged write with the rules' inferences (SHACL-AF
+/// §8.3) and stores only what was written: the inferred type never lands.
+/// A shapes graph declaring a regime the processor does not support refuses
+/// the write, naming the regime (SHACL §1.5) — the gate fails closed.
+#[tokio::test]
+async fn a_gate_validates_under_sh_rules_entailment_and_stores_no_inference() {
+    let (state, _admin, alice, _mallory) = setup();
+    let sg = create_shape_graph(&state, &alice, ENTAILED_SHAPES).await;
+    let (st, created) = create_pipeline(
+        &state,
+        &alice,
+        json!({ "name": "gate", "gate_writes": true, "shape_graph_ids": [sg],
+                "targets": [{ "kind": "graph", "id": DATA_GRAPH }] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    let gate_id = id_of(&created);
+
+    // Only the inferred type makes p3 a person, and it has no name.
+    let (put, body) = put_data(&state, &alice, "<http://ex.org/p3> <http://ex.org/age> 5 .").await;
+    assert_eq!(
+        put,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the gate validated the inferred ex:Person: {body}"
+    );
+    assert!(body.contains("http://ex.org/p3"), "{body}");
+
+    let named = "<http://ex.org/p4> <http://ex.org/age> 5 ; <http://ex.org/name> \"Ada\" .";
+    let (put, body) = put_data(&state, &alice, named).await;
+    assert!(put.is_success(), "conforming data lands: {put} {body}");
+    assert_eq!(graph_len(&state), 2, "the inferred type is not stored");
+
+    let (st, _) = send(
+        &state,
+        Method::DELETE,
+        &format!("/api/shacl/pipelines/{gate_id}"),
+        &alice,
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert!(st.is_success());
+
+    // An unsupported regime fails the shapes graph: the gate refuses.
+    let unsupported = ENTAILED_SHAPES.replace(
+        "sh:entailment sh:Rules",
+        "sh:entailment <http://www.w3.org/ns/entailment/OWL-RDF-Based>",
+    );
+    let sg = create_shape_graph(&state, &alice, &unsupported).await;
+    let (st, created) = create_pipeline(
+        &state,
+        &alice,
+        json!({ "name": "gate", "gate_writes": true, "shape_graph_ids": [sg],
+                "targets": [{ "kind": "graph", "id": DATA_GRAPH }] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    let (put, body) = put_data(&state, &alice, named).await;
+    assert_eq!(put, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body.contains("http://www.w3.org/ns/entailment/OWL-RDF-Based"),
+        "the refusal names the regime: {body}"
+    );
+}
