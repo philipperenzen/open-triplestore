@@ -5298,6 +5298,151 @@ fn ogc_req42_agg_bounding_circle_and_concave_hull() {
     ));
 }
 
+/// An L of points: its concave hulls range from the L itself (target 0) to its
+/// convex hull (target 1), so the target shows in the area.
+const L_POINTS: &str = r#"
+    ex:l1 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(0 0)"^^geo:wktLiteral ] .
+    ex:l2 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(2 0)"^^geo:wktLiteral ] .
+    ex:l3 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(4 0)"^^geo:wktLiteral ] .
+    ex:l4 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(4 1)"^^geo:wktLiteral ] .
+    ex:l5 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(1 1)"^^geo:wktLiteral ] .
+    ex:l6 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(1 4)"^^geo:wktLiteral ] .
+    ex:l7 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(0 4)"^^geo:wktLiteral ] .
+    ex:l8 ex:in ex:ell ; geo:hasGeometry [ geo:asWKT "POINT(0 2)"^^geo:wktLiteral ] .
+    ex:s1 ex:in ex:sq ; geo:hasGeometry [ geo:asWKT "POINT(10 10)"^^geo:wktLiteral ] .
+    ex:s2 ex:in ex:sq ; geo:hasGeometry [ geo:asWKT "POINT(12 10)"^^geo:wktLiteral ] .
+    ex:s3 ex:in ex:sq ; geo:hasGeometry [ geo:asWKT "POINT(12 12)"^^geo:wktLiteral ] .
+    ex:s4 ex:in ex:sq ; geo:hasGeometry [ geo:asWKT "POINT(10 12)"^^geo:wktLiteral ] .
+"#;
+
+/// The area of each group's aggregate `expr` (over `?g`, grouped by `?r`), by
+/// group, in group order; `None` where it is unbound.
+fn agg_areas(s: &open_triplestore::store::TripleStore, expr: &str) -> Vec<Option<f64>> {
+    let q = format!(
+        "{GEO_PFX}\nSELECT ?r (geof:area({expr}) AS ?a) WHERE {{
+            ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g }} GROUP BY ?r ORDER BY ?r"
+    );
+    solutions(s.query(&q).unwrap())
+        .into_iter()
+        .map(|row| row[1].as_deref().map(extract_f64))
+        .collect()
+}
+
+// Req 42: geof:aggConcaveHull(geom, targetPercent) — GeoSPARQL 1.1 §10.10 gives
+// the aggregate a target. A constant target, the default 0.5, and the same
+// answers as geof:concaveHull over the group's union; on the engine and on the
+// accelerated store alike.
+#[test]
+fn ogc_req42_agg_concave_hull_takes_a_target_percent() {
+    for s in [engine_only(), accelerated()] {
+        load(&s, L_POINTS);
+        let convex = agg_areas(&s, "geof:aggConvexHull(?g)");
+        // Groups in order: ex:ell, ex:sq.
+        assert_eq!(convex, vec![Some(11.5), Some(4.0)]);
+        assert_eq!(agg_areas(&s, "geof:aggConcaveHull(?g, 1)"), convex);
+        assert_eq!(agg_areas(&s, "geof:aggConcaveHull(?g, 1.0e0)"), convex);
+        for t in ["0", "0.3", "0.5", "0.8"] {
+            assert_eq!(
+                agg_areas(&s, &format!("geof:aggConcaveHull(?g, {t})")),
+                agg_areas(&s, &format!("geof:concaveHull(geof:aggUnion(?g), {t})")),
+                "target {t}"
+            );
+        }
+        let tight = agg_areas(&s, "geof:aggConcaveHull(?g, 0)");
+        assert!(
+            tight[0].unwrap() < 11.5 - 1.0,
+            "the L is concave: {tight:?}"
+        );
+        assert_eq!(
+            agg_areas(&s, "geof:aggConcaveHull(?g)"),
+            agg_areas(&s, "geof:aggConcaveHull(?g, 0.5)"),
+            "the default target is 0.5"
+        );
+        assert_eq!(
+            agg_areas(&s, "geof:aggConcaveHull(DISTINCT ?g, 0)"),
+            tight,
+            "DISTINCT applies to the argument list"
+        );
+    }
+}
+
+// The target is evaluated per solution: an expression of the group key gives each
+// group its own target; solutions of one group that disagree, a target outside
+// 0..1, or a second argument to another aggregate make that group unbound.
+#[test]
+fn ogc_req42_agg_concave_hull_target_per_group_and_errors() {
+    let s = engine_only();
+    load(&s, L_POINTS);
+    let per_group = agg_areas(&s, "geof:aggConcaveHull(?g, IF(?r = ex:ell, 0, 1))");
+    let tight = agg_areas(&s, "geof:aggConcaveHull(?g, 0)");
+    let convex = agg_areas(&s, "geof:aggConcaveHull(?g, 1)");
+    assert_eq!(per_group, vec![tight[0], convex[1]]);
+    // A target bound by the group's solutions, constant within each group.
+    let q = format!(
+        "{GEO_PFX}\nSELECT ?r (geof:area(geof:aggConcaveHull(?g, ?t)) AS ?a) WHERE {{
+            ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g
+            BIND(IF(?r = ex:ell, 0, 1) AS ?t) }} GROUP BY ?r ORDER BY ?r"
+    );
+    let rows: Vec<Option<f64>> = solutions(s.query(&q).unwrap())
+        .into_iter()
+        .map(|row| row[1].as_deref().map(extract_f64))
+        .collect();
+    assert_eq!(rows, per_group);
+    // Disagreeing targets within ex:ell; ex:sq agrees.
+    let mixed = agg_areas(&s, "geof:aggConcaveHull(?g, IF(?f = ex:l1, 0.1, 0.9))");
+    assert_eq!(mixed[0], None, "{mixed:?}");
+    assert!(mixed[1].is_some(), "{mixed:?}");
+    for bad in [
+        "geof:aggConcaveHull(?g, 1.5)",
+        "geof:aggConcaveHull(?g, -0.1)",
+        "geof:aggConcaveHull(?g, \"x\")",
+        "geof:aggConcaveHull(?g, 0.5, 0.5)",
+        "geof:aggUnion(?g, 0.5)",
+        "geof:aggConvexHull(?g, 1)",
+    ] {
+        assert_eq!(agg_areas(&s, bad), vec![None, None], "{bad}");
+    }
+}
+
+// A query with a two-argument aggregate survives every path that parses and
+// re-serialises it: an UPDATE's WHERE and a scoped query.
+#[test]
+fn ogc_req42_agg_concave_hull_target_in_update_and_scoped_query() {
+    let s = ts();
+    load(&s, L_POINTS);
+    s.update(&format!(
+        "{GEO_PFX}\nINSERT {{ ?r ex:hull ?h }} WHERE {{
+            SELECT ?r (geof:aggConcaveHull(?g, 1) AS ?h)
+            WHERE {{ ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g }} GROUP BY ?r
+        }}"
+    ))
+    .unwrap();
+    let r = sel(
+        &s,
+        "SELECT ?r (geof:area(?h) AS ?a) WHERE { ?r ex:hull ?h } ORDER BY ?r",
+    );
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(extract_f64(&r[0][1]), 11.5, "{r:?}");
+    let g = "http://example.org/ell";
+    s.load_str(
+        &format!("{TTL_PREFIXES}{L_POINTS}"),
+        RdfFormat::Turtle,
+        Some(g),
+    )
+    .unwrap();
+    let rows = solutions(
+        s.query_scoped(
+            &format!(
+                "{GEO_PFX}\nSELECT ?r (geof:area(geof:aggConcaveHull(?g, 1)) AS ?a) WHERE {{ ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g }} GROUP BY ?r ORDER BY ?r"
+            ),
+            &[g.to_string()],
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(extract_f64(rows[0][1].as_deref().unwrap_or("")), 11.5);
+}
+
 // Every aggregate follows aggUnion's rules: the empty group is the empty geometry, a
 // non-geometry makes the group unbound, and the answer does not depend on the order
 // the solutions arrive in.

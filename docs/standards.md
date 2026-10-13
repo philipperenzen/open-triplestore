@@ -300,10 +300,10 @@ behavior and will flip green when the limitation is resolved.
    OGC certification. `getSRID` and `geometryType` return the `xsd:anyURI`
    literals their signatures give (since 2026-10; they returned IRIs before,
    [#510](https://github.com/philipperenzen/open-triplestore/issues/510)). A choice the standard leaves open:
-   `geof:concaveHull` without a target uses the target 0.5. Not a choice:
-   `geof:aggConcaveHull` takes one argument, always at the target 0.5, where its
-   signature also has `targetPercent`, because the SPARQL parser allows one
-   expression in a custom aggregate call ([#525](https://github.com/philipperenzen/open-triplestore/issues/525); see
+   `geof:concaveHull` and `geof:aggConcaveHull` without a target use the target
+   0.5; `geof:aggConcaveHull(?g, targetPercent)` takes the target its signature
+   gives since 2026-10, when the vendored SPARQL crates began passing a custom
+   aggregate every argument of its call ([#525](https://github.com/philipperenzen/open-triplestore/issues/525); see
    [geosparql.md](geosparql.md#aggregates)).
 6. **SHACL Core** — the Core constraint components are implemented, and
    blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
