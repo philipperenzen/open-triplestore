@@ -271,6 +271,18 @@ One commit each, in this order:
     and `regex_braces_are_ordinary_characters` in
     `tests/sparql_functions_conformance.rs` pins it. Draft:
     `spareval/UPSTREAM-PR-regex-braces.md`.
+11. **Custom aggregate calls with several arguments** (`spargebra` parser
+    and algebra). SPARQL 1.1 lets a custom aggregate take an argument list
+    (`iriOrFunction` with `ArgList`, §18.5.1 aggregates over a list of
+    expressions); spargebra parsed one expression. `AggregateExpression::FunctionCall`
+    gets `extra_args` (the arguments after the first, empty for the built-ins),
+    which the parser, `Display`, SSE, used-variable lookup and the nested
+    aggregate check all handle. A custom aggregate call is now parsed before
+    `iriOrFunction`, which read `ex:agg(DISTINCT ?x)` as the bare IRI `ex:agg`:
+    every `DISTINCT` custom aggregate call used to be a parse error. GeoSPARQL 1.1's
+    `geof:aggConcaveHull(?geom, targetPercent)` needs it
+    (`tests/geosparql_conformance.rs`, `ogc_req42_agg_concave_hull_*`). Draft:
+    `spargebra/UPSTREAM-PR-custom-aggregate-arguments.md`.
 
 ### Verifying the fork
 
