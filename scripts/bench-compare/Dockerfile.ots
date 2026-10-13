@@ -15,6 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV CARGO_BUILD_JOBS=6 RUST_MIN_STACK=33554432
+# The shipped profile is fat LTO. Its link of the `full` binary needs about
+# 14 GB, more than a 16 GB laptop's Docker VM has free next to other
+# containers; `--build-arg CARGO_PROFILE_RELEASE_LTO=thin` builds with thin LTO
+# instead, and a run that does so says so in its inputs.json.
+ARG CARGO_PROFILE_RELEASE_LTO=true
+ENV CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO}
 COPY .cargo/ .cargo/
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
