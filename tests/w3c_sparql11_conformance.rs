@@ -2013,6 +2013,71 @@ fn cx13_copy_preserves_source_and_self_copy_noop() {
 // merge (SPARQL 1.1 Query §13.2, §18.3; Update §3.1.3): a triple held in two
 // of them is one triple. Four quads, three distinct triples, two of which
 // share the value 10 (so deduplicating values instead of triples would fail).
+/// The same merge on the persistent store, whose scans of the graphs are merged
+/// by key (vendored oxigraph change 14): every pattern shape (each index
+/// order), a graph with no match, three graphs, and the union default graph.
+#[test]
+fn dataset_from_graphs_merge_as_a_set_on_rocksdb() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open_triplestore::store::TripleStore::open(dir.path())
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(false, 1, 0);
+    s.update(
+        r#"INSERT DATA {
+             GRAPH <http://ex/g1> { <http://ex/a> <http://ex/v> 10 . <http://ex/b> <http://ex/v> 20 . <http://ex/a> <http://ex/w> <http://ex/b> }
+             GRAPH <http://ex/g2> { <http://ex/a> <http://ex/v> 10 . <http://ex/c> <http://ex/v> 10 . <http://ex/a> <http://ex/w> <http://ex/b> }
+             GRAPH <http://ex/g3> { <http://ex/z> <http://ex/other> 1 }
+           }"#,
+    )
+    .unwrap();
+    let from = "FROM <http://ex/g1> FROM <http://ex/g2> FROM <http://ex/g3>";
+    let count = |pattern: &str| -> String {
+        select(
+            &s,
+            &format!("SELECT (COUNT(*) AS ?n) {from} WHERE {{ {pattern} }}"),
+        )[0][0]
+            .split('"')
+            .nth(1)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(count("?s ?p ?o"), "5", "spo, all graphs");
+    assert_eq!(count("<http://ex/a> ?p ?o"), "2", "spo, subject bound");
+    assert_eq!(
+        count("<http://ex/a> <http://ex/v> ?o"),
+        "1",
+        "spo, subject and predicate"
+    );
+    assert_eq!(count("?s <http://ex/v> ?o"), "3", "pos, predicate bound");
+    assert_eq!(
+        count("?s <http://ex/v> 10"),
+        "2",
+        "pos, predicate and object"
+    );
+    assert_eq!(count("?s ?p <http://ex/b>"), "1", "osp, object bound");
+    assert_eq!(
+        count("<http://ex/a> ?p <http://ex/b>"),
+        "1",
+        "osp, subject and object"
+    );
+    assert_eq!(count("<http://ex/a> <http://ex/v> 10"), "1", "fully bound");
+    assert_eq!(count("?s <http://ex/other> ?o"), "1", "one graph matches");
+    assert_eq!(count("?s <http://ex/none> ?o"), "0", "no graph matches");
+    // The union default graph (no dataset clause, union mode off: named graphs
+    // are reached through GRAPH) and GRAPH ?g keep one row per graph.
+    assert_eq!(
+        select(
+            &s,
+            "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { <http://ex/a> <http://ex/v> 10 } }"
+        )[0][0]
+            .split('"')
+            .nth(1)
+            .unwrap(),
+        "2"
+    );
+}
+
 #[test]
 fn dataset_from_graphs_merge_as_a_set() {
     let s = ts();
