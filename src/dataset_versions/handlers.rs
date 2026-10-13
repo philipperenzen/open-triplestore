@@ -594,7 +594,7 @@ pub async fn restore_version(
             .dataset_has_graph(&id, g)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         let claim = if registered {
-            crate::auth::dataset_graph::refuse_model_registry_graph(
+            crate::auth::dataset_graph::refuse_reserved_write_target(
                 &state.store,
                 &state.base_url,
                 &id,

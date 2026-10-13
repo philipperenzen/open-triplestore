@@ -2448,6 +2448,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **The statement-provenance graph is system-managed.** Only the server's
+  change-log consumer writes `urn:ots:statement-provenance:<id>`. SPARQL
+  Update, the Graph Store, RDF Patch and patch-log appends, imports,
+  validate-and-commit, restores and RML/LDES targets refuse it with `403`, for
+  admins too, and no dataset may register it; an admin's variable-graph
+  `DELETE`/`INSERT` skips it. Before, any writer of the dataset could forge or
+  erase its statement history (#533).
 - **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
   DOMPurify up to 3.4.15 could leave event handlers armed in a removed
   subtree, or return markup that runs on reparse, in `IN_PLACE` mode

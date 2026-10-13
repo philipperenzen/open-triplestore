@@ -438,7 +438,7 @@ The approval did not wait for the measurements of §8.2, and most were not taken
 
 ### 9.5 Still open
 
-- **The provenance graph is writable by the dataset's writers**, as every graph the server keeps for a dataset is (its property states, reports and entailment graphs): annotations are a projection of the change log, which no user can write, not a tamper-proof record in their own right. Making it system-only is a change to the dataset-graph write rules, left for an owner decision.
+- **The provenance graph is system-managed** (owner decision on #533, 2026-10-13): only the consumer writes it. `provenance::refuse_direct_write` is checked by every request write path — the Graph Store and SPARQL Update targets (`require_graph_write_for`), the dataset-scoped gates (`refuse_reserved_write_target`, so imports, validate-and-commit, restores, RML and LDES targets, graph registration), RDF Patch and patch logs, bulk imports and repair applies — admins included; an admin's variable-graph `DELETE`/`INSERT` gains a filter that keeps it off these graphs. The other graphs the server keeps for a dataset (property states, reports, entailment) stay writable by its writers.
 - **The replace-import archive is still a full copy** (§1.1, Q10).
 - **Unpublished deltas are not in backups** (Q1).
 - **The write gate still copies the whole graph** into its sandbox before validating a POST. The change log now makes the alternative possible — validate the merged delta's focus nodes, as the write trigger does — but the gate validates *before* the write, against data that has no rows yet, so it needs its own focus derivation from the payload; not done here.

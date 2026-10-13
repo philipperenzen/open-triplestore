@@ -5217,7 +5217,7 @@ fn gate_shapes_graph_link(
              '{dataset_id}'."
         ));
     }
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,

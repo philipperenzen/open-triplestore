@@ -283,6 +283,8 @@ pub async fn bulk_import(
         // their licence records true and refuses altered copies of content
         // whose licence allows none (IMBOR).
         for g in graphs {
+            // Nor a system-managed statement-provenance graph (#533).
+            crate::provenance::refuse_direct_write(g)?;
             if dataset_graph::graph_held_by_model_registry(&authz_store, &authz_base, g) {
                 return Err(format!(
                     "Target graph <{g}> belongs to the model registry; change models through the \

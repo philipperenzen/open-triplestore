@@ -59,6 +59,23 @@ pub fn is_any_statement_provenance_graph(graph: &str) -> bool {
     graph.starts_with("urn:ots:statement-provenance:")
 }
 
+/// `Err(message)` when `graph` is a statement-provenance graph. Those graphs
+/// are system-managed: only the change-log consumer that writes the
+/// annotations (`statement_provenance`) may write them, so every user-facing
+/// write path — SPARQL Update, the Graph Store, RDF Patch and patch logs,
+/// imports, validate-and-commit, restores, RML and LDES targets — refuses
+/// them, for admins too (#533). Reading them is unaffected.
+pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
+    if is_any_statement_provenance_graph(graph) {
+        return Err(format!(
+            "Graph <{graph}> is a statement-provenance graph: the server writes it from the change \
+             log, and no request may write it directly. Turn statement provenance off in the \
+             dataset's settings to stop it."
+        ));
+    }
+    Ok(())
+}
+
 /// The dataset's PROV-O trail as Turtle.
 pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
     let base = state.base_url.trim_end_matches('/');

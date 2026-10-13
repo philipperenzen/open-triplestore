@@ -928,6 +928,13 @@ pub(crate) async fn execute_update(
     // H-1: enforce the per-graph ACL on BOTH the write targets and the WHERE/USING
     // read side, and admin-gate variable-graph / SERVICE / all-graph operations.
     let authorized = authorize_update(state, user, &parsed)?;
+    let guarded;
+    let effective_str = if keep_variable_graph_writes_off_system_graphs(&mut parsed) {
+        guarded = parsed.to_string();
+        guarded.as_str()
+    } else {
+        effective_str
+    };
     let (graph_iris, requires_admin) = (authorized.write_iris, authorized.requires_admin);
     // A write into a model version's graph: its licence record stops calling
     // the content unchanged before the write runs.
@@ -1348,6 +1355,64 @@ fn authorize_update(
     })
 }
 
+/// Keep a DELETE/INSERT whose template writes a variable graph (an admin's
+/// store-wide rewrite, the only kind [`authorize_update`] lets through) out
+/// of the system-managed statement-provenance graphs: its WHERE clause gains
+/// `FILTER(!BOUND(?g) || !STRSTARTS(STR(?g), "urn:ots:statement-provenance:"))`
+/// for each such variable, so no solution binds one of them (#533). Named
+/// targets are refused before the update runs ([`require_graph_write_for`]);
+/// `CLEAR`/`DROP ALL` and `NAMED`, which wipe the store, wipe these graphs
+/// with everything else. Returns whether `update` changed.
+fn keep_variable_graph_writes_off_system_graphs(update: &mut spargebra::Update) -> bool {
+    use spargebra::algebra::{Expression, Function, GraphPattern};
+    let mut changed = false;
+    for op in &mut update.operations {
+        let GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            pattern,
+            ..
+        } = op
+        else {
+            continue;
+        };
+        let mut vars: Vec<spargebra::term::Variable> = Vec::new();
+        for g in delete
+            .iter()
+            .map(|q| &q.graph_name)
+            .chain(insert.iter().map(|q| &q.graph_name))
+        {
+            if let GraphNamePattern::Variable(v) = g {
+                if !vars.contains(v) {
+                    vars.push(v.clone());
+                }
+            }
+        }
+        for v in vars {
+            let outside = Expression::Not(Box::new(Expression::FunctionCall(
+                Function::StrStarts,
+                vec![
+                    Expression::FunctionCall(Function::Str, vec![Expression::Variable(v.clone())]),
+                    Expression::Literal(spargebra::term::Literal::new_simple_literal(
+                        "urn:ots:statement-provenance:",
+                    )),
+                ],
+            )));
+            let expr = Expression::Or(
+                Box::new(Expression::Not(Box::new(Expression::Bound(v)))),
+                Box::new(outside),
+            );
+            let inner = std::mem::replace(pattern.as_mut(), GraphPattern::Bgp { patterns: vec![] });
+            **pattern = GraphPattern::Filter {
+                expr,
+                inner: Box::new(inner),
+            };
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod update_graph_access_tests {
     use super::analyze_update_graph_access;
@@ -1451,12 +1516,15 @@ async fn sparql_batch_update(
     }
     let mut model_versions = Vec::new();
     let mut writes_unnamed_graphs = false;
-    for stmt in &resolved {
-        let parsed = crate::sparql::parser()
+    for stmt in resolved.iter_mut() {
+        let mut parsed = crate::sparql::parser()
             .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.
         let authorized = authorize_update(&state, Some(&user), &parsed)?;
+        if keep_variable_graph_writes_off_system_graphs(&mut parsed) {
+            *stmt = parsed.to_string();
+        }
         writes_unnamed_graphs |= authorized.writes_unnamed_graphs;
         model_versions.extend(authorized.model_versions);
     }
@@ -2025,6 +2093,9 @@ fn require_graph_write_for(
         Some(i) => i,
         None => return Ok(None), // default graph — handled by require_auth layer
     };
+
+    // A system-managed graph is written by the server alone, admins included.
+    crate::provenance::refuse_direct_write(iri).map_err(AppError::Forbidden)?;
 
     // Admins bypass graph ACL
     let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
@@ -9748,7 +9819,7 @@ fn authorize_shapes_graph_write(
 ) -> Result<Option<crate::auth::dataset_graph::GraphClaim>, (StatusCode, String)> {
     use crate::auth::dataset_graph;
     let forbidden = |m: String| (StatusCode::FORBIDDEN, m);
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,

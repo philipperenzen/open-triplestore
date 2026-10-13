@@ -636,3 +636,220 @@ async fn defaults_never_pick_the_provenance_graph() {
         )
     ));
 }
+
+fn multipart(boundary: &str, parts: &[(&str, &str, Option<&str>, &str)]) -> String {
+    let mut out = String::new();
+    for (name, ct, filename, body) in parts {
+        out.push_str(&format!("--{boundary}\r\n"));
+        match filename {
+            Some(f) => out.push_str(&format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\n"
+            )),
+            None => out.push_str(&format!(
+                "Content-Disposition: form-data; name=\"{name}\"\r\n"
+            )),
+        }
+        out.push_str(&format!("Content-Type: {ct}\r\n\r\n{body}\r\n"));
+    }
+    out.push_str(&format!("--{boundary}--\r\n"));
+    out
+}
+
+/// #533: the statement-provenance graph is system-managed. Only the change-log
+/// consumer writes it; every write path a request can take refuses it — for
+/// the dataset's owner and for an admin alike — while reading it still works.
+/// An admin's store-wide rewrite through a variable graph passes over it.
+#[tokio::test]
+async fn only_the_consumer_writes_the_provenance_graph() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    let (state, admin) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    state
+        .auth_db
+        .create_user("ed", "ed", "ed@t.com", "h", SystemRole::User)
+        .unwrap();
+    let ed = mint_token("ed", "ed", "user");
+    state
+        .auth_db
+        .create_dataset(
+            "spw",
+            "spw",
+            None,
+            OwnerType::User,
+            "ed",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("spw", G).unwrap();
+    let (st, v) = json_req(
+        &app,
+        Method::PUT,
+        "/api/datasets/spw/settings",
+        Some(&ed),
+        json!({ "provenance": "minimal" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let tick = || open_triplestore::statement_provenance::tick(&state);
+    tick();
+    // The owner writes the data (a patch: the dataset grants that, the graph
+    // ACL is not involved); the consumer annotates it.
+    let (st, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/spw/patch?graph={}", url_encode(G)),
+        Some(&ed),
+        Some("application/rdf-patch"),
+        "TX .\nA <urn:sp:a> <urn:sp:p> \"1\" .\nTC .\n",
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert!(tick() > 0, "the consumer writes the graph");
+    let pg = "urn:ots:statement-provenance:spw";
+    let annotated = count(&state, pg);
+    assert!(annotated > 0);
+
+    let forged = "<urn:sp:x> <urn:sp:p> \"forged\" .";
+    for (who, token) in [("owner", ed.as_str()), ("admin", admin.as_str())] {
+        let refused = |st: StatusCode, txt: &str, path: &str| {
+            assert_eq!(st, StatusCode::FORBIDDEN, "{who}, {path}: {txt}");
+        };
+        for update in [
+            format!("INSERT DATA {{ GRAPH <{pg}> {{ {forged} }} }}"),
+            format!("DELETE WHERE {{ GRAPH <{pg}> {{ ?s ?p ?o }} }}"),
+            format!("CLEAR GRAPH <{pg}>"),
+            format!("DROP GRAPH <{pg}>"),
+            format!(
+                "INSERT {{ GRAPH <{pg}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{G}> {{ ?s ?p ?o }} }}"
+            ),
+        ] {
+            let (st, txt) = req(
+                &app,
+                Method::POST,
+                "/sparql",
+                Some(token),
+                Some("application/sparql-update"),
+                &update,
+            )
+            .await;
+            refused(st, &txt, &update);
+        }
+        let gsp = format!("/store?graph={}", url_encode(pg));
+        for method in [Method::PUT, Method::POST] {
+            let (st, txt) = req(
+                &app,
+                method.clone(),
+                &gsp,
+                Some(token),
+                Some("text/turtle"),
+                forged,
+            )
+            .await;
+            refused(st, &txt, &format!("GSP {method}"));
+        }
+        let (st, txt) = req(&app, Method::DELETE, &gsp, Some(token), None, "").await;
+        refused(st, &txt, "GSP DELETE");
+        let patch = format!("TX .\nA {} <{pg}> .\nTC .\n", forged.trim_end_matches(" ."));
+        let (st, txt) = req(
+            &app,
+            Method::POST,
+            "/api/datasets/spw/patch",
+            Some(token),
+            Some("application/rdf-patch"),
+            &patch,
+        )
+        .await;
+        refused(st, &txt, "RDF Patch");
+        let (st, txt) = req(
+            &app,
+            Method::POST,
+            "/api/datasets/spw/log",
+            Some(token),
+            Some("application/rdf-patch"),
+            &format!("H id <urn:uuid:{}> .\n{patch}", uuid::Uuid::new_v4()),
+        )
+        .await;
+        refused(st, &txt, "patch log append");
+        let (st, txt) = req(
+            &app,
+            Method::POST,
+            "/api/import/bulk",
+            Some(token),
+            Some("multipart/form-data; boundary=BND"),
+            &multipart(
+                "BND",
+                &[
+                    ("dataset_id", "text/plain", None, "spw"),
+                    ("default_target_graph", "text/plain", None, pg),
+                    ("file", "text/turtle", Some("a.ttl"), forged),
+                ],
+            ),
+        )
+        .await;
+        refused(st, &txt, "bulk import");
+    }
+    // Nor can another dataset take it up.
+    let (st, v) = json_req(
+        &app,
+        Method::POST,
+        "/api/datasets",
+        Some(&admin),
+        json!({ "name": "spw2", "owner_type": "user", "owner_id": "adm", "visibility": "private" }),
+    )
+    .await;
+    assert!(st.is_success(), "{v}");
+    let other = v["id"].as_str().unwrap().to_string();
+    let (st, v) = json_req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{other}/graphs"),
+        Some(&admin),
+        json!({ "graph_iri": pg }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(count(&state, pg), annotated, "nothing got through");
+
+    // An admin's variable-graph rewrite passes over the provenance graph.
+    let (st, txt) = req(
+        &app,
+        Method::POST,
+        "/sparql",
+        Some(&admin),
+        Some("application/sparql-update"),
+        &format!(
+            "DELETE {{ GRAPH ?g {{ ?s ?p ?o }} }} WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(?g IN (<{G}>, <{pg}>)) }}"
+        ),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(count(&state, G), 0, "the data graph was rewritten");
+    assert_eq!(count(&state, pg), annotated, "the annotations were not");
+
+    // Reading it is unaffected, and the consumer keeps writing it.
+    let (st, body) = req(
+        &app,
+        Method::GET,
+        &format!("/store?graph={}&format=nquads", url_encode(pg)),
+        Some(&admin),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    tick();
+    let before = count(&state, pg);
+    let (st, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/spw/patch?graph={}", url_encode(G)),
+        Some(&ed),
+        Some("application/rdf-patch"),
+        "TX .\nA <urn:sp:b> <urn:sp:p> \"2\" .\nTC .\n",
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert!(tick() > 0, "the consumer still writes the graph");
+    assert!(count(&state, pg) > before);
+}

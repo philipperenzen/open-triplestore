@@ -1177,6 +1177,9 @@ pub(crate) async fn apply_to_dataset(
         if !registered.contains(iri) {
             return Err(not_registered(iri));
         }
+        // System-managed (#533): admins included.
+        crate::provenance::refuse_direct_write(iri)
+            .map_err(|m| refuse(StatusCode::FORBIDDEN, m))?;
         if !graphs.iter().any(|x| x == iri) {
             graphs.push(iri.to_string());
         }

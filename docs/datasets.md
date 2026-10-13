@@ -253,6 +253,15 @@ a version's default graphs and of the dataset's browse scope (name it with
 `graph=` to browse it), and served as JSON-LD answers 406 (JSON-LD has no
 triple terms) — ask for Turtle, N-Quads or TriG.
 
+The graph is **system-managed**: the server writes it from the change log,
+and nothing else may. SPARQL Update, the Graph Store, RDF Patch and patch
+logs, imports, validate-and-commit, version restores, RML and LDES targets
+all refuse it with `403` — for the dataset's owners and for admins too — and
+no dataset can register it as one of its graphs. An admin's store-wide
+`DELETE`/`INSERT` through a variable graph passes over it; only `CLEAR ALL`
+or `DROP ALL`, which wipe the store, clear it with everything else. Reading
+it is unaffected. To stop it growing, set `"provenance": "off"`.
+
 ### Skolem IRIs on import (opt-in)
 
 `PUT /api/datasets/:id/settings` with `{"skolem": true}` replaces the blank

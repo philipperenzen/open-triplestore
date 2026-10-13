@@ -290,7 +290,7 @@ pub async fn validate_and_commit(
             } else {
                 // Already registered: still never replace a model-registry graph
                 // (a registration made before such graphs were refused).
-                crate::auth::dataset_graph::refuse_model_registry_graph(
+                crate::auth::dataset_graph::refuse_reserved_write_target(
                     &state.store,
                     &state.base_url,
                     &ds_id,
