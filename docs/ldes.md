@@ -213,7 +213,8 @@ stream again.
 The `url` may be the event stream, its root node, a redirect to either, or a
 page with exactly one `tree:view` (LDES 1.0 §3.1); the report names the
 `stream` and `root_node` it found and the stream's `polling_interval` — how
-long to wait before the next run, since nothing here schedules one. The client
+long to wait before the next run, since nothing here schedules one
+([#530](https://github.com/philipperenzen/open-triplestore/issues/530)). The client
 reads the stream's context from the root node, follows each page's
 `tree:relation`s, and extracts every member: its triples in the default graph,
 every quad in the graph named after it, and the blank nodes they reach
