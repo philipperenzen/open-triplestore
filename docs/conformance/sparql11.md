@@ -42,10 +42,9 @@ sides are encoded as an RDF graph in the DAWG result-set vocabulary and
 canonicalised, so blank nodes are matched structurally; order is asserted only
 when the query has an outer `ORDER BY`); CONSTRUCT/DESCRIBE by graph
 isomorphism; updates by dataset isomorphism. Numeric literals are compared by
-value (`"2.0"^^xsd:decimal` equals `"2"^^xsd:decimal`): stored literals come
-back as written, but the engine prints a computed number in its canonical form,
-which the expected results may spell otherwise; every other literal by lexical
-form. Syntax tests assert parse success or failure only.
+value (`"2.0"^^xsd:decimal` equals `"2"^^xsd:decimal`), because the engine
+stores numerics natively and writes them back in canonical form; every other
+literal by lexical form. Syntax tests assert parse success or failure only.
 
 **Not vendored:** the protocol, service-description, graph-store-protocol,
 result-format (`csv-tsv-res/`, `json-res/`) and entailment-regime
@@ -81,8 +80,11 @@ The same fork also makes a default graph built from several `FROM` graphs their
 RDF merge, as SPARQL 1.1 §13.2 defines it: before, a triple held in two of them
 matched twice ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919),
 backport of [#1920](https://github.com/oxigraph/oxigraph/pull/1920)). No entry of
-the vendored sections exercises that; `tests/w3c_sparql11_conformance.rs`
-(`dataset_from_graphs_merge_as_a_set`) pins it.
+the vendored query and update sections exercises that;
+`tests/w3c_sparql11_conformance.rs` (`dataset_from_graphs_merge_as_a_set`) pins it.
+The entailment section does: a triple both asserted and derived sits in the
+default graph and in the entailment graph, and six of its cases
+([entailment.md](entailment.md)) counted it twice until the merge was a set.
 
 ## Federation
 
