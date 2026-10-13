@@ -534,12 +534,11 @@ impl ParallelMirror {
         // Writes resumed since the spawn (a bulk load's next chunk): leave the
         // mirror dirty, the next quiet tick tries again. The short period only:
         // the spawn already waited out the long one where it applied.
+        let last_write = self.inner.last_write_ms.load(Ordering::Acquire);
         if self.writes_in_flight() > 0
-            || self
-                .inner
-                .now_ms()
-                .saturating_sub(self.inner.last_write_ms.load(Ordering::Acquire))
-                < self.inner.rebuild_quiet_ms.load(Ordering::Relaxed)
+            || (last_write != 0
+                && self.inner.now_ms().saturating_sub(last_write)
+                    < self.inner.rebuild_quiet_ms.load(Ordering::Relaxed))
         {
             return;
         }
