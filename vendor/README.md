@@ -124,6 +124,14 @@ non-canonical literal is false. Graph patterns are not affected.
    is a data graph plus its shapes graph, in the store comparison. Draft:
    `spareval/UPSTREAM-PR-merged-default-graph-single-match.md`.
 
+13. **A configured parser is cheap to clone** (`spargebra` parser). The custom
+   aggregate set is shared (`Arc`) between clones, so `opengraph::sparql_parser`
+   keeps one parser with the GeoSPARQL aggregates and hands out clones instead
+   of rebuilding it per query (issue #527: about 0.35 µs per query once six
+   aggregates were declared). The `SELECT`-variable-reuse check of change 9 no
+   longer copies the in-scope variable set. Draft:
+   `spargebra/UPSTREAM-PR-cheap-parser-clone.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
