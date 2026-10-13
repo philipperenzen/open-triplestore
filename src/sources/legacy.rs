@@ -834,7 +834,7 @@ entities:
         conn.execute_batch(
             "CREATE TABLE suppliers (supplier_id INTEGER PRIMARY KEY, name TEXT);
              CREATE TABLE products (
-                 product_id INTEGER PRIMARY KEY, price REAL, category TEXT,
+                 product_id INTEGER PRIMARY KEY, price DECIMAL(10,2), category TEXT,
                  supplier_id INTEGER, status TEXT, city TEXT);
              INSERT INTO suppliers VALUES (10, 'Acme');
              INSERT INTO products VALUES

@@ -47,7 +47,7 @@ fn fresh_sqlite(name: &str, broken: bool) -> PathBuf {
          CREATE TABLE products (
              product_id INTEGER PRIMARY KEY,
              name TEXT NOT NULL,
-             price REAL NOT NULL,
+             price DECIMAL(10,2) NOT NULL,
              supplier_id INTEGER
          );
          INSERT INTO suppliers VALUES (10, 'Acme'), (20, 'Globex');
