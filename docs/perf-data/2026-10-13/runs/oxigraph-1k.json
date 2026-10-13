@@ -1,0 +1,91 @@
+{
+ "store": "oxigraph",
+ "scale": "1k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+ "phases": {
+  "load": {
+   "seconds": 4.208,
+   "peak_mem_bytes": 107688755.2,
+   "load_after": [
+    5.75927734375,
+    5.9619140625,
+    6.146484375
+   ],
+   "method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`"
+  },
+  "explore": {
+   "seconds": 4.68,
+   "peak_mem_bytes": 54347694.08,
+   "load_after": [
+    4.36376953125,
+    5.5009765625,
+    5.95703125
+   ]
+  },
+  "features": {
+   "seconds": 248.203,
+   "peak_mem_bytes": 61939384.32,
+   "load_after": [
+    5.14306640625,
+    5.01171875,
+    5.591796875
+   ]
+  },
+  "concurrent": {
+   "seconds": 211.317,
+   "peak_mem_bytes": 65473085.44,
+   "load_after": [
+    8.56982421875,
+    6.490234375,
+    6.05322265625
+   ]
+  },
+  "load_http": {
+   "seconds": 6.003,
+   "peak_mem_bytes": 367630745.6,
+   "load_after": [
+    7.5546875,
+    6.3798828125,
+    6.0224609375
+   ],
+   "method": "HTTP Graph Store POST, 100 MB N-Triples chunks"
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm optimize",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload explore --out /out/explore.json --endpoint http://oxigraph:7878/query --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload features --out /out/features.json --endpoint http://oxigraph:7878/query --features /h/queries/features --feature-runs 10",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload concurrent --out /out/concurrent.json --endpoint http://oxigraph:7878/query --params /bench/params.json --clients 1,4,8 --seconds 60",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload load-http --out /out/load_http.json --endpoint http://oxigraph:7878/store?default --file /bench/dataset.nt --chunk-mb 100",
+  "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   5.91259765625,
+   5.9951171875,
+   6.1591796875
+  ],
+  "waited_s": 0,
+  "free_gib": 28.0,
+  "swap": "total = 16384.00M  used = 15970.88M  free = 413.12M  (encrypted)"
+ },
+ "started": "2026-10-13T18:41:07+0200",
+ "optimize_seconds": 0.768,
+ "db_bytes_after_load": 72130560,
+ "image": "sha256:7e146d8d735b69c39e0071aef05150b8fcdf1f2394daac7e84df7131a43cb601 ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767",
+ "finished": "2026-10-13T18:50:14+0200",
+ "load_after": [
+  7.5546875,
+  6.3798828125,
+  6.0224609375
+ ]
+}

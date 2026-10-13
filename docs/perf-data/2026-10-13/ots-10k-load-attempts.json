@@ -1,0 +1,88 @@
+{
+ "store": "ots",
+ "scale": "10k",
+ "memory_limit": "4g",
+ "chunk_mb": 100,
+ "images": {
+  "21523b87": "an earlier commit of perf/round3-fixes, the six repeated loads: the same load path and accelerator limits as 9e49fa50, with the 5 s quiet period after every write (9e49fa50: after a burst of two or more)",
+  "9e49fa50": "the measured head",
+  "570a7a30": "the 2026-10-03 commit, rebuilt with thin LTO"
+ },
+ "attempts": [
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 93.902,
+   "peak_mem_mib_sampled": 1529
+  },
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 89.686,
+   "peak_mem_mib_sampled": 1636
+  },
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 91.576,
+   "peak_mem_mib_sampled": 1579
+  },
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 173.919,
+   "peak_mem_mib_sampled": 1632
+  },
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 348.598,
+   "peak_mem_mib_sampled": 1730
+  },
+  {
+   "image": "21523b87",
+   "via": "repeated load (scripts: loadtest)",
+   "result": "loaded",
+   "seconds": 242.663,
+   "peak_mem_mib_sampled": 1883
+  },
+  {
+   "image": "21523b87",
+   "via": "earlier campaign run (not used for the tables)",
+   "result": "loaded",
+   "seconds": 116.3,
+   "peak_mem_mib_sampled": 1513
+  },
+  {
+   "image": "9e49fa50",
+   "via": "earlier campaign run (not used for the tables; host swapping)",
+   "result": "loaded",
+   "seconds": 127.1,
+   "peak_mem_mib_sampled": 1796
+  },
+  {
+   "image": "9e49fa50",
+   "via": "campaign",
+   "result": "loaded",
+   "seconds": 105.937,
+   "peak_mem_mib_sampled": 1744
+  },
+  {
+   "image": "570a7a30",
+   "via": "campaign",
+   "result": "loaded",
+   "seconds": 149.285,
+   "peak_mem_mib_sampled": 3843
+  },
+  {
+   "image": "570a7a30",
+   "via": "campaign, SHACL phase",
+   "result": "container gone during whole-dataset SHACL validation (connection refused; last log line: the run index at its 1,789,569-quad budget), peak 4,092 MiB sampled"
+  }
+ ]
+}
