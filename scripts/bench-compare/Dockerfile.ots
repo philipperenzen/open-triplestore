@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+# Benchmark image of Open Triplestore: `cargo build --release --features full`
+# (fat LTO, codegen-units=1 — the shipped release profile) in a Linux container,
+# so the server runs under the same Docker memory/CPU limits as every other store
+# in the comparison. Unlike the production Dockerfile it skips the web UI bundle,
+# the LOV corpus and the licence-notice generator: none of them affects query,
+# load or validation speed, and leaving them out keeps the build small.
+#
+#   docker build -f scripts/bench-compare/Dockerfile.ots -t ots-bench:<sha> .
+#
+# Base images are pinned by digest (linux/arm64 and linux/amd64 manifests lists).
+FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgeos-dev cmake pkg-config libclang-dev lld libxml2-dev libxmlsec1-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV CARGO_BUILD_JOBS=6 RUST_MIN_STACK=33554432
+COPY .cargo/ .cargo/
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY benches/ benches/
+COPY opengraph/ opengraph/
+COPY plugins/ plugins/
+COPY tools/ tools/
+COPY docs/ docs/
+COPY examples/ examples/
+COPY frontend/public/vocab/ frontend/public/vocab/
+COPY frontend/public/samples/ frontend/public/samples/
+COPY assets/ assets/
+# Cargo.toml declares [[test]] targets; cargo refuses to parse the manifest
+# when their sources are missing, even for a plain `cargo build`.
+COPY tests/ tests/
+# Build, keep only the binary, and drop target/ in the same layer so the
+# intermediate image stays small.
+RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
+    cargo build --release --features full \
+    && cp target/release/open-triplestore /usr/local/bin/open-triplestore \
+    && rm -rf target
+
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgeos-c1v5 ca-certificates curl libxml2 libxmlsec1-openssl libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/open-triplestore /usr/local/bin/open-triplestore
+RUN mkdir -p /data
+EXPOSE 7878
+ENTRYPOINT ["open-triplestore"]
+CMD ["--data-dir", "/data", "--port", "7878", "--bind", "0.0.0.0"]

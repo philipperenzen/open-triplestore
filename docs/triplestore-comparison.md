@@ -270,6 +270,10 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 >   1.2 directional string (`docs/conformance/jsonld.md`). These deliberate deviations keep the
 >   row Partial under the project's Full rubric.
 
+> **Measured performance.** Open Triplestore against Oxigraph, Apache Jena Fuseki, QLever,
+> Virtuoso and RDF4J — one machine, the same container limits, the same data and queries, result
+> counts cross-checked: [performance-comparison.md](performance-comparison.md).
+
 ### 4.2 Reasoning, Validation & Inference
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
