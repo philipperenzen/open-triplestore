@@ -77,8 +77,9 @@ pub trait QueryableDataset<'a>: Sized + 'a {
                     .filter_map(|mut iter| iter.peek().is_some().then_some(iter))
                     .collect::<Vec<_>>();
                 if iters.len() <= 1 {
-                    return Box::new(iters.pop().into_iter().flatten())
-                        as Box<dyn Iterator<Item = Result<_, _>> + 'a>;
+                    let single: Box<dyn Iterator<Item = Result<_, _>> + 'a> =
+                        Box::new(iters.pop().into_iter().flatten());
+                    return single;
                 }
                 Box::new(iters.into_iter().flatten())
             } else {
