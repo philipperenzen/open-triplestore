@@ -31,9 +31,9 @@ use serde::Serialize;
 use super::checks::DataErrors;
 use super::model::*;
 use super::sql::{
-    apply_own_nulls, check_relational_columns, collect_unique_keys, flush, index_key, join_key,
-    lookup, plan_triples_map, pushdown_subject, row_triples, same_row_subject, sanitise_label,
-    split_row, JoinStrategy, ParentIndex, ParentIndexBuilder, RefKey, TmPlan,
+    apply_own_nulls, collect_unique_keys, flush, index_key, join_key, lookup, plan_triples_map,
+    prepare_relational, pushdown_subject, row_triples, same_row_subject, sanitise_label, split_row,
+    JoinStrategy, ParentIndex, ParentIndexBuilder, RefKey, TmPlan,
 };
 use super::terms::{Cells, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
@@ -105,7 +105,7 @@ pub fn execute_sample(
     spec: &SampleSpec,
 ) -> Result<SampleOutcome, String> {
     let limit = spec.limit.clamp(1, MAX_SAMPLE_ROWS);
-    check_relational_columns(mapping, conn, quote)?;
+    let mapping = &prepare_relational(mapping, conn, quote)?;
     let unique_keys = collect_unique_keys(mapping, conn)?;
     let mut plans: HashMap<String, TmPlan> = HashMap::new();
     for tm in &mapping.triples_maps {

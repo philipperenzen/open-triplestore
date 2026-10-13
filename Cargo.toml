@@ -188,6 +188,9 @@ wkt = { version = "0.14", features = ["geo-types"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The JSON grammar rdf:JSON literals are checked against on the way in — the
+# parser the JSON-LD processor (oxjsonld) serialises them with.
+json-event-parser = "0.2.3"
 
 # CLI & config
 clap = { version = "4", features = ["derive", "env"] }
