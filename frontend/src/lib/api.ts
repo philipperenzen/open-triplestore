@@ -217,6 +217,8 @@ async function requestRaw(method, path, body, contentType) {
     }
   }
   if (!res.ok) {
+    // The structured body too: an RDF Patch refused by a SHACL write gate
+    // answers 422 with the report, which the caller shows.
     const { message, body: errorBody } = await extractError(res);
     const err = new ApiError(message);
     err.status = res.status;

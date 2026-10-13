@@ -19,8 +19,9 @@
 # (0.8.x/0.9.x) need native SFCGAL >= 2.0 at build time, and Debian bookworm
 # only packages libsfcgal 1.4.1 (its headers lack the 2.x API, so the sfcgal
 # crate fails with E0432 unresolved imports); trixie ships 2.0.0.
-# The rust job also runs the S3 storage tests against a MinIO service (ci.yml's
-# backend job starts the same MinIO), and the image-build job mirrors
+# The rust job also runs the S3 storage tests against a Versity S3 Gateway
+# service (ci.yml's backend job starts the same server), and the image-build
+# job mirrors
 # .github/workflows/image.yml.
 
 stages:
@@ -44,15 +45,13 @@ rust:
   stage: test
   # An S3-compatible server for tests/storage_s3_live.rs; the last script line
   # runs them with OTS_TEST_LIVE_REQUIRED (see ci.yml's "S3 storage against
-  # MinIO" step). Throwaway credentials; MinIO publishes no new community
-  # images, so this tag is the last one.
+  # Versity S3 Gateway" step): Versity S3 Gateway (Apache-2.0) over a POSIX
+  # directory, pinned by tag and digest, which checks request signatures.
+  # MinIO stopped publishing community images. Throwaway credentials.
   services:
-    - name: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-      alias: minio
-      command: ["server", "/data"]
-  variables:
-    MINIO_ROOT_USER: ots-ci-minio
-    MINIO_ROOT_PASSWORD: ots-ci-minio-secret
+    - name: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+      alias: s3
+      command: ["--access", "ots-ci-s3", "--secret", "ots-ci-s3-secret", "posix", "/tmp"]
   # trixie, not bookworm: `--all-features` pulls in sfcgal-sys, which needs
   # native SFCGAL >= 2.0 (bookworm's libsfcgal-dev 1.4.1 is too old — see the
   # header note). And 1.94, not 1.91: the AWS SDK stack (aws-credential-types
@@ -94,7 +93,7 @@ rust:
     - if grep -E 'test result:.* [1-9][0-9]* ignored' test.log; then echo "Some tests were ignored"; exit 1; fi
     # The S3 storage tests skipped in the run above (no endpoint set); this
     # re-run reuses its binary.
-    - OTS_TEST_LIVE_REQUIRED=1 OTS_TEST_S3_ENDPOINT=http://minio:9000 OTS_TEST_S3_ACCESS_KEY=$MINIO_ROOT_USER OTS_TEST_S3_SECRET_KEY=$MINIO_ROOT_PASSWORD cargo test --all-features --locked --test storage_s3_live
+    - OTS_TEST_LIVE_REQUIRED=1 OTS_TEST_S3_ENDPOINT=http://s3:7070 OTS_TEST_S3_ACCESS_KEY=ots-ci-s3 OTS_TEST_S3_SECRET_KEY=ots-ci-s3-secret cargo test --all-features --locked --test storage_s3_live
 
 # ── Database connectors against live servers (mirrors ci.yml live-sources) ──
 # Each driver crate's live test skips when its OTS_TEST_<DIALECT>_HOST is
