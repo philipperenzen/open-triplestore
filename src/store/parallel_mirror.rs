@@ -157,6 +157,11 @@ struct Inner {
     background_quiet_ms: AtomicU64,
     /// Triple count found by the last `store.len()` probe (0 before the first).
     last_probed_len: AtomicUsize,
+    /// Writes started since the mirror was last clean. The background quiet
+    /// period is for a burst (a bulk load's chunks); a single write is
+    /// followed by the ordinary one, so a store loaded once is accelerated
+    /// half a second later, as before.
+    writes_since_clean: AtomicUsize,
     /// Store size (triples) up to which a due rebuild runs inline on the query
     /// path; larger rebuilds are handed to a background thread. See
     /// [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`].
@@ -194,6 +199,7 @@ impl Inner {
         }
         if self.last_probed_len.load(Ordering::Relaxed)
             > self.inline_rebuild_max.load(Ordering::Relaxed)
+            && self.writes_since_clean.load(Ordering::Relaxed) >= 2
         {
             quiet = quiet.max(self.background_quiet_ms.load(Ordering::Relaxed));
         }
@@ -259,6 +265,7 @@ impl ParallelMirror {
                 rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
                 background_quiet_ms: AtomicU64::new(env_background_quiet_ms()),
                 last_probed_len: AtomicUsize::new(0),
+                writes_since_clean: AtomicUsize::new(0),
                 inline_rebuild_max: AtomicUsize::new(DEFAULT_INLINE_REBUILD_MAX_TRIPLES),
                 background_building: AtomicBool::new(false),
                 writes_in_flight: AtomicUsize::new(0),
@@ -276,6 +283,9 @@ impl ParallelMirror {
     /// an RAII guard, so every return path balances the counter).
     pub fn write_started(&self) {
         self.inner.writes_in_flight.fetch_add(1, Ordering::AcqRel);
+        self.inner
+            .writes_since_clean
+            .fetch_add(1, Ordering::Relaxed);
         self.mark_dirty();
     }
 
@@ -522,8 +532,15 @@ impl ParallelMirror {
     /// `build_lock`; this is the background thread's whole job.
     fn rebuild_locked(&self, store: &Store) {
         // Writes resumed since the spawn (a bulk load's next chunk): leave the
-        // mirror dirty, the next quiet tick tries again.
-        if self.inner.recently_written() || self.writes_in_flight() > 0 {
+        // mirror dirty, the next quiet tick tries again. The short period only:
+        // the spawn already waited out the long one where it applied.
+        if self.writes_in_flight() > 0
+            || self
+                .inner
+                .now_ms()
+                .saturating_sub(self.inner.last_write_ms.load(Ordering::Acquire))
+                < self.inner.rebuild_quiet_ms.load(Ordering::Relaxed)
+        {
             return;
         }
         self.inner.len_probes.fetch_add(1, Ordering::Relaxed);
@@ -575,6 +592,7 @@ impl ParallelMirror {
             *c = None;
         }
         self.inner.built_len.store(0, Ordering::Release);
+        self.inner.writes_since_clean.store(0, Ordering::Relaxed);
         self.inner.dirty.store(false, Ordering::Release);
         // An over-cap store silently disabling the accelerator was the cause of
         // a hard-to-spot perf regression (large joins fell back to RocksDB,
@@ -683,6 +701,9 @@ impl ParallelMirror {
         self.inner.over_cap_warned.store(false, Ordering::Release);
         let unchanged = self.inner.last_write_ms.load(Ordering::Acquire) == write_mark
             && self.writes_in_flight() == 0;
+        if unchanged {
+            self.inner.writes_since_clean.store(0, Ordering::Relaxed);
+        }
         self.inner.dirty.store(!unchanged, Ordering::Release);
     }
 
@@ -1324,8 +1345,9 @@ mod stale_read_tests {
     }
 
     /// Issue #469: once the store is known to be large (its rebuild runs in the
-    /// background), a rebuild waits for the longer background quiet period, so
-    /// the sub-second gaps between a bulk load's chunks never start one.
+    /// background), a rebuild after a burst of writes waits for the longer
+    /// background quiet period, so the sub-second gaps between a bulk load's
+    /// chunks never start one; after a single write the short period applies.
     #[test]
     fn large_store_rebuild_waits_for_the_background_quiet_period() {
         let store = store_with_quads(200);
@@ -1342,8 +1364,12 @@ mod stale_read_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(mirror.build_count(), 1, "the first background build ran");
-        // A write, then a gap longer than the short quiet period: no rebuild.
-        mirror.mark_dirty();
+        // Two writes (a burst), then a gap longer than the short quiet
+        // period: no rebuild.
+        for _ in 0..2 {
+            mirror.write_started();
+            mirror.write_finished();
+        }
         std::thread::sleep(Duration::from_millis(60));
         mirror.ensure_fresh(&store);
         std::thread::sleep(Duration::from_millis(100));
@@ -1362,5 +1388,18 @@ mod stale_read_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(mirror.build_count(), 2);
+        // A single write afterwards: the short period applies again.
+        mirror.set_background_quiet_ms(60_000);
+        mirror.write_started();
+        mirror.write_finished();
+        std::thread::sleep(Duration::from_millis(60));
+        mirror.ensure_fresh(&store);
+        for _ in 0..200 {
+            if mirror.build_count() == 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(mirror.build_count(), 3, "one write is not a burst");
     }
 }

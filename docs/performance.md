@@ -1179,7 +1179,8 @@ container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY*`-tunable; t
 engine copies cost ~2× the dataset in RAM, the columnar copy about 48 bytes a quad on
 top) so it never mirrors a store larger than RAM — above the cap the copies stay off and
 the persistent store answers, leaving the 1–100M disk tiers (data > RAM) unaffected. A
-build waits for writes to stay quiet (5 s for a store over 50k triples), stops as soon
+build waits for writes to stay quiet (5 s after a burst of writes to a store over 50k
+triples), stops as soon
 as a write starts, and on Linux does not start unless the process's resident memory plus
 the copies fit in 80 % of the limit (issue #469: a 3.5M-triple load into 4 GiB was
 OOM-killed in 2 of 6 attempts when a build ran next to it).

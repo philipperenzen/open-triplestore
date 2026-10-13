@@ -689,8 +689,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the memory limit at about 1 KiB a triple, with no 2M-triple floor: 1,048,576
   triples in a 4 GiB container (2M only where no limit can be read). On Linux
   a build waits until resident memory plus the projected copies fit in 80% of
-  the limit, stops as soon as a write starts, and for a store over 50k
-  triples waits for 5 s of quiet writes (`OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`).
+  the limit, stops as soon as a write starts, and after a burst of writes to a store over
+  50k triples waits for 5 s of quiet writes (`OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`).
   Loading 3.5M triples over the Graph Store protocol into the shipped 4 GiB
   container was OOM-killed in 2 of 6 attempts because a build ran in the gap
   between two chunks.
