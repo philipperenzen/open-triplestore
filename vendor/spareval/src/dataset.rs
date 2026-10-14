@@ -56,7 +56,13 @@ pub trait QueryableDataset<'a>: Sized + 'a {
     {
         let iter: Box<dyn Iterator<Item = Result<_, _>> + 'a> =
             if let Some(graph_names) = graph_names {
-                let iters = graph_names
+                // Only the graphs with a match take part. A triple can match
+                // twice only if two of them do, so when at most one graph has a
+                // match its triples are streamed as they are: no hash set, no
+                // clone per triple. That is the common case of a dataset whose
+                // default graph merges a data graph with small side graphs
+                // (shapes, vocabularies) that the pattern's predicate is not in.
+                let mut iters = graph_names
                     .iter()
                     .map(|graph_name| {
                         self.internal_quads_for_pattern(
@@ -66,8 +72,15 @@ pub trait QueryableDataset<'a>: Sized + 'a {
                             Some(graph_name.as_ref()),
                         )
                         .map(|quad| quad.map(InternalTriple::from))
+                        .peekable()
                     })
+                    .filter_map(|mut iter| iter.peek().is_some().then_some(iter))
                     .collect::<Vec<_>>();
+                if iters.len() <= 1 {
+                    let single: Box<dyn Iterator<Item = Result<_, _>> + 'a> =
+                        Box::new(iters.pop().into_iter().flatten());
+                    return single;
+                }
                 Box::new(iters.into_iter().flatten())
             } else {
                 Box::new(
@@ -75,7 +88,9 @@ pub trait QueryableDataset<'a>: Sized + 'a {
                         .map(|quad| quad.map(InternalTriple::from)),
                 )
             };
-        hash_deduplicate(iter)
+        let deduplicated: Box<dyn Iterator<Item = Result<_, _>> + 'a> =
+            Box::new(hash_deduplicate(iter));
+        deduplicated
     }
 
     /// Fetches the list of dataset named graphs

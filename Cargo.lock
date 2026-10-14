@@ -4373,6 +4373,7 @@ dependencies = [
  "imagesize",
  "infer",
  "ipnet",
+ "json-event-parser",
  "jsonwebtoken",
  "kamadak-exif",
  "lettre",
@@ -4706,6 +4707,7 @@ version = "0.5.11"
 dependencies = [
  "dashmap 6.2.1",
  "getrandom 0.3.4",
+ "json-event-parser",
  "libc",
  "oxiri",
  "oxrdf",

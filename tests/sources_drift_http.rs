@@ -91,7 +91,7 @@ async fn register_source(app: &Router, token: &str, id: &str, db: &Path) {
         token,
         json!({
             "id": id, "name": id, "dialect": "sqlite",
-            "database": db.to_string_lossy(), "readOnly": true, "statementTimeoutMs": 5000,
+            "database": db.to_string_lossy(), "read_only": true, "statement_timeout_ms": 5000,
         }),
     )
     .await;
@@ -165,7 +165,7 @@ async fn drift_is_measured_against_the_mappings_baseline_and_opens_one_ticket() 
     // Profiled once, then mapped: the mapping's baseline is version 1.
     assert_eq!(profile(&app, &token, "drift").await, 1);
     let m = register_mapping(&app, &token, "entry-map", "drift").await;
-    assert_eq!(m["profileVersion"], 1, "{m}");
+    assert_eq!(m["profile_version"], 1, "{m}");
 
     // Nothing to compare yet.
     let (st, _, txt) = drift(&app, &token, "drift", json!({ "mapping": "entry-map" })).await;
@@ -180,35 +180,35 @@ async fn drift_is_measured_against_the_mappings_baseline_and_opens_one_ticket() 
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(d["baseline"], 1, "the mapping's baseline: {txt}");
     assert_eq!(d["candidate"], 2, "{txt}");
-    assert_eq!(d["klThreshold"], 0.1, "from the gates: {txt}");
+    assert_eq!(d["kl_threshold"], 0.1, "from the gates: {txt}");
     let entry = d["tables"]
         .as_array()
         .unwrap()
         .iter()
         .find(|t| t["table"] == "entry")
         .expect("the entry table");
-    assert_eq!(entry["structuralHashChanged"], true, "{txt}");
-    assert_eq!(entry["newColumns"], json!(["added"]), "{txt}");
+    assert_eq!(entry["structural_hash_changed"], true, "{txt}");
+    assert_eq!(entry["new_columns"], json!(["added"]), "{txt}");
     assert!(
-        entry["removedColumns"].as_array().unwrap().is_empty(),
+        entry["removed_columns"].as_array().unwrap().is_empty(),
         "{txt}"
     );
-    let shifts = entry["distributionShifts"].as_array().unwrap();
+    let shifts = entry["distribution_shifts"].as_array().unwrap();
     assert_eq!(shifts.len(), 1, "the code list moved: {txt}");
     assert_eq!(shifts[0]["column"], "state", "{txt}");
-    assert!(shifts[0]["klDivergence"].as_f64().unwrap() > 0.1, "{txt}");
+    assert!(shifts[0]["kl_divergence"].as_f64().unwrap() > 0.1, "{txt}");
     assert_eq!(entry["affected"], true, "{txt}");
-    assert_eq!(d["affectedTables"], json!(["entry"]), "{txt}");
-    assert!(d["modelVersionBump"].is_null(), "no model named: {txt}");
+    assert_eq!(d["affected_tables"], json!(["entry"]), "{txt}");
+    assert!(d["model_version_bump"].is_null(), "no model named: {txt}");
 
     // One ticket, for this mapping.
     let ticket = &d["ticket"];
     assert_eq!(ticket["status"], "open", "{txt}");
     assert_eq!(ticket["reason"], "schema-drift", "{txt}");
-    assert_eq!(ticket["affectedTables"], json!(["entry"]), "{txt}");
+    assert_eq!(ticket["affected_tables"], json!(["entry"]), "{txt}");
     assert_eq!(ticket["mapping"], "urn:mapping:entry-map", "{txt}");
-    assert_eq!(ticket["baselineProfile"], 1, "{txt}");
-    assert_eq!(ticket["candidateProfile"], 2, "{txt}");
+    assert_eq!(ticket["baseline_profile"], 1, "{txt}");
+    assert_eq!(ticket["candidate_profile"], 2, "{txt}");
     let ticket_id = ticket["id"].as_str().unwrap().to_string();
 
     // A second check updates the same ticket rather than opening another.
@@ -231,7 +231,7 @@ async fn drift_is_measured_against_the_mappings_baseline_and_opens_one_ticket() 
         &app,
         &token,
         "drift",
-        json!({ "baseline": 1, "candidate": 2, "openTicket": false }),
+        json!({ "baseline": 1, "candidate": 2, "open_ticket": false }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -273,7 +273,7 @@ async fn drift_is_measured_against_the_mappings_baseline_and_opens_one_ticket() 
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    assert_eq!(m["profileVersion"], 2, "{txt}");
+    assert_eq!(m["profile_version"], 2, "{txt}");
     assert_eq!(m["version"], 1, "a state change mints no version: {txt}");
     let (st, d4, txt) = drift(&app, &token, "drift", json!({ "mapping": "entry-map" })).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -346,6 +346,6 @@ async fn the_request_is_checked() {
     // An unchanged source between two profiles: nothing affected, no ticket.
     let (st, d, txt) = drift(&app, &token, "checked", json!({})).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    assert!(d["affectedTables"].as_array().unwrap().is_empty(), "{txt}");
+    assert!(d["affected_tables"].as_array().unwrap().is_empty(), "{txt}");
     assert!(d["ticket"].is_null(), "{txt}");
 }

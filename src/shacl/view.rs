@@ -102,7 +102,12 @@ pub(crate) struct DataView<'a> {
     /// `data_graphs` is empty; an entry that is not a valid IRI is skipped (it
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
+    /// `graphs` as a set, for the merged scans of [`GraphSel::All`] over
+    /// several data graphs (see [`Self::for_quads`]).
+    graph_set: HashSet<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
+    /// Transitive path closures computed in this run (see [`Self::closure_memo`]).
+    closures: ClosureMemo,
     /// The run's SPARQL evaluator, built by the caller from
     /// `TripleStore::query_options_for_shapes` so the GeoSPARQL, 3D, RDF 1.2
     /// and the run's own `sh:SPARQLFunction` registrations are present.
@@ -219,15 +224,23 @@ impl<'a> DataView<'a> {
                 .filter_map(|g| NamedNode::new(g).ok().map(GraphName::NamedNode))
                 .collect()
         };
+        let graph_set = graphs.iter().cloned().collect();
         Self {
             store,
             data_graphs,
             raw,
             graphs,
+            graph_set,
             classes: HashMap::new(),
+            closures: ClosureMemo::default(),
             evaluator,
             index: None,
         }
+    }
+
+    /// The run's memo of property-path closures (see [`ClosureMemo`]).
+    pub(crate) fn closure_memo(&self) -> &ClosureMemo {
+        &self.closures
     }
 
     /// Whether the run reads the accelerator's RAM copy.
@@ -289,17 +302,11 @@ impl<'a> DataView<'a> {
         let mut out = Vec::new();
         if inverse {
             let obj = from.as_ref();
-            self.for_graphs(sel, |graph| {
-                for q in self
-                    .raw
-                    .quads_for_pattern(None, Some(pred), Some(obj), Some(graph))
-                    .flatten()
-                {
-                    out.push(match q.subject {
-                        oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
-                        oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
-                    });
-                }
+            self.for_quads(sel, None, Some(pred), Some(obj), |q| {
+                out.push(match q.subject {
+                    oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+                    oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
+                });
             });
         } else {
             let subj: NamedOrBlankNodeRef<'_> = match from {
@@ -307,17 +314,49 @@ impl<'a> DataView<'a> {
                 Term::BlankNode(bn) => NamedOrBlankNodeRef::BlankNode(bn.as_ref()),
                 _ => return out, // literals have no outgoing edges
             };
-            self.for_graphs(sel, |graph| {
-                for q in self
-                    .raw
-                    .quads_for_pattern(Some(subj), Some(pred), None, Some(graph))
-                    .flatten()
-                {
-                    out.push(q.object);
-                }
-            });
+            self.for_quads(sel, Some(subj), Some(pred), None, |q| out.push(q.object));
         }
         out
+    }
+
+    /// Every quad matching the pattern in the graphs `sel` selects, passed to `f`.
+    ///
+    /// Over several data graphs, [`GraphSel::All`] is one scan with the graph
+    /// left open, keeping the quads of the run's graphs, rather than one scan
+    /// per graph: a property path over the merged data graphs (decision D7 of
+    /// the SHACL-SPARQL work) made every hop of every path a scan per graph,
+    /// 3.4x the single-graph cost with five data graphs (issue #467). A triple
+    /// held by two of the graphs is passed twice; callers that need a set
+    /// deduplicate, as they did before.
+    fn for_quads(
+        &self,
+        sel: GraphSel,
+        subject: Option<NamedOrBlankNodeRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+        mut f: impl FnMut(oxigraph::model::Quad),
+    ) {
+        if sel == GraphSel::All && self.graphs.len() > 1 {
+            for q in self
+                .raw
+                .quads_for_pattern(subject, predicate, object, None)
+                .flatten()
+            {
+                if self.graph_set.contains(&q.graph_name) {
+                    f(q);
+                }
+            }
+            return;
+        }
+        self.for_graphs(sel, |graph| {
+            for q in self
+                .raw
+                .quads_for_pattern(subject, predicate, object, Some(graph))
+                .flatten()
+            {
+                f(q);
+            }
+        });
     }
 
     /// All `(predicate, object)` pairs of `focus` in the selected graphs — used
@@ -333,14 +372,8 @@ impl<'a> DataView<'a> {
             _ => return Vec::new(),
         };
         let mut out = Vec::new();
-        self.for_graphs(sel, |graph| {
-            for q in self
-                .raw
-                .quads_for_pattern(Some(subj), None, None, Some(graph))
-                .flatten()
-            {
-                out.push((q.predicate.as_str().to_string(), q.object));
-            }
+        self.for_quads(sel, Some(subj), None, None, |q| {
+            out.push((q.predicate.as_str().to_string(), q.object));
         });
         out
     }
@@ -797,7 +830,17 @@ impl<'a> DataView<'a> {
                     GraphSel::All if single_graph => {
                         Some(Arc::new(self.scan_instances(&closure, 0)))
                     }
-                    GraphSel::All => None,
+                    // Over several data graphs too: the instance set of the
+                    // merge is the union of the per-graph scans (a type triple
+                    // lives in one graph), so `sh:class` is one set lookup per
+                    // value node instead of a type probe and a closure test.
+                    GraphSel::All => {
+                        let mut set = HashSet::new();
+                        for gi in 0..self.graphs.len() {
+                            set.extend(self.scan_instances(&closure, gi));
+                        }
+                        Some(Arc::new(set))
+                    }
                 };
                 (
                     (class.clone(), *sel),
@@ -847,6 +890,64 @@ impl<'a> DataView<'a> {
             }
             _ => false,
         }
+    }
+}
+
+/// Terms a run's [`ClosureMemo`] may hold in total, and in one closure.
+const CLOSURE_MEMO_MAX_TERMS: usize = 2_000_000;
+const CLOSURE_MEMO_MAX_SET: usize = 100_000;
+/// Distinct closure paths a run memoises.
+const CLOSURE_MEMO_MAX_PATHS: usize = 64;
+
+/// The `p+` reach sets (nodes reachable in one or more steps) one run computed,
+/// per (path, graph selection, start node), so a closure that reaches a node
+/// whose own closure is known adds that set instead of walking it again: focus
+/// nodes on one `ex:partOf` chain share every ancestor's walk, and a value node
+/// checked under several shapes is walked once. Bounded by
+/// [`CLOSURE_MEMO_MAX_TERMS`]; past it closures are still computed, not kept.
+#[derive(Default)]
+pub(crate) struct ClosureMemo {
+    paths: std::sync::RwLock<Vec<PropertyPath>>,
+    sets: dashmap::DashMap<(usize, GraphSel, Term), Arc<[Term]>>,
+    held: std::sync::atomic::AtomicUsize,
+}
+
+impl ClosureMemo {
+    /// The run-local id of `path`, or `None` once the run has seen
+    /// [`CLOSURE_MEMO_MAX_PATHS`] others.
+    pub(crate) fn path_id(&self, path: &PropertyPath) -> Option<usize> {
+        if let Some(i) = self.paths.read().ok()?.iter().position(|p| p == path) {
+            return Some(i);
+        }
+        let mut paths = self.paths.write().ok()?;
+        if let Some(i) = paths.iter().position(|p| p == path) {
+            return Some(i);
+        }
+        if paths.len() >= CLOSURE_MEMO_MAX_PATHS {
+            return None;
+        }
+        paths.push(path.clone());
+        Some(paths.len() - 1)
+    }
+
+    pub(crate) fn get(&self, path: usize, sel: GraphSel, start: &Term) -> Option<Arc<[Term]>> {
+        self.sets
+            .get(&(path, sel, start.clone()))
+            .map(|e| e.value().clone())
+    }
+
+    pub(crate) fn insert(&self, path: usize, sel: GraphSel, start: Term, reach: Arc<[Term]>) {
+        use std::sync::atomic::Ordering;
+        if reach.len() > CLOSURE_MEMO_MAX_SET {
+            return;
+        }
+        if self.held.fetch_add(reach.len(), Ordering::Relaxed) + reach.len()
+            > CLOSURE_MEMO_MAX_TERMS
+        {
+            self.held.fetch_sub(reach.len(), Ordering::Relaxed);
+            return;
+        }
+        self.sets.insert((path, sel, start), reach);
     }
 }
 

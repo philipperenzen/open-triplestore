@@ -97,7 +97,7 @@ export function summarizeTriples(res) {
     types: types.slice(0, 3),
     description: pickLiteral(descs),
     facts: triples.length,
-    more: !!res?.hasMore,
+    more: !!res?.has_more,
   };
 }
 

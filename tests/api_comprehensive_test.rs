@@ -3078,7 +3078,7 @@ mod browse {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// /browse/triples (no count param) must return a `hasMore` flag derived
+    /// /browse/triples (no count param) must return a `has_more` flag derived
     /// from a LIMIT+1 probe — not a `total` field. This is the fast path that
     /// replaced the unconditional COUNT(*) query.
     #[tokio::test]
@@ -3134,8 +3134,8 @@ mod browse {
             "Must truncate to limit: {json}"
         );
         assert_eq!(
-            json["hasMore"], true,
-            "Third triple exists, hasMore must be true: {json}"
+            json["has_more"], true,
+            "Third triple exists, has_more must be true: {json}"
         );
         assert!(
             json.get("total").is_none(),
@@ -3501,8 +3501,8 @@ mod browse {
         let json = body_json(resp.into_body()).await;
         assert_eq!(json["triples"].as_array().unwrap().len(), 1);
         assert_eq!(
-            json["hasMore"], false,
-            "Single row must report hasMore=false: {json}"
+            json["has_more"], false,
+            "Single row must report has_more=false: {json}"
         );
     }
 
@@ -3551,7 +3551,7 @@ mod browse {
             Some(4),
             "count=true must return exact total: {json}"
         );
-        assert_eq!(json["hasMore"], true);
+        assert_eq!(json["has_more"], true);
     }
 
     /// Counts above the former 100 001 cap must now be exact. The browser used
@@ -3758,7 +3758,7 @@ mod browse {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp.into_body()).await;
         assert_eq!(json["triples"].as_array().unwrap().len(), 0);
-        assert_eq!(json["hasMore"], false);
+        assert_eq!(json["has_more"], false);
     }
 
     /// The TTL cache on get_accessible_graph_iris must produce identical results
@@ -4038,11 +4038,11 @@ mod browse {
         let first = browse(&state, &format!("filters={chip}&limit=1&count=true")).await;
         assert_eq!(first["triples"].as_array().unwrap().len(), 1, "{first}");
         assert_eq!(first["total"], 2, "Exact count covers all matches: {first}");
-        assert_eq!(first["hasMore"], true, "{first}");
+        assert_eq!(first["has_more"], true, "{first}");
 
         let second = browse(&state, &format!("filters={chip}&limit=1&offset=1")).await;
         assert_eq!(second["triples"].as_array().unwrap().len(), 1, "{second}");
-        assert_eq!(second["hasMore"], false, "Last page must end: {second}");
+        assert_eq!(second["has_more"], false, "Last page must end: {second}");
         assert_ne!(
             first["triples"][0], second["triples"][0],
             "Pages must not repeat a row: {first} / {second}"
@@ -6061,6 +6061,57 @@ mod visibility_leaks {
             resp.status().is_success(),
             "Admin must be able to bulk-import: {}",
             resp.status()
+        );
+    }
+
+    /// An import whose file holds an `rdf:JSON` literal that is not JSON
+    /// (an ill-typed literal) is refused with a 400, and nothing is loaded.
+    #[tokio::test]
+    async fn bulk_import_refuses_an_ill_typed_json_literal() {
+        let (state, token) = admin_state();
+        let boundary = "BNDjson";
+        let body = multipart_body(
+            boundary,
+            &[
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    b"http://ex.org/g/json",
+                ),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<http://ex.org/s> <http://ex.org/p> \"ok\" .\n<http://ex.org/s> <http://ex.org/j> \"bareword\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> .",
+                ),
+            ],
+        );
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/import/bulk")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = body_text(resp.into_body()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("ill-typed"), "{text}");
+        assert_eq!(
+            state
+                .store
+                .count_graph(Some("http://ex.org/g/json"))
+                .unwrap(),
+            0
         );
     }
 

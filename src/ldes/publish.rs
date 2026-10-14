@@ -174,6 +174,49 @@ pub async fn put_stream(
     })))
 }
 
+/// GET /api/datasets/:id/ldes/config — the stream's settings as JSON, for
+/// the dataset page: whether it publishes, its page size (the fragmentation:
+/// pages of that many members, sealed once full), retention policy and
+/// polling interval, plus the member and sealed-page counts. Readable by
+/// everyone who can see the dataset (the stream declares the same facts);
+/// `can_write` says whether the caller may change them. A dataset that never
+/// enabled a stream answers with the defaults and `enabled: false`.
+pub async fn get_config(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(dataset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiErr> {
+    let user = user.map(|Extension(u)| u);
+    let ds = visible_dataset(&state, user.as_ref(), &dataset_id)?;
+    let can_write = match &user {
+        Some(u) => state
+            .auth_db
+            .can_write_dataset(&u.user_id, &ds)
+            .map_err(e500)?,
+        None => false,
+    };
+    let cfg = store::stream(&state.auth_db, &dataset_id).map_err(e500)?;
+    let sealed = store::sealed_nodes(&state.auth_db, &dataset_id)
+        .map_err(e500)?
+        .len();
+    Ok(Json(serde_json::json!({
+        "dataset_id": dataset_id,
+        "enabled": cfg.as_ref().is_some_and(|c| c.enabled),
+        "configured": cfg.is_some(),
+        "page_size": cfg.as_ref().map(|c| c.page_size).unwrap_or(100),
+        "polling_interval": cfg
+            .as_ref()
+            .and_then(|c| c.polling_interval)
+            .unwrap_or(store::DEFAULT_POLLING_INTERVAL),
+        "retention": store::retention(&state.auth_db, &dataset_id).map_err(e500)?,
+        "members": store::member_count(&state.auth_db, &dataset_id).map_err(e500)?,
+        "sealed_nodes": sealed,
+        "created_at": cfg.as_ref().map(|c| c.created_at.clone()),
+        "stream": stream_iri(&state.base_url, &dataset_id),
+        "can_write": can_write,
+    })))
+}
+
 fn enabled_stream(state: &AppState, dataset_id: &str) -> Result<store::StreamConfig, ApiErr> {
     match store::stream(&state.auth_db, dataset_id).map_err(e500)? {
         Some(cfg) if cfg.enabled => Ok(cfg),

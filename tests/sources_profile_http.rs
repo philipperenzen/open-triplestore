@@ -147,8 +147,8 @@ fn source_body(id: &str, db: &Path) -> Value {
         "name": format!("Source {id}"),
         "dialect": "sqlite",
         "database": db.to_string_lossy(),
-        "readOnly": true,
-        "statementTimeoutMs": 5000,
+        "read_only": true,
+        "statement_timeout_ms": 5000,
     })
 }
 
@@ -242,7 +242,7 @@ fn hash_of(summary: &Value, table: &str) -> String {
         .expect("tables")
         .iter()
         .find(|t| t["table"] == table)
-        .unwrap_or_else(|| panic!("no summary for '{table}' in {summary}"))["structuralHash"]
+        .unwrap_or_else(|| panic!("no summary for '{table}' in {summary}"))["structural_hash"]
         .as_str()
         .expect("a structural hash")
         .to_string()
@@ -267,7 +267,7 @@ async fn a_profile_reports_columns_keys_and_null_counts() {
         "urn:source:src:profile:version:1:activity"
     );
     assert!(
-        summary["previousVersion"].is_null(),
+        summary["previous_version"].is_null(),
         "a first profile has no baseline: {summary}"
     );
     let entry = summary["tables"]
@@ -524,7 +524,7 @@ async fn re_profiling_writes_a_new_version_and_keeps_the_previous_one() {
     let second = profile(&app, &token, "src").await;
     assert_eq!(second["version"], 2);
     assert_eq!(
-        second["previousVersion"], 1,
+        second["previous_version"], 1,
         "the drift baseline is the previous version: {second}"
     );
 
@@ -775,7 +775,7 @@ async fn a_repeating_document_is_not_a_code_list() {
         .iter()
         .find(|t| t["table"] == "doc")
         .expect("the doc table");
-    assert_eq!(doc["codeLists"], 0, "{doc}");
+    assert_eq!(doc["code_lists"], 0, "{doc}");
 }
 
 #[tokio::test]
@@ -885,7 +885,7 @@ async fn deleting_a_datasource_deletes_its_profiles() {
         "a re-registered id inherited the deleted datasource's versions: {fresh}"
     );
     assert!(
-        fresh["previousVersion"].is_null(),
+        fresh["previous_version"].is_null(),
         "…and its drift baseline: {fresh}"
     );
 

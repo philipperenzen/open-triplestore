@@ -8,7 +8,7 @@ use oxrdf::Term;
 use oxsdatatypes::Boolean;
 #[cfg(feature = "rdf-12")]
 use spareval::ExpressionTriple;
-use spareval::{ExpressionTerm, InternalQuad, QueryableDataset};
+use spareval::{ExpressionTerm, InternalQuad, InternalTriple, QueryableDataset};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -67,6 +67,25 @@ impl<'a> QueryableDataset<'a> for DatasetView<'a> {
                     } else {
                         Some(quad.graph_name)
                     },
+                })
+            })
+    }
+
+    fn internal_triples_for_pattern(
+        &self,
+        subject: Option<&EncodedTerm>,
+        predicate: Option<&EncodedTerm>,
+        object: Option<&EncodedTerm>,
+        graph_names: Option<&[Option<EncodedTerm>]>,
+    ) -> impl Iterator<Item = Result<InternalTriple<EncodedTerm>, StorageError>> + use<'a> {
+        self.reader
+            .quads_for_pattern_in_union(subject, predicate, object, graph_names)
+            .map(|quad| {
+                let quad = quad?;
+                Ok(InternalTriple {
+                    subject: quad.subject,
+                    predicate: quad.predicate,
+                    object: quad.object,
                 })
             })
     }

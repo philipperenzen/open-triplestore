@@ -255,9 +255,9 @@ property path, and `source_constraint` is a short label such as
 `source_constraint_component` is the SHACL constraint component IRI.
 `message` is the shape's `sh:message` when it has one, else a default text.
 A test or partial run answers `"run_id": null, "ran_at": null` and adds
-`"test": true` and `"partial"`. The 422 body of a write gate uses
-camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
-`sourceConstraintComponent`). A result of a SPARQL constraint or validator
+`"test": true` and `"partial"`. The 422 body of a write gate uses the same
+snake_case keys (`focus_node`, `source_shape`, `source_constraint`,
+`source_constraint_component`). A result of a SPARQL constraint or validator
 that declares [result annotations](#result-annotations-shresultannotation-shacl-af-4)
 also has an `annotations` list; no other result has the key.
 
@@ -355,6 +355,16 @@ curl -X PUT 'http://localhost:7878/store?graph=http://example.org/people' \
 # {"error":"SHACL validation failed","conforms":false,"results":[...]}
 ```
 
+### How the write gates combine
+
+Three things can gate a write to a graph: SHACL Studio pipelines with `gate_writes` whose scope covers it, validation-layer bindings on the graph or its dataset (both [below](#the-validation-layer-bindings)), and this per-dataset `shacl_on_write` flag. They are not alternatives and none overrides another: every write path (Graph Store `PUT`/`POST`, validate-and-commit, bulk import, RDF Patch, repair proposals) runs all of them in **one pass** over the graph as it will be after the write, staged once, in this order:
+
+1. `gate_writes` pipelines, each at its own severity threshold;
+2. validation-layer bindings, at the `Violation` threshold;
+3. the dataset's `shacl_on_write` shapes graph, which refuses on **any** result, whatever its severity (the report must conform).
+
+The write lands only when every gate passes. When several would refuse it, the 422 carries the report of the first in this order, so fixing that one may reveal the next. Each gate is evaluated once per write; a shapes graph named by more than one gate is still checked by each, at that gate's own threshold. Every run of the dataset gate, passing or not, is kept in the dataset's report history as an `on-write` report.
+
 ### Limitations
 
 These apply to every write gate: this per-dataset `shacl_on_write` gate, and the SHACL Studio gates below (validation-layer bindings and pipelines with `gate_writes`).
@@ -362,6 +372,7 @@ These apply to every write gate: this per-dataset `shacl_on_write` gate, and the
 - Writes are validated on Graph Store `PUT` and `POST` (`/store`), bulk import (`/api/import/bulk`) and `POST /api/datasets/validate-and-commit`.
 - SPARQL Update (`/sparql`, `/sparql/batch`) is still not validated, Studio gates included: an update can write data that a gate would refuse on `/store`. To keep a gated graph valid, write it through one of the paths above, or run the pipeline (or `POST /api/datasets/{id}/validate`) after the update.
 - Only graphs a gate covers are validated: graphs registered to the dataset, graphs that carry a binding, and graphs in a gating pipeline's scope. Writes to other graphs pass through unchecked.
+- A datasource run that promotes its graph into a dataset is checked against the mapping's shapes and the dataset's `shacl_on_write` shapes ([sources](sources.md)), not yet against the dataset's `gate_writes` pipelines and bindings ([#503](https://github.com/philipperenzen/open-triplestore/issues/503)).
 
 ---
 
@@ -442,6 +453,8 @@ Impact — *what data a shape graph is applied to* — is the reverse binding lo
 ### Pipelines & targets
 
 A pipeline is a saved, runnable validation. Its scope is a set of **targets** — any mix of datasets, graphs, and shape graphs — plus composed shape graphs, a severity threshold, and triggers (manual, on-write, cron). When `gate_writes` is set, writes covered by the pipeline are gated. See `POST /api/shacl/pipelines`; the request body's `targets` is an array of `{ "kind": "dataset"|"graph"|"shapegraph", "id": "…" }`.
+
+**Run on write** (`trigger_on_write`) needs the [change log](/docs/versioning) (`OTS_CHANGE_CAPTURE=on`): a few seconds after a write to one of the pipeline's data graphs the pipeline runs, recorded as `triggered_by: "write"`. When it can, the run covers only the nodes the write touched — the subjects of the changed statements, the nodes they point at, and the nodes pointing at them — and merges the result into the pipeline's last report, which then says what a full run would. It runs in full instead when there is no earlier report, the pipeline's shapes changed, the shapes use SPARQL constraints or targets, the pipeline infers, the change log could not carry the write's quads, or more than `OTS_STUDIO_INCREMENTAL_MAX` (10 000) nodes were touched. Like a scheduled run it reads with its creator's authority. With capture off the trigger does nothing.
 
 A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
 
@@ -952,7 +965,7 @@ curl -X POST http://localhost:7878/api/shaclc/parse \
 curl -X POST http://localhost:7878/api/shaclc/serialize \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
-     -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
+     -d '{"shapes_graph_iri": "urn:dataset:my-dataset:shapes"}'
 
 # Plain IRI body also accepted
 curl -X POST http://localhost:7878/api/shaclc/serialize \
@@ -1079,7 +1092,8 @@ curl -X POST http://localhost:7878/api/shacl/export/ids \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/turtle' \
      --data-binary @shapes.ttl
-# → {"format":"ids","document":"<?xml …","specification_count":2,"losses":[…]}
+# → {"format":"ids","document":"<?xml …","specification_count":2,
+#    "verbatim_specifications":2,"losses":[…]}
 
 # the bare document instead of the report
 curl -X POST 'http://localhost:7878/api/shacl/export/ids?raw=true' …
@@ -1094,7 +1108,15 @@ constraints. Import → export → import is a fixpoint: the second import
 produces the same Turtle as the first (`tests/spec_export_http.rs`), and the
 exported document passes the importer's XSD and audit checks. A specification
 whose shapes were edited after import is not exported from its stale source;
-it is listed in `losses` instead.
+it is listed in `losses` instead. `verbatim_specifications` counts the
+specifications written back from their recorded source; when it equals
+`specification_count` and `losses` is empty, the export is a lossless
+re-export of the imported document.
+
+In the web UI, the shape library's **Export to IDS** action on a shape graph
+runs this export and says which case it is — a lossless re-export, partly
+written back, or translated from the shapes — lists every loss, and offers the
+`.ids` file for download.
 
 **Other shapes go through the older translator, and `losses` is the reason
 the report is the default representation.** IDS's whole expressive surface for
@@ -1159,6 +1181,13 @@ curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
 
 Without `create=true` the response carries the Turtle and the report only.
 
+In the web UI, **Import IDS** in the shape library checks a document first
+(converting without storing), shows its specifications and what could not be
+carried, and creates the shape graph on request. A refused document shows the
+audit report item by item: the import answers a refusal as
+`{error, stage, problems}`, with `stage` `xml`, `schema` (the IDS 1.0 XSD) or
+`audit`, and `problems` listing every problem found.
+
 **Validation first.** The document is checked against the IDS 1.0 XSD
 (elements, their order and attributes, `ifcVersion` tokens, cardinality values)
 and the IDS audit rules after the buildingSMART IDS Audit Tool: entity names
@@ -1179,7 +1208,12 @@ does not become shapes that quietly pass. The standard property-set templates
 **What the shapes check.** The shapes are SHACL-SPARQL over the **IDS
 projection** of the IFC lift — the graph an IFC import writes to
 `…/building/ids` (see [geo-3d-platform.md §9](geo-3d-platform.md)). Run a
-pipeline or a dataset validation over that graph. Each specification becomes a
+pipeline or a dataset validation over that graph. In the web UI, the dataset
+page's **Exchange** section has an **IDS check**: pick an IDS-imported shape
+graph and a building's projection graph, and it runs a SHACL Studio pipeline
+scoped to exactly that pair (made on first use, reused after, so its runs are
+kept), showing the result per specification — passed, the entities that fail
+a requirement, or no applicable entity where the specification requires one. Each specification becomes a
 node shape:
 
 - **targets**: the exact classes its entity facet admits; a pattern or
