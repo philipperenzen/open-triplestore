@@ -64,13 +64,12 @@ const MIN_MAX_TRIPLES: usize = 100_000;
 /// Fraction of the memory budget the process may use, RAM copies included,
 /// for a build to start (see [`ParallelMirror::build_fits_in_memory`]).
 const BUILD_HEADROOM_PERCENT: u64 = 80;
-/// Default quiet period (ms) before a mirror build that will run in the
-/// background (a store over [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`]). A bulk
-/// load over the Graph Store protocol sends 100 MB chunks with sub-second gaps
-/// between them; with the 500 ms quiet period a build of two RAM copies started
-/// in such a gap and ran on next to the following chunk. Tunable via
-/// `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`.
-const DEFAULT_BACKGROUND_QUIET_MS: u64 = 5_000;
+// Default quiet period (ms) before a mirror build that will run in the
+// background (a store over [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`]). A bulk
+// load over the Graph Store protocol sends 100 MB chunks with sub-second gaps
+// between them; with the 500 ms quiet period a build of two RAM copies started
+// in such a gap and ran on next to the following chunk. Tunable via
+// `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`. (default 5000 ms, in the configuration registry).
 /// Quads between two checks of whether a write has started during a build.
 const BUILD_CANCEL_CHECK_EVERY: usize = 4096;
 /// Absolute ceiling on the auto-derived cap, regardless of how much RAM is
@@ -849,7 +848,7 @@ pub(crate) fn detect_memory_limit_bytes() -> Option<u64> {
 /// `OTS_PARALLEL_QUERY_MAX_TRIPLES` always wins over this; the result is clamped
 /// to `[MIN_MAX_TRIPLES, ABSOLUTE_MAX_TRIPLES]`, and is [`DEFAULT_MAX_TRIPLES`]
 /// when the budget can't be detected.
-fn ram_aware_default_max_triples() -> usize {
+pub fn ram_aware_default_max_triples() -> usize {
     match detect_memory_limit_bytes() {
         Some(bytes) => ram_cap_for(bytes),
         None => DEFAULT_MAX_TRIPLES,
