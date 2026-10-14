@@ -6,24 +6,93 @@ Datasets can be snapshotted into immutable versions, organised on branches, and 
 
 ## Version lifecycle
 
-1. **Snapshot** — Create a version from the dataset's current graphs. Each version copies the live data into dedicated snapshot graphs so it is frozen and independently queryable.
+1. **Snapshot** — Create a version from the dataset's current graphs. The version is frozen and independently queryable: a *checkpoint* copies the live data into dedicated snapshot graphs; with the [change log](#change-log) on, later versions are *deltas* that record the change since a checkpoint instead of copying (see [Delta versions](#delta-versions)).
 2. **Stage** — Mark a draft as *staged* for review before it goes live.
 3. **Publish** — Mark a version *published*. The published version is what saved-query APIs serve by default.
 4. **Deprecate / Restore** — Retire an old version, or restore a deprecated one if you need to roll back.
 
 Each version records who created it, an optional note, and its source-graph mapping. Download any version's data (content-negotiated, defaulting to TriG) at `/api/datasets/{id}/versions/{version}/data`.
 
+## Delta versions
+
+Without the change log every version is a full physical copy of the graphs
+it covers, so a dataset re-imported N times kept N copies. With the
+[change log](#change-log) on (`OTS_CHANGE_CAPTURE=on`), the first version of
+a dataset is a **checkpoint** — a copy, as before — and the versions after it
+are **deltas**: a base checkpoint, a range of the change log and a content
+hash. A delta copies nothing when it is cut; it reads exactly like the
+checkpoint it replaces.
+
+| | Checkpoint | Delta |
+|---|---|---|
+| Cut | copies the covered graphs into the version's snapshot graphs | records `base_version` and `patch_range` (`epoch`, `from_seq`, `to_seq`) |
+| Read | as it is | built on first read into the same snapshot-graph IRIs a checkpoint has, then served like one |
+| `kind` in the API | `checkpoint` | `delta` |
+
+**When a cut is a delta.** The change log is recording, the version is not
+Published (a published version is always physical, so it is in every
+backup), you did not ask for `"checkpoint": true`, none of the graphs is
+registered to another dataset too, and an *anchored* checkpoint of the
+dataset covers the graphs with an intact chain of change rows from it to now.
+A checkpoint is *anchored* when no write touched its graphs while it was being
+copied, which pins its content to one sequence number of the log. Otherwise
+the cut is a checkpoint, and the response says why in `checkpoint_reason` —
+for example `change capture is off`, or `sequence 412 changed <…> by more
+quads than a row carries`. To keep chains short, a cut is also a checkpoint
+once `OTS_CHECKPOINT_EVERY` (100) deltas chain from the same base, or when
+the changes since the base exceed `OTS_CHECKPOINT_FRACTION` (0.25) of its
+size (and more than 1 000 quads).
+
+**Backups.** A backup holds the store and the identity database, not the
+change log, so an unpublished delta is not in it: after a restore it answers
+`410`. Publish a version, or cut it with `"checkpoint": true`, before a
+backup it must survive.
+
+**Building a delta.** The first read of a delta's data — `…/versions/:ver/data`,
+a `versions=` pin in browse, a dataset service's `?version=`, a saved query
+pinned to it, its tests — builds its graphs, forward from the base checkpoint
+or backward from the live graphs, whichever is cheaper. A build is a store
+write, so it takes a slot of the expensive-operation pool, answers 503 when
+it outlasts the write timeout (it carries on in the background), and is
+refused with **507** when it would hold more than `OTS_MATERIALISATION_MAX_QUADS`
+(2 000 000) quads. **An anonymous caller never triggers a build**: it gets
+503 with `Retry-After` until someone signed in has read the version (the
+versions anonymous readers are usually entitled to — Published ones — are
+always physical). A build unused for `OTS_MATERIALISATION_TTL_SECS` (3600)
+is dropped again; `materialised` on the version record says whether it is
+built now. Each build checks itself against the content hash, and a build
+that fails from one end is tried from the other. A delta that neither end
+can rebuild (rows lost to retention, the base gone or no longer matching its
+hash, live graphs changed by writes the log did not record) is marked
+`chain_broken` and its data answers **410**.
+
+**Content hash.** Every version records `content_hash`, a 256-bit set hash of
+its quads (per graph, and in total), computed while a checkpoint is copied
+and, for a delta, from its base's hash and its chain — without building it.
+Publishing a delta builds it and checks what was built against the hash
+before it becomes physical; a mismatch marks the chain broken and refuses
+with 409.
+
+**Publishing** a delta makes it a checkpoint: it is built, verified, and its
+built graphs become its own snapshot graphs.
+
 ## Retention: diff, delete, garbage-collect
 
-Every version snapshots the dataset's graphs, so each replace-import that is
-versioned keeps a full copy of the changed graphs. Three endpoints keep that
-under control:
+A checkpoint keeps a full copy of the graphs it covers; a delta keeps only its
+rows of the change log, which its range pins against retention. Three
+endpoints keep that under control:
 
 | Call | Effect |
 |---|---|
-| `GET /api/datasets/:id/versions/:a/diff/:b` | Per-graph triple delta from `a` to `b` (`added`/`removed`, plus totals). `b` may be `live` to compare a version with the dataset's current graphs. |
-| `DELETE /api/datasets/:id/versions/:ver` | Removes the version, its snapshot graphs and its version-scoped validation graph. A **published** version answers 409 — deprecate it first — unless `?force=true`. |
-| `POST /api/datasets/:id/versions/gc` with `{"keep": N}` | Deletes all but the newest `N` non-published versions. Published versions are never collected. |
+| `GET /api/datasets/:id/versions/:a/diff/:b` | Per-graph triple delta from `a` to `b` (`added`/`removed`, plus totals). `b` may be `live` to compare a version with the dataset's current graphs. When both sides sit on one chain the diff is folded from the change log — `"source": "chain"`, O(change), nothing built — else the two sides are compared, building any delta first (`"source": "materialised"`). |
+| `DELETE /api/datasets/:id/versions/:ver` | Removes the version, its snapshot graphs and its version-scoped validation graph (a delta: its build, if any, and its pin). A **published** version answers 409 — deprecate it first — unless `?force=true`; so does a checkpoint a delta chains from (`dependants` lists them). |
+| `POST /api/datasets/:id/versions/gc` with `{"keep": N}` | Deletes all but the newest `N` non-published versions: deltas first, then the checkpoints nothing chains from any more (`kept_as_base` lists the rest). Published versions are never collected. |
+
+Deleting a dataset deletes its versions too (they used to stay behind, and a
+new dataset reusing the id saw them). `POST /api/admin/versions/sweep`
+(admin) cleans up what a deletion before this left: versions of datasets that
+no longer exist, version graphs no record names, pins of versions that are
+gone, expired builds.
 
 In the web UI, the dataset page's version list has **Compare** and a **Diff** per
 version (from that version to the live graphs, or between two versions): the
@@ -31,15 +100,35 @@ per-graph counts, the changes row by row from the RDF Patch, and the patch to
 download. **Clean up** asks how many unpublished versions to keep, shows which
 versions would go, and deletes them after the app's confirmation dialog.
 
-Restore is atomic per graph: the snapshot is copied into a staging graph and
-swapped into place with one `MOVE`, so readers never see a live graph empty or
-half-written, and the full-text index is refreshed for the restored graphs.
-Snapshot, branch and restore stream their copies in batches rather than
-holding every quad in memory.
+## Restore
+
+`POST /api/datasets/:id/versions/:ver/restore` puts the dataset's live graphs
+back to the version, in one of two ways — `tier` in the response says which:
+
+- **Tier 1** — when the version is anchored in the change log's current
+  epoch, the chain from it to now is intact, and its inverse fits
+  `OTS_APPLY_DELTA_TX_MAX_QUADS` (50 000) quads: the inverse of everything
+  since the version is applied in **one transaction across all its graphs**,
+  then each graph is checked against the version's content hash. Nothing is
+  copied, and no reader ever sees the version half-restored.
+- **Tier 2** — otherwise (and when a tier-1 check fails because a write
+  landed in between): the version is built if it is a delta, each snapshot is
+  copied into a staging graph and swapped into place with one `MOVE`, so a
+  reader never sees a live graph empty or half-written.
+
+Either way the restore is one commit in the dataset's history, captured by
+its LDES stream, entailment and full-text index. Snapshot, branch and
+restore stream their copies in batches rather than holding every quad in
+memory.
 
 ## Branches
 
-Branches let you fork a version line to develop changes in parallel — for example a `staging` branch alongside `main`. List and create branches at `/api/datasets/{id}/branches`, specifying the branch name and the version it forks from.
+Branches let you fork a version line to develop changes in parallel — for example a `staging` branch alongside `main`. List and create branches at `/api/datasets/{id}/branches`, specifying the branch name and the version it forks from. A branch of an anchored version copies nothing: it is a delta on the same base (on the version itself, for a checkpoint). Its `ahead`/`behind` counts against the latest published version come from the change log when both sit on one chain.
+
+Version operations on one dataset — create, branch, publish, restore, delete,
+gc, a pipeline's auto-version, validate-and-commit — are serialised by a
+per-dataset lock: two concurrent creates of one label make one version and a
+400, where they used to make two half-copies under one record.
 
 ## Share links
 
@@ -120,12 +209,34 @@ and `#` starts a comment that runs to the end of the line).
   to a copy that holds the same nodes. A label must be a valid N-Triples
   blank-node label. A label the data does not hold creates a node with that
   id.
-- **Not supported** — RDF 1.2 triple terms (`<<( … )>>`), which RDF Patch has
-  no syntax for yet. They are refused.
+- **Triple terms** — as an extension, an RDF 1.2 triple term
+  `<<( s p o )>>` (nested ones too) may be the object of an `A`/`D` row, its
+  inner terms checked as in a row. RDF Patch has no syntax for triple terms
+  yet; the store needs one because a change or a version diff over RDF 1.2
+  data, such as a [statement-provenance](datasets.md#statement-provenance-opt-in)
+  graph, holds them. A build without RDF 1.2 support refuses them.
 
 Adding a quad that is present or deleting one that is absent changes
-nothing. The response reports the net `added` / `removed` counts and the
-`transactions` committed and aborted, with their `prefix_rows`.
+nothing; the rows apply in order, so the last row on a quad decides whether
+it ends up present. The response reports the net `added` / `removed` counts,
+the `transactions` committed and aborted with their `prefix_rows`, and, when
+the [change log](#change-log) recorded the write, its `seq`. Every patch, and
+every version restore or build, goes through one engine primitive
+(`apply_quad_ops`, origin `patch` in the change log), and the route needs an
+account (401 anonymous).
+
+`H base-digest "<64 hex digits>"` makes the apply conditional: the set hash
+of the graphs the patch's rows name must be that value before it applies,
+else **412** and nothing is applied. It is the same hash versions record as
+`content_hash` (`store::set_hash`: the sum of the SHA-256 of each quad
+printed as `<graph> s p o`, modulo 2^256). The repair layer's
+`?if-base-commit=` / `?if-base-sequence=` preconditions (see
+[repair.md](repair.md)) work on the same route.
+
+Each change of the change log is a patch too — see
+[The dataset's change feed](#the-datasets-change-feed): `H seq` and `H epoch`
+give its place in the log, `H commit` the commit it belongs to, and its
+inverse carries `H prev` naming it.
 
 Patches pass the same SHACL write gates as a Graph Store write to the same
 graphs: Studio pipelines with `gate_writes`, shapes bound to the graph or its
@@ -226,9 +337,14 @@ graphs held nothing, else a draft version named `log-init-…` that is cut for
 the purpose; if that first patch is refused, the version is dropped again.
 `/init` answers `410` once that version is deleted.
 
-A version entry is rendered from the snapshot graphs it compares, which do
-not change. Before a version is deleted, the text of every entry that reads
-it is written out, so the entry is served unchanged afterwards. If the
+A version entry is rendered from the versions it compares, which do not
+change: per graph from the [change log](#change-log) when both versions are
+anchored on one chain, otherwise from their snapshot graphs. A
+[delta version](#delta-versions) is built first when its snapshots are
+needed — never for an anonymous reader, who gets `503` with `Retry-After` —
+and an entry over a version that can no longer be rebuilt answers `410`.
+Before a version is deleted, the text of every entry that reads it is
+written out, so the entry is served unchanged afterwards. If the
 version a log's last version entry reached is deleted, the next cut's entry
 is a diff from the empty graph for those graphs: it adds what the version
 holds but cannot delete what replay may still carry.
@@ -308,7 +424,44 @@ rows *plus* the store-scoped rows, which a reader of any graph must see.
 `PUT …/cursors/<name>` bookmarks a consumer at the last `seq` it applied
 (`0` … the newest `seq`; names are 1–64 characters of `[A-Za-z0-9._-]`),
 `DELETE` drops it (`204`, or `404`). All four are admin-only: rows carry
-quads from every tenant.
+quads from every tenant. `GET /api/admin/changes/stats` (admin) accounts for
+the log: rows and payload bytes per dataset, live builds of delta versions
+and the quads they hold, checkpoints and deltas per dataset, the pins and
+cursors holding retention back and their owners.
+
+### The dataset's change feed
+
+A dataset's readers can tail its part of the log:
+
+```
+GET    /api/datasets/<id>/changes?since=<seq>&limit=<n>&wait_ms=<ms>
+GET    /api/datasets/<id>/changes/<seq>
+GET    /api/datasets/<id>/changes/<seq>/inverse
+PUT    /api/datasets/<id>/changes/cursors/<name>      {"seq": <n>}
+DELETE /api/datasets/<id>/changes/cursors/<name>
+```
+
+The feed lists the rows of the dataset's graphs above `since`, without their
+quads, plus `next` to resume from; `wait_ms` long-polls (up to 30 s) when
+nothing is new. Only rows of graphs the caller may read are listed — dataset
+access does not imply access to its private graphs, and an unreadable row is
+omitted, never counted. Store-scoped rows (writes whose graphs were not
+known) are listed for every dataset: they bound every chain.
+
+`…/changes/<seq>` is that change as an RDF Patch (`application/rdf-patch`),
+`…/inverse` the patch that undoes it; **410** when retention has removed the
+change, **409** when the row carries no quads (it was larger than a row
+holds, or the log could not bound it). A cursor (any signed-in reader) pins
+retention like an admin cursor; it belongs to whoever set it — someone else
+gets 403 — and an admin can delete it. Every route answers from an empty log
+while capture is off.
+
+The commit trail points into the log: a commit whose write the log recorded
+carries `seq_from` / `seq_to` (its rows) and `net_added` / `net_removed`
+(what it actually changed — unlike `added` / `removed`, whose meaning differs
+per write path) on `GET /api/datasets/<id>/commits`, and `ver:seqFrom` /
+`ver:seqTo` in `urn:system:commit-log`. Commits made before the log existed
+have neither; order those by `created`.
 
 ### What it costs
 
@@ -340,10 +493,25 @@ less; the scan cost does not shrink.
 ### Retention, crashes, caps
 
 - **Retention.** Rows older than `OTS_CHANGE_RETENTION_DAYS` (default 90)
-  are swept, but never above the lowest live cursor. A cursor that has not
-  been updated for `OTS_CURSOR_TTL_DAYS` (default 30) stops pinning
+  are swept, but never above the lowest live cursor or pin. A cursor that has
+  not been updated for `OTS_CURSOR_TTL_DAYS` (default 30) stops pinning
   retention and is dropped: a consumer that went away must resynchronise,
-  not hold the log forever.
+  not hold the log forever. A delta version pins its range for as long as it
+  lives (deleting or publishing it releases the pin). Rows of a version's own
+  snapshot graphs and of restore staging graphs, which no chain needs, go
+  after a day. The highest sequence number retention deleted is remembered,
+  so a chain that would need a row below it counts as broken — the next cut
+  is a checkpoint — rather than silently missing a change.
+- **Capture switched off and on again.** A log kept from an earlier run
+  stays readable while capture is off (delta versions resolve through it),
+  but records nothing; the next run that records starts a new epoch, so no
+  chain is ever extended across writes the log did not see.
+- **Bounded whole-graph operations.** `CLEAR`, `DROP`, `CREATE` and `LOAD`
+  of a named graph (and `MOVE`/`COPY`/`ADD`, which are made of them) are
+  bounded to that graph and recorded like any other write; only `CLEAR`/`DROP
+  ALL` and `NAMED` are store-scoped. A streamed load of a multi-graph file
+  probes its quads on the way past (up to the scan cap) and records exact
+  rows per graph.
 - **Crashes.** A row is written *before* its write runs and finalised with
   the sequence number right after the commit. A crash between the two
   leaves it `pending`; the next start probes the store for the intended

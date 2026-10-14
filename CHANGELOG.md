@@ -14,6 +14,58 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Delta versions.** With change capture on (`OTS_CHANGE_CAPTURE=on`), a
+  dataset's first version is a checkpoint (a copy, as before) and the next
+  ones are deltas: a base checkpoint, a range of the change log and a content
+  hash — nothing copied when the version is cut. A delta reads like a
+  checkpoint: its graphs are built on first read (never for an anonymous
+  caller, who gets `503` with `Retry-After`; `507` over
+  `OTS_MATERIALISATION_MAX_QUADS`), dropped again after
+  `OTS_MATERIALISATION_TTL_SECS`, and verified against the content hash when
+  the version is published, which makes it physical. A cut is a checkpoint
+  when capture is off, the version is Published, `"checkpoint": true` asks
+  for one, a graph is shared with another dataset, no anchored checkpoint
+  covers the graphs, the chain since it is broken, or the chain has grown
+  (`OTS_CHECKPOINT_EVERY`, `OTS_CHECKPOINT_FRACTION`); the response says why.
+  Diffs and branch `ahead`/`behind` between versions on one chain come from
+  the change log (`"source": "chain"`), branches copy nothing, a restore
+  applies the chain's inverse in one transaction across all graphs when it
+  can (`"tier": 1`), and a checkpoint a delta chains from is never deleted or
+  collected. Version records gain `kind`, `base_version`, `patch_range`,
+  `anchor`, `content_hash`, `quad_count`, `change_count`, `chain_broken`,
+  `materialised`. See docs/versioning.md, "Delta versions".
+- **A dataset's change feed.** `GET /api/datasets/:id/changes` lists the
+  change-log rows of the dataset's graphs the caller may read;
+  `…/changes/:seq` serves one change as an RDF Patch and `…/inverse` the patch
+  that undoes it; `PUT`/`DELETE …/changes/cursors/:name` keeps a reader's
+  position (pinning retention). `GET /api/admin/changes/stats` accounts for
+  the log per dataset. A commit whose write the log recorded carries
+  `seq_from`/`seq_to` and `net_added`/`net_removed`.
+- **RDF Patch:** RDF 1.2 triple terms (`<<( s p o )>>` as an object, an
+  extension: the format has no syntax for them, and a change or version diff
+  that holds one must carry it), inverse patches (`H prev`), change headers
+  (`H seq`, `H epoch`, `H commit`), and `H base-digest`, which makes an apply
+  conditional on the graphs' content (`412`). A patch applies through the same
+  engine primitive as version restores and builds (`apply_quad_ops`), recorded
+  in the change log under one commit; the response adds the write's `seq`.
+  A patch-log version entry over a delta version is rendered from the change
+  log between the two versions it compares, or from the versions once built.
+- **Statement provenance (opt-in).** `PUT /api/datasets/:id/settings` with
+  `{"provenance": "minimal" | "full"}`: every change to the dataset's
+  statements is annotated in RDF 1.2 in `urn:ots:statement-provenance:<id>` —
+  a named reifier per statement, an event per change with its operation,
+  change-log sequence number and commit (`full` adds actor and time). The
+  graph is no reasoning premise, never gated, no LDES member, not part of a
+  version by default, and out of the dataset's browse scope.
+- **Skolem IRIs on import (opt-in).** `{"skolem": true}` gives blank nodes
+  imported into the dataset's graphs durable, content-derived IRIs, so a
+  re-import changes nothing.
+- **Write-triggered validation pipelines.** `trigger_on_write` — stored but
+  never read until now — runs the pipeline after a write to its data graphs
+  (with change capture on), over only the nodes the write touched when it can,
+  merged into its last report.
+- **`POST /api/admin/versions/sweep`** purges what deleted datasets left
+  behind: their versions, unreferenced version graphs, stale change-log pins.
 - **Web UI for the exchange formats and maintenance tasks that were API-only.**
   The dataset page has an **Exchange** section: the LDES stream's settings
   (publishing, members per page, polling interval, retention policy, with the
@@ -749,6 +801,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- With change capture on, a write adjusts the graph-count index by its known
+  delta instead of rescanning the graph; the full-text index, entailment and
+  LDES take the write's own change-log rows instead of rescanning graphs.
+- `CLEAR`, `DROP`, `CREATE` and `LOAD` of a named graph are bounded to that
+  graph: the count index recounts it alone, and the change log records it
+  exactly instead of as a store-wide unknown change.
+- A streamed load of a multi-graph file, with change capture on, records exact
+  rows per graph instead of one store-wide unknown row (which broke every
+  version chain on every boot that seeded such a file).
+- A change log kept from an earlier run stays readable while capture is off,
+  and the next run that records starts a new epoch.
+- Deleting a dataset (or its organisation) deletes its versions.
+- Version operations on one dataset are serialised: two concurrent creates of
+  one label make one version and a `400`. A pipeline's auto-versions and
+  validate-and-commit no longer overwrite a version cut in the same second.
 
 - **The in-memory query accelerator is sized from the memory budget and
   never builds next to a bulk load** (#469). Its default cap is a quarter of
@@ -1966,6 +2033,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- `POST /api/datasets/:id/patch` answered `500` to an anonymous caller; it
+  is `401`.
+- Graph Store `GET` as JSON-LD of a graph holding RDF 1.2 triple terms
+  answered `200` and then broke off the body; it is `406` before any byte.
+- A `source` commit read back from the commit trail as `data-model`.
+- Validate-and-commit without a `graph` committed into the dataset's first
+  registered graph, and replaced it — which could be the dataset's
+  property-states graph. It now skips the graphs the server keeps for the
+  dataset's history.
 
 - **A query that timed out kept running** (#468). `/sparql`, the dataset
   service endpoints and saved queries answered "Query execution timed out"
@@ -2635,6 +2711,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **The statement-provenance graph is system-managed.** Only the server's
+  change-log consumer writes `urn:ots:statement-provenance:<id>`. SPARQL
+  Update, the Graph Store, RDF Patch and patch-log appends, imports,
+  validate-and-commit, restores and RML/LDES targets refuse it with `403`, for
+  admins too, and no dataset may register it; an admin's variable-graph
+  `DELETE`/`INSERT` skips it. Before, any writer of the dataset could forge or
+  erase its statement history (#533).
 - **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
   DOMPurify up to 3.4.15 could leave event handlers armed in a removed
   subtree, or return markup that runs on reparse, in `IN_PLACE` mode

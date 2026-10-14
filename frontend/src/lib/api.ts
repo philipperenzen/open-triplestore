@@ -2467,10 +2467,21 @@ export interface PatchApplied {
   applied: boolean;
   id?: string | null;
   aborted?: boolean;
-  transactions?: number;
+  /** The blocks committed and aborted, and the rows as written. */
+  transactions?: {
+    committed: number;
+    aborted: number;
+    add_rows: number;
+    delete_rows: number;
+    prefix_rows: number;
+  };
+  /** The net change: quads that were not there before, and that went. */
   added: number;
   removed: number;
   graphs?: string[];
+  /** The write's last change-log sequence number, when capture recorded it. */
+  seq?: number | null;
+  reason?: string;
   version?: number;
   prev?: string | null;
 }
