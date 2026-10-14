@@ -289,7 +289,8 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 | **SWRL** | ✅¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 > ⁷ RDFS entailment (RDF 1.1 Semantics: `rdfD2`, `rdfs1`–`rdfs13` and the axiomatic triples in
->   one fixed point, datatype clashes reported; the infinite `rdf:_n` axioms bounded by the data,
+>   one fixed point, datatype clashes reported, `rdfD1` on request, equal values written
+>   differently matched at query time; the infinite `rdf:_n` axioms bounded by the data,
 >   decision D11), graded Full in [`docs/standards.md`](standards.md) (footnote 14 there), in the
 >   default `full` build (feature `rdfs-entailment`). See
 >   [`docs/rdfs-entailment.md`](rdfs-entailment.md).
@@ -441,6 +442,18 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > N-Quads/TriG, is ungraded feature presence. The per-change recounts written while the
 > branches were open counted from baselines that no longer held and are replaced by this one.
 
+> **Rubric sweep, 2026-10-06 (no recount needed).** Every graded row of the
+> Open Triplestore column was checked against the Full rubric of `docs/standards.md`: each
+> known failure, skip and divergence list of the vendored suites was classified as a test-suite
+> defect, an open external specification issue, an external engine limit, or a gap in this
+> project's code, and each of the last kind was fixed or filed. Fixed: the RDF 1.1 Semantics
+> cases (D-entailment by value, `rdfD1`, lexical spaces without whitespace normalization,
+> `rdf:XMLLiteral` checks; none fails now) and the OGC GeoSPARQL validator's S18 example
+> (braces in `REGEX` / `sh:pattern`). Filed: [#504](https://github.com/philipperenzen/open-triplestore/issues/504) (RDF 1.2, w3c/rdf-xml#97),
+> [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
+> [#508](https://github.com/philipperenzen/open-triplestore/issues/508) (SHACL test defects), [#509](https://github.com/philipperenzen/open-triplestore/issues/509) (GeoSPARQL DGGS scope) and [#510](https://github.com/philipperenzen/open-triplestore/issues/510)
+> (GeoSPARQL `getSRID` / `geometryType` return type, back with the owner). No grade changed.
+>
 > Open Triplestore recounted on 2026-10-13 (round 3, card K1), 26 → **28 of 28**: JSON-LD 1.1
 > and RML follow their new Full grades in `docs/standards.md`. JSON-LD's serialiser now runs the
 > fromRdf list and JSON-literal conversions, and the store refuses an `rdf:JSON` literal that
