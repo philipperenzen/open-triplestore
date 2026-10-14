@@ -127,7 +127,11 @@ pub fn catalog_shapes(store: &TripleStore, graph: &str) -> Vec<CatalogShape> {
             ?shape a ?t .
             FILTER(?t IN (sh:NodeShape, sh:PropertyShape))
             FILTER(isIRI(?shape))
-            OPTIONAL {{ ?shape rdfs:label ?label }}
+            # The display name: rdfs:label, else sh:name (which the IDS
+            # importer writes on each specification's node shape).
+            OPTIONAL {{ ?shape rdfs:label ?rdfsLabel }}
+            OPTIONAL {{ ?shape sh:name ?shName }}
+            BIND(COALESCE(?rdfsLabel, ?shName) AS ?label)
             OPTIONAL {{ ?shape sh:targetClass ?tc }}
             OPTIONAL {{ ?shape sh:path ?path }}
           }}
@@ -312,6 +316,37 @@ mod tests {
         let mixed = catalog_shapes(&store, "urn:data:mixed");
         assert_eq!(mixed.len(), 1);
         assert_eq!(mixed[0].shape, "http://ex/MixedShape");
+    }
+
+    #[test]
+    fn a_shape_without_rdfs_label_is_named_by_sh_name() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                   <urn:ids:spec1> a sh:NodeShape ; sh:name "Walls need a fire rating" .
+                   <urn:ids:spec2> a sh:NodeShape ; rdfs:label "Labelled" ; sh:name "Named" ."#,
+                RdfFormat::Turtle,
+                Some("urn:shapes:ids"),
+            )
+            .unwrap();
+        let shapes = catalog_shapes(&store, "urn:shapes:ids");
+        let label = |iri: &str| {
+            shapes
+                .iter()
+                .find(|s| s.shape == iri)
+                .and_then(|s| s.label.clone())
+        };
+        assert_eq!(
+            label("urn:ids:spec1").as_deref(),
+            Some("Walls need a fire rating")
+        );
+        assert_eq!(
+            label("urn:ids:spec2").as_deref(),
+            Some("Labelled"),
+            "rdfs:label wins"
+        );
     }
 
     #[test]
