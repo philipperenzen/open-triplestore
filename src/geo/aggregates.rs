@@ -249,8 +249,10 @@ mod tests {
     use super::*;
 
     /// A custom aggregate call with several arguments parses into the algebra
-    /// with all of them, and prints back to a query that parses to the same
-    /// algebra (the scoped and rewritten query paths print and re-parse).
+    /// with all of them, and prints back to a query that parses with all of
+    /// them again (the scoped and rewritten query paths print and re-parse;
+    /// spargebra prints a grouped query as a sub-select, so the algebra gains a
+    /// projection on the way, but the aggregate is the same).
     #[test]
     fn a_two_argument_aggregate_round_trips_through_the_parser() {
         use spargebra::algebra::{AggregateExpression, AggregateFunction, GraphPattern};
@@ -264,7 +266,6 @@ mod tests {
         let again = crate::sparql::parser()
             .parse_query(&parsed.to_string())
             .unwrap();
-        assert_eq!(parsed, again, "{parsed}");
         fn aggregates(p: &GraphPattern) -> Option<&[(oxrdf::Variable, AggregateExpression)]> {
             match p {
                 GraphPattern::Group { aggregates, .. } => Some(aggregates),
@@ -275,10 +276,14 @@ mod tests {
                 _ => None,
             }
         }
-        let spargebra::Query::Select { pattern, .. } = &parsed else {
-            panic!()
+        let aggregate_of = |q: &spargebra::Query| {
+            let spargebra::Query::Select { pattern, .. } = q else {
+                panic!()
+            };
+            aggregates(pattern).unwrap()[0].1.clone()
         };
-        let aggs = aggregates(pattern).unwrap();
+        assert_eq!(aggregate_of(&parsed), aggregate_of(&again), "{parsed}");
+        let aggs = [(oxrdf::Variable::new_unchecked("h"), aggregate_of(&parsed))];
         assert!(matches!(
             &aggs[0].1,
             AggregateExpression::FunctionCall {
