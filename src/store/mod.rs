@@ -2,6 +2,7 @@ pub mod changes;
 pub mod consensus;
 pub mod engine;
 pub mod graph_snapshot;
+pub mod literals;
 pub mod parallel_mirror;
 pub mod query_cache;
 pub mod recovery;

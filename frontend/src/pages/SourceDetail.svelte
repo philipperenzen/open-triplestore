@@ -226,11 +226,11 @@
   }
 
   const changesOf = (tbl) => [
-    [$t('pages.sourceDetail.driftNewCols'), tbl.newColumns],
-    [$t('pages.sourceDetail.driftRemovedCols'), tbl.removedColumns],
-    [$t('pages.sourceDetail.driftTypeChanges'), tbl.typeChanges.map((c) => `${c.column}: ${c.from} → ${c.to}`)],
-    [$t('pages.sourceDetail.driftShifts'), tbl.distributionShifts.map((s) => `${s.column} (KL ${s.klDivergence.toFixed(2)})`)],
-    [$t('pages.sourceDetail.driftCodeLists'), tbl.codeListChanges.map((c) => `${c.column}: ${c.change}`)],
+    [$t('pages.sourceDetail.driftNewCols'), tbl.new_columns],
+    [$t('pages.sourceDetail.driftRemovedCols'), tbl.removed_columns],
+    [$t('pages.sourceDetail.driftTypeChanges'), tbl.type_changes.map((c) => `${c.column}: ${c.from} → ${c.to}`)],
+    [$t('pages.sourceDetail.driftShifts'), tbl.distribution_shifts.map((s) => `${s.column} (KL ${s.kl_divergence.toFixed(2)})`)],
+    [$t('pages.sourceDetail.driftCodeLists'), tbl.code_list_changes.map((c) => `${c.column}: ${c.change}`)],
   ].filter(([, items]) => items.length);
 
   // ───────────────────────────── Map ─────────────────────────────
@@ -321,12 +321,12 @@
     saving = true;
     try {
       const out = await convertLegacyMapping({
-        format: 'sql2rdf', source: id, document: legacyText, emptyAsNull: legacyEmptyAsNull,
+        format: 'sql2rdf', source: id, document: legacyText, empty_as_null: legacyEmptyAsNull,
       });
       rmlText = out.rml;
       rmlLoadedFor = '__converted__';
       legacyWarnings = out.warnings || [];
-      toastSuccess($t('pages.sourceDetail.converted', { values: { count: out.triplesMaps } }));
+      toastSuccess($t('pages.sourceDetail.converted', { values: { count: out.triples_maps } }));
       mapView = 'turtle';
     } catch (e) {
       toastError(e.message);
@@ -375,13 +375,13 @@
   async function runDryRun() {
     dryRunning = true;
     try {
-      const body = { sampleSize: Number(dr.sampleSize) || 20 };
+      const body = { sample_size: Number(dr.sampleSize) || 20 };
       if (dr.table.trim()) body.table = dr.table.trim();
       if (dr.mapping === '__editor__') {
         body.rml = rmlText;
         const m = selected;
-        if (m?.shapesGraph) body.shapesGraph = m.shapesGraph;
-        if (m?.model) { body.model = m.model; body.modelVersion = m.modelVersion; }
+        if (m?.shapes_graph) body.shapes_graph = m.shapes_graph;
+        if (m?.model) { body.model = m.model; body.model_version = m.model_version; }
       } else {
         body.mapping = dr.mapping;
       }
@@ -392,8 +392,8 @@
           n: rounds.length + 1,
           at: new Date().toLocaleTimeString(),
           mapping: dr.mapping === '__editor__' ? $t('pages.sourceDetail.useEditor') : dr.mapping,
-          defects: drResult.classification.mappingDefects.length,
-          issues: drResult.classification.dataIssues.length,
+          defects: drResult.classification.mapping_defects.length,
+          issues: drResult.classification.data_issues.length,
           triples: drResult.triples,
           result: drResult,
         },
@@ -562,20 +562,20 @@
       <h2><Database size={18} /> {source.name}</h2>
       <div class="chips">
         <span class="chip">{source.dialect}</span>
-        {#if source.readOnly}<span class="chip chip-ok"><Lock size={10} /> {$t('pages.sources.chipReadOnly')}</span>{/if}
+        {#if source.read_only}<span class="chip chip-ok"><Lock size={10} /> {$t('pages.sources.chipReadOnly')}</span>{/if}
         {#if source.allowlisted}
           <span class="chip chip-ok"><ShieldCheck size={10} /> {$t('pages.sources.chipAllowlisted')}</span>
         {:else}
           <span class="chip chip-warn"><ShieldAlert size={10} /> {$t('pages.sources.chipNotAllowlisted')}</span>
         {/if}
-        {#if source.allowModelAssist}<span class="chip chip-assist"><Sparkles size={10} /> {$t('pages.sources.chipModelAssist')}</span>{/if}
+        {#if source.allow_model_assist}<span class="chip chip-assist"><Sparkles size={10} /> {$t('pages.sources.chipModelAssist')}</span>{/if}
       </div>
       <dl class="facts">
         <div><dt>{$t('pages.sourceDetail.location')}</dt><dd>{source.host ? `${source.host}${source.port ? `:${source.port}` : ''} · ` : ''}{source.database}</dd></div>
         {#if source.credential}
           <div><dt>{$t('pages.sourceDetail.credential')}</dt><dd><code>{source.credential}</code> <span class="dim">{$t('pages.sourceDetail.credentialNote')}</span></dd></div>
         {/if}
-        <div><dt>{$t('pages.sourceDetail.timeout')}</dt><dd>{source.statementTimeoutMs} ms</dd></div>
+        <div><dt>{$t('pages.sourceDetail.timeout')}</dt><dd>{source.statement_timeout_ms} ms</dd></div>
         {#if source.dataset}<div><dt>{$t('pages.sourceDetail.dataset')}</dt><dd><Link to={`/datasets/${source.dataset}`}>{source.dataset}</Link></dd></div>{/if}
         <div><dt>{$t('pages.sourceDetail.serving')}</dt>
           <dd>{#if source.production}<code>{source.production.graph}</code>{:else}<span class="dim">{$t('pages.sources.neverRun')}</span>{/if}</dd>
@@ -712,12 +712,12 @@
                 <Table2 size={14} /><strong>{tb.name}</strong>
                 <span class="chip">{tb.kind}</span>
                 <span class="dim">{tb.columns.length} {$t('pages.sourceDetail.columns')}</span>
-                {#if tb.rowEstimate != null}<span class="dim">≈{tb.rowEstimate.toLocaleString()} {$t('pages.sourceDetail.rows')}</span>{/if}
+                {#if tb.row_estimate != null}<span class="dim">≈{tb.row_estimate.toLocaleString()} {$t('pages.sourceDetail.rows')}</span>{/if}
               </button>
               <div class="cols">
                 {#each tb.columns as c (c.name)}
-                  <span class="col" class:pk={c.primaryKey} title={`${c.nativeType}${c.nullable ? '' : ' NOT NULL'}${c.comment ? ` — ${c.comment}` : ''}`}>
-                    {#if c.primaryKey}<KeyRound size={10} />{/if}{c.name} <em>{c.genericType}</em>
+                  <span class="col" class:pk={c.primary_key} title={`${c.native_type}${c.nullable ? '' : ' NOT NULL'}${c.comment ? ` — ${c.comment}` : ''}`}>
+                    {#if c.primary_key}<KeyRound size={10} />{/if}{c.name} <em>{c.generic_type}</em>
                   </span>
                 {/each}
               </div>
@@ -742,7 +742,7 @@
           <h3><GitCompareArrows size={15} /> {$t('pages.sourceDetail.driftHeading')}</h3>
           {#if mappings.length}
             <select bind:value={selectedMapping}>
-              {#each mappings as m (m.id)}<option value={m.id}>{m.title} (v{m.version}{m.profileVersion ? ` · profile v${m.profileVersion}` : ''})</option>{/each}
+              {#each mappings as m (m.id)}<option value={m.id}>{m.title} (v{m.version}{m.profile_version ? ` · profile v${m.profile_version}` : ''})</option>{/each}
             </select>
           {/if}
           <span class="grow"></span>
@@ -752,12 +752,12 @@
           </button>
         </div>
         {#if drift}
-          {#if !drift.affectedTables.length && !drift.modelVersionBump}
+          {#if !drift.affected_tables.length && !drift.model_version_bump}
             <p class="ok"><Check size={13} /> {$t('pages.sourceDetail.driftNone', { values: { baseline: drift.baseline, candidate: drift.candidate } })}</p>
           {:else}
-            <p class="small dim">v{drift.baseline} → v{drift.candidate} · KL ≥ {drift.klThreshold}</p>
-            {#if drift.modelVersionBump}
-              <p class="warn"><AlertTriangle size={13} /> {$t('pages.sourceDetail.modelBump', { values: { model: drift.modelVersionBump.model, from: drift.modelVersionBump.mappingVersion, to: drift.modelVersionBump.latestVersion } })}</p>
+            <p class="small dim">v{drift.baseline} → v{drift.candidate} · KL ≥ {drift.kl_threshold}</p>
+            {#if drift.model_version_bump}
+              <p class="warn"><AlertTriangle size={13} /> {$t('pages.sourceDetail.modelBump', { values: { model: drift.model_version_bump.model, from: drift.model_version_bump.mapping_version, to: drift.model_version_bump.latest_version } })}</p>
             {/if}
             {#each drift.tables.filter((x) => x.affected) as tbl (tbl.table)}
               <div class="drift-table">
@@ -767,8 +767,8 @@
                 {/each}
               </div>
             {/each}
-            {#if drift.newTables.length}<div class="small"><span class="dim">{$t('pages.sourceDetail.driftNewTables')}:</span> {drift.newTables.join(', ')}</div>{/if}
-            {#if drift.removedTables.length}<div class="small"><span class="dim">{$t('pages.sourceDetail.driftRemovedTables')}:</span> {drift.removedTables.join(', ')}</div>{/if}
+            {#if drift.new_tables.length}<div class="small"><span class="dim">{$t('pages.sourceDetail.driftNewTables')}:</span> {drift.new_tables.join(', ')}</div>{/if}
+            {#if drift.removed_tables.length}<div class="small"><span class="dim">{$t('pages.sourceDetail.driftRemovedTables')}:</span> {drift.removed_tables.join(', ')}</div>{/if}
           {/if}
         {/if}
 
@@ -781,9 +781,9 @@
               <li class:closed={tk.status === 'closed'}>
                 <span class="chip" class:chip-warn={tk.status === 'open'}>{tk.status}</span>
                 <span>{tk.reason}</span>
-                <span class="dim small">{tk.affectedTables.join(', ')}</span>
+                <span class="dim small">{tk.affected_tables.join(', ')}</span>
                 {#if tk.mapping}<code class="small">{tk.mapping.replace('urn:mapping:', '')}</code>{/if}
-                <span class="dim small">{when(tk.updatedAt)}</span>
+                <span class="dim small">{when(tk.updated_at)}</span>
                 {#if tk.status === 'open'}
                   <button class="btn btn-sm btn-ghost" on:click={() => closeOne(tk.id)}><X size={12} /> {$t('pages.sourceDetail.closeTicket')}</button>
                 {/if}
@@ -805,7 +805,7 @@
             <span class="dim">{$t('pages.sourceDetail.noMappings')}</span>
           {/if}
           {#if selected}
-            {#if selected.shapesGraph}<span class="dim small">{$t('pages.sourceDetail.gatedBy')} <code>{shortenIRI(selected.shapesGraph)}</code></span>{/if}
+            {#if selected.shapes_graph}<span class="dim small">{$t('pages.sourceDetail.gatedBy')} <code>{shortenIRI(selected.shapes_graph)}</code></span>{/if}
             <span class="grow"></span>
             <span class="small dim">{$t('pages.sourceDetail.state')}:</span>
             <span class="chip" class:chip-ok={selected.state === 'approved'} class:chip-warn={selected.state === 'rejected'}>{$t(`pages.sourceDetail.state_${selected.state}`)}</span>
@@ -832,7 +832,7 @@
               {#each decisions as d (d.id)}
                 <li>
                   <span class="chip chip-tiny" class:chip-ok={d.outcome === 'approve'} class:chip-warn={d.outcome === 'reject'}>{$t(`pages.sourceDetail.decision_${d.outcome}`)}</span>
-                  <span class="dim small">v{d.mappingVersion} · {when(d.decidedAt)}</span>
+                  <span class="dim small">v{d.mapping_version} · {when(d.decided_at)}</span>
                   {#if d.confidence != null}<span class="small">{pct(d.confidence)}</span>{/if}
                   {#if d.target}<code class="small">{shortenIRI(d.target)}</code>{/if}
                   {#if d.note}<span class="small">{d.note}</span>{/if}
@@ -950,14 +950,14 @@
             <strong>{$t('pages.sourceDetail.drRows', { values: { rows: drResult.rows, triples: drResult.triples } })}</strong>
             {#if drResult.report}
               <span class="chip" class:chip-ok={drResult.report.conforms} class:chip-warn={!drResult.report.conforms}>
-                {drResult.report.conforms ? $t('pages.sourceDetail.drConforms') : $t('pages.sourceDetail.drViolations', { values: { count: drResult.report.resultsCount } })}
+                {drResult.report.conforms ? $t('pages.sourceDetail.drConforms') : $t('pages.sourceDetail.drViolations', { values: { count: drResult.report.results_count } })}
               </span>
             {/if}
-            <span class="dim small">{$t('pages.sourceDetail.expires', { values: { graph: drResult.graph, when: when(drResult.expiresAt) } })}</span>
+            <span class="dim small">{$t('pages.sourceDetail.expires', { values: { graph: drResult.graph, when: when(drResult.expires_at) } })}</span>
           </div>
           <div class="chips">
-            {#each drResult.maps as m (m.triplesMap)}
-              <span class="chip chip-tiny" title={m.triplesMap}>{m.table ?? shortenIRI(m.triplesMap)}: {$t('pages.sourceDetail.drMaps', { values: { sampled: m.sampledRows, pulled: m.pulledInRows } })} → {m.triples}</span>
+            {#each drResult.maps as m (m.triples_map)}
+              <span class="chip chip-tiny" title={m.triples_map}>{m.table ?? shortenIRI(m.triples_map)}: {$t('pages.sourceDetail.drMaps', { values: { sampled: m.sampled_rows, pulled: m.pulled_in_rows } })} → {m.triples}</span>
             {/each}
           </div>
           {#if drResult.warnings.length}
@@ -967,9 +967,9 @@
 
         <div class="two">
           <div class="card">
-            <h4 class="bad-h"><AlertTriangle size={13} /> {$t('pages.sourceDetail.mappingDefects')} <span class="count">{drResult.classification.mappingDefects.length}</span></h4>
-            {#if !drResult.classification.mappingDefects.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
-            {#each drResult.classification.mappingDefects as f}
+            <h4 class="bad-h"><AlertTriangle size={13} /> {$t('pages.sourceDetail.mappingDefects')} <span class="count">{drResult.classification.mapping_defects.length}</span></h4>
+            {#if !drResult.classification.mapping_defects.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
+            {#each drResult.classification.mapping_defects as f}
               <div class="finding defect">
                 <div><code>{formatShaclPath(String(f.path ?? f.shape))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
                 <div class="small">{f.message}</div>
@@ -978,13 +978,13 @@
             {/each}
           </div>
           <div class="card">
-            <h4><AlertTriangle size={13} /> {$t('pages.sourceDetail.dataIssues')} <span class="count">{drResult.classification.dataIssues.length}</span></h4>
-            {#if !drResult.classification.dataIssues.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
-            {#each drResult.classification.dataIssues as f}
+            <h4><AlertTriangle size={13} /> {$t('pages.sourceDetail.dataIssues')} <span class="count">{drResult.classification.data_issues.length}</span></h4>
+            {#if !drResult.classification.data_issues.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
+            {#each drResult.classification.data_issues as f}
               <div class="finding issue">
                 <div><code>{formatShaclPath(String(f.path ?? f.shape))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
                 <div class="small">{f.message}</div>
-                <div class="small dim">{$t('pages.sourceDetail.share', { values: { affected: f.affected, population: f.population, share: Math.round(f.share * 100) } })} · {f.focusNodes.map(shortenIRI).join(', ')}</div>
+                <div class="small dim">{$t('pages.sourceDetail.share', { values: { affected: f.affected, population: f.population, share: Math.round(f.share * 100) } })} · {f.focus_nodes.map(shortenIRI).join(', ')}</div>
               </div>
             {/each}
           </div>
@@ -1070,7 +1070,7 @@
                 </span>
                 {#if isProduction(r)}<span class="chip chip-ok">{$t('pages.sourceDetail.inProduction')}</span>{/if}
                 <code class="graph">{shortenIRI(r.graph)}</code>
-                <span class="dim">{when(r.startedAt)}</span>
+                <span class="dim">{when(r.started_at)}</span>
               </div>
               <div class="run-meta">
                 {#if r.mapping}
@@ -1078,10 +1078,10 @@
                 {:else}
                   <span class="chip chip-tiny">{$t('pages.sourceDetail.snapshotOfEndpoint')}</span>
                 {/if}
-                <span>{r.rowsExtracted.toLocaleString()} {$t('pages.sourceDetail.rows')}</span>
-                <span>{r.triplesProduced.toLocaleString()} {$t('pages.sourceDetail.triples')}</span>
-                <span>{$t('pages.sourceDetail.nowHolding', { values: { count: r.graphTriples.toLocaleString() } })}</span>
-                <span>{duration(r.durationMs)}</span>
+                <span>{r.rows_extracted.toLocaleString()} {$t('pages.sourceDetail.rows')}</span>
+                <span>{r.triples_produced.toLocaleString()} {$t('pages.sourceDetail.triples')}</span>
+                <span>{$t('pages.sourceDetail.nowHolding', { values: { count: r.graph_triples.toLocaleString() } })}</span>
+                <span>{duration(r.duration_ms)}</span>
                 {#if r.shacl}
                   <span class:bad={!r.shacl.conforms}>
                     {r.shacl.conforms
@@ -1100,7 +1100,7 @@
                     <Undo2 size={12} /> {$t('pages.sourceDetail.rollback')}
                   </button>
                 {/if}
-                {#if r.status === 'rejected' && !isProduction(r) && r.graphTriples > 0}
+                {#if r.status === 'rejected' && !isProduction(r) && r.graph_triples > 0}
                   <button class="btn btn-sm" on:click={() => promote(r.id)} disabled={promoting === r.id}>
                     {#if promoting === r.id}<Loader2 size={12} class="spin" />{:else}<Rocket size={12} />{/if}
                     {$t('pages.sourceDetail.promote')}
@@ -1177,7 +1177,7 @@
                   {#if suggestions[it.id]}
                     <div class="small">
                       <span class="dim">{$t('pages.sourceDetail.modelSays', { values: { model: suggestions[it.id].model } })}</span>
-                      {#if !suggestions[it.id].valuesShared}<span class="chip chip-tiny">{$t('pages.sourceDetail.valuesWithheld')}</span>{/if}
+                      {#if !suggestions[it.id].values_shared}<span class="chip chip-tiny">{$t('pages.sourceDetail.valuesWithheld')}</span>{/if}
                     </div>
                     <pre class="rml">{JSON.stringify(suggestions[it.id].suggestion, null, 2)}</pre>
                   {/if}

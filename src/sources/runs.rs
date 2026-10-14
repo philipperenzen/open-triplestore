@@ -140,11 +140,21 @@ fn watermark_state(
     conn: &mut dyn ots_plugin_api::sources::SourceConnection,
     column: &str,
 ) -> Result<(HashSet<String>, Option<String>), String> {
+    // The catalogue names the mapping's tables stand for, by the
+    // connection's identifier rules (R2RML §5).
+    let rules = conn
+        .identifier_rules()
+        .map_err(|e| format!("reading the datasource's identifier rules: {e}"))?;
     let wanted: HashSet<String> = mapping
         .triples_maps
         .iter()
         .filter(|tm| tm.logical_source.query.is_none())
-        .filter_map(|tm| tm.logical_source.table_name.clone())
+        .filter_map(|tm| {
+            crate::rml::sqlident::catalogue_table(
+                tm.logical_source.table_name.as_deref()?,
+                Some(&rules),
+            )
+        })
         .collect();
     let tables = conn
         .introspect()
@@ -362,7 +372,7 @@ pub fn execute(
     let increment = if mode == RunMode::Watermark {
         let column = source.watermark_column.clone().ok_or_else(|| {
             RunError::BadRequest(format!(
-                "datasource '{}' declares no watermarkColumn, so there is nothing to read \
+                "datasource '{}' declares no watermark_column, so there is nothing to read \
                  incrementally",
                 source.id
             ))
@@ -1027,7 +1037,7 @@ pub fn metrics(store: &TripleStore) -> serde_json::Value {
     };
     serde_json::json!({
         "sources": sources.len(),
-        "sourcesInProduction": sources.iter().filter(|s| s.production.is_some()).count(),
+        "sources_in_production": sources.iter().filter(|s| s.production.is_some()).count(),
         "mappings": registry::list_mappings(store, None).len(),
         "runs": {
             "total": runs.len(),
@@ -1035,11 +1045,11 @@ pub fn metrics(store: &TripleStore) -> serde_json::Value {
             "rejected": rejected,
             "failed": failed,
         },
-        "rowsExtracted": rows,
-        "triplesProduced": triples,
-        "totalDurationMs": duration,
-        "shaclPassRate": pass_rate,
-        "reviewQueueDepth": super::review::queue_depth(store),
+        "rows_extracted": rows,
+        "triples_produced": triples,
+        "total_duration_ms": duration,
+        "shacl_pass_rate": pass_rate,
+        "review_queue_depth": super::review::queue_depth(store),
     })
 }
 
@@ -1187,8 +1197,11 @@ mod tests {
         let m = metrics(&store);
         assert_eq!(m["sources"], 0);
         assert_eq!(m["runs"]["total"], 0);
-        assert_eq!(m["rowsExtracted"], 0);
-        assert!(m["shaclPassRate"].is_null(), "no gated runs means no rate");
+        assert_eq!(m["rows_extracted"], 0);
+        assert!(
+            m["shacl_pass_rate"].is_null(),
+            "no gated runs means no rate"
+        );
     }
 
     #[test]
@@ -1251,8 +1264,8 @@ mod tests {
         assert_eq!(m["runs"]["total"], 2);
         assert_eq!(m["runs"]["succeeded"], 1);
         assert_eq!(m["runs"]["rejected"], 1);
-        assert_eq!(m["rowsExtracted"], 20);
-        assert_eq!(m["triplesProduced"], 80);
-        assert_eq!(m["shaclPassRate"], 0.5);
+        assert_eq!(m["rows_extracted"], 20);
+        assert_eq!(m["triples_produced"], 80);
+        assert_eq!(m["shacl_pass_rate"], 0.5);
     }
 }

@@ -66,6 +66,42 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   merged into its last report.
 - **`POST /api/admin/versions/sweep`** purges what deleted datasets left
   behind: their versions, unreferenced version graphs, stale change-log pins.
+- **Web UI for reasoning, SWRL, ShEx, RDF Patch and version diff/GC**, which
+  were API-only. A dataset's **Reasoning** page sets its entailment regime
+  (SKOS included), mode and identity policy and shows the last run, its
+  consistency and the server's OWL 2 DL backend; materialises a regime now
+  (with `eq_ref` for OWL 2 RL), runs OWL 2 DL checks, lists their background
+  jobs with their status, shows the ignored-axioms report, manages the stored
+  SWRL rules, runs rules once with a regime (rounds, regime triples, the
+  message naming a refused built-in) and shows the OWL 2 QL rewriting of a
+  query. **ShEx validation** (sidebar and dataset page) takes a ShExC or ShExJ
+  schema and a shape map; a dataset's **RDF Patch** page applies a patch (or
+  records it in the patch log) and browses, shows and downloads the log; the
+  version list compares versions (counts and the changes from the RDF Patch)
+  and cleans up old ones after the app's confirmation dialog. A sidebar
+  **Reasoning** page runs SWRL, DL checks and rewriting outside a dataset.
+- **Stored SWRL rules over HTTP**: `GET/POST /api/datasets/{id}/rules`,
+  `PUT/DELETE …/rules/{set}` and `POST …/rules/run` keep rule sets written in
+  any SWRL syntax in the dataset's managed `entailment`-role graph
+  `urn:ots:rules:<id>` (as `swrl:Imp` triples, with their source), check every
+  rule before anything is written, and run the rules again after each change.
+- **`GET /api/reasoning/jobs`** lists the caller's background reasoning jobs
+  (an admin's: everyone's), each with the dataset it ran over; `?dataset=`
+  narrows the list.
+- **Performance comparison with other open-source triplestores.**
+  [`docs/performance-comparison.md`](docs/performance-comparison.md) measures
+  Open Triplestore against upstream Oxigraph 0.5.11, Apache Jena Fuseki 6.2.0,
+  QLever, Virtuoso Open Source 7.2.17 and Eclipse RDF4J 6.1.0 on one machine,
+  one store at a time, each in a 4 GiB / 4-CPU container: BSBM explore at 1k
+  and 10k products, load time, a SPARQL 1.1 feature mix, SHACL validation and
+  1/4/8 concurrent clients, with median/p95 latency, QMpH, peak memory and a
+  per-query result-count cross-check. The harness is `scripts/bench-compare/`
+  (pinned images, fetched BSBM generator, quiet-window and disk checks); the
+  data is in `docs/perf-data/2026-10-03/`. It reports where this store loses —
+  slower than its own engine with the accelerator off, its load path, memory
+  headroom in 4 GiB, correlated `NOT EXISTS` — and links the issues filed for
+  them (#468–#471). Linked from the comparison matrix, `docs/performance.md`
+  and the README; also in the in-app docs viewer.
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -737,6 +773,133 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Version operations on one dataset are serialised: two concurrent creates of
   one label make one version and a `400`. A pipeline's auto-versions and
   validate-and-commit no longer overwrite a version cut in the same second.
+- **`POST /api/reasoning/materialize` with a `dataset` and no `target_graph`**
+  writes the dataset's own graph for the regime, `urn:entailment:<regime>:<id>`,
+  which the dataset's writers may fill; it used to write the shared
+  `urn:entailment:<regime>` graph, which only an admin could.
+- **`GET /api/reasoning/status`** answers `{graphs, dl_backend}`: the counts per
+  shared entailment graph moved under `graphs`, and the server's OWL 2 DL backend
+  is reported beside them.
+- **`image` Cargo feature.** `image` is an alias for the published image's
+  feature set — `full`, `saml` and the three SQL connector plugins — and the
+  Dockerfile's default `CARGO_FEATURES` is now `image`, so
+  `cargo build --release --features image` builds the image's binary
+  natively. The `full` and `default` comments in `Cargo.toml` no longer claim
+  "all extensions" or SAML, and `docs/build-features.md` lists both aliases.
+- **SHACL write gates run in one pass with a defined order.** A Graph Store
+  `PUT`/`POST` and validate-and-commit used to run the Studio gates
+  (`gate_writes` pipelines, validation-layer bindings) and then, separately,
+  the dataset's `shacl_on_write` shapes, staging the graph twice. Every write
+  path now runs all three in one pass over one staged graph, in a documented
+  order — pipelines (own threshold), bindings (`Violation`), then the
+  dataset's `shacl_on_write` shapes (any result refuses) — and answers with
+  the first failing gate's report; the write lands only when all pass. A
+  malformed body on a gated Graph Store write now gets the same answer as on
+  an ungated one. See `docs/shacl.md` "How the write gates combine".
+- **One surface for the identity policy; `eq_ref` in the dataset setting**
+  (breaking). `PUT /api/datasets/{id}/identity` is now the only way to set a
+  dataset's `owl:sameAs` policy: `PUT …/entailment` no longer takes
+  `identity` and refuses unknown fields (`422`). The entailment setting gains
+  `eq_ref` (`owl2-rl` and `skos`; kept until changed, reported by
+  `GET …/entailment`), honoured by every run of the dataset, the
+  write-triggered ones and the joint SWRL runs included;
+  `POST /api/reasoning/materialize` with a `dataset` uses it unless the body
+  says otherwise. A run without a dataset (`materialize`, `check`,
+  `swrl/execute`) takes an `identity` from the body and defaults to
+  `sameas-narrow`, the dataset default, instead of `sameas-full`; a dataset
+  run refuses one (`400`). The materialisation report names the policy it
+  applied (`identity`). See `docs/reasoning.md`.
+- **LDP: a resource that does not exist is a 404 with its discovery
+  headers.** `GET`/`HEAD` on an LDP path nothing created — never written,
+  deleted, an intermediate path, or an IRI another resource only links to —
+  used to answer `200` with an empty body whenever any triple mentioned the
+  IRI, and a bare `404` otherwise. It now answers `404` carrying
+  `Link: <…acl>; rel="acl"`, the `constrainedBy` link and the caller's
+  `WAC-Allow` for that path, so ACL discovery and creating with `PUT` keep
+  working; a resource exists when an LDP write typed it, and the root
+  container always does. `PUT`, `PATCH` and `DELETE` use the same test, so a
+  `PUT` to a merely-mentioned IRI is a create (Append on the container, the
+  caller becomes owner). A caller without Read still gets `403` either way.
+  A `PUT` whose body does not parse or describes another resource is now
+  refused before anything is removed; it used to delete the resource's
+  triples first, so a refused `PUT` wiped the resource. See `docs/ldp.md`.
+- **Every JSON field of the HTTP API is snake_case** (breaking). The
+  datasource, mapping, run, gates, dry-run, drift, profile, review,
+  calibration and legacy-convert bodies (`/api/sources/*`, `/api/mappings/*`,
+  `/api/runs/*`, review items), the introspection and profile tables, and
+  the RML `data_errors` / sample `triples_map` rows no longer use camelCase:
+  `statementTimeoutMs` is `statement_timeout_ms`, `onDataError` is
+  `on_data_error`, `sampleSize` is `sample_size`, and so on, with no aliases.
+  The hand-built keys follow: `has_more` on `/api/browse/triples`,
+  `shapes_graph_iri` on `POST /api/shaclc/serialize`, `server_version`,
+  the `/api/sources/metrics` counters, `current_revision` and `version_iri`
+  on the model endpoints, `dataset_id` on a version commit, `parse_error` /
+  `saved_revision` on the saved-query repair, and `focus_node`,
+  `source_shape`, `source_constraint`, `source_constraint_component` in a
+  write gate's 422 (now the same keys as every other SHACL report). Enum
+  values keep their casing (`needsHuman`, `dateTime`), and formats another
+  specification defines keep its names (OGC API, 3D Tiles, ShExJ, WebAuthn,
+  SAML, the LOV API v2 `queryString`). Review items stored before this change
+  lose their stored violations and fixes; reset the install or re-run the
+  affected mappings. The web UI follows, and a unit test
+  (`spec_has_no_camel_case_properties`) fails the build on any upper-case
+  property in the OpenAPI document. See `docs/api-reference.md`.
+- **One ignored-axioms report for OWL 2 EL and QL** (breaking). An `owl2-ql`
+  materialisation now reports the axioms it left out as `ignored:
+  [{construct, count, example}]`, the shape `owl2-el` already used; the
+  QL-only `ignored_axioms` and `ignored_sample` fields are removed. Constructs
+  are named as in the OWL 2 Structural Specification (`ObjectUnionOf`,
+  `TransitiveObjectProperty`, `SameIndividual`), an axiom whose expression is
+  outside the profile counts under that expression's constructor, examples
+  are bare IRIs, and the most frequent construct comes first. RDFS, OWL 2 RL
+  and SKOS use every triple and OWL 2 DL refuses input outside its profile,
+  so they never report `ignored`. See `docs/reasoning.md`.
+
+- **RML / R2RML and JSON-LD 1.1 are graded Full; the Standards Score is 28
+  of 28** (`docs/standards.md` footnotes 9 and 13,
+  `docs/triplestore-comparison.md`). Each row had kept one deliberate
+  deviation, which the Full rubric does not accept; both are fixed (below),
+  and every failure that remains is footnoted with its issue: an engine limit
+  of SQLite and MySQL, or a defect in a test suite.
+- **SQL column and table names in mappings are SQL identifiers** (R2RML §5).
+  A regular (unquoted) name stands for its folded form and a delimited one
+  (`"Name"`, `` `Name` ``, `[Name]`) is exactly its text, compared the way the
+  datasource's engine does: PostgreSQL folds to lower case (and honours SQL
+  2008's upper case), SQLite and MySQL compare without regard to case, SQL
+  Server follows the database collation, SQL 2008 (the default) folds to upper
+  case; a virtual SPARQL source takes names verbatim. **Breaking:** on
+  PostgreSQL a mixed-case column created delimited (`"StudentId"`) must now be
+  written delimited (`rr:column "\"StudentId\""`); a regular `StudentId`
+  names `studentid`. A column name that is not one SQL identifier
+  (`rr:column "Unit Price"`) is refused, with the delimited spelling to use;
+  one that differs from a column only in case is refused before the first row
+  with that hint. `rr:tableName` parts fold the same way. Connectors report
+  their rules through the new `SourceConnection::identifier_rules`
+  (`plugins/api`); a connector that does not is read as SQL 2008. W3C
+  R2RMLTC0002f now passes on PostgreSQL. See `docs/sources.md`.
+- **A datatype-override literal carries the value's natural lexical form**
+  (R2RML §10.3). With `rr:datatype` or a datatype map, the literal's lexical
+  form is the canonical form of the SQL value, as for a natural literal, not
+  the source's own spelling, and a form the datatype does not accept is a
+  data error handled by the run's `on_data_error` policy, never written as an
+  ill-typed literal. **Breaking:** a `REAL` 0.25 typed `xsd:decimal` is now
+  `"2.5E-1"`, a data error; type decimals from `DECIMAL` / `NUMERIC` columns.
+- **A JSON-LD download follows the JSON-LD 1.1 serialisation algorithm.** A
+  well-formed RDF list is written as `@list`, without the `rdf:type rdf:List`
+  quads of its nodes (the algorithm drops them; RDF Schema entails them); an
+  `rdf:JSON` literal is written as its `@json` value, or typed with its text
+  when that is not the canonical form `@json` reads back as. W3C json-ld-api
+  fromRdf `0016`, `js08` and `js09` now pass; the runner's known-failure list
+  is empty. The vendored `oxjsonld` carries both changes, each with an
+  upstream draft (`vendor/oxjsonld/UPSTREAM-PR-5-json-literals.md`,
+  `UPSTREAM-PR-6-list-conversion.md`).
+- **An `rdf:JSON` literal that is not JSON is refused with 400** on every write
+  path — uploads and imports, SPARQL UPDATE (constants and computed values
+  alike, through the vendored Oxigraph's update evaluator), the Graph Store
+  Protocol, LDP and RDF Patch — and nothing of the request is written. Such a
+  literal is ill-typed (JSON-LD 1.1 §10.2), and no JSON-LD download could hold
+  it. An RML run that would generate one reports a data error. See
+  `docs/datatypes.md`.
 
 - **Standards Score recounted once for the second merge train: 26 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is

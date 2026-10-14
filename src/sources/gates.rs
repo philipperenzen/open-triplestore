@@ -43,7 +43,6 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// (column, property) pair from name similarity, description similarity and
 /// datatype compatibility; these are the weights it combines them with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct LexicalScorer {
     /// Weight of name similarity: the column name against the property's
     /// local name and labels.
@@ -59,7 +58,6 @@ pub struct LexicalScorer {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MappingGates {
     /// Confidence at or above which a proposal is accepted without review.
     pub auto_threshold: f64,
@@ -119,28 +117,28 @@ impl MappingGates {
                 Ok(())
             }
         };
-        unit("autoThreshold", self.auto_threshold)?;
-        unit("reviewThreshold", self.review_threshold)?;
-        unit("datatypeMismatchCap", self.datatype_mismatch_cap)?;
-        unit("ambiguityMargin", self.ambiguity_margin)?;
-        unit("enumMatchMinimum", self.enum_match_minimum)?;
-        unit("systematicShare", self.systematic_share)?;
-        unit("lexical.nameWeight", self.lexical.name_weight)?;
-        unit("lexical.commentWeight", self.lexical.comment_weight)?;
-        unit("lexical.typeWeight", self.lexical.type_weight)?;
-        unit("lexical.minimumScore", self.lexical.minimum_score)?;
+        unit("auto_threshold", self.auto_threshold)?;
+        unit("review_threshold", self.review_threshold)?;
+        unit("datatype_mismatch_cap", self.datatype_mismatch_cap)?;
+        unit("ambiguity_margin", self.ambiguity_margin)?;
+        unit("enum_match_minimum", self.enum_match_minimum)?;
+        unit("systematic_share", self.systematic_share)?;
+        unit("lexical.name_weight", self.lexical.name_weight)?;
+        unit("lexical.comment_weight", self.lexical.comment_weight)?;
+        unit("lexical.type_weight", self.lexical.type_weight)?;
+        unit("lexical.minimum_score", self.lexical.minimum_score)?;
         if self.review_threshold > self.auto_threshold {
             return Err(format!(
-                "reviewThreshold ({}) is above autoThreshold ({}); the review band would be empty",
+                "review_threshold ({}) is above auto_threshold ({}); the review band would be empty",
                 self.review_threshold, self.auto_threshold
             ));
         }
         if self.systematic_min_subjects == 0 {
-            return Err("systematicMinSubjects must be at least 1".to_string());
+            return Err("systematic_min_subjects must be at least 1".to_string());
         }
         if self.drift_kl_threshold.is_nan() || self.drift_kl_threshold < 0.0 {
             return Err(format!(
-                "driftKlThreshold must be zero or more, not {}",
+                "drift_kl_threshold must be zero or more, not {}",
                 self.drift_kl_threshold
             ));
         }
@@ -158,7 +156,7 @@ impl MappingGates {
 /// ignored — a misspelled gate silently keeping its old value is the failure
 /// mode this exists to prevent.
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct GatesPatch {
     pub auto_threshold: Option<f64>,
     pub review_threshold: Option<f64>,
@@ -172,7 +170,7 @@ pub struct GatesPatch {
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LexicalPatch {
     pub name_weight: Option<f64>,
     pub comment_weight: Option<f64>,
@@ -333,7 +331,6 @@ pub fn turtle(gates: &MappingGates) -> String {
 // ─────────────────────────────── HTTP ───────────────────────────────
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct GatesResponse {
     pub graph: &'static str,
     /// `configured` when the graph holds a saved configuration, `default`
@@ -422,12 +419,12 @@ mod tests {
             review_threshold: 0.95,
             ..Default::default()
         };
-        assert!(crossed.validate().unwrap_err().contains("reviewThreshold"));
+        assert!(crossed.validate().unwrap_err().contains("review_threshold"));
         let over = MappingGates {
             systematic_share: 1.5,
             ..Default::default()
         };
-        assert!(over.validate().unwrap_err().contains("systematicShare"));
+        assert!(over.validate().unwrap_err().contains("systematic_share"));
         let none = MappingGates {
             systematic_min_subjects: 0,
             ..Default::default()
@@ -448,7 +445,7 @@ mod tests {
     #[test]
     fn a_patch_changes_only_what_it_names() {
         let patch: GatesPatch =
-            serde_json::from_str(r#"{"systematicShare": 0.8, "lexical": {"nameWeight": 0.5}}"#)
+            serde_json::from_str(r#"{"systematic_share": 0.8, "lexical": {"name_weight": 0.5}}"#)
                 .unwrap();
         let g = patch.apply(MappingGates::default());
         assert_eq!(g.systematic_share, 0.8);

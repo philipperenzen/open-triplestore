@@ -82,7 +82,7 @@ pub enum StoreError {
     #[error("SPARQL evaluation error: {0}")]
     Evaluation(#[from] oxigraph::sparql::QueryEvaluationError),
     #[error("SPARQL update error: {0}")]
-    Update(#[from] oxigraph::sparql::UpdateEvaluationError),
+    Update(oxigraph::sparql::UpdateEvaluationError),
     #[error("SPARQL syntax error: {0}")]
     SparqlSyntax(#[from] oxigraph::sparql::SparqlSyntaxError),
     #[error("IO error: {0}")]
@@ -97,6 +97,28 @@ pub enum StoreError {
     Other(String),
     #[error("read-only replica: writes go to the leader {0}")]
     ReadOnly(String),
+    /// A literal outside its datatype's lexical space, which the store does
+    /// not hold ([`super::literals`]).
+    #[error("{0}")]
+    IllTypedLiteral(String),
+}
+
+impl From<oxigraph::sparql::UpdateEvaluationError> for StoreError {
+    /// An update that would insert an ill-typed literal is the caller's
+    /// error, as it is on every other write path ([`super::literals`]).
+    fn from(e: oxigraph::sparql::UpdateEvaluationError) -> Self {
+        match e {
+            oxigraph::sparql::UpdateEvaluationError::IllTypedLiteral(literal) => {
+                match super::literals::ill_typed(literal.as_ref()) {
+                    Some(why) => StoreError::IllTypedLiteral(why),
+                    None => {
+                        StoreError::IllTypedLiteral(format!("the literal {literal} is ill-typed"))
+                    }
+                }
+            }
+            other => StoreError::Update(other),
+        }
+    }
 }
 
 /// One step of [`TripleStore::apply_quad_ops`]: add or remove a quad.
@@ -2846,7 +2868,16 @@ impl TripleStore {
             }
             // Streamed straight into the store with nothing recording it.
             let mut loader = self.store.bulk_loader();
-            loader.load_from_reader(parser, reader)?;
+            // Each quad is checked as it streams past: an ill-typed literal
+            // fails the load before the loader commits anything.
+            let quads = parser.rename_blank_nodes().for_reader(reader).map(
+                |r| -> Result<Quad, StoreError> {
+                    let q = r.map_err(|e| StoreError::Parse(e.to_string()))?;
+                    super::literals::check_quad(q.as_ref())?;
+                    Ok(q)
+                },
+            );
+            loader.load_ok_quads::<StoreError, StoreError>(quads)?;
             loader.commit()?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
@@ -2878,8 +2909,11 @@ impl TripleStore {
         let mut loader = self.store.bulk_loader();
         let mut chunk: Vec<Quad> = Vec::with_capacity(CHUNK);
         let staged = (|| -> Result<(), StoreError> {
-            for q in parser.for_reader(reader) {
+            // Blank nodes renamed, as the bulk loader's own parse does, and
+            // every literal checked before anything commits.
+            for q in parser.rename_blank_nodes().for_reader(reader) {
                 let q = q.map_err(|e| StoreError::Parse(e.to_string()))?;
+                super::literals::check_quad(q.as_ref())?;
                 tracker.observe(&q, |q| Ok(self.store.contains(q.as_ref())?))?;
                 chunk.push(q);
                 if chunk.len() >= CHUNK {
@@ -2965,6 +2999,8 @@ impl TripleStore {
             crate::jsonld::with_loader(Self::parser_for(format, base_iri)?.for_reader(reader))
                 .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
                 .collect::<Result<Vec<_>, _>>()?;
+        // Nothing is written from a body that holds an ill-typed literal.
+        super::literals::check_quads(&quads)?;
 
         // Force everything into the target graph if one was requested.
         if let Some(graph_iri) = to_graph {
@@ -3905,6 +3941,7 @@ impl TripleStore {
         affected_graphs: &[String],
     ) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
+        super::literals::check_quads(&quads)?;
         let mut known: std::collections::HashMap<Option<String>, i64> =
             std::collections::HashMap::new();
         if !quads.is_empty() {
@@ -4116,6 +4153,12 @@ impl TripleStore {
             return Ok((Vec::new(), Vec::new()));
         }
         let _w = self.begin_write()?;
+        // Every literal an addition writes is checked first (an ill-typed
+        // `rdf:JSON`, say): a refusal writes nothing.
+        super::literals::check_quads(ops.iter().filter_map(|op| match op {
+            QuadOp::Add(q) => Some(q),
+            QuadOp::Remove(_) => None,
+        }))?;
         self.touch_quads(ops.iter().map(QuadOp::quad));
         let pre_count = self.pre_count();
         let intent = self.changes.begin("patch", Some(&graphs), &pre_count);
@@ -4209,6 +4252,7 @@ impl TripleStore {
 
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
+        super::literals::check_quad(quad.as_ref())?;
         self.touch_quads([&quad]);
         let graph = Self::graph_key_of(&quad);
         let pre_count = self.pre_count();

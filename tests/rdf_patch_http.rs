@@ -1258,3 +1258,57 @@ async fn an_anonymous_patch_is_unauthorized_not_an_error() {
     .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
+
+/// An `rdf:JSON` literal that is not JSON is ill-typed: a patch adding one is
+/// refused with a 400 and applies nothing — the other rows of its
+/// transaction included.
+#[tokio::test]
+async fn patch_refuses_an_ill_typed_json_literal() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "dst",
+            "dst",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("dst", G2).unwrap();
+    let app = test_app(state.clone());
+    let json = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>";
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/dst/patch",
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &format!(
+            "TX .\nA <urn:s> <urn:p> \"fine\" <{G2}> .\n\
+             A <urn:s> <urn:j> \"[{{]\"^^{json} <{G2}> .\nTC .\n"
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("ill-typed"), "{txt}");
+    assert!(
+        graph_triples(&state, G2).is_empty(),
+        "nothing may be applied"
+    );
+
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/dst/patch",
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &format!("TX .\nA <urn:s> <urn:j> \"[1]\"^^{json} <{G2}> .\nTC .\n"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "valid JSON applies: {txt}");
+}

@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use ots_plugin_api::sources::{
-    BatchSink, ConnectParams, Row, SourceConnection, SourceConnector, SourceError, TableInfo,
-    TableProfile,
+    BatchSink, ConnectParams, IdentifierRules, Row, SourceConnection, SourceConnector, SourceError,
+    TableInfo, TableProfile,
 };
 
 use super::sqlite::SqliteConnector;
@@ -198,6 +198,10 @@ impl SourceConnection for Guarded {
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {
         self.call(|c| c.server_version())
+    }
+
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        self.call(|c| c.identifier_rules())
     }
 
     fn profile(&mut self, table: &str) -> Result<TableProfile, SourceError> {

@@ -40,6 +40,7 @@ pub mod conformance;
 pub mod containers;
 pub mod data_models;
 pub mod dataset_changes;
+pub mod dataset_rules;
 pub mod dataset_settings;
 pub mod dataset_versions;
 pub mod dcat;

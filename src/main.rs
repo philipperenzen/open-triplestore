@@ -18,6 +18,7 @@ mod conformance;
 mod containers;
 mod data_models;
 mod dataset_changes;
+mod dataset_rules;
 mod dataset_settings;
 mod dataset_versions;
 mod dcat;

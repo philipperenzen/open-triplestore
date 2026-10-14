@@ -85,7 +85,9 @@ loses consequences, it never adds a wrong one. Such constructs include:
 - `owl:oneOf` with more than one member;
 - facets (datatype restrictions) and datatypes outside the EL map.
 
-The report counts these per construct, with one example subject:
+The report counts these per construct, with the first one read as the
+example (an IRI, or a blank-node label for an anonymous expression), the most
+frequent construct first. OWL 2 QL reports in the same shape:
 
 ```json
 "ignored": [

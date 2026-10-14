@@ -94,6 +94,12 @@ new dataset reusing the id saw them). `POST /api/admin/versions/sweep`
 no longer exist, version graphs no record names, pins of versions that are
 gone, expired builds.
 
+In the web UI, the dataset page's version list has **Compare** and a **Diff** per
+version (from that version to the live graphs, or between two versions): the
+per-graph counts, the changes row by row from the RDF Patch, and the patch to
+download. **Clean up** asks how many unpublished versions to keep, shows which
+versions would go, and deletes them after the app's confirmation dialog.
+
 ## Restore
 
 `POST /api/datasets/:id/versions/:ver/restore` puts the dataset's live graphs
@@ -280,6 +286,13 @@ the one its `H prev` names.
 | `GET /api/datasets/{id}/log/current` | The latest patch |
 | `GET /api/datasets/{id}/log/patch/{version}` | A patch by log version (all digits) |
 | `GET /api/datasets/{id}/log/patch/{id}` | A patch by id: the full IRI, or the UUID of a `uuid:` / `urn:uuid:` id |
+
+The dataset's **RDF Patch** page (`/datasets/{id}/patch`) applies a patch, pasted or
+from a file, either straight to the dataset (`POST …/patch`) or recorded in the log
+(`POST …/log`, adding the `H id` and the `H prev` naming the log's latest entry when
+the patch has none), with a graph for its triples; a SHACL write gate's refusal shows
+its report. Below it the log lists every entry, shows any patch, and downloads it,
+version 0 and the latest patch.
 
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<id>/log \
