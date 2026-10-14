@@ -43,6 +43,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identity DB open, outcome reported in the status); `GET
   /api/text-search/status` (size, freshness, substring push-down and the last
   rebuild).
+- **Web UI for reasoning, SWRL, ShEx, RDF Patch and version diff/GC**, which
+  were API-only. A dataset's **Reasoning** page sets its entailment regime
+  (SKOS included), mode and identity policy and shows the last run, its
+  consistency and the server's OWL 2 DL backend; materialises a regime now
+  (with `eq_ref` for OWL 2 RL), runs OWL 2 DL checks, lists their background
+  jobs with their status, shows the ignored-axioms report, manages the stored
+  SWRL rules, runs rules once with a regime (rounds, regime triples, the
+  message naming a refused built-in) and shows the OWL 2 QL rewriting of a
+  query. **ShEx validation** (sidebar and dataset page) takes a ShExC or ShExJ
+  schema and a shape map; a dataset's **RDF Patch** page applies a patch (or
+  records it in the patch log) and browses, shows and downloads the log; the
+  version list compares versions (counts and the changes from the RDF Patch)
+  and cleans up old ones after the app's confirmation dialog. A sidebar
+  **Reasoning** page runs SWRL, DL checks and rewriting outside a dataset.
+- **Stored SWRL rules over HTTP**: `GET/POST /api/datasets/{id}/rules`,
+  `PUT/DELETE …/rules/{set}` and `POST …/rules/run` keep rule sets written in
+  any SWRL syntax in the dataset's managed `entailment`-role graph
+  `urn:ots:rules:<id>` (as `swrl:Imp` triples, with their source), check every
+  rule before anything is written, and run the rules again after each change.
+- **`GET /api/reasoning/jobs`** lists the caller's background reasoning jobs
+  (an admin's: everyone's), each with the dataset it ran over; `?dataset=`
+  narrows the list.
 - **Performance comparison with other open-source triplestores.**
   [`docs/performance-comparison.md`](docs/performance-comparison.md) measures
   Open Triplestore against upstream Oxigraph 0.5.11, Apache Jena Fuseki 6.2.0,
@@ -723,6 +745,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `BACKUP_S3_ENABLED=true`, as scheduled backups always were; the answer adds
   `s3: {uploaded, error?}` (null when S3 is off). The OpenAPI document now says
   it answers 200, as it always did.
+- **`POST /api/reasoning/materialize` with a `dataset` and no `target_graph`**
+  writes the dataset's own graph for the regime, `urn:entailment:<regime>:<id>`,
+  which the dataset's writers may fill; it used to write the shared
+  `urn:entailment:<regime>` graph, which only an admin could.
+- **`GET /api/reasoning/status`** answers `{graphs, dl_backend}`: the counts per
+  shared entailment graph moved under `graphs`, and the server's OWL 2 DL backend
+  is reported beside them.
 - **`image` Cargo feature.** `image` is an alias for the published image's
   feature set — `full`, `saml` and the three SQL connector plugins — and the
   Dockerfile's default `CARGO_FEATURES` is now `image`, so

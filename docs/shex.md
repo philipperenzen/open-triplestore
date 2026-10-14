@@ -12,7 +12,10 @@ ShEx is in the `full` build (Cargo feature `shex`).
 
 ## Validating
 
-Two endpoints, both authenticated:
+In the web UI, **ShEx validation** in the sidebar validates everything you may read,
+and **ShEx validation** on a dataset page validates that dataset: a schema in ShExC or
+ShExJ, every shape or a shape map (the ShapeMap language, or node and shape pairs),
+and the verdicts, filterable by outcome. Two endpoints, both authenticated:
 
 | Endpoint | Reads |
 |---|---|

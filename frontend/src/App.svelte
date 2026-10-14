@@ -20,7 +20,7 @@
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
-    MessageSquarePlus, MessageSquareText, HardDrive, Rss
+    MessageSquarePlus, MessageSquareText, HardDrive, Rss, Brain, ShieldCheck
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -83,6 +83,12 @@
   const lazyFiles               = () => import('./pages/Files.svelte');
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
+  const lazyDatasetReasoning = () => import('./pages/DatasetReasoning.svelte');
+  const lazyDatasetShex      = () => import('./pages/DatasetShex.svelte');
+  const lazyDatasetPatch     = () => import('./pages/DatasetPatch.svelte');
+  const lazyDatasetVersionDiff = () => import('./pages/DatasetVersionDiff.svelte');
+  const lazyReasoning        = () => import('./pages/Reasoning.svelte');
+  const lazyShexValidation   = () => import('./pages/ShexValidation.svelte');
 
   // Overridable at runtime (no rebuild) via /config.json's "branding.title" — see runtimeConfig.ts.
   $: BRAND = $runtimeBranding.title;
@@ -108,6 +114,8 @@
         { to: '/import', labelKey: 'nav.importData', icon: Upload, match: (p) => p.startsWith('/import'), authRequired: true },
         { to: '/sources', labelKey: 'nav.sqlSources', icon: DatabaseZap, match: (p) => p.startsWith('/sources'), authRequired: true, adminOnly: true },
         { to: '/shacl', labelKey: 'nav.validate', icon: CheckCircle2, match: (p) => p.startsWith('/validation') || p.startsWith('/shacl'), authRequired: true },
+        { to: '/shex', labelKey: 'nav.shex', icon: ShieldCheck, match: (p) => p.startsWith('/shex'), authRequired: true },
+        { to: '/reasoning', labelKey: 'nav.reasoning', icon: Brain, match: (p) => p.startsWith('/reasoning'), authRequired: true },
       ],
     },
     {
@@ -285,6 +293,8 @@
       ['/import', 'pages.import.title', 'pages.import.detail'],
       ['/validation', 'pages.validation.title', 'pages.validation.detail'],
       ['/shacl', 'pages.shaclStudio.title', 'pages.shaclStudio.detail'],
+      ['/shex', 'pages.shex.title', 'pages.shex.detail'],
+      ['/reasoning', 'pages.reasoning.title', 'pages.reasoning.detail'],
       ['/graphs', 'pages.graphList.title', 'pages.graphList.detail'],
       ['/datasets', 'pages.datasets.title', 'pages.datasets.detail'],
       ['/files', 'pages.files.title', 'pages.files.detail'],
@@ -738,6 +748,24 @@
         </Route>
         <Route path="/datasets/:id/cesium" let:params>
           <LazyPage loader={lazyCesiumView} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/reasoning" let:params>
+          <LazyPage loader={lazyDatasetReasoning} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/shex" let:params>
+          <LazyPage loader={lazyDatasetShex} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/patch" let:params>
+          <LazyPage loader={lazyDatasetPatch} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/versions/diff" let:params>
+          <LazyPage loader={lazyDatasetVersionDiff} id={params.id} />
+        </Route>
+        <Route path="/reasoning">
+          <LazyPage loader={lazyReasoning} />
+        </Route>
+        <Route path="/shex">
+          <LazyPage loader={lazyShexValidation} />
         </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
