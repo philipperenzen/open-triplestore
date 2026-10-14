@@ -31,13 +31,13 @@ COMPOSE = ROOT / "docker-compose.yml"
 SERVICE = "triplestore"
 
 # Entries compose sets on purpose, whatever `.env` says: paths inside the
-# container's data volume and the wiring to the bundled MinIO service.
+# container's data volume and the wiring to the bundled S3 gateway service.
 WIRED = {
     "OTS_AUTH_DB_PATH": "the auth database lives on the /data volume",
     "OTS_BACKUP_DIR": "backups live on the /data volume",
-    "OTS_S3_ENDPOINT": "the bundled MinIO service",
-    "OTS_S3_ACCESS_KEY": "the bundled MinIO credentials (MINIO_ROOT_USER)",
-    "OTS_S3_SECRET_KEY": "the bundled MinIO credentials (MINIO_ROOT_PASSWORD)",
+    "OTS_S3_ENDPOINT": "the bundled s3-gateway service",
+    "OTS_S3_ACCESS_KEY": "the bundled s3-gateway credentials (S3_GATEWAY_ACCESS_KEY)",
+    "OTS_S3_SECRET_KEY": "a reference to the bundled s3-gateway secret (S3_GATEWAY_SECRET_KEY)",
 }
 
 NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"

@@ -453,7 +453,7 @@ async fn main() -> anyhow::Result<()> {
             .to_string(),
     };
 
-    // Initialize asset storage — S3/MinIO if configured, local filesystem otherwise
+    // Initialize asset storage — S3 if configured, local filesystem otherwise
     let object_store = if let Some(endpoint) = config::S3_ENDPOINT.get() {
         let access_key = config::S3_ACCESS_KEY.get().unwrap_or_default();
         let bucket = config::S3_BUCKET.get();

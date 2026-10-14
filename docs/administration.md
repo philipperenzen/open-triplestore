@@ -503,7 +503,7 @@ as a reference shows the reference.
 | `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS` | `5000` | The same after a burst of writes (two or more since the mirror was last fresh) to a store over 50 k triples, whose rebuild runs in the background: a bulk load's chunks arrive with sub-second gaps, and a build started in one would run next to the next chunk. A build is also abandoned as soon as a write starts. |
 | `OTS_SHACL_RUN_INDEX_MIN_PROBES` | `20000` | A SHACL validation run builds an in-memory index of the predicates its shapes traverse only when it will make at least this many lookups. |
 | `OTS_SHACL_RUN_INDEX_MAX_QUADS` | *(derived from RAM)* | The most quads that run index may hold. The default is derived from the memory limit, 1 M where none can be detected, and is never below 250 k or above 8 M. Beyond the cap, lookups go to the store. |
-| `OTS_S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
+| `OTS_S3_ENDPOINT` | *(unset — local filesystem)* | Endpoint URL of an S3-compatible store (the compose stack points it at its bundled Versity S3 Gateway). If unset, assets are stored in `<data-dir>/assets/` |
 | `OTS_S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `OTS_S3_ACCESS_KEY` | | S3 access key |
 | `OTS_S3_SECRET_KEY` | | S3 secret key (raw or a secret reference; raw is refused under `OTS_ENV=production`) |
@@ -563,8 +563,8 @@ OTS_ENV=production
 OTS_JWT_SECRET=file:/run/secrets/jwt_secret
 OTS_CORS_ORIGINS=https://www.example.com
 OTS_BASE_URL=https://www.example.com
-MINIO_ROOT_USER=triplestore
-MINIO_ROOT_PASSWORD=<strong password>
+S3_GATEWAY_ACCESS_KEY=triplestore
+S3_GATEWAY_SECRET_KEY=<strong password>
 
 # Outbound account email via the bundled Postfix relay (full options: .env.example)
 COMPOSE_PROFILES=mail
@@ -588,9 +588,11 @@ secrets:
     file: ./secrets/jwt_secret   # openssl rand -hex 32 > secrets/jwt_secret
 ```
 
-The MinIO credential needs nothing: compose hands the server
-`OTS_S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD`, a reference to the variable it also
-forwards.
+The S3 gateway credential needs nothing: compose hands the server
+`OTS_S3_SECRET_KEY=env:S3_GATEWAY_SECRET_KEY`, a reference to the variable it also
+forwards. `S3_GATEWAY_ACCESS_KEY` and `S3_GATEWAY_SECRET_KEY` are compose variables:
+they set the bundled `s3-gateway` service's root credentials, and the server reads
+them only through `OTS_S3_ACCESS_KEY` and that reference.
 
 Put it next to `docker-compose.yml` as `.env` and start the stack:
 
@@ -604,7 +606,8 @@ server — including settings the compose file does not list by name, such as
 `OTS_SECURE_COOKIES_ENABLED`, `OTS_TRUSTED_PROXY_CIDRS` or `OTS_SERVICE_ALLOWLIST`. A few entries are
 wired by compose itself and ignore `.env`: `OTS_AUTH_DB_PATH` and `OTS_BACKUP_DIR` (the `/data`
 volume) and the `OTS_S3_ENDPOINT` / `OTS_S3_ACCESS_KEY` / `OTS_S3_SECRET_KEY` link to the bundled
-MinIO. `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
+S3 gateway (`http://s3-gateway:7070`, signed with `S3_GATEWAY_ACCESS_KEY` /
+`S3_GATEWAY_SECRET_KEY`). `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
 `scripts/check_compose_env.py` to keep the compose file and these docs in step.
 
 ---

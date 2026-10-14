@@ -57,7 +57,7 @@ are enumerated in §5, together with instructions for disabling each one.
 
 Open Triplestore stores data **on the infrastructure where you run it** (a local
 SQLite metadata database, the RDF store, and — if configured — an S3-compatible
-object store such as MinIO for uploaded assets). The categories below are what
+object store such as the Versity S3 Gateway the compose stack bundles, for uploaded assets). The categories below are what
 the software is *capable* of storing; what your specific instance actually holds
 depends on how you use it.
 
