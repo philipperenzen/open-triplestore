@@ -465,9 +465,9 @@ settings! {
     CHANGE_CAPTURE_MAX_PAYLOAD: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", at_least(0), "query")
         .default("250000")
         .doc("Quads a full change-log row may carry.");
-    CHANGE_RETENTION_DAYS: u64 = Spec::new("OTS_CHANGE_RETENTION_DAYS", at_least(1), "query")
+    CHANGE_RETENTION_DAYS: u64 = Spec::new("OTS_CHANGE_RETENTION_DAYS", at_least(0), "query")
         .default("90")
-        .doc("Change-log rows kept this long.");
+        .doc("Change-log rows kept this long (below the lowest live cursor; 0 sweeps them at once).");
     CURSOR_TTL_DAYS: u64 = Spec::new("OTS_CURSOR_TTL_DAYS", at_least(1), "query")
         .default("30")
         .doc("A change-log cursor idle this long is dropped.");

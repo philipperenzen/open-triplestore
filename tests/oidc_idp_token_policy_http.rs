@@ -197,10 +197,13 @@ async fn idp_tokens_write_but_cannot_mint_api_tokens_by_default() {
         "a delegated IdP token must not become a permanent credential: {body}"
     );
 
-    // An unknown policy value falls back to the default, not to the permissive one.
-    std::env::set_var("OTS_OIDC_IDP_TOKEN_POLICY", "banana");
-    let (status, body) = mint(&app, &token).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    // An unknown policy value is no policy at all: the server refuses to
+    // start with it, rather than falling back to anything.
+    let refused = open_triplestore::config::Config::load(
+        &|n| (n == "OTS_OIDC_IDP_TOKEN_POLICY").then(|| "banana".to_string()),
+        &Default::default(),
+    );
+    assert!(refused.is_err(), "an unknown policy must stop the start");
 
     // The provider-token policy does not reach IdP tokens: `full` there keeps
     // IdP tokens at the default.
@@ -273,14 +276,18 @@ async fn oidc_default_role_never_makes_an_administrator() {
     let _env = ENV_LOCK.lock().await;
     clear_policy_env();
 
-    // As configured: an admin default is read as `user`, a lower one is kept.
-    for (raw, expected) in [
-        ("admin", "user"),
-        ("super_admin", "user"),
-        ("SUPER_ADMIN", "user"),
-        ("guest", "guest"),
-        ("user", "user"),
-    ] {
+    // As configured: an admin default stops the start, a lower one is kept.
+    for raw in ["admin", "super_admin", "SUPER_ADMIN"] {
+        let refused = open_triplestore::config::Config::load(
+            &|n| (n == "OIDC_DEFAULT_ROLE").then(|| raw.to_string()),
+            &Default::default(),
+        );
+        assert!(
+            refused.is_err(),
+            "OIDC_DEFAULT_ROLE={raw} must stop the start"
+        );
+    }
+    for (raw, expected) in [("guest", "guest"), ("user", "user"), ("GUEST", "guest")] {
         std::env::set_var("OIDC_DEFAULT_ROLE", raw);
         assert_eq!(
             AuthExt::from_env().default_role,

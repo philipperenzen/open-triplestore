@@ -237,8 +237,9 @@ mod tests {
         assert!(!caps.api_tokens, "never granted unless named");
 
         assert_eq!(parse_guest_capabilities("all"), GuestCapabilities::all());
-        // Separator and case tolerance, plus the hyphenated spellings.
-        assert!(parse_guest_capabilities("API-TOKENS").api_tokens);
+        // Case tolerance; the hyphenated spellings are gone (no aliases).
+        assert!(parse_guest_capabilities("API_TOKENS").api_tokens);
+        assert!(check_guest_capabilities("api-tokens").is_err());
     }
 
     #[test]
