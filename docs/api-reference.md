@@ -102,7 +102,10 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
 | `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |
 | `POST` | `/api/reasoning/check` | **token** | OWL 2 DL consistency, entailment, satisfiability or profile check over graphs the caller may read, or over Turtle in the body; `?async=true` queues it as a job. |
+| `GET` | `/api/reasoning/jobs` | **token** | The caller's background reasoning jobs, newest first (an admin sees everyone's); `?dataset=` narrows them to one dataset. |
 | `GET` | `/api/reasoning/jobs/{job_id}` | **token** | A background reasoning job, to the user who started it and admins (`404` to anyone else). |
+| `GET` | `/api/datasets/{dataset_id}/rules` | **none** | A dataset's stored SWRL rules, to whoever may read the dataset; a private rule graph only to its writers. |
+| `POST` | `/api/datasets/{dataset_id}/rules` | **token** | Store a rule set with the dataset (its writers); the rules run at once. `PUT` / `DELETE …/rules/{set_id}` replace or remove one, `POST …/rules/run` runs them again. |
 | `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |

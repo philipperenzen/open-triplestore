@@ -35,6 +35,8 @@
 
 **Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), **SHACL Core**, **ShEx 2.1** and **OWL 2** reasoning (RL, EL and QL natively; DL with the bundled OWL API + HermiT reasoner sidecar) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
+How it performs against Oxigraph, Apache Jena Fuseki, QLever, Virtuoso and RDF4J — same machine, same container limits, same data and queries, including where it is slower — is measured in [docs/performance-comparison.md](docs/performance-comparison.md).
+
 ## Demo
 
 The web UI is **served by the binary itself** at `http://localhost:7878/` — there's no separate frontend to deploy. At a glance:
@@ -900,13 +902,13 @@ licence policy allows no performance claims on a subset.
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 27 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 28 |  |
 | buildingSMART IDS 1.0 | `tests/buildingsmart_ids_conformance.rs` | **buildingSMART IDS test corpus**, fetched at a pinned commit and SHA-256 checked (not in the repository) | 2 | runs in CI as a development and regression ratchet; no score is published, and the results are not a buildingSMART certification; known gaps in `docs/conformance/ids.md` |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI) | 18 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 192 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
-| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 14 |  |
+| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 15 |  |
 | OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
 | OWL 2 DL | `tests/owl2_dl_conformance.rs` | spec-derived (+ live tests against the reasoner sidecar) | 76 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
@@ -915,7 +917,7 @@ licence policy allows no performance claims on a subset.
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 50 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 51 |  |
 | RML-Core | `tests/rml_core_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven) | 2 | 76 corpus cases: 75 pass, 1 known failure, 0 runner-side skips (floor ≥70 asserted) |
 | RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
 | RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
@@ -945,7 +947,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1265 conformance tests across 44 suites; a further 855 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
+1268 conformance tests across 44 suites; a further 859 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

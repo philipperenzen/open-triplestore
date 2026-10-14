@@ -1709,3 +1709,179 @@ mod owl2_dl_backend {
         assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
+
+// ── Dataset runs and the job list (the web UI's reasoning page) ──────────────
+
+/// A dataset run with no target writes the dataset's own graph for the regime,
+/// which the dataset's writers may fill (a viewer may not); a background run
+/// records its dataset, and `GET /api/reasoning/jobs?dataset=` lists the
+/// caller's jobs over that dataset, and only theirs.
+#[tokio::test]
+async fn dataset_runs_write_the_dataset_graph_and_jobs_list_by_dataset() {
+    use open_triplestore::auth::models::{GraphKind, OwnerType, SystemRole, Visibility};
+    let (state, _admin) = admin_state();
+    for (id, name) in [("writer", "writer"), ("viewer", "viewer")] {
+        state
+            .auth_db
+            .create_user(
+                id,
+                name,
+                &format!("{id}@test.com"),
+                "hash",
+                SystemRole::User,
+            )
+            .unwrap();
+    }
+    let writer = mint_token("writer", "writer", "user");
+    let viewer = mint_token("viewer", "viewer", "user");
+    state
+        .auth_db
+        .create_dataset(
+            "jobsds",
+            "Jobs",
+            None,
+            OwnerType::User,
+            "writer",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    let (model, data) = (
+        "https://example.org/jobs/model",
+        "https://example.org/jobs/data",
+    );
+    for (g, role) in [(model, GraphKind::Model), (data, GraphKind::Instances)] {
+        state.auth_db.add_dataset_graph("jobsds", g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("jobsds", g, Some(role))
+            .unwrap();
+    }
+    state
+        .store
+        .load_str(
+            "<http://example.org/Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Animal> .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(model),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            "<http://example.org/rex> a <http://example.org/Dog> .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(data),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let call = |uri: &'static str, token: String, body: Option<Value>| {
+        let app = app.clone();
+        async move {
+            let mut b = Request::builder()
+                .method(if body.is_some() {
+                    Method::POST
+                } else {
+                    Method::GET
+                })
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"));
+            if body.is_some() {
+                b = b.header(header::CONTENT_TYPE, "application/json");
+            }
+            let resp = app
+                .oneshot(
+                    b.body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let st = resp.status();
+            (st, body_json(resp.into_body()).await)
+        }
+    };
+    let run = json!({ "regime": "rdfs", "dataset": "jobsds" });
+
+    let (st, v) = call(
+        "/api/reasoning/materialize",
+        writer.clone(),
+        Some(run.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["target_graph"], "urn:entailment:rdfs:jobsds", "{v}");
+    assert!(matches!(
+        state.store.query(
+            "ASK { GRAPH <urn:entailment:rdfs:jobsds> { <http://example.org/rex> a <http://example.org/Animal> } }"
+        ),
+        Ok(QueryResults::Boolean(true))
+    ));
+
+    let (st, v) = call(
+        "/api/reasoning/materialize",
+        viewer.clone(),
+        Some(run.clone()),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a viewer may not fill the dataset's graph: {v}"
+    );
+
+    let (st, v) = call(
+        "/api/reasoning/materialize?async=true",
+        writer.clone(),
+        Some(run),
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let job_id = v["job_id"].as_str().unwrap().to_string();
+
+    let (st, v) = call("/api/reasoning/jobs?dataset=jobsds", writer.clone(), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let jobs = v["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{v}");
+    assert_eq!(jobs[0]["id"], job_id.as_str(), "{v}");
+    assert_eq!(jobs[0]["dataset"], "jobsds", "{v}");
+    assert_eq!(jobs[0]["kind"], "materialize", "{v}");
+
+    let (st, v) = call("/api/reasoning/jobs?dataset=jobsds", viewer.clone(), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["jobs"].as_array().unwrap().len(),
+        0,
+        "another user's jobs stay hidden: {v}"
+    );
+    let (st, v) = call("/api/reasoning/jobs?dataset=other", writer.clone(), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["jobs"].as_array().unwrap().len(), 0, "{v}");
+
+    // QL rewriting over the dataset reads its TBox (Dog ⊑ Animal) from the
+    // dataset's sources, whoever asks.
+    #[cfg(feature = "owl2-ql")]
+    {
+        let (st, v) = call(
+            "/api/reasoning/rewrite",
+            writer.clone(),
+            Some(json!({
+                "query": "SELECT ?x WHERE { ?x a <http://example.org/Animal> }",
+                "dataset": "jobsds",
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v["rewritten"]
+                .as_str()
+                .unwrap()
+                .contains("http://example.org/Dog"),
+            "{v}"
+        );
+    }
+
+    // The status names the shared graphs and the DL backend (none configured).
+    let (st, v) = call("/api/reasoning/status", writer, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["graphs"].get(RDFS_TG).is_some(), "{v}");
+    assert_eq!(v["dl_backend"], Value::Null, "{v}");
+}
