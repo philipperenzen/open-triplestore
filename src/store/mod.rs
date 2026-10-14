@@ -2,11 +2,13 @@ pub mod changes;
 pub mod consensus;
 pub mod engine;
 pub mod graph_snapshot;
+pub mod literals;
 pub mod parallel_mirror;
 pub mod query_cache;
 pub mod recovery;
 pub mod replication;
 pub mod search_journal;
+pub mod set_hash;
 pub mod telemetry;
 
 pub use engine::{QuadOp, StoreError, TripleStore};

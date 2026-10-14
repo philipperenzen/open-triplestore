@@ -32,9 +32,10 @@ fn graph() -> NamedNode {
 
 /// Apply `patch` to `store`, triples going to [`G`]: the net (added, removed).
 fn apply(store: &TripleStore, patch: &Patch) -> (usize, usize) {
-    store
+    let (added, removed) = store
         .apply_quad_ops(&patch.quad_ops(Some(&graph())).unwrap())
-        .unwrap()
+        .unwrap();
+    (added.len(), removed.len())
 }
 
 fn quads(store: &TripleStore) -> HashSet<Quad> {
@@ -455,16 +456,29 @@ fn adding_present_and_deleting_absent_quads_change_nothing() {
     let ops = [QuadOp::Remove(
         p.quad_ops(Some(&graph())).unwrap()[0].quad().clone(),
     )];
-    assert_eq!(store.apply_quad_ops(&ops).unwrap(), (0, 1));
+    let (added, removed) = store.apply_quad_ops(&ops).unwrap();
+    assert_eq!((added.len(), removed.len()), (0, 1));
     assert!(quads(&store).is_empty());
 }
 
-/// RDF 1.2 triple terms have no RDF Patch syntax yet (owner decision D10):
-/// refused with a message, not misread as an IRI.
+/// RDF 1.2 triple terms have no RDF Patch syntax yet. The store reads and
+/// writes them as an extension, `<<( s p o )>>` in the object position (as
+/// N-Triples 1.2 writes them), because the change log and version diffs over
+/// RDF 1.2 data carry them; anywhere else they are refused, and never misread
+/// as an IRI.
 #[test]
-fn triple_terms_are_refused() {
-    let e = parse("A <urn:s> <urn:p> <<( <urn:a> <urn:b> <urn:c> )>> .\n").unwrap_err();
-    assert!(e.contains("triple terms"), "{e}");
+#[cfg(feature = "rdf-12")]
+fn triple_terms_are_an_object_extension() {
+    let p = parse("A <urn:s> <urn:p> <<( <urn:a> <urn:b> <urn:c> )>> <urn:g> .\n").unwrap();
+    let q = p.quad_ops(None).unwrap()[0].quad().clone();
+    assert_eq!(q.object.to_string(), "<<( <urn:a> <urn:b> <urn:c> )>>");
+    let store = TripleStore::in_memory().unwrap();
+    store.apply_quad_ops(&p.quad_ops(None).unwrap()).unwrap();
+    assert!(store.store().contains(q.as_ref()).unwrap());
+    let e = parse("A <<( <urn:a> <urn:b> <urn:c> )>> <urn:p> <urn:o> .\n").unwrap_err();
+    assert!(e.contains("only be an object"), "{e}");
+    let e = parse("A <urn:s> <urn:p> <<( <urn:a> <urn:b> )>> .\n").unwrap_err();
+    assert!(e.contains("triple term"), "{e}");
 }
 
 // ── Prefixes: changes to the data the patch is applied to ───────────────────

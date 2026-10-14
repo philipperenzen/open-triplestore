@@ -376,7 +376,7 @@ impl Builder {
     }
 
     fn ignore(&mut self, construct: &'static str, subject: Tid) {
-        let example = self.terms[subject as usize].to_string();
+        let example = crate::reasoning::common::example_label(&self.terms[subject as usize]);
         let e = self.ignored.entry(construct).or_insert((0, example));
         e.0 += 1;
     }

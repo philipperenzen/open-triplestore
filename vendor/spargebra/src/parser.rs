@@ -18,6 +18,7 @@ use std::mem::take;
 #[cfg(feature = "standard-unicode-escaping")]
 use std::str::Chars;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// A SPARQL parser
 ///
@@ -34,7 +35,10 @@ use std::str::FromStr;
 pub struct SparqlParser {
     base_iri: Option<Iri<String>>,
     prefixes: HashMap<String, String>,
-    custom_aggregate_functions: HashSet<NamedNode>,
+    // Shared, so a parser with custom aggregates is cheap to clone: a caller
+    // that keeps one configured parser and clones it per query (`parse_query`
+    // consumes the parser) pays one reference count, not a copy of the set.
+    custom_aggregate_functions: Arc<HashSet<NamedNode>>,
 }
 
 impl SparqlParser {
@@ -100,7 +104,7 @@ impl SparqlParser {
     /// ```
     #[inline]
     pub fn with_custom_aggregate_function(mut self, name: impl Into<NamedNode>) -> Self {
-        self.custom_aggregate_functions.insert(name.into());
+        Arc::make_mut(&mut self.custom_aggregate_functions).insert(name.into());
         self
     }
 
@@ -667,8 +671,10 @@ fn build_select(
             // SPARQL 1.2 (w3c/sparql-query PR #380): in an aggregating query, a
             // SELECT expression may use the variable of an earlier SELECT
             // expression, `(COUNT(?v) AS ?c) (?c + 1 AS ?d)`. The expressions are
-            // evaluated in order (one `Extend` each), so it is bound there.
-            let mut bound_by_select = visible.clone();
+            // evaluated in order (one `Extend` each), so it is bound there. Kept
+            // apart from `visible` rather than as a copy of it: cloning the set
+            // cost every SELECT query ~0.1 µs (issue #527 of Open Triplestore).
+            let mut bound_by_select: Vec<Variable> = Vec::new();
             for sel_item in sel_items {
                 let v = match sel_item {
                     SelectionMember::Variable(v) => {
@@ -685,7 +691,11 @@ fn build_select(
                                 "The SELECT overrides an existing variable using an expression",
                             );
                         }
-                        if with_aggregate && !are_variables_bound(&expression, &bound_by_select) {
+                        if with_aggregate
+                            && !are_variables_bound_by(&expression, &|v| {
+                                visible.contains(v) || bound_by_select.contains(v)
+                            })
+                        {
                             // We validate projection variables if there is an aggregate
                             return Err(
                                 "The SELECT contains an expression with a variable that is unbound",
@@ -696,7 +706,7 @@ fn build_select(
                             variable: variable.clone(),
                             expression,
                         };
-                        bound_by_select.insert(variable.clone());
+                        bound_by_select.push(variable.clone());
                         variable
                     }
                 };
@@ -756,16 +766,16 @@ fn build_select(
     Ok(m)
 }
 
-fn are_variables_bound(expression: &Expression, variables: &HashSet<Variable>) -> bool {
+fn are_variables_bound_by(expression: &Expression, is_bound: &impl Fn(&Variable) -> bool) -> bool {
     match expression {
         Expression::NamedNode(_)
         | Expression::Literal(_)
         | Expression::Bound(_)
         | Expression::Coalesce(_)
         | Expression::Exists(_) => true,
-        Expression::Variable(var) => variables.contains(var),
+        Expression::Variable(var) => is_bound(var),
         Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => {
-            are_variables_bound(e, variables)
+            are_variables_bound_by(e, is_bound)
         }
         Expression::Or(a, b)
         | Expression::And(a, b)
@@ -779,18 +789,18 @@ fn are_variables_bound(expression: &Expression, variables: &HashSet<Variable>) -
         | Expression::Subtract(a, b)
         | Expression::Multiply(a, b)
         | Expression::Divide(a, b) => {
-            are_variables_bound(a, variables) && are_variables_bound(b, variables)
+            are_variables_bound_by(a, is_bound) && are_variables_bound_by(b, is_bound)
         }
         Expression::In(a, b) => {
-            are_variables_bound(a, variables) && b.iter().all(|b| are_variables_bound(b, variables))
+            are_variables_bound_by(a, is_bound) && b.iter().all(|b| are_variables_bound_by(b, is_bound))
         }
         Expression::FunctionCall(_, parameters) => {
-            parameters.iter().all(|p| are_variables_bound(p, variables))
+            parameters.iter().all(|p| are_variables_bound_by(p, is_bound))
         }
         Expression::If(a, b, c) => {
-            are_variables_bound(a, variables)
-                && are_variables_bound(b, variables)
-                && are_variables_bound(c, variables)
+            are_variables_bound_by(a, is_bound)
+                && are_variables_bound_by(b, is_bound)
+                && are_variables_bound_by(c, is_bound)
         }
     }
 }
@@ -941,7 +951,7 @@ enum Either<L, R> {
 pub struct ParserState {
     base_iri: Option<Iri<String>>,
     prefixes: HashMap<String, String>,
-    custom_aggregate_functions: HashSet<NamedNode>,
+    custom_aggregate_functions: Arc<HashSet<NamedNode>>,
     used_bnodes: HashSet<BlankNode>,
     currently_used_bnodes: HashSet<BlankNode>,
     aggregates: Vec<Vec<(Variable, AggregateExpression)>>,
@@ -951,7 +961,7 @@ impl ParserState {
     pub(crate) fn new(
         base_iri: Option<Iri<String>>,
         prefixes: HashMap<String, String>,
-        custom_aggregate_functions: HashSet<NamedNode>,
+        custom_aggregate_functions: Arc<HashSet<NamedNode>>,
     ) -> Self {
         Self {
             base_iri,

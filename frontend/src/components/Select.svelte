@@ -206,6 +206,7 @@
         data-idx={i}
         role="option"
         aria-selected={opt.value === value}
+        aria-disabled={opt.disabled || undefined}
         on:mouseenter={() => { if (!opt.disabled) activeIdx = i; }}
         on:click={() => choose(opt)}
       >

@@ -55,7 +55,21 @@ fn rows(v: &Value) -> usize {
 
 #[tokio::test]
 async fn dataset_regime_materialises_on_write_and_joins_queries_on_request() {
-    let (state, token) = admin_state();
+    regime_scenario(admin_state()).await;
+}
+
+/// The same with change capture on, where a write's own rows decide whether
+/// the entailment graph is extended (the write only added) or rebuilt.
+#[tokio::test]
+async fn dataset_regime_materialises_from_the_change_log() {
+    use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
+    let store = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD);
+    regime_scenario(admin_state_with_store(store)).await;
+}
+
+async fn regime_scenario((state, token): (open_triplestore::server::AppState, String)) {
     state
         .auth_db
         .create_dataset(
@@ -1104,4 +1118,241 @@ async fn an_asserted_and_derived_triple_is_one_answer() {
             );
         }
     }
+}
+
+/// The stored-rules API (`/api/datasets/:id/rules`, the web UI's rules
+/// editor): a rule set written in the SWRLAPI syntax is checked, stored as
+/// `swrl:Imp` triples in the dataset's managed rules graph, and run at once;
+/// editing it re-runs the rules, deleting it takes its conclusions with it.
+/// A refused rule writes nothing and the message names what was refused;
+/// only the dataset's writers may change its rules.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn stored_rule_sets_are_written_run_edited_and_removed() {
+    use open_triplestore::auth::models::SystemRole;
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "crud",
+            "Rules CRUD",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("crud", DATA).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("crud", DATA, Some(GraphKind::Instances))
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}b1> a <{EX}Asset> ; <{EX}age> 7 . <{EX}b2> a <{EX}Asset> ; <{EX}age> 2 ."
+            ),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    state
+        .auth_db
+        .create_user("v", "viewer", "v@test.com", "hash", SystemRole::User)
+        .unwrap();
+    let viewer = mint_token("v", "viewer", "user");
+    let app = test_app(state.clone());
+    let inspected = |state: &open_triplestore::server::AppState, who: &str| {
+        matches!(
+            state.store.query(&format!(
+                "ASK {{ GRAPH <urn:entailment:swrl:crud> {{ <{EX}{who}> a <{EX}Inspected> }} }}"
+            )),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    let set = |rules: &str| {
+        json!({
+            "label": "Inspection",
+            "format": "swrlapi",
+            "prefixes": { "ex": EX },
+            "rules": rules,
+        })
+        .to_string()
+    };
+
+    // Create: stored, listed with its source and functional form, and run.
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        Some("application/json"),
+        &set("ex:Asset(?x) ^ ex:age(?x, ?a) ^ swrlb:greaterThan(?a, 5) -> ex:Inspected(?x)"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert_eq!(v["rules"], 1, "{txt}");
+    assert_eq!(v["run"]["report"]["converged"], true, "{txt}");
+    let id = v["id"].as_str().unwrap().to_string();
+    assert!(inspected(&state, "b1") && !inspected(&state, "b2"), "{txt}");
+
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["graph"], "urn:ots:rules:crud", "{txt}");
+    assert_eq!(v["can_write"], true, "{txt}");
+    let sets = v["sets"].as_array().unwrap();
+    assert_eq!(sets.len(), 1, "{txt}");
+    assert_eq!(sets[0]["id"], id.as_str(), "{txt}");
+    assert_eq!(sets[0]["format"], "swrlapi", "{txt}");
+    assert_eq!(sets[0]["label"], "Inspection", "{txt}");
+    assert!(
+        sets[0]["source"].as_str().unwrap().contains("greaterThan"),
+        "{txt}"
+    );
+    assert_eq!(sets[0]["options"]["prefixes"]["ex"], EX, "{txt}");
+    let functional = sets[0]["rules"][0]["functional"].as_str().unwrap();
+    assert!(functional.starts_with("DLSafeRule(Body("), "{functional}");
+    assert!(
+        functional.contains("DataPropertyAtom"),
+        "the SWRLAPI property atom is settled as data: {functional}"
+    );
+    // The managed graph is one of the dataset's rule graphs, in the entailment role.
+    let (_, ent, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/crud/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(ent["rules"]["count"], 1, "{txt}");
+
+    // Edit: the threshold drops, b2 is inspected too.
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        &format!("/api/datasets/crud/rules/{id}"),
+        Some(&token),
+        Some("application/json"),
+        &set("ex:Asset(?x) ^ ex:age(?x, ?a) ^ swrlb:greaterThan(?a, 1) -> ex:Inspected(?x)"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(
+        v["run"]["report"]["rules"], 1,
+        "the old rule is gone: {txt}"
+    );
+    assert!(inspected(&state, "b1") && inspected(&state, "b2"), "{txt}");
+
+    // Refused rules write nothing; the message names the culprit.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        Some("application/json"),
+        &set("ex:Asset(?x) ^ swrlb:noSuchBuiltin(?x) -> ex:Odd(?x)"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("noSuchBuiltin"), "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        Some("application/json"),
+        &set("ex:p(?x, ?y) -> ex:q(?x, ?y)"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("object or a data property"), "{txt}");
+    let (_, v, _) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(v["sets"].as_array().unwrap().len(), 1);
+
+    // A viewer reads the rules but may not change them.
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/crud/rules",
+        Some(&viewer),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["can_write"], false, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/crud/rules/{id}"),
+        Some(&viewer),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{txt}");
+
+    // Delete: the set and its conclusions go.
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/crud/rules/{id}"),
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        !inspected(&state, "b1") && !inspected(&state, "b2"),
+        "{txt}"
+    );
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/crud/rules",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(v["sets"].as_array().unwrap().len(), 0, "{txt}");
+    let left = state
+        .store
+        .query("ASK { GRAPH <urn:ots:rules:crud> { ?s ?p ?o } }")
+        .unwrap();
+    assert!(
+        matches!(left, oxigraph::sparql::QueryResults::Boolean(false)),
+        "no triple of the set is left behind"
+    );
+    let (st, _, _) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/crud/rules/{id}"),
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

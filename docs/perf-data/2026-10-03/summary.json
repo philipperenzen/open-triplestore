@@ -1,0 +1,3521 @@
+{
+ "flags": [
+  {
+   "examples": [
+    {
+     "count": 28,
+     "hash": "b196d7220f266b88",
+     "majority": 6
+    },
+    {
+     "count": 35,
+     "hash": "2e679df45ab60b06",
+     "majority": 6
+    },
+    {
+     "count": 33,
+     "hash": "99b12078fff91ffe",
+     "majority": 6
+    }
+   ],
+   "instances": 1192,
+   "kind": "describe-differs",
+   "query": "Q9",
+   "scale": "1k",
+   "store": "rdf4j"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "2": 1,
+      "4": 44
+     },
+     "hash": "9e390d66ff12eaee",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 1,
+   "kind": "inconsistent",
+   "query": "Q10",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "10": 52
+     },
+     "hash": "2c84c97a3a8b0417",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 1,
+   "kind": "inconsistent",
+   "query": "Q11",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "10": 1,
+      "32": 299
+     },
+     "hash": "22b4a615786ce666",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "24": 100
+     },
+     "hash": "3dec893c7f5a547a",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "2": 1,
+      "27": 143
+     },
+     "hash": "8a678bf1efefc37d",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    }
+   ],
+   "instances": 13,
+   "kind": "inconsistent",
+   "query": "Q2",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "7": 1,
+      "17": 53
+     },
+     "hash": "e9b406a1b87ce304",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "6": 204
+     },
+     "hash": "8838106443db7216",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "10": 1,
+      "17": 53
+     },
+     "hash": "310870335eb25799",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    }
+   ],
+   "instances": 6,
+   "kind": "inconsistent",
+   "query": "Q7",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "2": 1,
+      "10": 49
+     },
+     "hash": "16f8104ecbd36d1d",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "5": 52
+     },
+     "hash": "70c0becfe17ac192",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "2": 1,
+      "8": 44
+     },
+     "hash": "5074cade49878f39",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 3,
+   "kind": "inconsistent",
+   "query": "Q8",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "count": 28,
+     "hash": "b196d7220f266b88",
+     "majority": 6
+    },
+    {
+     "count": 35,
+     "hash": "2e679df45ab60b06",
+     "majority": 6
+    },
+    {
+     "count": 33,
+     "hash": "99b12078fff91ffe",
+     "majority": 6
+    }
+   ],
+   "instances": 1192,
+   "kind": "describe-differs",
+   "query": "Q9",
+   "scale": "1k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "count": 23,
+     "hash": "3af55db506b2bdde",
+     "majority": 6
+    },
+    {
+     "count": 26,
+     "hash": "867b96e8aa139952",
+     "majority": 6
+    },
+    {
+     "count": 35,
+     "hash": "1624714503831b45",
+     "majority": 6
+    }
+   ],
+   "instances": 715,
+   "kind": "describe-differs",
+   "query": "Q9",
+   "scale": "10k",
+   "store": "rdf4j"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "3": 43
+     },
+     "hash": "2c21d5291c23feeb",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "2": 43
+     },
+     "hash": "b2776ebae9d5244b",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 2,
+   "kind": "inconsistent",
+   "query": "Q1",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "4": 41
+     },
+     "hash": "c37a1754faf8d469",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 1,
+   "kind": "inconsistent",
+   "query": "Q10",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "24": 40
+     },
+     "hash": "a885bb55589c1bc2",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8",
+      "explore"
+     ]
+    },
+    {
+     "counts": {
+      "10": 1,
+      "28": 132
+     },
+     "hash": "ce4400c92d8159b7",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "7": 1,
+      "22": 43
+     },
+     "hash": "7297d88b0c6c5b3f",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 9,
+   "kind": "inconsistent",
+   "query": "Q2",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "4": 1,
+      "6": 43
+     },
+     "hash": "1125655eb597f465",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 1,
+   "kind": "inconsistent",
+   "query": "Q3",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "4": 1,
+      "5": 39
+     },
+     "hash": "f4de6fa3eea8759e",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "5": 39
+     },
+     "hash": "c807328e728bb0ca",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 2,
+   "kind": "inconsistent",
+   "query": "Q5",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "17": 36
+     },
+     "hash": "9e34623b0edcd3f7",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "1": 1,
+      "16": 40
+     },
+     "hash": "d22a09aaf5b45d3c",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    },
+    {
+     "counts": {
+      "4": 1,
+      "8": 86
+     },
+     "hash": "1a050a60d881a26e",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 8,
+   "kind": "inconsistent",
+   "query": "Q7",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "counts": {
+      "1": 1,
+      "3": 39
+     },
+     "hash": "b2762882e6163807",
+     "workloads": [
+      "concurrent-1",
+      "concurrent-4",
+      "concurrent-8"
+     ]
+    }
+   ],
+   "instances": 1,
+   "kind": "inconsistent",
+   "query": "Q8",
+   "scale": "10k",
+   "store": "virtuoso"
+  },
+  {
+   "examples": [
+    {
+     "count": 23,
+     "hash": "3af55db506b2bdde",
+     "majority": 6
+    },
+    {
+     "count": 26,
+     "hash": "867b96e8aa139952",
+     "majority": 6
+    },
+    {
+     "count": 35,
+     "hash": "1624714503831b45",
+     "majority": 6
+    }
+   ],
+   "instances": 1197,
+   "kind": "describe-differs",
+   "query": "Q9",
+   "scale": "10k",
+   "store": "virtuoso"
+  }
+ ],
+ "scales": {
+  "10k": {
+   "fuseki": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0022508749971166253,
+      "mixes": 87,
+      "p95": 0.29029165440297233,
+      "qmph": 5220.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.002097729498927947,
+      "mixes": 218,
+      "p95": 0.4692577543515655,
+      "qmph": 13080.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0029826255049556494,
+      "mixes": 128,
+      "p95": 1.6376023742464898,
+      "qmph": 7680.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.001641916504013352,
+       "n": 100,
+       "p95": 0.0024758494102570692
+      },
+      "Q10": {
+       "median": 0.001754271004756447,
+       "n": 200,
+       "p95": 0.002463206261018058
+      },
+      "Q11": {
+       "median": 0.0013143129981472157,
+       "n": 100,
+       "p95": 0.0017381062592903616
+      },
+      "Q12": {
+       "median": 0.0018413330035400577,
+       "n": 100,
+       "p95": 0.0024116499982483218
+      },
+      "Q2": {
+       "median": 0.0033626040021772496,
+       "n": 600,
+       "p95": 0.004459845194651278
+      },
+      "Q3": {
+       "median": 0.001719416497508064,
+       "n": 100,
+       "p95": 0.005671441707090707
+      },
+      "Q4": {
+       "median": 0.0020123544964008033,
+       "n": 100,
+       "p95": 0.0035300101066241037
+      },
+      "Q5": {
+       "median": 0.30151818750891834,
+       "n": 200,
+       "p95": 0.40629151904722677
+      },
+      "Q7": {
+       "median": 0.00286306299676653,
+       "n": 400,
+       "p95": 0.005191014611045832
+      },
+      "Q8": {
+       "median": 0.0023685210035182536,
+       "n": 200,
+       "p95": 0.0037083271025039723
+      },
+      "Q9": {
+       "median": 0.0014179999925545417,
+       "n": 400,
+       "p95": 0.001963774357136572
+      }
+     },
+     "qmph": 5358.871615572626
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 7.619833982498676,
+       "n": 10,
+       "p95": 8.127171578396519
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.006515062501421198,
+       "n": 10,
+       "p95": 0.008549389392283047
+      },
+      "F03-path-alternative": {
+       "median": 1.0441250425064936,
+       "n": 10,
+       "p95": 1.123419294202904
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.02473156249470776,
+       "n": 10,
+       "p95": 0.027325783154083183
+      },
+      "F05-agg-group-avg": {
+       "median": 0.9204028965032194,
+       "n": 10,
+       "p95": 1.0789022277524054
+      },
+      "F06-agg-having": {
+       "median": 0.1887686455011135,
+       "n": 10,
+       "p95": 0.20771824580297107
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.20426027099165367,
+       "n": 10,
+       "p95": 0.279589779352682
+      },
+      "F08-optional-unbound": {
+       "median": 0.04292579150205711,
+       "n": 10,
+       "p95": 0.05022676844455418
+      },
+      "F09-minus": {
+       "median": 0.14509604199702153,
+       "n": 10,
+       "p95": 0.14664034170200466
+      },
+      "F10-not-exists": {
+       "median": 1.7052709799972945,
+       "n": 10,
+       "p95": 1.8064300468009606
+      },
+      "F11-subquery-topk": {
+       "median": 0.4970184590056306,
+       "n": 10,
+       "p95": 0.5135859063986572
+      },
+      "F12-subquery-agg-join": {
+       "median": 1.765890209004283,
+       "n": 10,
+       "p95": 1.8348095654015197
+      },
+      "F13-values-union": {
+       "median": 0.004895582998869941,
+       "n": 10,
+       "p95": 0.00796855800363119
+      },
+      "F14-count-all": {
+       "median": 0.6367379584989976,
+       "n": 10,
+       "p95": 0.715803825850162
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload explore --out /out/explore.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload features --out /out/features.json --endpoint http://fuseki:3030/ds/sparql --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload concurrent --out /out/concurrent.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload shacl --out /out/shacl.json --endpoint http://fuseki:3030/ds/shacl?graph=default --shacl-kind fuseki --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload load-http --out /out/load_http.json --endpoint http://fuseki:3030/ds/data?default --file /bench/dataset.nt --chunk-mb 100",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 737947648,
+     "finished": "2026-10-03T17:08:03+0200",
+     "image": "sha256:05e5dc64672d5a2233e7a3c7b527b43d6e7d0bb8231d21582c1729282404d259 eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      2.18505859375,
+      2.84716796875,
+      2.935546875
+     ],
+     "load_method": "`tdb2.tdbloader` (offline, default loader)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.32763671875,
+        3.33154296875,
+        3.1025390625
+       ],
+       "peak_mem_bytes": 2409476653.056,
+       "seconds": 204.505
+      },
+      "explore": {
+       "load_after": [
+        3.06201171875,
+        3.14013671875,
+        3.06396484375
+       ],
+       "peak_mem_bytes": 797127475.2,
+       "seconds": 82.95
+      },
+      "features": {
+       "load_after": [
+        2.171875,
+        2.791015625,
+        2.9345703125
+       ],
+       "peak_mem_bytes": 2033667014.656,
+       "seconds": 185.762
+      },
+      "load": {
+       "load_after": [
+        3.7568359375,
+        3.39794921875,
+        3.13671875
+       ],
+       "method": "`tdb2.tdbloader` (offline, default loader)",
+       "peak_mem_bytes": 3071975358.464,
+       "seconds": 19.782
+      },
+      "load_http": {
+       "load_after": [
+        2.18505859375,
+        2.84716796875,
+        2.935546875
+       ],
+       "method": "HTTP Graph Store POST, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 1525787131.904,
+       "seconds": 26.715
+      },
+      "shacl": {
+       "load_after": [
+        2.4443359375,
+        2.95703125,
+        2.9765625
+       ],
+       "peak_mem_bytes": 2383706849.28,
+       "seconds": 76.442
+      }
+     },
+     "quiet": {
+      "free_gib": 21.4,
+      "load_before": [
+       3.798828125,
+       3.3759765625,
+       3.123046875
+      ],
+      "swap": "total = 9216.00M  used = 8397.50M  free = 818.50M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T16:57:02+0200",
+     "store": "fuseki"
+    },
+    "shacl": {
+     "median": 12.358038089005277,
+     "n": 5,
+     "p95": 12.71740737259679,
+     "results": [
+      51690
+     ]
+    }
+   },
+   "ots": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0025790420040721074,
+      "mixes": 141,
+      "p95": 0.05852631680900232,
+      "qmph": 8460.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0021467080077854916,
+      "mixes": 655,
+      "p95": 0.05605809990520353,
+      "qmph": 39300.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0023967919987626374,
+      "mixes": 1079,
+      "p95": 0.09098388760176014,
+      "qmph": 64740.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.04422710400103824,
+       "n": 100,
+       "p95": 0.06778937150738783
+      },
+      "Q10": {
+       "median": 0.007950354505737778,
+       "n": 200,
+       "p95": 0.05081468959760969
+      },
+      "Q11": {
+       "median": 0.0018561039978521876,
+       "n": 100,
+       "p95": 0.004563610757759307
+      },
+      "Q12": {
+       "median": 0.0024562085018260404,
+       "n": 100,
+       "p95": 0.003856316358724143
+      },
+      "Q2": {
+       "median": 0.00293810450239107,
+       "n": 600,
+       "p95": 0.005678564307891062
+      },
+      "Q3": {
+       "median": 0.015327854503993876,
+       "n": 100,
+       "p95": 0.05212166875135151
+      },
+      "Q4": {
+       "median": 0.009913687499647494,
+       "n": 100,
+       "p95": 0.051124522605823584
+      },
+      "Q5": {
+       "median": 0.06988814549549716,
+       "n": 200,
+       "p95": 0.12300798399519408
+      },
+      "Q7": {
+       "median": 0.0029503750047297217,
+       "n": 400,
+       "p95": 0.04180159169700346
+      },
+      "Q8": {
+       "median": 0.0021610414987662807,
+       "n": 200,
+       "p95": 0.004495705943554641
+      },
+      "Q9": {
+       "median": 0.042782396005350165,
+       "n": 400,
+       "p95": 0.050520119391876506
+      }
+     },
+     "qmph": 7229.31526174152
+    },
+    "features": {
+     "errors": {
+      "F10-not-exists": "Query execution timed out"
+     },
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.014163583000481594,
+       "n": 10,
+       "p95": 0.014288995797687675
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.002116625000780914,
+       "n": 10,
+       "p95": 0.002398541004367871
+      },
+      "F03-path-alternative": {
+       "median": 2.621180333997472,
+       "n": 10,
+       "p95": 2.81023805945224
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.016634728999633808,
+       "n": 10,
+       "p95": 0.01780488125514239
+      },
+      "F05-agg-group-avg": {
+       "median": 3.7077625220044865,
+       "n": 10,
+       "p95": 3.858916110298742
+      },
+      "F06-agg-having": {
+       "median": 0.06473987500066869,
+       "n": 10,
+       "p95": 0.06800536875525723
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.2439813749952009,
+       "n": 10,
+       "p95": 0.25155792485020356
+      },
+      "F08-optional-unbound": {
+       "median": 0.1041645415025414,
+       "n": 10,
+       "p95": 0.11057351874624147
+      },
+      "F09-minus": {
+       "median": 0.8266908754958422,
+       "n": 10,
+       "p95": 0.8887369293544908
+      },
+      "F11-subquery-topk": {
+       "median": 1.2577246459986782,
+       "n": 10,
+       "p95": 1.2831787499970233
+      },
+      "F12-subquery-agg-join": {
+       "median": 4.521420315002615,
+       "n": 10,
+       "p95": 4.58493059386019
+      },
+      "F13-values-union": {
+       "median": 0.0019476249945000745,
+       "n": 10,
+       "p95": 0.0026430603429616895
+      },
+      "F14-count-all": {
+       "median": 1.6886986879981123,
+       "n": 10,
+       "p95": 1.7207547065569089
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload concurrent --out /out/concurrent.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --clients 1,4,8 --seconds 60 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 1823301632,
+     "finished": "2026-10-03T18:03:12+0200",
+     "image": "sha256:1056964d79c2b554e7bb7ea7d9e7ec24d51e929e078bca1502ae019861c6d5a8 ots-bench:570a7a30",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      5.8916015625,
+      3.86181640625,
+      3.29345703125
+     ],
+     "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.4892578125,
+        3.267578125,
+        3.05712890625
+       ],
+       "peak_mem_bytes": 2268816474.112,
+       "seconds": 203.024
+      },
+      "explore": {
+       "load_after": [
+        3.2529296875,
+        3.39013671875,
+        3.14404296875
+       ],
+       "peak_mem_bytes": 2394444267.52,
+       "seconds": 62.441
+      },
+      "features": {
+       "load_after": [
+        2.39404296875,
+        2.74560546875,
+        2.90087890625
+       ],
+       "peak_mem_bytes": 2258079055.872,
+       "seconds": 212.659
+      },
+      "load": {
+       "load_after": [
+        4.31689453125,
+        3.61083984375,
+        3.1826171875
+       ],
+       "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 3165390897.152,
+       "seconds": 82.059
+      },
+      "shacl": {
+       "load_after": [
+        5.8916015625,
+        3.86181640625,
+        3.29345703125
+       ],
+       "peak_mem_bytes": 4269197492.224,
+       "seconds": 87.794
+      }
+     },
+     "quiet": {
+      "free_gib": 19.1,
+      "load_before": [
+       4.26611328125,
+       3.4248046875,
+       3.08154296875
+      ],
+      "swap": "total = 10240.00M  used = 9535.75M  free = 704.25M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T17:51:22+0200",
+     "store": "ots"
+    },
+    "shacl": {
+     "median": 14.088874089997262,
+     "n": 5,
+     "p95": 15.463697282192879,
+     "results": [
+      51690
+     ]
+    }
+   },
+   "oxigraph": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.001024354001856409,
+      "mixes": 656,
+      "p95": 0.024315982693224113,
+      "qmph": 39360.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0010185620049014688,
+      "mixes": 2168,
+      "p95": 0.0288474874934764,
+      "qmph": 130080.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0011488959935377352,
+      "mixes": 2020,
+      "p95": 0.07659885354587473,
+      "qmph": 121200.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0010122084931936115,
+       "n": 100,
+       "p95": 0.009915080954669975
+      },
+      "Q10": {
+       "median": 0.0007206465088529512,
+       "n": 200,
+       "p95": 0.0011463402050139848
+      },
+      "Q11": {
+       "median": 0.00028802100132452324,
+       "n": 100,
+       "p95": 0.0003293774003395811
+      },
+      "Q12": {
+       "median": 0.00039547950291307643,
+       "n": 100,
+       "p95": 0.000453718459175434
+      },
+      "Q2": {
+       "median": 0.0010781250020954758,
+       "n": 600,
+       "p95": 0.0014364756025315728
+      },
+      "Q3": {
+       "median": 0.0018490420043235645,
+       "n": 100,
+       "p95": 0.01309794999397127
+      },
+      "Q4": {
+       "median": 0.0021287709969328716,
+       "n": 100,
+       "p95": 0.014589799990790197
+      },
+      "Q5": {
+       "median": 0.0257901245058747,
+       "n": 200,
+       "p95": 0.045470702098828045
+      },
+      "Q7": {
+       "median": 0.0013977705020806752,
+       "n": 400,
+       "p95": 0.002535141351836501
+      },
+      "Q8": {
+       "median": 0.0008698539968463592,
+       "n": 200,
+       "p95": 0.0014838541414064822
+      },
+      "Q9": {
+       "median": 0.00024493748787790537,
+       "n": 400,
+       "p95": 0.0002861597517039627
+      }
+     },
+     "qmph": 43680.70746969284
+    },
+    "features": {
+     "errors": {
+      "F10-not-exists": "TimeoutError: timed out"
+     },
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.008387791989662219,
+       "n": 10,
+       "p95": 0.008569496194104432
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0011864164916914888,
+       "n": 10,
+       "p95": 0.0012666704984440004
+      },
+      "F03-path-alternative": {
+       "median": 1.3262945840033353,
+       "n": 10,
+       "p95": 1.3529808440500346
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.011679749994073063,
+       "n": 10,
+       "p95": 0.011995851598476293
+      },
+      "F05-agg-group-avg": {
+       "median": 2.175340480498562,
+       "n": 10,
+       "p95": 2.2020910802049913
+      },
+      "F06-agg-having": {
+       "median": 0.055336249504762236,
+       "n": 10,
+       "p95": 0.0581381225529185
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.18870822949975263,
+       "n": 10,
+       "p95": 0.20051000829771512
+      },
+      "F08-optional-unbound": {
+       "median": 0.07006485400052043,
+       "n": 10,
+       "p95": 0.07442101874985382
+      },
+      "F09-minus": {
+       "median": 0.5328882914982387,
+       "n": 10,
+       "p95": 0.6288650715025143
+      },
+      "F11-subquery-topk": {
+       "median": 0.6352911249923636,
+       "n": 10,
+       "p95": 0.6457350438999129
+      },
+      "F12-subquery-agg-join": {
+       "median": 3.157860001498193,
+       "n": 10,
+       "p95": 3.23052888255188
+      },
+      "F13-values-union": {
+       "median": 0.0009928955041687004,
+       "n": 10,
+       "p95": 0.0010438438941491768
+      },
+      "F14-count-all": {
+       "median": 1.4727993755004718,
+       "n": 10,
+       "p95": 1.4953877529034798
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm optimize",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/oxigraph/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload explore --out /out/explore.json --endpoint http://oxigraph:7878/query --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/oxigraph/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload features --out /out/features.json --endpoint http://oxigraph:7878/query --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/oxigraph/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload concurrent --out /out/concurrent.json --endpoint http://oxigraph:7878/query --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/oxigraph/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload load-http --out /out/load_http.json --endpoint http://oxigraph:7878/store?default --file /bench/dataset.nt --chunk-mb 100",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 667058176,
+     "finished": "2026-10-03T16:56:51+0200",
+     "image": "sha256:7e146d8d735b69c39e0071aef05150b8fcdf1f2394daac7e84df7131a43cb601 ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      3.78564453125,
+      3.3564453125,
+      3.11328125
+     ],
+     "load_method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+     "optimize_seconds": 3.364,
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        5.05029296875,
+        3.4921875,
+        3.1474609375
+       ],
+       "peak_mem_bytes": 455711129.6,
+       "seconds": 203.35
+      },
+      "explore": {
+       "load_after": [
+        3.82861328125,
+        3.37158203125,
+        3.220703125
+       ],
+       "peak_mem_bytes": 156342681.6,
+       "seconds": 10.725
+      },
+      "features": {
+       "load_after": [
+        2.22607421875,
+        2.44140625,
+        2.798828125
+       ],
+       "peak_mem_bytes": 274307481.6,
+       "seconds": 416.93
+      },
+      "load": {
+       "load_after": [
+        3.90478515625,
+        3.1923828125,
+        3.14794921875
+       ],
+       "method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+       "peak_mem_bytes": 1920924123.136,
+       "seconds": 14.204
+      },
+      "load_http": {
+       "load_after": [
+        3.78564453125,
+        3.3564453125,
+        3.11328125
+       ],
+       "method": "HTTP Graph Store POST, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 1320702443.52,
+       "seconds": 42.42
+      }
+     },
+     "quiet": {
+      "free_gib": 21.9,
+      "load_before": [
+       3.9033203125,
+       3.166015625,
+       3.13818359375
+      ],
+      "swap": "total = 9216.00M  used = 8005.31M  free = 1210.69M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T16:44:11+0200",
+     "store": "oxigraph"
+    }
+   },
+   "qlever": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.04552308299753349,
+      "mixes": 39,
+      "p95": 0.17396127860702107,
+      "qmph": 2340.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.04434199999377597,
+      "mixes": 147,
+      "p95": 0.18711405810026924,
+      "qmph": 8820.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.08948531200439902,
+      "mixes": 128,
+      "p95": 0.4393160853986047,
+      "qmph": 7680.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.057686750500579365,
+       "n": 100,
+       "p95": 0.060969559747172754
+      },
+      "Q10": {
+       "median": 0.17515045850450406,
+       "n": 200,
+       "p95": 0.18488967324447003
+      },
+      "Q11": {
+       "median": 0.004111104004550725,
+       "n": 100,
+       "p95": 0.004597258654393954
+      },
+      "Q12": {
+       "median": 0.013659875003213529,
+       "n": 100,
+       "p95": 0.01425283576027141
+      },
+      "Q2": {
+       "median": 0.024230187496868894,
+       "n": 600,
+       "p95": 0.027638788938929792
+      },
+      "Q3": {
+       "median": 0.06856649999826914,
+       "n": 100,
+       "p95": 0.07624184789310676
+      },
+      "Q4": {
+       "median": 0.09103635400242638,
+       "n": 100,
+       "p95": 0.09913094170551631
+      },
+      "Q5": {
+       "median": 0.08706793749297503,
+       "n": 200,
+       "p95": 0.09475563604573836
+      },
+      "Q7": {
+       "median": 0.09556400000292342,
+       "n": 400,
+       "p95": 0.10802703191075126
+      },
+      "Q8": {
+       "median": 0.040357020996452775,
+       "n": 200,
+       "p95": 0.04716467019679841
+      },
+      "Q9": {
+       "median": 0.04510914550337475,
+       "n": 400,
+       "p95": 0.05073457950347802
+      }
+     },
+     "qmph": 2338.611452201361
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.008147875501890667,
+       "n": 10,
+       "p95": 0.008661929050140316
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.006537896493682638,
+       "n": 10,
+       "p95": 0.0067957813989778515
+      },
+      "F03-path-alternative": {
+       "median": 0.045807750000676606,
+       "n": 10,
+       "p95": 0.048372195653792006
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.010878082997805905,
+       "n": 10,
+       "p95": 0.013032171506347369
+      },
+      "F05-agg-group-avg": {
+       "median": 0.20284060400445014,
+       "n": 10,
+       "p95": 0.21431497744924854
+      },
+      "F06-agg-having": {
+       "median": 0.016370083496440202,
+       "n": 10,
+       "p95": 0.017274449698015816
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.024138624998158775,
+       "n": 10,
+       "p95": 0.025067885903263233
+      },
+      "F08-optional-unbound": {
+       "median": 0.009180416498566046,
+       "n": 10,
+       "p95": 0.009916085602162639
+      },
+      "F09-minus": {
+       "median": 0.02467170850286493,
+       "n": 10,
+       "p95": 0.025304047947429353
+      },
+      "F10-not-exists": {
+       "median": 0.04391756250697654,
+       "n": 10,
+       "p95": 0.04908586875317269
+      },
+      "F11-subquery-topk": {
+       "median": 0.01583506249880884,
+       "n": 10,
+       "p95": 0.01768346059761825
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.045057916999212466,
+       "n": 10,
+       "p95": 0.2767314041913781
+      },
+      "F13-values-union": {
+       "median": 0.022115770989330485,
+       "n": 10,
+       "p95": 0.023412453947821633
+      },
+      "F14-count-all": {
+       "median": 0.044915375001437496,
+       "n": 10,
+       "p95": 0.05050849999897764
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp up -d qlever",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload explore --out /out/explore.json --endpoint http://qlever:7001/ --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload features --out /out/features.json --endpoint http://qlever:7001/ --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload concurrent --out /out/concurrent.json --endpoint http://qlever:7001/ --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 146616320,
+     "finished": "2026-10-03T17:15:52+0200",
+     "image": "sha256:2b3e28a54915832558320112d2c2d9ca132994ac35501c2f22b4dbd59f5a105a adfreiburg/qlever:commit-caba7eb0d1@sha256:64ad83b43341548f7e8bedaadeb09ef4f2aa50acc7686778e1e9bb830ae1e0ab",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      5.92236328125,
+      3.724609375,
+      3.1181640625
+     ],
+     "load_method": "`qlever-index` (offline index build)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        5.92236328125,
+        3.724609375,
+        3.1181640625
+       ],
+       "peak_mem_bytes": 755918438.4,
+       "seconds": 206.111
+      },
+      "explore": {
+       "load_after": [
+        1.68310546875,
+        2.14599609375,
+        2.5888671875
+       ],
+       "peak_mem_bytes": 714814259.2,
+       "seconds": 186.064
+      },
+      "features": {
+       "load_after": [
+        1.81787109375,
+        2.15771484375,
+        2.58740234375
+       ],
+       "peak_mem_bytes": 697093324.8,
+       "seconds": 7.85
+      },
+      "load": {
+       "load_after": [
+        2.330078125,
+        2.8662109375,
+        2.94140625
+       ],
+       "method": "`qlever-index` (offline index build)",
+       "peak_mem_bytes": 658505728.0,
+       "seconds": 7.49
+      }
+     },
+     "quiet": {
+      "free_gib": 22.0,
+      "load_before": [
+       2.18505859375,
+       2.84716796875,
+       2.935546875
+      ],
+      "swap": "total = 9216.00M  used = 8674.31M  free = 541.69M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T17:08:04+0200",
+     "store": "qlever"
+    }
+   },
+   "rdf4j": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0019153749963152222,
+      "mixes": 56,
+      "p95": 0.19372714230339624,
+      "qmph": 3360.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0025247919984394684,
+      "mixes": 101,
+      "p95": 0.4475961415941129,
+      "qmph": 6060.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.003662625007564202,
+      "mixes": 91,
+      "p95": 0.9708555501943921,
+      "qmph": 5460.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0014321039998321794,
+       "n": 100,
+       "p95": 0.0028487458424933704
+      },
+      "Q10": {
+       "median": 0.0019758960042963736,
+       "n": 200,
+       "p95": 0.0029802874953020367
+      },
+      "Q11": {
+       "median": 0.17941670850268565,
+       "n": 100,
+       "p95": 0.1863578190881526
+      },
+      "Q12": {
+       "median": 0.0017807709955377504,
+       "n": 100,
+       "p95": 0.002319908006757032
+      },
+      "Q2": {
+       "median": 0.0014605415053665638,
+       "n": 600,
+       "p95": 0.0020590773980075023
+      },
+      "Q3": {
+       "median": 0.0014423960019485094,
+       "n": 100,
+       "p95": 0.006307877095241565
+      },
+      "Q4": {
+       "median": 0.0016140624938998371,
+       "n": 100,
+       "p95": 0.0027870059508131816
+      },
+      "Q5": {
+       "median": 0.021493062500667293,
+       "n": 200,
+       "p95": 0.04147499169557705
+      },
+      "Q7": {
+       "median": 0.0021743329998571426,
+       "n": 400,
+       "p95": 0.0036017374935909175
+      },
+      "Q8": {
+       "median": 0.0018918539935839362,
+       "n": 200,
+       "p95": 0.0028013666895276403
+      },
+      "Q9": {
+       "median": 0.1811559580019093,
+       "n": 400,
+       "p95": 0.19316743299496011
+      }
+     },
+     "qmph": 3626.5748696924356
+    },
+    "features": {
+     "errors": {
+      "F10-not-exists": "TimeoutError: timed out"
+     },
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.013772270998742897,
+       "n": 10,
+       "p95": 0.015034640254452825
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0016830204986035824,
+       "n": 10,
+       "p95": 0.0020098792003409474
+      },
+      "F03-path-alternative": {
+       "median": 0.796801084499748,
+       "n": 10,
+       "p95": 0.8599022336071358
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.025311979006801266,
+       "n": 10,
+       "p95": 0.03081922485289397
+      },
+      "F05-agg-group-avg": {
+       "median": 0.6997739584985538,
+       "n": 10,
+       "p95": 0.7445859063976968
+      },
+      "F06-agg-having": {
+       "median": 0.14067962500121212,
+       "n": 10,
+       "p95": 0.1535060937560047
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.18070979150070343,
+       "n": 10,
+       "p95": 0.1939125293516554
+      },
+      "F08-optional-unbound": {
+       "median": 0.13983962449856335,
+       "n": 10,
+       "p95": 0.1518303453536646
+      },
+      "F09-minus": {
+       "median": 0.46353123000153573,
+       "n": 10,
+       "p95": 0.5019742979522561
+      },
+      "F11-subquery-topk": {
+       "median": 0.35797343750164146,
+       "n": 10,
+       "p95": 0.391552641850285
+      },
+      "F12-subquery-agg-join": {
+       "median": 3.096359293005662,
+       "n": 10,
+       "p95": 3.30809918485611
+      },
+      "F13-values-union": {
+       "median": 0.8271350834984332,
+       "n": 10,
+       "p95": 0.848036656104523
+      },
+      "F14-count-all": {
+       "median": 2.7032741055008955,
+       "n": 10,
+       "p95": 2.7746178867535494
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp up -d rdf4j",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload load-http --out /out/load.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench/statements --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload explore --out /out/explore.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload features --out /out/features.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload concurrent --out /out/concurrent.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 656064512,
+     "finished": "2026-10-03T17:35:16+0200",
+     "image": "sha256:80354a64388a0c719e15f9b3bb4d51f52177e6eb7c908b365eb44fcd746cd9b4 eclipse/rdf4j-workbench:6.1.0-tomcat@sha256:7a18cecfc879f3143b5a57fe31176a0774fa57e5313f639c6f51756f390f7670",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      3.9404296875,
+      3.087890625,
+      2.859375
+     ],
+     "load_method": "HTTP `POST /statements`, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        3.9404296875,
+        3.087890625,
+        2.859375
+       ],
+       "peak_mem_bytes": 1390495662.08,
+       "seconds": 204.788
+      },
+      "explore": {
+       "load_after": [
+        2.42236328125,
+        2.93017578125,
+        2.97509765625
+       ],
+       "peak_mem_bytes": 1231581872.128,
+       "seconds": 121.775
+      },
+      "features": {
+       "load_after": [
+        2.52880859375,
+        2.294921875,
+        2.60205078125
+       ],
+       "peak_mem_bytes": 1114544013.312,
+       "seconds": 416.061
+      },
+      "load": {
+       "load_after": [
+        4.14501953125,
+        3.669921875,
+        3.21337890625
+       ],
+       "method": "HTTP `POST /statements`, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 1452772687.872,
+       "seconds": 35.34
+      }
+     },
+     "quiet": {
+      "free_gib": 22.5,
+      "load_before": [
+       4.443359375,
+       3.5224609375,
+       3.134765625
+      ],
+      "swap": "total = 9216.00M  used = 8630.06M  free = 585.94M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T17:21:12+0200",
+     "store": "rdf4j"
+    }
+   },
+   "virtuoso": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.002775770495645702,
+      "mixes": 858,
+      "p95": 0.004475341300712898,
+      "qmph": 51480.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0031228750012815,
+      "mixes": 2950,
+      "p95": 0.0054651061051117725,
+      "qmph": 177000.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.003450082993367687,
+      "mixes": 4556,
+      "p95": 0.007444022938580021,
+      "qmph": 273360.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0015865624955040403,
+       "n": 100,
+       "p95": 0.0019380204998014957
+      },
+      "Q10": {
+       "median": 0.002671666501555592,
+       "n": 200,
+       "p95": 0.0030657187460747084
+      },
+      "Q11": {
+       "median": 0.000883791501109954,
+       "n": 100,
+       "p95": 0.001011341650155373
+      },
+      "Q12": {
+       "median": 0.00233481250324985,
+       "n": 100,
+       "p95": 0.0024733999955060424
+      },
+      "Q2": {
+       "median": 0.003718353997101076,
+       "n": 600,
+       "p95": 0.004374421453394461
+      },
+      "Q3": {
+       "median": 0.0018898540001828223,
+       "n": 100,
+       "p95": 0.0025064125009521374
+      },
+      "Q4": {
+       "median": 0.004346354500739835,
+       "n": 100,
+       "p95": 0.00520853301131865
+      },
+      "Q5": {
+       "median": 0.002517541499400977,
+       "n": 200,
+       "p95": 0.0031321684509748593
+      },
+      "Q7": {
+       "median": 0.003850207998766564,
+       "n": 400,
+       "p95": 0.005892960438359296
+      },
+      "Q8": {
+       "median": 0.002746541504166089,
+       "n": 200,
+       "p95": 0.0032365431594371333
+      },
+      "Q9": {
+       "median": 0.0009241875013685785,
+       "n": 400,
+       "p95": 0.0010757461444882211
+      }
+     },
+     "qmph": 49962.26895916418
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.010676124999008607,
+       "n": 10,
+       "p95": 0.010753293900052086
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0008735209994483739,
+       "n": 10,
+       "p95": 0.0009183416972518898
+      },
+      "F03-path-alternative": {
+       "median": 0.01841358299861895,
+       "n": 10,
+       "p95": 0.01845840015084832
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.006411374997696839,
+       "n": 10,
+       "p95": 0.0064541392486717085
+      },
+      "F05-agg-group-avg": {
+       "median": 0.09126835400093114,
+       "n": 10,
+       "p95": 0.09615191875345773
+      },
+      "F06-agg-having": {
+       "median": 0.03542706250300398,
+       "n": 10,
+       "p95": 0.03660312529609655
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.19606604149885243,
+       "n": 10,
+       "p95": 0.2185698151071847
+      },
+      "F08-optional-unbound": {
+       "median": 0.01492143750510877,
+       "n": 10,
+       "p95": 0.015078442001686199
+      },
+      "F09-minus": {
+       "median": 0.03408368799864547,
+       "n": 10,
+       "p95": 0.034416345800855196
+      },
+      "F10-not-exists": {
+       "median": 0.07762112499040086,
+       "n": 10,
+       "p95": 0.09021862310401048
+      },
+      "F11-subquery-topk": {
+       "median": 0.010077291495690588,
+       "n": 10,
+       "p95": 0.010110006402101135
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.25617872899601934,
+       "n": 10,
+       "p95": 0.26431879429510446
+      },
+      "F13-values-union": {
+       "median": 0.0019559369975468144,
+       "n": 10,
+       "p95": 0.001999841450015083
+      },
+      "F14-count-all": {
+       "median": 0.021492062500328757,
+       "n": 10,
+       "p95": 0.021779604197945446
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp up -d virtuoso",
+      "docker exec benchcmp-virtuoso-1 isql 1111 dba <password> exec=\"ld_dir('/bench', 'dataset.nt', 'http://example.org/bench/bsbm'); rdf_loader_run(); checkpoint; select count(*) from DB.DBA.load_list where ll_error is not null;\"",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/virtuoso/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload explore --out /out/explore.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/virtuoso/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload features --out /out/features.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/virtuoso/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload concurrent --out /out/concurrent.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 534814720,
+     "finished": "2026-10-03T17:21:11+0200",
+     "image": "sha256:a1dcc3231b97071dee537e180a7b18f4cef0d8257a77a30265d2237a87f0d3dd openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      4.443359375,
+      3.5224609375,
+      3.134765625
+     ],
+     "load_method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.443359375,
+        3.5224609375,
+        3.134765625
+       ],
+       "peak_mem_bytes": 3439195062.272,
+       "seconds": 204.374
+      },
+      "explore": {
+       "load_after": [
+        3.404296875,
+        3.41015625,
+        3.05615234375
+       ],
+       "peak_mem_bytes": 3143916060.672,
+       "seconds": 9.949
+      },
+      "features": {
+       "load_after": [
+        3.10791015625,
+        3.3466796875,
+        3.03759765625
+       ],
+       "peak_mem_bytes": 3277060046.848,
+       "seconds": 10.114
+      },
+      "load": {
+       "load_after": [
+        4.6484375,
+        3.6318359375,
+        3.10595703125
+       ],
+       "method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)",
+       "peak_mem_bytes": 3067680391.168,
+       "seconds": 14.807
+      }
+     },
+     "quiet": {
+      "free_gib": 22.9,
+      "load_before": [
+       5.17138671875,
+       3.634765625,
+       3.0927734375
+      ],
+      "swap": "total = 9216.00M  used = 8694.06M  free = 521.94M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "10k",
+     "started": "2026-10-03T17:16:03+0200",
+     "store": "virtuoso"
+    }
+   }
+  },
+  "1k": {
+   "fuseki": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0014815829999861307,
+      "mixes": 302,
+      "p95": 0.07264633315207904,
+      "qmph": 18120.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.001538708500447683,
+      "mixes": 788,
+      "p95": 0.11592942530114668,
+      "qmph": 47280.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.002157604496460408,
+      "mixes": 466,
+      "p95": 0.4384389937418741,
+      "qmph": 27960.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0013170210004318506,
+       "n": 100,
+       "p95": 0.0017450625113269779
+      },
+      "Q10": {
+       "median": 0.0015604375003022142,
+       "n": 200,
+       "p95": 0.0019914749915187716
+      },
+      "Q11": {
+       "median": 0.0011558124970179051,
+       "n": 100,
+       "p95": 0.0014568937505828217
+      },
+      "Q12": {
+       "median": 0.0016834374982863665,
+       "n": 100,
+       "p95": 0.0020866985498287248
+      },
+      "Q2": {
+       "median": 0.0030817915030638687,
+       "n": 600,
+       "p95": 0.003846446142415516
+      },
+      "Q3": {
+       "median": 0.0014734164942638017,
+       "n": 100,
+       "p95": 0.0018158027087338269
+      },
+      "Q4": {
+       "median": 0.001608229496923741,
+       "n": 100,
+       "p95": 0.0019681597987073474
+      },
+      "Q5": {
+       "median": 0.07458939599746373,
+       "n": 200,
+       "p95": 0.10081297318974976
+      },
+      "Q7": {
+       "median": 0.002056624500255566,
+       "n": 400,
+       "p95": 0.0028120417009631637
+      },
+      "Q8": {
+       "median": 0.001986083501833491,
+       "n": 200,
+       "p95": 0.0028715788561385126
+      },
+      "Q9": {
+       "median": 0.001288270992517937,
+       "n": 400,
+       "p95": 0.0017329579990473577
+      }
+     },
+     "qmph": 17771.67693220964
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.5076328544964781,
+       "n": 10,
+       "p95": 0.52974521509459
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0024968960060505196,
+       "n": 10,
+       "p95": 0.0028497560975665696
+      },
+      "F03-path-alternative": {
+       "median": 0.08640127050603041,
+       "n": 10,
+       "p95": 0.09682197499278118
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.005143895999935921,
+       "n": 10,
+       "p95": 0.006013160604197766
+      },
+      "F05-agg-group-avg": {
+       "median": 0.08545233350014314,
+       "n": 10,
+       "p95": 0.09362304184469394
+      },
+      "F06-agg-having": {
+       "median": 0.0143094375016517,
+       "n": 10,
+       "p95": 0.017285016851383263
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.016613625004538335,
+       "n": 10,
+       "p95": 0.017619531392847422
+      },
+      "F08-optional-unbound": {
+       "median": 0.0048898749955696985,
+       "n": 10,
+       "p95": 0.007071056107815823
+      },
+      "F09-minus": {
+       "median": 0.013639083001180552,
+       "n": 10,
+       "p95": 0.01541124534487608
+      },
+      "F10-not-exists": {
+       "median": 0.16968579150852747,
+       "n": 10,
+       "p95": 0.173440235745511
+      },
+      "F11-subquery-topk": {
+       "median": 0.04639397949358681,
+       "n": 10,
+       "p95": 0.049238456409511855
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.14988983350485796,
+       "n": 10,
+       "p95": 0.15519125014398014
+      },
+      "F13-values-union": {
+       "median": 0.0027309169963700697,
+       "n": 10,
+       "p95": 0.0028711981009109876
+      },
+      "F14-count-all": {
+       "median": 0.0714877290010918,
+       "n": 10,
+       "p95": 0.07205077499238541
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/fuseki/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload explore --out /out/explore.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/fuseki/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload features --out /out/features.json --endpoint http://fuseki:3030/ds/sparql --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/fuseki/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload concurrent --out /out/concurrent.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/fuseki/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload shacl --out /out/shacl.json --endpoint http://fuseki:3030/ds/shacl?graph=default --shacl-kind fuseki --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/fuseki/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload load-http --out /out/load_http.json --endpoint http://fuseki:3030/ds/data?default --file /bench/dataset.nt --chunk-mb 100",
+      "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 77148160,
+     "finished": "2026-10-03T16:22:41+0200",
+     "image": "sha256:05e5dc64672d5a2233e7a3c7b527b43d6e7d0bb8231d21582c1729282404d259 eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      3.4169921875,
+      3.724609375,
+      4.3759765625
+     ],
+     "load_method": "`tdb2.tdbloader` (offline, default loader)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.10546875,
+        3.86572265625,
+        4.4365234375
+       ],
+       "peak_mem_bytes": 1315333734.4,
+       "seconds": 202.623
+      },
+      "explore": {
+       "load_after": [
+        2.28173828125,
+        4.14990234375,
+        4.7314453125
+       ],
+       "peak_mem_bytes": 815162982.4,
+       "seconds": 25.946
+      },
+      "features": {
+       "load_after": [
+        2.07080078125,
+        4.0107421875,
+        4.67138671875
+       ],
+       "peak_mem_bytes": 815162982.4,
+       "seconds": 15.57
+      },
+      "load": {
+       "load_after": [
+        3.48095703125,
+        4.92919921875,
+        5.04638671875
+       ],
+       "method": "`tdb2.tdbloader` (offline, default loader)",
+       "peak_mem_bytes": 1054867456.0,
+       "seconds": 5.5
+      },
+      "load_http": {
+       "load_after": [
+        3.4169921875,
+        3.724609375,
+        4.3759765625
+       ],
+       "method": "HTTP Graph Store POST, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 500170752.0,
+       "seconds": 3.302
+      },
+      "shacl": {
+       "load_after": [
+        3.62744140625,
+        3.77099609375,
+        4.39599609375
+       ],
+       "peak_mem_bytes": 1238024323.072,
+       "seconds": 6.598
+      }
+     },
+     "quiet": {
+      "free_gib": 19.9,
+      "load_before": [
+       3.697265625,
+       4.99560546875,
+       5.0703125
+      ],
+      "swap": "total = 12288.00M  used = 11139.00M  free = 1149.00M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-03T16:17:17+0200",
+     "store": "fuseki"
+    },
+    "shacl": {
+     "median": 0.9789685840078164,
+     "n": 5,
+     "p95": 0.993006175008486,
+     "results": [
+      5245
+     ]
+    }
+   },
+   "ots": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0008173329988494515,
+      "mixes": 1593,
+      "p95": 0.004809458195813932,
+      "qmph": 95580.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0009629160049371421,
+      "mixes": 4013,
+      "p95": 0.005483999400166795,
+      "qmph": 240780.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0013602289982372895,
+      "mixes": 5294,
+      "p95": 0.01219427309406457,
+      "qmph": 317640.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0005048959937994368,
+       "n": 100,
+       "p95": 0.0008905169539502821
+      },
+      "Q10": {
+       "median": 0.0010170210007345304,
+       "n": 200,
+       "p95": 0.0019401416480832269
+      },
+      "Q11": {
+       "median": 0.0004799999951501377,
+       "n": 100,
+       "p95": 0.000837055603187764
+      },
+      "Q12": {
+       "median": 0.0006058540020603687,
+       "n": 100,
+       "p95": 0.001023497294227127
+      },
+      "Q2": {
+       "median": 0.0008822710005915724,
+       "n": 600,
+       "p95": 0.0013519124913727865
+      },
+      "Q3": {
+       "median": 0.0005831044909427874,
+       "n": 100,
+       "p95": 0.0009360958058096001
+      },
+      "Q4": {
+       "median": 0.0005893339985050261,
+       "n": 100,
+       "p95": 0.0008935503508837428
+      },
+      "Q5": {
+       "median": 0.0015116249996935949,
+       "n": 200,
+       "p95": 0.002695570854120888
+      },
+      "Q7": {
+       "median": 0.0028413545005605556,
+       "n": 400,
+       "p95": 0.0036669142624305095
+      },
+      "Q8": {
+       "median": 0.0049283125044894405,
+       "n": 200,
+       "p95": 0.0066478229011409
+      },
+      "Q9": {
+       "median": 0.0005224584965617396,
+       "n": 400,
+       "p95": 0.04532916664829827
+      }
+     },
+     "qmph": 50896.68318843575
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0023668119974900037,
+       "n": 10,
+       "p95": 0.0024618082970846444
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0006614165031351149,
+       "n": 10,
+       "p95": 0.0006918770508491434
+      },
+      "F03-path-alternative": {
+       "median": 0.08143256249604747,
+       "n": 10,
+       "p95": 0.08452522484440124
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0022129165081423707,
+       "n": 10,
+       "p95": 0.0024257769007817844
+      },
+      "F05-agg-group-avg": {
+       "median": 0.27970562500559026,
+       "n": 10,
+       "p95": 0.284766090089397
+      },
+      "F06-agg-having": {
+       "median": 0.006131583002570551,
+       "n": 10,
+       "p95": 0.006165051745483652
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.1251718335042824,
+       "n": 10,
+       "p95": 0.13022214375523616
+      },
+      "F08-optional-unbound": {
+       "median": 0.0024349375016754493,
+       "n": 10,
+       "p95": 0.0024562686041463165
+      },
+      "F09-minus": {
+       "median": 0.004363020991149824,
+       "n": 10,
+       "p95": 0.00443535975064151
+      },
+      "F10-not-exists": {
+       "median": 4.372959168991656,
+       "n": 10,
+       "p95": 4.5168434374478235
+      },
+      "F11-subquery-topk": {
+       "median": 0.011598353994486388,
+       "n": 10,
+       "p95": 0.011834066302981228
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.3025721875092131,
+       "n": 10,
+       "p95": 0.31675335014806477
+      },
+      "F13-values-union": {
+       "median": 0.007672791507502552,
+       "n": 10,
+       "p95": 0.007911618897924199
+      },
+      "F14-count-all": {
+       "median": 0.04054800000449177,
+       "n": 10,
+       "p95": 0.04070065609412268
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload concurrent --out /out/concurrent.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --clients 1,4,8 --seconds 60 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 163680256,
+     "finished": "2026-10-03T17:51:21+0200",
+     "image": "sha256:1056964d79c2b554e7bb7ea7d9e7ec24d51e929e078bca1502ae019861c6d5a8 ots-bench:570a7a30",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      4.26611328125,
+      3.4248046875,
+      3.08154296875
+     ],
+     "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.26611328125,
+        3.4248046875,
+        3.08154296875
+       ],
+       "peak_mem_bytes": 1256277934.08,
+       "seconds": 205.258
+      },
+      "explore": {
+       "load_after": [
+        2.51123046875,
+        2.80859375,
+        2.8349609375
+       ],
+       "peak_mem_bytes": 1268089094.144,
+       "seconds": 12.716
+      },
+      "features": {
+       "load_after": [
+        3.65380859375,
+        3.06005859375,
+        2.923828125
+       ],
+       "peak_mem_bytes": 1234803097.6,
+       "seconds": 63.824
+      },
+      "load": {
+       "load_after": [
+        1.92138671875,
+        2.6943359375,
+        2.79638671875
+       ],
+       "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 813694976.0,
+       "seconds": 8.547
+      },
+      "shacl": {
+       "load_after": [
+        4.26611328125,
+        3.4248046875,
+        3.08154296875
+       ],
+       "peak_mem_bytes": 1270236577.792,
+       "seconds": 2.587
+      }
+     },
+     "quiet": {
+      "free_gib": 17.6,
+      "load_before": [
+       1.90771484375,
+       2.71875,
+       2.80615234375
+      ],
+      "swap": "total = 10240.00M  used = 8964.38M  free = 1275.62M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-03T17:45:25+0200",
+     "store": "ots"
+    },
+    "shacl": {
+     "median": 0.3326974999945378,
+     "n": 5,
+     "p95": 0.3736842919985065,
+     "results": [
+      5245
+     ]
+    }
+   },
+   "oxigraph": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0006634169985773042,
+      "mixes": 2631,
+      "p95": 0.0028421829032595314,
+      "qmph": 157860.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0007091250008670613,
+      "mixes": 9838,
+      "p95": 0.0029774751485092525,
+      "qmph": 590280.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0007195000071078539,
+      "mixes": 12029,
+      "p95": 0.003757275198586284,
+      "qmph": 721740.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0004060829960508272,
+       "n": 100,
+       "p95": 0.0012159273996076082
+      },
+      "Q10": {
+       "median": 0.0006202705044415779,
+       "n": 200,
+       "p95": 0.0009820080500503538
+      },
+      "Q11": {
+       "median": 0.0002918124955613166,
+       "n": 100,
+       "p95": 0.00034951665948028675
+      },
+      "Q12": {
+       "median": 0.0003724170019268058,
+       "n": 100,
+       "p95": 0.00047730836013215594
+      },
+      "Q2": {
+       "median": 0.0009467295021750033,
+       "n": 600,
+       "p95": 0.001209910400211811
+      },
+      "Q3": {
+       "median": 0.0004775620109285228,
+       "n": 100,
+       "p95": 0.0013010770962864626
+      },
+      "Q4": {
+       "median": 0.0006867915071779862,
+       "n": 100,
+       "p95": 0.0021784485506941564
+      },
+      "Q5": {
+       "median": 0.0036133120011072606,
+       "n": 200,
+       "p95": 0.007432033652730754
+      },
+      "Q7": {
+       "median": 0.0010012710044975393,
+       "n": 400,
+       "p95": 0.0014779443590668964
+      },
+      "Q8": {
+       "median": 0.0007093129970598966,
+       "n": 200,
+       "p95": 0.001087789896700997
+      },
+      "Q9": {
+       "median": 0.00022897950111655518,
+       "n": 400,
+       "p95": 0.0003018812494701706
+      }
+     },
+     "qmph": 136476.41018060443
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0039329999999608845,
+       "n": 10,
+       "p95": 0.004008872555277776
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0013615420029964298,
+       "n": 10,
+       "p95": 0.0014990626463259106
+      },
+      "F03-path-alternative": {
+       "median": 0.16079829150112346,
+       "n": 10,
+       "p95": 0.20416068965496378
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0032824580048327334,
+       "n": 10,
+       "p95": 0.007123373256763444
+      },
+      "F05-agg-group-avg": {
+       "median": 0.3602650419998099,
+       "n": 10,
+       "p95": 0.5725382752985753
+      },
+      "F06-agg-having": {
+       "median": 0.010188895990722813,
+       "n": 10,
+       "p95": 0.012040243451338029
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.023505937002482824,
+       "n": 10,
+       "p95": 0.04402259984708508
+      },
+      "F08-optional-unbound": {
+       "median": 0.015767728997161612,
+       "n": 10,
+       "p95": 0.024036721199809107
+      },
+      "F09-minus": {
+       "median": 0.033160312501422595,
+       "n": 10,
+       "p95": 0.03900025260518305
+      },
+      "F10-not-exists": {
+       "median": 111.62983671799884,
+       "n": 1,
+       "p95": 111.62983671799884
+      },
+      "F11-subquery-topk": {
+       "median": 0.05833658349729376,
+       "n": 10,
+       "p95": 0.0587776831453084
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.1804021459975047,
+       "n": 10,
+       "p95": 0.18897247719360166
+      },
+      "F13-values-union": {
+       "median": 0.0008546879980713129,
+       "n": 10,
+       "p95": 0.0008955876481195446
+      },
+      "F14-count-all": {
+       "median": 0.13580256250861567,
+       "n": 10,
+       "p95": 0.14026801440268172
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm optimize",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload explore --out /out/explore.json --endpoint http://oxigraph:7878/query --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload features --out /out/features.json --endpoint http://oxigraph:7878/query --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload concurrent --out /out/concurrent.json --endpoint http://oxigraph:7878/query --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/oxigraph/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store oxigraph --workload load-http --out /out/load_http.json --endpoint http://oxigraph:7878/store?default --file /bench/dataset.nt --chunk-mb 100",
+      "docker compose -f <repo>/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 72130560,
+     "finished": "2026-10-03T16:17:07+0200",
+     "image": "sha256:7e146d8d735b69c39e0071aef05150b8fcdf1f2394daac7e84df7131a43cb601 ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      4.1005859375,
+      5.115234375,
+      5.11328125
+     ],
+     "load_method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+     "optimize_seconds": 1.373,
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.6669921875,
+        5.275390625,
+        5.16943359375
+       ],
+       "peak_mem_bytes": 68587356.16,
+       "seconds": 209.475
+      },
+      "explore": {
+       "load_after": [
+        4.0478515625,
+        5.6259765625,
+        4.9326171875
+       ],
+       "peak_mem_bytes": 55480156.16,
+       "seconds": 3.806
+      },
+      "features": {
+       "load_after": [
+        2.38134765625,
+        5.46533203125,
+        5.22216796875
+       ],
+       "peak_mem_bytes": 63281561.6,
+       "seconds": 243.417
+      },
+      "load": {
+       "load_after": [
+        5.302734375,
+        5.95556640625,
+        4.974609375
+       ],
+       "method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+       "peak_mem_bytes": 288358400.0,
+       "seconds": 3.056
+      },
+      "load_http": {
+       "load_after": [
+        4.1005859375,
+        5.115234375,
+        5.11328125
+       ],
+       "method": "HTTP Graph Store POST, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 355781836.8,
+       "seconds": 3.594
+      }
+     },
+     "quiet": {
+      "free_gib": 20.3,
+      "load_before": [
+       5.302734375,
+       5.95556640625,
+       4.974609375
+      ],
+      "swap": "total = 12288.00M  used = 11515.00M  free = 773.00M  (encrypted)",
+      "waited_s": 540
+     },
+     "scale": "1k",
+     "started": "2026-10-03T16:08:10+0200",
+     "store": "oxigraph"
+    }
+   },
+   "qlever": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.05019383299804758,
+      "mixes": 41,
+      "p95": 0.15449754158908036,
+      "qmph": 2460.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.04850250049639726,
+      "mixes": 160,
+      "p95": 0.16794075449797674,
+      "qmph": 9600.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.08380489599949215,
+      "mixes": 166,
+      "p95": 0.30587830190634124,
+      "qmph": 9960.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.05682120899291476,
+       "n": 100,
+       "p95": 0.059456568748282736
+      },
+      "Q10": {
+       "median": 0.15643170850671595,
+       "n": 200,
+       "p95": 0.16428215559499224
+      },
+      "Q11": {
+       "median": 0.004055625504406635,
+       "n": 100,
+       "p95": 0.004525908301002346
+      },
+      "Q12": {
+       "median": 0.012854854001489002,
+       "n": 100,
+       "p95": 0.013244256845791825
+      },
+      "Q2": {
+       "median": 0.024751458498940337,
+       "n": 600,
+       "p95": 0.027784908637840996
+      },
+      "Q3": {
+       "median": 0.06702187500923174,
+       "n": 100,
+       "p95": 0.07338053574640072
+      },
+      "Q4": {
+       "median": 0.08993789600208402,
+       "n": 100,
+       "p95": 0.09701334134369972
+      },
+      "Q5": {
+       "median": 0.07323508349509211,
+       "n": 200,
+       "p95": 0.0801828080577252
+      },
+      "Q7": {
+       "median": 0.0827616040041903,
+       "n": 400,
+       "p95": 0.08942207441068603
+      },
+      "Q8": {
+       "median": 0.04482252099842299,
+       "n": 200,
+       "p95": 0.07678597470294336
+      },
+      "Q9": {
+       "median": 0.049513041507452726,
+       "n": 400,
+       "p95": 0.05176199164925492
+      }
+     },
+     "qmph": 2467.3113630274515
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0047936874980223365,
+       "n": 10,
+       "p95": 0.0050003145552182104
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.006915145997481886,
+       "n": 10,
+       "p95": 0.0075693352002417676
+      },
+      "F03-path-alternative": {
+       "median": 0.04898531249637017,
+       "n": 10,
+       "p95": 0.051426387657556916
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0056831665060599335,
+       "n": 10,
+       "p95": 0.007830125141481403
+      },
+      "F05-agg-group-avg": {
+       "median": 0.027862811999511905,
+       "n": 10,
+       "p95": 0.030153104195778723
+      },
+      "F06-agg-having": {
+       "median": 0.004334645498602185,
+       "n": 10,
+       "p95": 0.0044726526022714095
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.008384208995266818,
+       "n": 10,
+       "p95": 0.008763910747074988
+      },
+      "F08-optional-unbound": {
+       "median": 0.004514353997365106,
+       "n": 10,
+       "p95": 0.004996243447385496
+      },
+      "F09-minus": {
+       "median": 0.009341582997876685,
+       "n": 10,
+       "p95": 0.009653827451256803
+      },
+      "F10-not-exists": {
+       "median": 0.05729214599705301,
+       "n": 10,
+       "p95": 0.05814245409637806
+      },
+      "F11-subquery-topk": {
+       "median": 0.010948375493171625,
+       "n": 10,
+       "p95": 0.012116178803262302
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.056499124999390915,
+       "n": 10,
+       "p95": 0.059232074996543815
+      },
+      "F13-values-union": {
+       "median": 0.009419687499757856,
+       "n": 10,
+       "p95": 0.009650228504324333
+      },
+      "F14-count-all": {
+       "median": 0.046252708496467676,
+       "n": 10,
+       "p95": 0.05129733520079754
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp up -d qlever",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/qlever/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload explore --out /out/explore.json --endpoint http://qlever:7001/ --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/qlever/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload features --out /out/features.json --endpoint http://qlever:7001/ --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/qlever/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload concurrent --out /out/concurrent.json --endpoint http://qlever:7001/ --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 15536128,
+     "finished": "2026-10-03T16:30:09+0200",
+     "image": "sha256:2b3e28a54915832558320112d2c2d9ca132994ac35501c2f22b4dbd59f5a105a adfreiburg/qlever:commit-caba7eb0d1@sha256:64ad83b43341548f7e8bedaadeb09ef4f2aa50acc7686778e1e9bb830ae1e0ab",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      3.126953125,
+      2.88623046875,
+      3.607421875
+     ],
+     "load_method": "`qlever-index` (offline index build)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        3.126953125,
+        2.88623046875,
+        3.607421875
+       ],
+       "peak_mem_bytes": 658505728.0,
+       "seconds": 206.063
+      },
+      "explore": {
+       "load_after": [
+        2.3291015625,
+        2.92822265625,
+        3.85302734375
+       ],
+       "peak_mem_bytes": 551865548.8,
+       "seconds": 175.743
+      },
+      "features": {
+       "load_after": [
+        2.22265625,
+        2.89599609375,
+        3.8359375
+       ],
+       "peak_mem_bytes": 541904076.8,
+       "seconds": 4.255
+      },
+      "load": {
+       "load_after": [
+        3.94384765625,
+        3.82861328125,
+        4.40869140625
+       ],
+       "method": "`qlever-index` (offline index build)",
+       "peak_mem_bytes": null,
+       "seconds": 1.131
+      }
+     },
+     "quiet": {
+      "free_gib": 21.0,
+      "load_before": [
+       3.4169921875,
+       3.724609375,
+       4.3759765625
+      ],
+      "swap": "total = 11264.00M  used = 9662.19M  free = 1601.81M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-03T16:22:42+0200",
+     "store": "qlever"
+    }
+   },
+   "rdf4j": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0012406249952618964,
+      "mixes": 478,
+      "p95": 0.019987562808091754,
+      "qmph": 28680.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0016024795040721074,
+      "mixes": 1268,
+      "p95": 0.03158568815124454,
+      "qmph": 76080.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.002497750501788687,
+      "mixes": 876,
+      "p95": 0.09966460626092156,
+      "qmph": 52560.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0010704589949455112,
+       "n": 100,
+       "p95": 0.002272883040859597
+      },
+      "Q10": {
+       "median": 0.0016012080013751984,
+       "n": 200,
+       "p95": 0.0030275377990619744
+      },
+      "Q11": {
+       "median": 0.0203804789998685,
+       "n": 100,
+       "p95": 0.02322647919281735
+      },
+      "Q12": {
+       "median": 0.0016030215047067031,
+       "n": 100,
+       "p95": 0.002731343451887369
+      },
+      "Q2": {
+       "median": 0.0013487710093613714,
+       "n": 600,
+       "p95": 0.0019098145901807583
+      },
+      "Q3": {
+       "median": 0.0010435205040266737,
+       "n": 100,
+       "p95": 0.0015710169471276458
+      },
+      "Q4": {
+       "median": 0.0011379580028005876,
+       "n": 100,
+       "p95": 0.001707679148967145
+      },
+      "Q5": {
+       "median": 0.003562020996469073,
+       "n": 200,
+       "p95": 0.005852879157464488
+      },
+      "Q7": {
+       "median": 0.001505874992290046,
+       "n": 400,
+       "p95": 0.002204285439074738
+      },
+      "Q8": {
+       "median": 0.0015642709986423142,
+       "n": 200,
+       "p95": 0.002460347897431348
+      },
+      "Q9": {
+       "median": 0.019609291506640147,
+       "n": 400,
+       "p95": 0.022684197610942647
+      }
+     },
+     "qmph": 26291.864033067075
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0049463754912721924,
+       "n": 10,
+       "p95": 0.00560847050146549
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0014536665039486252,
+       "n": 10,
+       "p95": 0.00173864170719753
+      },
+      "F03-path-alternative": {
+       "median": 0.07852312499744585,
+       "n": 10,
+       "p95": 0.08211359169144998
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0034474164931452833,
+       "n": 10,
+       "p95": 0.0039002788034849805
+      },
+      "F05-agg-group-avg": {
+       "median": 0.06707491650013253,
+       "n": 10,
+       "p95": 0.07307467065402307
+      },
+      "F06-agg-having": {
+       "median": 0.013054687493422534,
+       "n": 10,
+       "p95": 0.017156589796650225
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.019545771006960422,
+       "n": 10,
+       "p95": 0.022356704506091774
+      },
+      "F08-optional-unbound": {
+       "median": 0.01080058349907631,
+       "n": 10,
+       "p95": 0.013779843750671717
+      },
+      "F09-minus": {
+       "median": 0.03533806250197813,
+       "n": 10,
+       "p95": 0.03889086699782638
+      },
+      "F10-not-exists": {
+       "median": 88.52818829100579,
+       "n": 1,
+       "p95": 88.52818829100579
+      },
+      "F11-subquery-topk": {
+       "median": 0.021390875008364674,
+       "n": 10,
+       "p95": 0.02292032935001771
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.1821744580011,
+       "n": 10,
+       "p95": 0.18906331409161795
+      },
+      "F13-values-union": {
+       "median": 0.060604770507779904,
+       "n": 10,
+       "p95": 0.06492695030392497
+      },
+      "F14-count-all": {
+       "median": 0.19137141699320637,
+       "n": 10,
+       "p95": 0.20229833765042715
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp up -d rdf4j",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/rdf4j/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload load-http --out /out/load.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench/statements --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/rdf4j/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload explore --out /out/explore.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/rdf4j/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload features --out /out/features.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/rdf4j/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload concurrent --out /out/concurrent.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 92409856,
+     "finished": "2026-10-03T16:43:04+0200",
+     "image": "sha256:80354a64388a0c719e15f9b3bb4d51f52177e6eb7c908b365eb44fcd746cd9b4 eclipse/rdf4j-workbench:6.1.0-tomcat@sha256:7a18cecfc879f3143b5a57fe31176a0774fa57e5313f639c6f51756f390f7670",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      4.01708984375,
+      3.0615234375,
+      3.1083984375
+     ],
+     "load_method": "HTTP `POST /statements`, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        4.01708984375,
+        3.0615234375,
+        3.1083984375
+       ],
+       "peak_mem_bytes": 1477468749.824,
+       "seconds": 202.867
+      },
+      "explore": {
+       "load_after": [
+        2.04931640625,
+        2.62353515625,
+        3.20751953125
+       ],
+       "peak_mem_bytes": 1016909004.8,
+       "seconds": 17.788
+      },
+      "features": {
+       "load_after": [
+        1.69140625,
+        2.2314453125,
+        2.9248046875
+       ],
+       "peak_mem_bytes": 651270553.6,
+       "seconds": 186.28
+      },
+      "load": {
+       "load_after": [
+        3.56201171875,
+        2.94091796875,
+        3.36865234375
+       ],
+       "method": "HTTP `POST /statements`, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 589299712.0,
+       "seconds": 3.611
+      }
+     },
+     "quiet": {
+      "free_gib": 21.8,
+      "load_before": [
+       3.744140625,
+       2.9560546875,
+       3.37939453125
+      ],
+      "swap": "total = 10240.00M  used = 9121.31M  free = 1118.69M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-03T16:35:07+0200",
+     "store": "rdf4j"
+    }
+   },
+   "virtuoso": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0024033959925873205,
+      "mixes": 986,
+      "p95": 0.0040619705025164874,
+      "qmph": 59160.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.00274770800024271,
+      "mixes": 3358,
+      "p95": 0.004870212654350325,
+      "qmph": 201480.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0030580000020563602,
+      "mixes": 5484,
+      "p95": 0.006570879153878196,
+      "qmph": 329040.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0014602914961869828,
+       "n": 100,
+       "p95": 0.0017240494002180638
+      },
+      "Q10": {
+       "median": 0.0029334584905882366,
+       "n": 200,
+       "p95": 0.0033424934510549067
+      },
+      "Q11": {
+       "median": 0.0008298955071950331,
+       "n": 100,
+       "p95": 0.0009855871969193686
+      },
+      "Q12": {
+       "median": 0.002426125000056345,
+       "n": 100,
+       "p95": 0.0025686475994007195
+      },
+      "Q2": {
+       "median": 0.003497479498037137,
+       "n": 600,
+       "p95": 0.004190812496381113
+      },
+      "Q3": {
+       "median": 0.0017211254962603562,
+       "n": 100,
+       "p95": 0.00199992855777964
+      },
+      "Q4": {
+       "median": 0.004089396003109869,
+       "n": 100,
+       "p95": 0.0047506722919933965
+      },
+      "Q5": {
+       "median": 0.0019363960018381476,
+       "n": 200,
+       "p95": 0.002187464555754559
+      },
+      "Q7": {
+       "median": 0.0032270209994749166,
+       "n": 400,
+       "p95": 0.003943412503576838
+      },
+      "Q8": {
+       "median": 0.0023527500015916303,
+       "n": 200,
+       "p95": 0.0027954431498073973
+      },
+      "Q9": {
+       "median": 0.0008802085067145526,
+       "n": 400,
+       "p95": 0.0010833148946403526
+      }
+     },
+     "qmph": 58385.69584237458
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0048735215023043565,
+       "n": 10,
+       "p95": 0.00496384389771265
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0010255205052089877,
+       "n": 10,
+       "p95": 0.001080051902681589
+      },
+      "F03-path-alternative": {
+       "median": 0.0036671245034085587,
+       "n": 10,
+       "p95": 0.0037151581484067718
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0010784579935716465,
+       "n": 10,
+       "p95": 0.0011625211998762097
+      },
+      "F05-agg-group-avg": {
+       "median": 0.025550562502758112,
+       "n": 10,
+       "p95": 0.02576376889119274
+      },
+      "F06-agg-having": {
+       "median": 0.0035502294995239936,
+       "n": 10,
+       "p95": 0.003580550303013297
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.01470108349894872,
+       "n": 10,
+       "p95": 0.01476679170227726
+      },
+      "F08-optional-unbound": {
+       "median": 0.0016468129979330115,
+       "n": 10,
+       "p95": 0.001700569052627543
+      },
+      "F09-minus": {
+       "median": 0.002986437495565042,
+       "n": 10,
+       "p95": 0.0030294602998765185
+      },
+      "F10-not-exists": {
+       "median": 0.022813729490735568,
+       "n": 10,
+       "p95": 0.025071341697184835
+      },
+      "F11-subquery-topk": {
+       "median": 0.001519145502243191,
+       "n": 10,
+       "p95": 0.0018831482469977348
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.033497917000204325,
+       "n": 10,
+       "p95": 0.03451231844737777
+      },
+      "F13-values-union": {
+       "median": 0.001959458000783343,
+       "n": 10,
+       "p95": 0.002031904192699585
+      },
+      "F14-count-all": {
+       "median": 0.0025864164999802597,
+       "n": 10,
+       "p95": 0.0026209413044853136
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp up -d virtuoso",
+      "docker exec benchcmp-virtuoso-1 isql 1111 dba <password> exec=\"ld_dir('/bench', 'dataset.nt', 'http://example.org/bench/bsbm'); rdf_loader_run(); checkpoint; select count(*) from DB.DBA.load_list where ll_error is not null;\"",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload explore --out /out/explore.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload features --out /out/features.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --features /h/queries/features --feature-runs 10",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload concurrent --out /out/concurrent.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json --clients 1,4,8 --seconds 60",
+      "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 272670720,
+     "finished": "2026-10-03T16:35:06+0200",
+     "image": "sha256:a1dcc3231b97071dee537e180a7b18f4cef0d8257a77a30265d2237a87f0d3dd openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      3.744140625,
+      2.9560546875,
+      3.37939453125
+     ],
+     "load_method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        3.744140625,
+        2.9560546875,
+        3.37939453125
+       ],
+       "peak_mem_bytes": 1346472247.296,
+       "seconds": 204.717
+      },
+      "explore": {
+       "load_after": [
+        2.78369140625,
+        2.7783203125,
+        3.4873046875
+       ],
+       "peak_mem_bytes": 1142461300.736,
+       "seconds": 8.338
+      },
+      "features": {
+       "load_after": [
+        2.78369140625,
+        2.7783203125,
+        3.4873046875
+       ],
+       "peak_mem_bytes": 1142461300.736,
+       "seconds": 1.924
+      },
+      "load": {
+       "load_after": [
+        2.92919921875,
+        2.85888671875,
+        3.580078125
+       ],
+       "method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)",
+       "peak_mem_bytes": 496815308.8,
+       "seconds": 1.827
+      }
+     },
+     "quiet": {
+      "free_gib": 22.0,
+      "load_before": [
+       3.2802734375,
+       2.9228515625,
+       3.611328125
+      ],
+      "swap": "total = 10240.00M  used = 9265.50M  free = 974.50M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-03T16:30:20+0200",
+     "store": "virtuoso"
+    }
+   }
+  }
+ }
+}

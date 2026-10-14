@@ -24,7 +24,7 @@ use crate::server::error::AppError;
 use crate::server::AppState;
 
 use super::models::{DatasetVersion, VersionStatus};
-use super::{registry, reports, snapshot};
+use super::{registry, reports};
 
 /// A graph supplied inline (`ttl`) or by OTS reference — forwarded verbatim to
 /// the external validation service, whose contract uses these exact (snake_case) fields.
@@ -259,9 +259,19 @@ pub async fn validate_and_commit(
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             let graph_iri = match c.graph.clone().filter(|s| !s.is_empty()) {
                 Some(g) => g,
-                None => registered.first().cloned().unwrap_or_else(|| {
-                    format!("{}/dataset/{}/graph/imported", state.base_url, ds_id)
-                }),
+                // Never a graph the server keeps for the dataset's history
+                // (statement provenance, property states): the commit
+                // replaces the graph it lands in.
+                None => registered
+                    .iter()
+                    .find(|g| {
+                        !crate::provenance::is_any_statement_provenance_graph(g)
+                            && **g != crate::property_states::states_graph(&ds_id)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        format!("{}/dataset/{}/graph/imported", state.base_url, ds_id)
+                    }),
             };
             if !registered.contains(&graph_iri) {
                 // The caller-supplied graph was accepted verbatim, registered to
@@ -280,7 +290,7 @@ pub async fn validate_and_commit(
             } else {
                 // Already registered: still never replace a model-registry graph
                 // (a registration made before such graphs were refused).
-                crate::auth::dataset_graph::refuse_model_registry_graph(
+                crate::auth::dataset_graph::refuse_reserved_write_target(
                     &state.store,
                     &state.base_url,
                     &ds_id,
@@ -319,68 +329,76 @@ pub async fn validate_and_commit(
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
 
-    // 5. Snapshot a new draft version carrying the commit message.
-    let version = c
-        .version
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| Utc::now().format("%Y%m%d%H%M%S").to_string());
+    // 5. Cut a new draft version carrying the commit message: a delta when
+    //    one can be chained from a checkpoint, a checkpoint otherwise.
+    let requested = c.version.clone().filter(|s| !s.is_empty());
     let source_graphs = vec![graph_iri.clone()];
-    let source_map = snapshot::snapshot_graphs(
-        &state.store,
-        &state.base_url,
-        &dataset.id,
-        &version,
-        &source_graphs,
-    )
-    .map_err(AppError::from)?;
-    let snapshot_graphs: Vec<String> = source_map
-        .iter()
-        .map(|m| m.snapshot_graph.clone())
-        .collect();
-    let record = DatasetVersion {
+    let version_lock = crate::dataset_versions::lock::dataset(&dataset.id);
+    let _held = version_lock.lock().await;
+    let version = match requested {
+        Some(v) => {
+            if registry::version_exists(&state.store, &state.base_url, &dataset.id, &v) {
+                return Err(AppError::BadRequest(format!(
+                    "Version '{v}' already exists"
+                )));
+            }
+            v
+        }
+        // A timestamp label is per second: a second commit within it gets a
+        // suffix instead of overwriting the first one's snapshot.
+        None => {
+            let stamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
+            let mut label = stamp.clone();
+            let mut n = 1;
+            while registry::version_exists(&state.store, &state.base_url, &dataset.id, &label) {
+                label = format!("{stamp}-{n}");
+                n += 1;
+            }
+            label
+        }
+    };
+    let req = crate::dataset_versions::cut::CutRequest {
         dataset_id: dataset.id.clone(),
         version: version.clone(),
+        source_graphs: source_graphs.clone(),
         status: VersionStatus::Draft,
-        graph_iri: format!(
-            "{}/dataset/{}/version/{}",
-            state.base_url, dataset.id, version
-        ),
-        snapshot_graphs,
-        source_map,
-        created_at: Utc::now().to_rfc3339(),
         created_by: Some(format!("{}/users/{}", state.base_url, user.user_id)),
-        derived_from: None,
         notes: c.message.clone(),
         branch: None,
+        derived_from: None,
+        force_checkpoint: false,
+        shared: crate::dataset_versions::cut::shared_graphs(
+            &state.auth_db,
+            &dataset.id,
+            &source_graphs,
+        ),
         conforms_to_model: dataset.conforms_to_model.clone().filter(|m| !m.is_empty()),
         conforms_to_version: dataset
             .conforms_to_version
             .clone()
             .filter(|v| !v.is_empty()),
     };
-    registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
-    registry::update_latest_draft(&state.store, &state.base_url, &dataset.id, &version)
-        .map_err(AppError::from)?;
+    let st = state.clone();
+    let record: DatasetVersion = tokio::task::spawn_blocking(move || {
+        let made = crate::dataset_versions::cut::cut(&st.store, &st.base_url, &req)?;
+        crate::dataset_versions::after_cut(
+            &st.store,
+            &st.base_url,
+            &made.record,
+            &req.source_graphs,
+        );
+        Ok::<_, String>(made.record)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
+    .map_err(AppError::Internal)?;
     crate::rdf_patch_log::on_version_cut(
         &state.auth_db,
         &state.base_url,
         &record,
         Some(&user.user_id),
     );
-    // Snapshot the validation layer alongside the committed data (best-effort).
-    if let Err(e) = crate::shacl_studio::bindings::snapshot_dataset_bindings(
-        &state.store,
-        &state.base_url,
-        &dataset.id,
-        &version,
-        &source_graphs,
-    ) {
-        tracing::warn!(
-            "failed to snapshot validation bindings for {} v{version}: {e}",
-            dataset.id
-        );
-    }
+    drop(_held);
     // Re-test this dataset's saved queries against the freshly committed version.
     crate::saved_queries::testing::spawn_version_tests(&state, &dataset.id, &version);
 
@@ -424,8 +442,9 @@ pub async fn validate_and_commit(
         Json(json!({
             "conforms": true,
             "committed": true,
-            "datasetId": dataset.id,
+            "dataset_id": dataset.id,
             "version": version,
+            "versionKind": record.kind,
             "graph": graph_iri,
             "report": result.report,
         })),

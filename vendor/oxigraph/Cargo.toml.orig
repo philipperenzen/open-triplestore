@@ -27,6 +27,7 @@ rdf-12 = ["oxrdfio/rdf-12", "spareval/sparql-12"]
 
 [dependencies]
 dashmap.workspace = true
+json-event-parser = "0.2.3"
 oxiri.workspace = true
 oxrdf = { workspace = true, features = ["oxsdatatypes", "rdfc-10"] }
 oxrdfio.workspace = true

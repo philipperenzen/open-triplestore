@@ -761,6 +761,7 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
     Ok(ExportedSpec {
         document,
         specification_count: count,
+        verbatim_specifications: 0,
         losses,
     })
 }
@@ -852,6 +853,8 @@ pub fn export_graph(
     let mut losses = Vec::new();
     let mut specs = String::new();
     let mut count = 0usize;
+    // Specifications written back from the recorded IDS source, unchanged.
+    let mut verbatim = 0usize;
     let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (iri, xml, fp) in &sources {
         handled.insert(iri.clone());
@@ -866,6 +869,7 @@ pub fn export_graph(
                     let _ = writeln!(specs, "    {line}");
                 }
                 count += 1;
+                verbatim += 1;
             }
             _ => losses.push(format!(
                 "specification `{name}` was changed after it was imported, so the IDS it came from no longer describes it — not exported"
@@ -919,6 +923,7 @@ pub fn export_graph(
     Ok(ExportedSpec {
         document,
         specification_count: count,
+        verbatim_specifications: verbatim,
         losses,
     })
 }

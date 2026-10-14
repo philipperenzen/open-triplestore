@@ -428,7 +428,12 @@ fn journal_cut(db: &AuthDb, cut: &WaitingCut) {
 /// Before version `record`'s snapshot graphs are dropped: write out the text
 /// of every version-cut entry that reads them, so the entry stays servable
 /// and unchanged, and forget the version's prefix table.
-pub fn before_version_purge(store: &TripleStore, db: &AuthDb, record: &DatasetVersion) {
+pub fn before_version_purge(
+    store: &TripleStore,
+    db: &AuthDb,
+    base_url: &str,
+    record: &DatasetVersion,
+) {
     let ds = &record.dataset_id;
     let gone: HashSet<&str> = record.snapshot_graphs.iter().map(String::as_str).collect();
     let pending = unrendered_version_entries(db, ds);
@@ -451,7 +456,19 @@ pub fn before_version_purge(store: &TripleStore, db: &AuthDb, record: &DatasetVe
                 if !reads {
                     continue;
                 }
-                let text = render_version_entry(store, &e, &spec);
+                // On the request thread, under the dataset's version lock:
+                // a delta it reads is built only when nobody else is at it.
+                let text = match render_version_entry(store, base_url, ds, &e, &spec, Build::IfFree)
+                {
+                    Ok(text) => text,
+                    Err(err) => {
+                        tracing::warn!(
+                            "patch log {ds}: entry {} not written out before a purge: {err:?}",
+                            e.version
+                        );
+                        continue;
+                    }
+                };
                 let written = db.pool().get().map_err(anyhow::Error::from).and_then(|c| {
                     c.execute(
                         "UPDATE dataset_patch_log_entries SET text = ?3
@@ -488,9 +505,107 @@ fn unrendered_version_entries(db: &AuthDb, dataset_id: &str) -> anyhow::Result<V
     Ok(rows)
 }
 
-fn render_version_entry(store: &TripleStore, e: &Entry, spec: &VersionSpec) -> String {
-    rdf_patch::render(
-        store,
+/// May rendering a version-cut entry build a delta version it reads?
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Build {
+    /// Yes, waiting for a build in progress (a blocking thread).
+    Allowed,
+    /// Only when nobody else is building it (a purge, on the request thread).
+    IfFree,
+    /// No: an anonymous reader never triggers a build.
+    Never,
+}
+
+#[derive(Debug)]
+enum RenderError {
+    /// A delta version it reads is not built, and this caller may not build it.
+    NeedsBuild(String),
+    /// A delta version it reads cannot be built.
+    Failed(String),
+}
+
+/// A version-cut entry's text. Each graph's rows come from the change log
+/// when both versions it compares are anchored in one epoch and the chain
+/// between them is intact for that graph — O(change), nothing to build;
+/// otherwise from comparing their snapshot graphs, a delta version among
+/// them built first (its snapshot graphs are empty until it is).
+fn render_version_entry(
+    store: &TripleStore,
+    base_url: &str,
+    dataset_id: &str,
+    e: &Entry,
+    spec: &VersionSpec,
+    build: Build,
+) -> Result<String, RenderError> {
+    use crate::dataset_versions::{handlers, lock, materialise, registry};
+    let versions = registry::list_versions(store, base_url, dataset_id);
+    let owner = |snapshot: &str| {
+        versions
+            .iter()
+            .find(|v| v.snapshot_graphs.iter().any(|g| g == snapshot))
+    };
+    let readable = |v: &DatasetVersion| -> Result<(), RenderError> {
+        let log = store.changes();
+        if !v.is_delta() || log.materialisation(&v.graph_iri).is_some() {
+            return Ok(());
+        }
+        let failed =
+            |e: materialise::BuildError| RenderError::Failed(format!("version {}: {e}", v.version));
+        match build {
+            Build::Never => Err(RenderError::NeedsBuild(v.version.clone())),
+            Build::Allowed => {
+                materialise::ensure_built_blocking(store, base_url, v).map_err(failed)
+            }
+            Build::IfFree => {
+                let l = lock::build(&v.graph_iri);
+                let Ok(_held) = l.try_lock() else {
+                    return Err(RenderError::Failed(format!(
+                        "version {} is being built",
+                        v.version
+                    )));
+                };
+                if log.materialisation(&v.graph_iri).is_some() {
+                    return Ok(());
+                }
+                materialise::build(store, base_url, v)
+                    .map(|_| ())
+                    .map_err(failed)
+            }
+        }
+    };
+    let mut rows = Vec::with_capacity(spec.mappings.len());
+    for (target, from, to) in &spec.mappings {
+        let from_v = from.as_deref().and_then(owner);
+        let to_v = to.as_deref().and_then(owner);
+        let anchors = from_v
+            .and_then(|v| v.anchor.as_ref())
+            .zip(to_v.and_then(|v| v.anchor.as_ref()));
+        if let Some(fold) = anchors
+            .and_then(|(a, b)| handlers::chain_delta(store, a, b, std::slice::from_ref(target)))
+        {
+            let net = fold.get(&Some(target.clone()));
+            rows.push(rdf_patch::GraphDiff {
+                target: target.clone(),
+                delete: net
+                    .map(|n| n.removed.iter().map(rdf_patch::triple_text).collect())
+                    .unwrap_or_default(),
+                add: net
+                    .map(|n| n.added.iter().map(rdf_patch::triple_text).collect())
+                    .unwrap_or_default(),
+            });
+            continue;
+        }
+        for v in [from_v, to_v].into_iter().flatten() {
+            readable(v)?;
+        }
+        rows.push(rdf_patch::snapshot_diff(
+            store,
+            target,
+            from.as_deref(),
+            to.as_deref(),
+        ));
+    }
+    Ok(rdf_patch::render_diff(
         &e.id,
         e.prev.as_deref(),
         &[
@@ -498,17 +613,28 @@ fn render_version_entry(store: &TripleStore, e: &Entry, spec: &VersionSpec) -> S
             ("to", spec.to_version.as_str()),
         ],
         &spec.prefix_changes,
-        &spec.mappings,
-    )
+        rows,
+    ))
 }
 
-/// An entry's patch text: as appended, or rendered from its snapshots.
-fn entry_text(store: &TripleStore, e: &Entry) -> Option<String> {
+/// An entry's patch text: as appended, or rendered from the versions it
+/// compares. Blocking when `build` is [`Build::Allowed`].
+fn entry_text(
+    store: &TripleStore,
+    base_url: &str,
+    dataset_id: &str,
+    e: &Entry,
+    build: Build,
+) -> Result<String, RenderError> {
     if let Some(t) = &e.text {
-        return Some(t.clone());
+        return Ok(t.clone());
     }
-    let spec: VersionSpec = serde_json::from_str(e.spec.as_deref()?).ok()?;
-    Some(render_version_entry(store, e, &spec))
+    let spec: VersionSpec = e
+        .spec
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .ok_or_else(|| RenderError::Failed(format!("log entry {} has no text", e.version)))?;
+    render_version_entry(store, base_url, dataset_id, e, &spec, build)
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -670,9 +796,40 @@ pub async fn get_init(
     Ok(([(header::CONTENT_TYPE, ct)], body).into_response())
 }
 
-fn patch_response(state: &AppState, e: &Entry) -> Result<Response, Refused> {
-    let text = entry_text(&state.store, e)
-        .ok_or_else(|| e500(format!("log entry {} has no text", e.version)))?;
+async fn patch_response(
+    state: &AppState,
+    dataset_id: &str,
+    e: &Entry,
+    anonymous: bool,
+) -> Result<Response, Refused> {
+    let st = state.clone();
+    let ds = dataset_id.to_string();
+    let entry = e.clone();
+    let build = if anonymous {
+        Build::Never
+    } else {
+        Build::Allowed
+    };
+    let text = tokio::task::spawn_blocking(move || {
+        entry_text(&st.store, &st.base_url, &ds, &entry, build)
+    })
+    .await
+    .map_err(e500)?
+    .map_err(|err| match err {
+        RenderError::NeedsBuild(v) => {
+            let mut resp = refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "this patch compares version {v}, which is built on demand: sign in to build it, or retry once it has been"
+                ),
+            )
+            .into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+            Refused::from(resp)
+        }
+        RenderError::Failed(m) => refuse(StatusCode::GONE, m),
+    })?;
     let mut resp = ([(header::CONTENT_TYPE, rdf_patch::MEDIA_TYPE)], text).into_response();
     if let Ok(v) = HeaderValue::from_str(&e.version.to_string()) {
         resp.headers_mut().insert("x-patch-log-version", v);
@@ -687,8 +844,10 @@ fn patch_response(state: &AppState, e: &Entry) -> Result<Response, Refused> {
     Ok(resp)
 }
 
-fn serve_entry(
+async fn serve_entry(
     state: &AppState,
+    dataset_id: &str,
+    uid: Option<&str>,
     e: Option<Entry>,
     hidden: &HashSet<String>,
     missing: &str,
@@ -700,7 +859,7 @@ fn serve_entry(
             "this patch changes graphs of the dataset you may not read",
         ));
     }
-    patch_response(state, &e)
+    patch_response(state, dataset_id, &e, uid.is_none()).await
 }
 
 /// GET /api/datasets/:id/log/current — the latest patch.
@@ -712,7 +871,15 @@ pub async fn get_current(
     let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
     let (_, hidden) = readable(&state, &dataset_id, uid)?;
     let e = latest(&state.auth_db, &dataset_id).map_err(e500)?;
-    serve_entry(&state, e, &hidden, "the dataset's patch log is empty")
+    serve_entry(
+        &state,
+        &dataset_id,
+        uid,
+        e,
+        &hidden,
+        "the dataset's patch log is empty",
+    )
+    .await
 }
 
 /// GET /api/datasets/:id/log/patch/:ref — a patch by log version or id.
@@ -743,7 +910,15 @@ pub async fn get_patch(
         }
         found
     };
-    serve_entry(&state, e, &hidden, "no such patch in the dataset's log")
+    serve_entry(
+        &state,
+        &dataset_id,
+        uid,
+        e,
+        &hidden,
+        "no such patch in the dataset's log",
+    )
+    .await
 }
 
 /// POST /api/datasets/:id/log — append a patch: check its `H id` / `H prev`
@@ -903,8 +1078,11 @@ async fn capture_init(
     let db = &state.auth_db;
     let prefixes = db.dataset_prefix_pairs(dataset_id).map_err(e500)?;
     let graphs = db.list_dataset_graphs(dataset_id).map_err(e500)?;
+    // As a version cut takes them by default: the statement-provenance
+    // graph is about the data, not part of it.
     let held: Vec<String> = graphs
         .into_iter()
+        .filter(|g| !crate::provenance::is_statement_provenance_graph(dataset_id, g))
         .filter(|g| state.store.count_graph(Some(g.as_str())).unwrap_or(0) > 0)
         .collect();
     if held.is_empty() {
