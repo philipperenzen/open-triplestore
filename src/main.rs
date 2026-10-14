@@ -312,11 +312,11 @@ async fn main() -> anyhow::Result<()> {
     if cli.promote_super_admin.is_none() {
         let target_sqlite = config::AUTH_DB_PATH
             .get()
-            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+            .unwrap_or_else(|| data_dir.join("auth.db"));
         let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
         backup::apply_pending_restore(
             &backup_dir,
-            &cli.data_dir,
+            &data_dir,
             &target_sqlite,
             identity.as_deref(),
         );
