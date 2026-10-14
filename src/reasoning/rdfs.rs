@@ -15,10 +15,21 @@
 //! - the container-membership axioms are written for `rdf:_1` … `rdf:_n`,
 //!   where `n` is the largest index the graphs in scope use;
 //! - `rdfs1` declares the recognized datatypes ([`recognized_datatypes`])
-//!   that literals in scope use, plus `xsd:string` and `rdf:langString`;
-//! - `rdfD1` (a fresh blank node for each typed literal) is not
-//!   materialized: its conclusions are existential and add nothing a query
-//!   could tell apart from the literal itself.
+//!   that literals in scope use, plus `xsd:string` and `rdf:langString`.
+//!
+//! `rdfD1` (a blank node standing for each typed literal's value) is opt-in
+//! ([`RdfsMaterializer::with_rdfd1`]): for every well-typed literal of a
+//! recognized datatype it writes one blank node per data value — named after
+//! the value, so equal values written differently share it and a re-run
+//! writes the same node — with `rdf:type` its datatypes, and copies each
+//! triple with the literal as object onto that node. The patterns then run
+//! over those nodes as over any resource (ranges, subclasses, `rdfs:Literal`).
+//! It is off by default: it writes two triples per literal-valued triple, all
+//! of them existential restatements of what the data says.
+//!
+//! The rest of D-entailment — that equal values written differently entail
+//! each other — is matched at query time ([`super::value_match`]), as no
+//! materialiser can write every lexical form of a value.
 //!
 //! Patterns whose conclusion has a literal subject (`rdfs3` / `rdfs4b` on a
 //! literal object) are generalized triples and are not stored; what they
@@ -37,6 +48,7 @@ use crate::store::TripleStore;
 
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS_NS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
 
 /// Maximum fixed-point iterations (safety valve).
 const MAX_ITERATIONS: usize = 500;
@@ -217,6 +229,10 @@ pub struct RdfsMaterializer<'a> {
     /// When set, the rules read ONLY these graphs (plus the target graph).
     /// Without it they read the unnamed default graph, as they always did.
     sources: Option<Vec<String>>,
+    /// The recognized datatypes (`D`); `None`: [`recognized_datatypes`].
+    recognized: Option<std::collections::HashSet<String>>,
+    /// Apply `rdfD1` (see the module documentation).
+    rdfd1: bool,
 }
 
 impl<'a> RdfsMaterializer<'a> {
@@ -228,6 +244,38 @@ impl<'a> RdfsMaterializer<'a> {
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
         self
+    }
+
+    /// Recognize only `datatypes` (plus `xsd:string` and `rdf:langString`,
+    /// which every RDF interpretation recognizes): the `D` of D-entailment.
+    /// Without it, every datatype of [`recognized_datatypes`]. A literal of
+    /// an unrecognized datatype is not checked and gets no `rdfD1` node.
+    #[allow(dead_code)] // library surface: the W3C RDF 1.1 Semantics runner sets `D`
+    pub fn with_recognized_datatypes<I, S>(mut self, datatypes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut d: std::collections::HashSet<String> =
+            datatypes.into_iter().map(Into::into).collect();
+        d.insert(format!("{XSD_NS}string"));
+        d.insert(format!("{RDF_NS}langString"));
+        self.recognized = Some(d);
+        self
+    }
+
+    /// Also apply `rdfD1` (off by default; see the module documentation).
+    pub fn with_rdfd1(mut self, on: bool) -> Self {
+        self.rdfd1 = on;
+        self
+    }
+
+    /// Whether `iri` is a recognized datatype of this run.
+    fn recognizes(&self, iri: &str) -> bool {
+        match &self.recognized {
+            Some(d) => d.contains(iri),
+            None => recognized_datatypes().contains(&iri),
+        }
     }
 
     fn scope(&self) -> Option<Vec<String>> {
@@ -276,6 +324,8 @@ impl<'a> RdfsMaterializer<'a> {
             store,
             target_graph: target_graph.into(),
             sources: None,
+            recognized: None,
+            rdfd1: false,
         }
     }
 
@@ -303,6 +353,9 @@ impl<'a> RdfsMaterializer<'a> {
             if added == 0 {
                 for rule in DATA_RULES {
                     self.apply(rule)?;
+                }
+                if self.rdfd1 {
+                    self.apply_rdfd1()?;
                 }
                 added = count_graph(self.store, &self.target_graph)?.saturating_sub(before);
             }
@@ -396,7 +449,7 @@ impl<'a> RdfsMaterializer<'a> {
         let rdf_type = expand("rdf:type");
         let datatype = expand("rdfs:Datatype");
         for d in recognized_datatypes() {
-            if used.contains(d) {
+            if used.contains(d) && self.recognizes(d) {
                 quads.push(quad(d, &rdf_type, &datatype));
             }
         }
@@ -443,6 +496,7 @@ impl<'a> RdfsMaterializer<'a> {
                 let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
                 if let Term::Literal(l) = &quad.object {
                     if Dt::from_any_iri(l.datatype().as_str()).is_some()
+                        && self.recognizes(l.datatype().as_str())
                         && datatypes::literal_value(l).is_none()
                     {
                         return Err(ReasoningError::inconsistency(
@@ -462,6 +516,9 @@ impl<'a> RdfsMaterializer<'a> {
             let (Some(Term::Literal(lt)), Some(Term::NamedNode(d))) = (&r[0], &r[1]) else {
                 continue;
             };
+            if !self.recognizes(d.as_str()) || !self.recognizes(lt.datatype().as_str()) {
+                continue;
+            }
             let clash = if d.as_str() == lang_string {
                 lt.language().is_none()
             } else {
@@ -493,6 +550,9 @@ impl<'a> RdfsMaterializer<'a> {
             let (Some(Term::NamedNode(a)), Some(Term::NamedNode(b))) = (&r[0], &r[1]) else {
                 continue;
             };
+            if !self.recognizes(a.as_str()) || !self.recognizes(b.as_str()) {
+                continue;
+            }
             if let (Some(x), Some(y)) = (Dt::from_any_iri(a.as_str()), Dt::from_any_iri(b.as_str()))
             {
                 if x.disjoint(y) {
@@ -504,6 +564,89 @@ impl<'a> RdfsMaterializer<'a> {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `rdfD1`: for each well-typed literal of a recognized datatype in
+    /// object position, the blank node of its value, typed with the
+    /// literal's datatype, takes the literal's place in a copy of the triple.
+    /// The node's label is a digest of the value, so equal values share it
+    /// and re-runs write the same node.
+    fn apply_rdfd1(&self) -> Result<(), ReasoningError> {
+        use super::datatypes;
+        use oxigraph::model::{BlankNode, NamedNode, Quad, QuadRef, Term};
+        use sha2::{Digest, Sha256};
+        let target = NamedNode::new(self.target_graph.clone())
+            .map_err(|e| ReasoningError::Store(e.to_string()))?;
+        let graphs = self.graphs();
+        let rdf_type = NamedNode::new_unchecked(expand("rdf:type"));
+        let mut nodes: std::collections::HashMap<oxigraph::model::Literal, BlankNode> =
+            std::collections::HashMap::new();
+        let mut new: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let present = |q: &Quad| {
+            graphs.iter().any(|g| {
+                self.store
+                    .store()
+                    .contains(QuadRef::new(
+                        &q.subject,
+                        &q.predicate,
+                        &q.object,
+                        g.as_ref(),
+                    ))
+                    .unwrap_or(false)
+            })
+        };
+        for g in &graphs {
+            for quad in self
+                .store
+                .store()
+                .quads_for_pattern(None, None, None, Some(g.as_ref()))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                let Term::Literal(lit) = &quad.object else {
+                    continue;
+                };
+                if !self.recognizes(lit.datatype().as_str()) {
+                    continue;
+                }
+                let node = match nodes.get(lit) {
+                    Some(n) => n.clone(),
+                    None => {
+                        let Some(value) = datatypes::literal_value(lit) else {
+                            continue; // ill-typed: an inconsistency, reported later
+                        };
+                        let digest = Sha256::digest(format!("{value:?}").as_bytes());
+                        let node = BlankNode::new_unchecked(format!(
+                            "rdfD1{}",
+                            hex::encode(&digest[..16])
+                        ));
+                        nodes.insert(lit.clone(), node.clone());
+                        node
+                    }
+                };
+                let typed = Quad::new(
+                    node.clone(),
+                    rdf_type.clone(),
+                    NamedNode::new_unchecked(lit.datatype().as_str()),
+                    target.clone(),
+                );
+                if !present(&typed) {
+                    new.insert(typed);
+                }
+                let copy = Quad::new(
+                    quad.subject.clone(),
+                    quad.predicate.clone(),
+                    node,
+                    target.clone(),
+                );
+                if !present(&copy) {
+                    new.insert(copy);
+                }
+            }
+        }
+        if !new.is_empty() {
+            self.store.insert_quads(new.into_iter().collect())?;
         }
         Ok(())
     }

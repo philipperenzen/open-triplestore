@@ -179,8 +179,15 @@ validation after writes that a cross-graph path depends on.
   typed `sh:PropertyShape`, without a `sh:path`; a shape with more than one
   `sh:path`; a path that is not a well-formed SHACL property path (a literal, a
   blank node that is no path, a sequence or alternative with a member that is
-  no path); and a SPARQL target (`sh:target [ sh:select … ]`) that does not
-  parse, does not project `?this`, or errors when it runs.
+  no path); a SPARQL target (`sh:target [ sh:select … ]`) that does not
+  parse, does not project `?this`, or errors when it runs; and, since
+  2026-10-06, a `sh:pattern` that is not a regular expression the engine
+  evaluates, or `sh:flags` that SPARQL `REGEX` does not have (it used to pass
+  every value).
+- **`sh:pattern` is an XPath regular expression**, as SPARQL `REGEX` reads it:
+  XML Schema 1.0 syntax, where `{` and `}` outside a quantifier are ordinary
+  characters (`^({)(.*)(})$` matches a braced string), plus XPath's anchors,
+  reluctant quantifiers and flags.
 
 ### Literal forms
 

@@ -142,6 +142,8 @@ fn dataset_options(db: &AuthDb, dataset_id: &str) -> crate::server::routes::Regi
             .ok()
             .flatten()
             .is_some_and(|c| c.eq_ref),
+        // rdfD1 is opt-in per request; a dataset's setting never turns it on.
+        rdfd1: false,
     }
 }
 
