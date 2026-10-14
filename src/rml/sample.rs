@@ -69,7 +69,6 @@ impl SampleSpec {
 
 /// What one triples map contributed to the sample.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SampledMap {
     pub triples_map: String,
     #[serde(skip_serializing_if = "Option::is_none")]

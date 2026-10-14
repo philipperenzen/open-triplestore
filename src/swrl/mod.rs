@@ -18,6 +18,7 @@
 //! - `expr` — class expressions and data ranges, and the auxiliary classes
 //!   that stand for class-expression atoms
 //! - `values` — XSD value semantics shared by built-ins and data ranges
+//! - `write` — rules out: the SWRL RDF syntax (stored rules) and functional syntax
 
 pub mod builtins;
 mod datarange;
@@ -31,6 +32,7 @@ pub mod rdf;
 pub mod ruleml;
 pub mod swrlapi;
 mod values;
+pub mod write;
 
 use std::collections::HashMap;
 use std::sync::Arc;

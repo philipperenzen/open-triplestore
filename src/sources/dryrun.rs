@@ -6,8 +6,8 @@
 //! produced the wrong term for that property — a literal where the shape
 //! wants an IRI, `xsd:string` where it wants `xsd:decimal`. One that fails on
 //! a few subjects is a fact about those rows. The classifier separates the
-//! two by share: a violation hitting at least `systematicShare` of a type's
-//! subjects, over at least `systematicMinSubjects` of them, is a **mapping
+//! two by share: a violation hitting at least `systematic_share` of a type's
+//! subjects, over at least `systematic_min_subjects` of them, is a **mapping
 //! defect**; anything sparser is a **data issue**. Both numbers come from the
 //! mapping gates ([`super::gates`]), so the proposer and the reviewer read
 //! the same rule.
@@ -128,11 +128,11 @@ pub fn sweep_leftovers(store: &TripleStore) {
 
 // ───────────────────────────── Request ─────────────────────────────
 
-/// What to dry-run. Exactly one of `mapping`, `mappingGraph`, `rml` and
+/// What to dry-run. Exactly one of `mapping`, `mapping_graph`, `rml` and
 /// `yarrrml` names the mapping; the rest narrows the sample and names the
 /// shapes.
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DryRunRequest {
     /// A registered mapping, by id or IRI; its newest version unless
     /// `version` says otherwise.
@@ -168,7 +168,6 @@ pub struct DryRunRequest {
 // ───────────────────────────── Response ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ReportSummary {
     pub conforms: bool,
     pub results_count: usize,
@@ -177,7 +176,6 @@ pub struct ReportSummary {
 
 /// One kind of violation, with how much of its type it covers.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub shape: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,7 +193,6 @@ pub struct Finding {
 }
 
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Classification {
     /// The rule applied, from the mapping gates.
     pub systematic_share: f64,
@@ -207,7 +204,6 @@ pub struct Classification {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Entity {
     pub subject: String,
     pub types: Vec<String>,
@@ -217,10 +213,9 @@ pub struct Entity {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DryRunResponse {
     pub id: String,
-    /// The scratch graph, readable until `expiresAt`.
+    /// The scratch graph, readable until `expires_at`.
     pub graph: String,
     pub expires_at: String,
     pub source: String,
@@ -241,7 +236,7 @@ pub struct DryRunResponse {
     pub warnings: Vec<String>,
     /// Sampled rows whose values cannot become the terms the mapping asks for
     /// (R2RML §4.3). The sample leaves those terms out; a run over the same
-    /// rows fails unless it runs with `onDataError: "skip"`. Absent when none.
+    /// rows fails unless it runs with `on_data_error: "skip"`. Absent when none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
@@ -438,7 +433,7 @@ fn choose(
     .count();
     if named != 1 {
         return Err(bad(
-            "name the mapping to dry-run in exactly one of 'mapping', 'mappingGraph', 'rml' or \
+            "name the mapping to dry-run in exactly one of 'mapping', 'mapping_graph', 'rml' or \
              'yarrrml'"
                 .to_string(),
         ));
@@ -654,7 +649,7 @@ pub async fn dry_run(
     let shapes_graphs = shapes_for(&state, &user, &body, chosen.record.as_ref(), &mut warnings);
     if shapes_graphs.is_empty() {
         warnings.push(
-            "no shapes graph applies: name one in 'shapesGraph', or register the mapping with a \
+            "no shapes graph applies: name one in 'shapes_graph', or register the mapping with a \
              shapes graph or a model version"
                 .to_string(),
         );

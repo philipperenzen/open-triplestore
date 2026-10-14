@@ -2,7 +2,7 @@
  * Browse API + /graph-viz redirect tests.
  *
  * These cover the contract between the frontend and the reworked
- * /api/browse/triples endpoint (hasMore probe + opt-in count) and the
+ * /api/browse/triples endpoint (has_more probe + opt-in count) and the
  * redirect that replaced the deleted /graph-viz page.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -14,7 +14,7 @@ describe('browseTriples wire format', () => {
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, _opts: any) => {
       return new Response(
-        JSON.stringify({ triples: [{ subject: { value: 's' }, predicate: { value: 'p' }, object: { value: 'o' } }], hasMore: true, limit: 1, offset: 0 }),
+        JSON.stringify({ triples: [{ subject: { value: 's' }, predicate: { value: 'p' }, object: { value: 'o' } }], has_more: true, limit: 1, offset: 0 }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     });
@@ -28,9 +28,9 @@ describe('browseTriples wire format', () => {
     expect(String(url)).not.toContain('count=true');
   });
 
-  it('returns hasMore flag and omits total by default', async () => {
+  it('returns has_more flag and omits total by default', async () => {
     const res = await browseTriples({ limit: '25' });
-    expect(res.hasMore).toBe(true);
+    expect(res.has_more).toBe(true);
     expect(res.total).toBeUndefined();
     expect(res.triples).toHaveLength(1);
   });

@@ -1329,6 +1329,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
         .route(
+            "/api/datasets/{dataset_id}/rules",
+            get(crate::dataset_rules::list_rules).post(crate::dataset_rules::create_rules),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/rules/run",
+            post(crate::dataset_rules::run_rules),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/rules/{set_id}",
+            put(crate::dataset_rules::update_rules).delete(crate::dataset_rules::delete_rules),
+        )
+        .route(
             "/api/datasets/{dataset_id}/containers/export",
             get(crate::containers::export_container),
         )
