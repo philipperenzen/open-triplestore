@@ -28,6 +28,16 @@ curl -OJ 'http://localhost:7878/api/datasets/<id>/containers/export?profile=icdd
 The archive body may be up to `OTS_MAX_UPLOAD_MB` (default 512 MB); it unpacks
 to at most 10 000 entries, 512 MB per entry and 2 GB in total.
 
+In the web UI, the dataset page's **Exchange** section does the same: pick an
+archive, import it (with a **Strict** toggle that refuses a container with any
+violation) or only validate it, and read the validator's report finding by
+finding; export downloads the `.icdd` and shows the export's own validation,
+read from its `X-Container-*` headers. When the operator has not set
+`OTS_ICDD_ONTOLOGY_DIR` (below), the section says so before anyone exports.
+It learns that from `GET /api/containers/profiles`, which lists the profiles
+and, for ICDD, `ontology_resources: {env, configured, complete, missing}` —
+file names only, never the directory.
+
 ## Validation
 
 Every import runs the profile's validator and returns its report as

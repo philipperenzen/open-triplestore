@@ -50,6 +50,9 @@ pub struct EntailmentConfig {
     /// `materialize` | `off`
     pub mode: String,
     pub graph: String,
+    /// `owl2-rl` (and `skos`, which runs on it): also run eq-ref, writing
+    /// `x owl:sameAs x` for every term. Off by default.
+    pub eq_ref: bool,
     pub updated_at: String,
     pub last_run_at: Option<String>,
     pub last_triples: Option<i64>,
@@ -81,7 +84,7 @@ pub fn config(db: &AuthDb, dataset_id: &str) -> anyhow::Result<Option<Entailment
     Ok(conn
         .query_row(
             "SELECT regime, mode, updated_at, last_run_at, last_triples, last_consistent, last_inconsistency, \
-                    last_status, last_error, last_backend, last_complete \
+                    last_status, last_error, last_backend, last_complete, eq_ref \
              FROM dataset_entailment WHERE dataset_id = ?1",
             params![dataset_id],
             |r| {
@@ -102,20 +105,44 @@ pub fn config(db: &AuthDb, dataset_id: &str) -> anyhow::Result<Option<Entailment
                     error: r.get(8)?,
                     backend: r.get(9)?,
                     complete: r.get::<_, Option<i64>>(10)?.map(|c| c != 0),
+                    eq_ref: r.get::<_, i64>(11)? != 0,
                 })
             },
         )
         .optional()?)
 }
 
-fn set_config(db: &AuthDb, dataset_id: &str, regime: &str, mode: &str) -> anyhow::Result<()> {
+fn set_config(
+    db: &AuthDb,
+    dataset_id: &str,
+    regime: &str,
+    mode: &str,
+    eq_ref: bool,
+) -> anyhow::Result<()> {
     let conn = db.pool().get()?;
     conn.execute(
-        "INSERT INTO dataset_entailment (dataset_id, regime, mode, updated_at) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT(dataset_id) DO UPDATE SET regime = excluded.regime, mode = excluded.mode, updated_at = excluded.updated_at",
-        params![dataset_id, regime, mode, chrono::Utc::now().to_rfc3339()],
+        "INSERT INTO dataset_entailment (dataset_id, regime, mode, eq_ref, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(dataset_id) DO UPDATE SET regime = excluded.regime, mode = excluded.mode, \
+         eq_ref = excluded.eq_ref, updated_at = excluded.updated_at",
+        params![dataset_id, regime, mode, i64::from(eq_ref), chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+/// Whether `regime` runs on the OWL 2 RL engine, the one that honours
+/// `eq_ref`.
+fn runs_owl2_rl(regime: &str) -> bool {
+    matches!(regime, "owl2-rl" | "skos")
+}
+
+/// The run options a dataset's entailment setting selects.
+fn dataset_options(db: &AuthDb, dataset_id: &str) -> crate::server::routes::RegimeOptions {
+    crate::server::routes::RegimeOptions {
+        eq_ref: config(db, dataset_id)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.eq_ref),
+    }
 }
 
 /// What a finished run recorded.
@@ -376,30 +403,33 @@ pub(crate) fn run_rules_jointly(
     compiled: &crate::swrl::engine::CompiledRules,
     sources: &[String],
     target: &str,
-    regime: Option<(&str, IdentityPolicy)>,
+    regime: Option<(&str, IdentityPolicy, crate::server::routes::RegimeOptions)>,
     regime_first: bool,
     max_iterations: usize,
     deadline: std::time::Instant,
 ) -> JointRun {
     let mut run = JointRun::default();
-    let regime_pass =
-        |run: &mut JointRun, regime: &str, policy: IdentityPolicy| -> Result<usize, String> {
-            match crate::server::routes::run_regime(
-                state,
-                regime,
-                Some(sources.to_vec()),
-                target,
-                policy,
-                crate::server::routes::RegimeOptions::default(),
-            ) {
-                Ok(Some(r)) => {
-                    run.regime_triples += r.report.triples_added;
-                    Ok(r.report.triples_added)
-                }
-                Ok(None) => Err(format!("unknown entailment regime '{regime}'")),
-                Err(e) => Err(format!("{e:?}")),
+    let regime_pass = |run: &mut JointRun,
+                       regime: &str,
+                       policy: IdentityPolicy,
+                       options: crate::server::routes::RegimeOptions|
+     -> Result<usize, String> {
+        match crate::server::routes::run_regime(
+            state,
+            regime,
+            Some(sources.to_vec()),
+            target,
+            policy,
+            options,
+        ) {
+            Ok(Some(r)) => {
+                run.regime_triples += r.report.triples_added;
+                Ok(r.report.triples_added)
             }
-        };
+            Ok(None) => Err(format!("unknown entailment regime '{regime}'")),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    };
     let installed = match compiled.install_aux(&state.store) {
         Ok(n) => n,
         Err(e) => {
@@ -407,9 +437,9 @@ pub(crate) fn run_rules_jointly(
             return run;
         }
     };
-    if let Some((regime, policy)) = regime {
+    if let Some((regime, policy, options)) = regime {
         if regime_first || installed > 0 {
-            if let Err(e) = regime_pass(&mut run, regime, policy) {
+            if let Err(e) = regime_pass(&mut run, regime, policy, options) {
                 run.error = Some(e);
                 return run;
             }
@@ -444,11 +474,11 @@ pub(crate) fn run_rules_jointly(
             run.converged = true;
             return run;
         }
-        let Some((regime, policy)) = regime else {
+        let Some((regime, policy, options)) = regime else {
             run.converged = true;
             return run;
         };
-        match regime_pass(&mut run, regime, policy) {
+        match regime_pass(&mut run, regime, policy, options) {
             Ok(0) => {
                 run.converged = true;
                 return run;
@@ -462,7 +492,7 @@ pub(crate) fn run_rules_jointly(
     }
     run.error = Some(format!(
         "no joint fixed point with {} after {MAX_JOINT_ROUNDS} rounds",
-        regime.map(|(r, _)| r).unwrap_or("the regime")
+        regime.map(|(r, _, _)| r).unwrap_or("the regime")
     ));
     run
 }
@@ -477,7 +507,7 @@ fn run_stored_rules(
     ds: &Dataset,
     sources: &[String],
     target: &str,
-    regime: Option<(&str, IdentityPolicy)>,
+    regime: Option<(&str, IdentityPolicy, crate::server::routes::RegimeOptions)>,
 ) -> Option<RulesReport> {
     if !holds_rules(state, ds) {
         return None;
@@ -501,7 +531,7 @@ fn run_stored_rules(
         &rules,
         Some(target),
         Some(sources),
-        regime.map(|(r, _)| r),
+        regime.map(|(r, _, _)| r),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -534,7 +564,7 @@ fn run_stored_rules(
     _ds: &Dataset,
     _sources: &[String],
     _target: &str,
-    _regime: Option<(&str, IdentityPolicy)>,
+    _regime: Option<(&str, IdentityPolicy, crate::server::routes::RegimeOptions)>,
 ) -> Option<RulesReport> {
     None
 }
@@ -607,12 +637,14 @@ pub fn run_for_dataset_with(
                 .map_err(|e| AppError::Internal(format!("clearing <{g}>: {e}")))?;
         }
     }
-    let outcome = crate::server::routes::run_reasoner(
+    let options = dataset_options(&state.auth_db, dataset_id);
+    let outcome = crate::server::routes::run_reasoner_with(
         state,
         engine,
         Some(sources.clone()),
         &target,
         identity.policy,
+        options,
     );
     // What the run derived about the SKOS schema itself is pruned — after an
     // inconsistent run too, whose consequences stay in the graph.
@@ -632,7 +664,7 @@ pub fn run_for_dataset_with(
             &ds,
             &sources,
             &target,
-            Some((regime, identity.policy)),
+            Some((regime, identity.policy, options)),
         );
         record_rules(dataset_id, rules.as_ref());
     }
@@ -1048,17 +1080,21 @@ fn rules_json(_state: &AppState, _ds: &Dataset) -> serde_json::Value {
     serde_json::Value::Null
 }
 
+/// The body of `PUT …/entailment`. Unknown fields are refused: the identity
+/// policy is not set here but through `PUT …/identity`, its one surface, and
+/// a stray `identity` must not look as if it took effect.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntailmentBody {
     pub regime: String,
     /// `materialize` (default) | `off`
     #[serde(default)]
     pub mode: Option<String>,
-    /// Identity policy for this dataset: `sameas-off` | `sameas-narrow` |
-    /// `sameas-full`, or `inherit` to drop the dataset's own setting and use
-    /// the organisation's (or the built-in default). Omitted: unchanged.
+    /// `owl2-rl` / `skos`: also run eq-ref (`x owl:sameAs x` for every term).
+    /// Omitted: unchanged (off for a new setting, and off whenever the regime
+    /// is not one of these).
     #[serde(default)]
-    pub identity: Option<String>,
+    pub eq_ref: Option<bool>,
 }
 
 /// PUT /api/datasets/:id/entailment — select a regime and mode; in
@@ -1096,23 +1132,20 @@ pub async fn put_entailment(
             "mode must be `materialize` or `off`".to_string(),
         ));
     }
-    if let Some(raw) = body.identity.as_deref() {
-        if raw.trim().eq_ignore_ascii_case("inherit") {
-            clear_identity_setting(&state.auth_db, "dataset", &dataset_id).map_err(e500)?;
-        } else {
-            let p = IdentityPolicy::parse(raw).ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "unknown identity policy `{raw}`; one of {} or `inherit`",
-                        IdentityPolicy::ALL.join(", ")
-                    ),
-                )
-            })?;
-            set_identity_setting(&state.auth_db, "dataset", &dataset_id, p).map_err(e500)?;
-        }
+    if body.eq_ref == Some(true) && !runs_owl2_rl(&regime) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("eq_ref applies to `owl2-rl` and `skos` only, not `{regime}`"),
+        ));
     }
-    set_config(&state.auth_db, &dataset_id, &regime, &mode).map_err(e500)?;
+    let eq_ref = runs_owl2_rl(&regime)
+        && body.eq_ref.unwrap_or_else(|| {
+            config(&state.auth_db, &dataset_id)
+                .ok()
+                .flatten()
+                .is_some_and(|c| c.eq_ref)
+        });
+    set_config(&state.auth_db, &dataset_id, &regime, &mode, eq_ref).map_err(e500)?;
     let graph = dataset_entailment_graph(&regime, &dataset_id);
     let st = state.clone();
     let id = dataset_id.clone();
@@ -1160,6 +1193,7 @@ pub async fn put_entailment(
         "regime": regime,
         "mode": mode,
         "graph": graph,
+        "eq_ref": eq_ref,
         "triples": triples,
         "consistent": (mode == "materialize"
             && crate::reasoning::common::checks_consistency(&regime))

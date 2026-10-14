@@ -1065,6 +1065,23 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             post(crate::backup::admin_verify_backup),
         )
         .route(
+            "/api/admin/backup/status",
+            get(crate::backup::admin_backup_status),
+        )
+        .route(
+            "/api/admin/backup/:id/restore",
+            post(crate::backup::admin_stage_restore),
+        )
+        .route(
+            "/api/admin/backup/restore",
+            delete(crate::backup::admin_cancel_restore),
+        )
+        .route(
+            "/api/admin/ldes/syncs",
+            get(crate::ldes::client::admin_list_syncs)
+                .delete(crate::ldes::client::admin_forget_sync),
+        )
+        .route(
             "/api/admin/llm/requests",
             get(llm_guard::admin_list_llm_requests),
         )
@@ -1233,6 +1250,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::ldes::publish::get_stream).put(crate::ldes::publish::put_stream),
         )
         .route(
+            "/api/datasets/:dataset_id/ldes/config",
+            get(crate::ldes::publish::get_config),
+        )
+        .route(
             "/api/datasets/:dataset_id/ldes/nodes/:n",
             get(crate::ldes::publish::get_node),
         )
@@ -1332,6 +1353,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/entailment",
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
+        )
+        .route(
+            "/api/datasets/:dataset_id/rules",
+            get(crate::dataset_rules::list_rules).post(crate::dataset_rules::create_rules),
+        )
+        .route(
+            "/api/datasets/:dataset_id/rules/run",
+            post(crate::dataset_rules::run_rules),
+        )
+        .route(
+            "/api/datasets/:dataset_id/rules/:set_id",
+            put(crate::dataset_rules::update_rules).delete(crate::dataset_rules::delete_rules),
         )
         .route(
             "/api/datasets/:dataset_id/containers/export",
@@ -1708,6 +1741,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/containers/validate",
             post(crate::containers::validate_container),
+        )
+        .route(
+            "/api/containers/profiles",
+            get(crate::containers::list_profiles),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2748,10 +2785,7 @@ pub async fn run(
 
     // Backup scheduler.
     if let Some(ref mgr) = backup {
-        let hours: u64 = std::env::var("BACKUP_SCHEDULE_HOURS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(24);
+        let hours = crate::backup::schedule_hours();
         crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
     }
 
@@ -2951,12 +2985,7 @@ pub async fn run(
         crate::svc_registry::spawn_registrar(self_url, registry_url, registry_token);
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    serve_on(listener, app, shutdown_signal()).await?;
 
     // The server has stopped accepting connections and drained in-flight requests. Flush RocksDB to
     // disk so the store closes in a consistent state: this triplestore has no other shutdown path,
@@ -2969,6 +2998,29 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Serve `app` on `listener` until `shutdown` resolves, the way the server
+/// does: with the caller's address available to the rate limiter and
+/// `TCP_NODELAY` on every accepted connection.
+///
+/// A streamed response — every SPARQL result: the head goes out once the query
+/// has started, the body as it is serialised — is two or more small writes.
+/// With Nagle's algorithm on, a body written after the head waits for the
+/// client's ACK of the head, which a Linux client may delay by 40 ms. Public so
+/// the benchmarks serve through the same setup.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .tcp_nodelay(true)
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM, so the server can shut down

@@ -62,7 +62,7 @@ jobs:
       # and within its timeout. SAML is intentionally excluded (no xmlsec needed
       # for the UI demo).
       - name: Build backend (demo features)
-        run: cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl"
+        run: cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-archive"
 
       - name: Install frontend deps
         working-directory: frontend

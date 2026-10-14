@@ -424,7 +424,7 @@ pub async fn validate_and_commit(
         Json(json!({
             "conforms": true,
             "committed": true,
-            "datasetId": dataset.id,
+            "dataset_id": dataset.id,
             "version": version,
             "graph": graph_iri,
             "report": result.report,

@@ -73,7 +73,7 @@ pub struct PropertyShape {
 }
 
 /// SHACL property paths.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertyPath {
     Predicate(String),
     Inverse(Box<PropertyPath>),

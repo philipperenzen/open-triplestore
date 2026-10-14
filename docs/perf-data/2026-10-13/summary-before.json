@@ -1,0 +1,522 @@
+{
+ "flags": [],
+ "scales": {
+  "10k": {
+   "ots": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.006207395996170817,
+      "mixes": 94,
+      "p95": 0.10202476439626491,
+      "qmph": 5640.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0035450419964035973,
+      "mixes": 487,
+      "p95": 0.07749306240075376,
+      "qmph": 29220.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0034647920001589227,
+      "mixes": 898,
+      "p95": 0.10092147515169925,
+      "qmph": 53880.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0447950835005031,
+       "n": 100,
+       "p95": 0.07135049440003058
+      },
+      "Q10": {
+       "median": 0.044312063000688795,
+       "n": 200,
+       "p95": 0.0486632717478642
+      },
+      "Q11": {
+       "median": 0.0025121039980149362,
+       "n": 100,
+       "p95": 0.00548566185061645
+      },
+      "Q12": {
+       "median": 0.0023596460014232434,
+       "n": 100,
+       "p95": 0.003617000003214343
+      },
+      "Q2": {
+       "median": 0.005012187499232823,
+       "n": 600,
+       "p95": 0.008099962196502018
+      },
+      "Q3": {
+       "median": 0.03990095850167563,
+       "n": 100,
+       "p95": 0.0633963815515017
+      },
+      "Q4": {
+       "median": 0.02150320800137706,
+       "n": 100,
+       "p95": 0.05375349405112501
+      },
+      "Q5": {
+       "median": 0.11038479199851281,
+       "n": 200,
+       "p95": 0.1747571229025198
+      },
+      "Q7": {
+       "median": 0.009984354001062457,
+       "n": 400,
+       "p95": 0.0440028577013436
+      },
+      "Q8": {
+       "median": 0.006554083498485852,
+       "n": 200,
+       "p95": 0.013629889602088953
+      },
+      "Q9": {
+       "median": 0.04255783299959148,
+       "n": 400,
+       "p95": 0.046217056898240114
+      }
+     },
+     "qmph": 5358.274617548587
+    },
+    "features": {
+     "errors": {
+      "F10-not-exists": "Query execution timed out"
+     },
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.017628478999540675,
+       "n": 10,
+       "p95": 0.019200535451818723
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0036731459986185655,
+       "n": 10,
+       "p95": 0.005046537648377126
+      },
+      "F03-path-alternative": {
+       "median": 3.4924114595014544,
+       "n": 10,
+       "p95": 3.62969215359808
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.01842806249987916,
+       "n": 10,
+       "p95": 0.020006300146997093
+      },
+      "F05-agg-group-avg": {
+       "median": 4.948127294002916,
+       "n": 10,
+       "p95": 5.357851221898454
+      },
+      "F06-agg-having": {
+       "median": 0.07910391649784287,
+       "n": 10,
+       "p95": 0.09352455870139238
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.31975810450239806,
+       "n": 10,
+       "p95": 0.35165138925112843
+      },
+      "F08-optional-unbound": {
+       "median": 0.11682654199830722,
+       "n": 10,
+       "p95": 0.12430724580044626
+      },
+      "F09-minus": {
+       "median": 1.2113103970004886,
+       "n": 10,
+       "p95": 1.4160282047498187
+      },
+      "F11-subquery-topk": {
+       "median": 1.3263168334997317,
+       "n": 10,
+       "p95": 1.3352216489503916
+      },
+      "F12-subquery-agg-join": {
+       "median": 5.226420147999306,
+       "n": 10,
+       "p95": 6.3001665751020495
+      },
+      "F13-values-union": {
+       "median": 0.002370208498177817,
+       "n": 10,
+       "p95": 0.002867379201052245
+      },
+      "F14-count-all": {
+       "median": 2.1015635634976206,
+       "n": 10,
+       "p95": 2.2906735055014
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw-before/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw-before/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw-before/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw-before/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload concurrent --out /out/concurrent.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --clients 1,4,8 --seconds 60 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw-before/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 1864785920,
+     "finished": "2026-10-13T18:19:40+0200",
+     "image": "sha256:0f4dc418d478873ee68e64d5e4edc32581a654839c0055a0d5e0ac081ce2ccb8 ots-bench:570a7a30-thin",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      7.61328125,
+      6.67041015625,
+      6.75146484375
+     ],
+     "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        6.81005859375,
+        6.458984375,
+        6.681640625
+       ],
+       "peak_mem_bytes": 3569117822.976,
+       "seconds": 203.898
+      },
+      "explore": {
+       "load_after": [
+        5.158203125,
+        6.1484375,
+        6.818359375
+       ],
+       "peak_mem_bytes": 3441342545.92,
+       "seconds": 83.662
+      },
+      "features": {
+       "load_after": [
+        6.9208984375,
+        6.49169921875,
+        6.78515625
+       ],
+       "peak_mem_bytes": 3515430731.776,
+       "seconds": 261.981
+      },
+      "load": {
+       "load_after": [
+        9.5009765625,
+        6.9619140625,
+        7.1845703125
+       ],
+       "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 4029753065.472,
+       "seconds": 149.285
+      },
+      "shacl": {
+       "load_after": [
+        7.61328125,
+        6.67041015625,
+        6.75146484375
+       ],
+       "peak_mem_bytes": 4290672328.704,
+       "seconds": 23.585
+      }
+     },
+     "quiet": {
+      "free_gib": 30.8,
+      "load_before": [
+       4.24267578125,
+       5.50537109375,
+       6.833984375
+      ],
+      "swap": "total = 15360.00M  used = 14136.94M  free = 1223.06M  (encrypted)",
+      "waited_s": 120
+     },
+     "scale": "10k",
+     "started": "2026-10-13T18:06:35+0200",
+     "store": "ots"
+    },
+    "shacl": {
+     "median": null,
+     "n": 0,
+     "p95": null,
+     "results": []
+    }
+   }
+  },
+  "1k": {
+   "ots": {
+    "concurrent": [
+     {
+      "clients": 1,
+      "errors": 0,
+      "median": 0.0012417079997248948,
+      "mixes": 479,
+      "p95": 0.04188570880287443,
+      "qmph": 28740.0
+     },
+     {
+      "clients": 4,
+      "errors": 0,
+      "median": 0.0011250415045651607,
+      "mixes": 3036,
+      "p95": 0.00789298190102273,
+      "qmph": 182160.0
+     },
+     {
+      "clients": 8,
+      "errors": 0,
+      "median": 0.0015549159943475388,
+      "mixes": 4755,
+      "p95": 0.016912871304521113,
+      "qmph": 285300.0
+     }
+    ],
+    "explore": {
+     "errors": {},
+     "mixes": 100,
+     "per_query": {
+      "Q1": {
+       "median": 0.0006922085012774915,
+       "n": 100,
+       "p95": 0.0009459496504859999
+      },
+      "Q10": {
+       "median": 0.0015981249998731073,
+       "n": 200,
+       "p95": 0.0025515044992062033
+      },
+      "Q11": {
+       "median": 0.000693353998940438,
+       "n": 100,
+       "p95": 0.0010358770501625258
+      },
+      "Q12": {
+       "median": 0.0007998959990800358,
+       "n": 100,
+       "p95": 0.0012687312500929693
+      },
+      "Q2": {
+       "median": 0.0010881455018534325,
+       "n": 600,
+       "p95": 0.0014876002955134019
+      },
+      "Q3": {
+       "median": 0.00082062500223401,
+       "n": 100,
+       "p95": 0.001120450299276854
+      },
+      "Q4": {
+       "median": 0.0008466045001114253,
+       "n": 100,
+       "p95": 0.0011669815437926445
+      },
+      "Q5": {
+       "median": 0.0020280214994272683,
+       "n": 200,
+       "p95": 0.0031542475997412113
+      },
+      "Q7": {
+       "median": 0.003509104499244131,
+       "n": 400,
+       "p95": 0.004336875300577958
+      },
+      "Q8": {
+       "median": 0.005835542000568239,
+       "n": 200,
+       "p95": 0.007234835748386104
+      },
+      "Q9": {
+       "median": 0.041489562496280996,
+       "n": 400,
+       "p95": 0.04574431934925088
+      }
+     },
+     "qmph": 24922.666247366862
+    },
+    "features": {
+     "errors": {},
+     "per_query": {
+      "F01-path-closure": {
+       "median": 0.0029285205055202823,
+       "n": 10,
+       "p95": 0.007547241298379959
+      },
+      "F02-path-sequence-inverse": {
+       "median": 0.0009118749985645991,
+       "n": 10,
+       "p95": 0.0011142562529130374
+      },
+      "F03-path-alternative": {
+       "median": 0.09362922949731001,
+       "n": 10,
+       "p95": 0.10484928180121643
+      },
+      "F04-path-oneormore-join": {
+       "median": 0.0027597500011324883,
+       "n": 10,
+       "p95": 0.002964681249068235
+      },
+      "F05-agg-group-avg": {
+       "median": 0.31957529200371937,
+       "n": 10,
+       "p95": 0.35817950624659717
+      },
+      "F06-agg-having": {
+       "median": 0.009042729496286483,
+       "n": 10,
+       "p95": 0.00970239725211286
+      },
+      "F07-agg-count-distinct": {
+       "median": 0.1463330835031229,
+       "n": 10,
+       "p95": 0.1520493041985901
+      },
+      "F08-optional-unbound": {
+       "median": 0.00284206249853014,
+       "n": 10,
+       "p95": 0.003127589549330878
+      },
+      "F09-minus": {
+       "median": 0.005277353997371392,
+       "n": 10,
+       "p95": 0.005653099995834054
+      },
+      "F10-not-exists": {
+       "median": 5.04724766849904,
+       "n": 10,
+       "p95": 5.174912995900013
+      },
+      "F11-subquery-topk": {
+       "median": 0.016697249997378094,
+       "n": 10,
+       "p95": 0.01750402485158702
+      },
+      "F12-subquery-agg-join": {
+       "median": 0.3572322500003793,
+       "n": 10,
+       "p95": 0.3656092400986381
+      },
+      "F13-values-union": {
+       "median": 0.008546562501578592,
+       "n": 10,
+       "p95": 0.009548234000976664
+      },
+      "F14-count-all": {
+       "median": 0.04521602100430755,
+       "n": 10,
+       "p95": 0.04894382760176086
+      }
+     }
+    },
+    "meta": {
+     "commands": [
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw-before/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw-before/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw-before/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw-before/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload concurrent --out /out/concurrent.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --clients 1,4,8 --seconds 60 --token <token>",
+      "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw-before/ots/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+      "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+     ],
+     "db_bytes_after_load": 187662336,
+     "finished": "2026-10-13T18:04:34+0200",
+     "image": "sha256:0f4dc418d478873ee68e64d5e4edc32581a654839c0055a0d5e0ac081ce2ccb8 ots-bench:570a7a30-thin",
+     "limits": {
+      "cpus": 4,
+      "memory": "4g"
+     },
+     "load_after": [
+      7.6064453125,
+      6.60546875,
+      7.38525390625
+     ],
+     "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+     "phases": {
+      "concurrent": {
+       "load_after": [
+        7.65966796875,
+        6.59912109375,
+        7.3876953125
+       ],
+       "peak_mem_bytes": 1245540515.84,
+       "seconds": 205.238
+      },
+      "explore": {
+       "load_after": [
+        3.82763671875,
+        6.13037109375,
+        7.6318359375
+       ],
+       "peak_mem_bytes": 1274531545.088,
+       "seconds": 19.519
+      },
+      "features": {
+       "load_after": [
+        6.71826171875,
+        6.52490234375,
+        7.65478515625
+       ],
+       "peak_mem_bytes": 1225139421.184,
+       "seconds": 73.876
+      },
+      "load": {
+       "load_after": [
+        4.892578125,
+        6.90673828125,
+        8.0283203125
+       ],
+       "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+       "peak_mem_bytes": 824075878.4,
+       "seconds": 15.612
+      },
+      "shacl": {
+       "load_after": [
+        7.6064453125,
+        6.60546875,
+        7.38525390625
+       ],
+       "peak_mem_bytes": 1248761741.312,
+       "seconds": 4.047
+      }
+     },
+     "quiet": {
+      "free_gib": 31.8,
+      "load_before": [
+       4.9658203125,
+       7.02294921875,
+       8.0888671875
+      ],
+      "swap": "total = 14336.00M  used = 13693.31M  free = 642.69M  (encrypted)",
+      "waited_s": 0
+     },
+     "scale": "1k",
+     "started": "2026-10-13T17:58:13+0200",
+     "store": "ots"
+    },
+    "shacl": {
+     "median": 0.5266850000043632,
+     "n": 5,
+     "p95": 0.5451279416010948,
+     "results": [
+      5245
+     ]
+    }
+   }
+  }
+ }
+}

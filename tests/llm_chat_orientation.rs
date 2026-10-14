@@ -676,7 +676,7 @@ async fn saved_query_repair_refuses_to_persist_unparseable_output() {
     assert_eq!(resp.status(), 200);
     let body = common::body_json(resp.into_body()).await;
     assert_eq!(body["valid"], false, "{body}");
-    assert!(body["parseError"].is_string(), "{body}");
+    assert!(body["parse_error"].is_string(), "{body}");
 
     // A parseable repair with save:true becomes the new head.
     let fixed = "SELECT ?s WHERE { ?s a ?t } LIMIT 5";
@@ -688,7 +688,7 @@ async fn saved_query_repair_refuses_to_persist_unparseable_output() {
     assert_eq!(resp.status(), 200);
     let body = common::body_json(resp.into_body()).await;
     assert_eq!(body["valid"], true, "{body}");
-    assert!(body["savedRevision"].is_number(), "{body}");
+    assert!(body["saved_revision"].is_number(), "{body}");
     assert_eq!(
         head(&state),
         fixed,

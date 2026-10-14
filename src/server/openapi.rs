@@ -1097,6 +1097,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             zip_body(),
             vec![("201", "Import summary with the validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found, or unknown profile"), ("422", "No profile recognises the archive, the index is unreadable or has several container descriptions, or (strict=true) the container is not conformant — `{error, validation}`"), ("503", "The container carries documents but no object storage is configured")], true)),
     ]);
+    mount(paths, "/api/containers/profiles", vec![
+        (M::Get, o("Import", "Container profiles",
+            "The container profiles this server imports and exports: `{profiles: [{id, label, ontology_resources?}]}`. For `icdd`, `ontology_resources` is `{env, configured, complete, missing[]}`: whether the operator set `OTS_ICDD_ONTOLOGY_DIR` and which of ISO's `Container.rdf` / `Linkset.rdf` it lacks. Without them an export carries the `ontology-resource-missing` warning and is not Part 1-conformant. File names only, never the directory.",
+            vec![], vec![("200", "Profiles"), ("401", "Authentication required")], true)),
+    ]);
     mount(paths, "/api/containers/validate", vec![
         (M::Post, ob("Import", "Validate a linked-document container",
             "Validate an archive against a container profile without storing anything. For ICDD: Open Triplestore's own SHACL shapes for the Part 1 index and linksets (container description, documents, parties, links, link elements, identifiers — derived from the ontology restrictions, not ISO's annexes) plus structural checks (the root `Index.rdf`, the three folders, `Container.rdf` / `Linkset.rdf` in `Ontology resources/`, every listed file present at its path, duplicate names, path traversal, checksums, link elements naming listed documents, and no extension of the ICDD classes in a Part 1 container). Returns `{profile, conforms, violations, warnings, findings[]}`; `conforms` means no violation.",
@@ -2422,7 +2427,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ("400", "Empty body"),
                     ("401", "Authentication required"),
                     ("404", "Unknown format (the known ids are named)"),
-                    ("422", "The document could not be imported"),
+                    ("422", "The document could not be imported. An IDS that is not well-formed XML, fails the IDS 1.0 XSD or fails the IDS audit rules answers `{error, stage, problems}`: `stage` is `xml`, `schema` or `audit`, `problems` lists every problem found"),
                 ],
                 true,
             ),
@@ -2440,7 +2445,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Export shapes to a constraint specification",
-                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, losses}` — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
+                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, verbatim_specifications, losses}` — `verbatim_specifications` counts the specifications written back unchanged from the IDS an import recorded (a lossless re-export while the shapes are unedited) — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
                 vec![
                     qp("raw", false, "`true` returns the document itself instead of the report (default: false)."),
                     qp("title", false, "Title written into the document (default: `Exported shapes`)."),
@@ -2514,6 +2519,21 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/datasets/:dataset_id/ldes/config",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Event stream settings",
+                "The stream's settings as JSON, for a settings form: `{dataset_id, enabled, configured, page_size, polling_interval, retention, members, sealed_nodes, created_at, stream, can_write}`. `page_size` is the fragmentation (members per page; a full page is sealed and immutable); `retention` is the declared policy or null; `can_write` says whether the caller may change them with PUT on the stream. A dataset that never enabled a stream answers its defaults with `enabled: false`. Readable by everyone who can see the dataset.",
+                vec![],
+                vec![("200", "Stream settings"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/datasets/:dataset_id/ldes/nodes/:n",
         vec![(
             M::Get,
@@ -2583,6 +2603,38 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 true,
             ),
         )],
+    );
+
+    mount(
+        paths,
+        "/api/admin/ldes/syncs",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Admin",
+                    "LDES sync jobs",
+                    "Every `(dataset, source)` sync `POST /api/ldes/sync` has run: `[{dataset_id, dataset_name, source_url, graph_iri, created_by, last_timestamp, members_applied, synced_at, last_run_at, last_status, last_error, last_report}]`, most recently run first. `last_status` is `ok` or `error`; a failed run keeps the previous bookmark and report, so the next run resumes. Admin only.",
+                    vec![],
+                    vec![("200", "Sync jobs"), ("401", "Authentication required"), ("403", "Admin role required")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Admin",
+                    "Forget an LDES sync job",
+                    "Remove a sync job and its client state (bookmark, pages, applied versions). The mirrored graph is left as it is; the next sync from that source reads the whole stream again. Admin only.",
+                    vec![
+                        qp("dataset_id", true, "The dataset the job writes to"),
+                        qp("url", true, "The job's source URL, as it was synced"),
+                    ],
+                    vec![("204", "Forgotten"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No such sync job")],
+                    true,
+                ),
+            ),
+        ],
     );
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2998,7 +3050,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Serialize to SHACL Compact Syntax",
-                "Serialise a stored shapes graph (body: its IRI, or `{\"shapesGraphIri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
+                "Serialise a stored shapes graph (body: its IRI, or `{\"shapes_graph_iri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
                 vec![qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
                 vec![("200", "SHACL-C text"), ("400", "Invalid body"), ("403", "No read access to that graph"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")],
                 false,
@@ -3036,20 +3088,47 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             "The dataset's regime, mode (`materialize` | `off`), entailment graph `urn:entailment:<regime>:<id>`, identity policy and the graphs a run reads, plus the last run: `last_run_at`, `last_triples`, `consistent` (`true`/`false` for a regime that checks consistency, `null` otherwise or after a run that failed for another reason), `inconsistency` (`{rule, detail}` of the check that fired), `status` (`queued` / `running` while an `owl2-dl` run waits or runs in the background, else `ok`, `inconsistent`, `not_converged`, `not_in_profile`, `unavailable`, `timeout`, `too_large` or `failed`), `error`, `backend` and `complete` (the DL backend that ran and whether it is a complete reasoner). `dl_backend` is the server's configured OWL 2 DL backend (`null`: `owl2-dl` is unavailable).",
             vec![pp("dataset_id")], vec![("200", "Setting and last run"), ("404", "Dataset not found")], true)),
         (M::Put, o("Reasoning", "Select the dataset's entailment regime",
-            "Body `{\"regime\": \"rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl\", \"mode\": \"materialize|off\", \"identity\": \"…\"}`. In `materialize` mode the regime runs at once over the dataset's conformance layer and again after every write to its graphs — for `owl2-dl` as a debounced background run (`OTS_DL_DEBOUNCE_MS`), so writes never wait for a DL reasoner. A failing run answers as `POST /api/reasoning/materialize` does; the setting is saved and the run recorded. Requires write access to the dataset.",
-            vec![pp("dataset_id")], vec![("200", "Setting, entailment graph size, `consistent`, `status`, `backend`, `complete`"), ("400", "Unknown regime, mode or identity policy"), ("403", "Write access required"), ("404", "Dataset not found"), ("413", "Too much input for the DL backend"), ("422", "The dataset is inconsistent (`{consistent: false, rule, detail, regime, target_graph}`), the run did not converge (`{converged: false, iterations, …}`) or the input is not in OWL 2 DL (`{in_profile: false, violations}`)"), ("503", "`owl2-dl` with no DL backend configured or reachable"), ("504", "The DL backend timed out (`result: unknown`)")], true)),
+            "Body `{\"regime\": \"rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl|skos\", \"mode\": \"materialize|off\", \"eq_ref\": bool}`. `eq_ref` (`owl2-rl` and `skos` only; omitted: unchanged, off for a new setting) also runs eq-ref, writing `x owl:sameAs x` for every term; it is part of the setting, so every later run of the dataset honours it. The identity policy is not set here but with `PUT /api/datasets/{dataset_id}/identity`; an `identity` field (like any unknown field) is refused with 422. In `materialize` mode the regime runs at once over the dataset's conformance layer and again after every write to its graphs — for `owl2-dl` as a debounced background run (`OTS_DL_DEBOUNCE_MS`), so writes never wait for a DL reasoner. A failing run answers as `POST /api/reasoning/materialize` does; the setting is saved and the run recorded. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "Setting, entailment graph size, `consistent`, `status`, `backend`, `complete`"), ("400", "Unknown regime or mode, or `eq_ref` with a regime other than `owl2-rl`/`skos`"), ("403", "Write access required"), ("404", "Dataset not found"), ("413", "Too much input for the DL backend"), ("422", "The dataset is inconsistent (`{consistent: false, rule, detail, regime, target_graph}`), the run did not converge (`{converged: false, iterations, …}`) or the input is not in OWL 2 DL (`{in_profile: false, violations}`)"), ("503", "`owl2-dl` with no DL backend configured or reachable"), ("504", "The DL backend timed out (`result: unknown`)")], true)),
     ]);
     mount(paths, "/api/reasoning/materialize", vec![
         (M::Post, o("Reasoning", "Materialise entailments",
-            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?}` (`eq_ref`, `owl2-rl` only, default false: also write `x owl:sameAs x` for every term): without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for every regime: `rdfs` checks datatype clashes, the OWL regimes their inconsistency rules); `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none; `owl2-el` adds `ignored` — `[{construct, count, example}]`, the axioms outside the EL profile it left out — when there are any; an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
+            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?, identity?}`. `eq_ref` (`owl2-rl` only: also write `x owl:sameAs x` for every term) defaults to the dataset's entailment setting with `dataset`, else false. `identity` (`sameas-off`, `sameas-narrow`, `sameas-full`; default `sameas-narrow`, the dataset default) says what `owl:sameAs` may do in a run without `dataset`; a dataset run applies the dataset's policy (`PUT /api/datasets/{id}/identity`) and refuses the field with 400. With a `dataset` and no `target_graph` the triples go to the dataset's own graph for the regime, `urn:entailment:<regime>:<dataset>`, which the dataset's writers may fill (any other target needs write access to that graph). Without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources`, `identity` (the policy applied) and `consistent` (`true` for every regime: `rdfs` checks datatype clashes, the OWL regimes their inconsistency rules); `owl2-el` and `owl2-ql` add `ignored` — `[{construct, count, example}]`, the axioms outside the profile they left out, by construct, most frequent first — when there are any (the other regimes use every triple, or refuse input outside their profile); an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
             vec![qp("async", false, "`true`: run as a background job and answer 202 with its id")],
             vec![("200", "Reasoning report"), ("202", "Queued as a job: `{job_id, status, location}`"), ("400", "Unknown regime"), ("401", "Authentication required"), ("403", "No write access to the target graph or no read access to a source graph"), ("404", "Dataset not found"), ("413", "More triples than the DL backend accepts (`OTS_REASONER_MAX_TRIPLES`)"), ("422", "The ontology is inconsistent — `{consistent: false, rule, detail, regime, target_graph}`, the derived triples stay in the target graph — or the run did not reach its fixed point within 500 iterations (`{converged: false, iterations, regime, target_graph}`), or (`owl2-dl`) the input is not in OWL 2 DL (`{in_profile: false, violations: [{rule, detail}]}`) or the identity policy cannot be honoured"), ("502", "The DL backend failed"), ("503", "`owl2-dl`: no DL backend configured, or it cannot be reached"), ("504", "The DL backend did not answer in time; the result is unknown (`{result: \"unknown\"}`)")], true)),
     ]);
     mount(paths, "/api/reasoning/check", vec![
         (M::Post, o("Reasoning", "OWL 2 DL check",
-            "Consistency, entailment, satisfiability or OWL 2 DL profile check (OWL 2 Conformance §2.2), through the configured DL backend. Body `{task: consistency|entailment|satisfiability|profile, dataset?, source_graphs?, premise?, conclusion?, class?}`: the premise is a dataset's readable conformance layer, readable `source_graphs`, Turtle in `premise`, or (none given) the unnamed default graph; `conclusion` is Turtle (entailment), `class` an IRI (satisfiability). A check that ran answers 200 `{task, result: \"true\"|\"false\"|\"unknown\", backend, backend_version, complete, regime, sources, warnings}`; an inconsistent premise adds the materialisation 422's `consistent: false`, `rule` and `detail`; a profile check adds `in_profile` and `violations` and needs no backend. The native backend answers `false` (sound) or `unknown`, never a `true` it cannot prove. `?async=true` answers 202 with a job.",
+            "Consistency, entailment, satisfiability or OWL 2 DL profile check (OWL 2 Conformance §2.2), through the configured DL backend. Body `{task: consistency|entailment|satisfiability|profile, dataset?, source_graphs?, premise?, conclusion?, class?, identity?}` (`identity` as for materialisation: without `dataset` only, default `sameas-narrow`): the premise is a dataset's readable conformance layer, readable `source_graphs`, Turtle in `premise`, or (none given) the unnamed default graph; `conclusion` is Turtle (entailment), `class` an IRI (satisfiability). A check that ran answers 200 `{task, result: \"true\"|\"false\"|\"unknown\", backend, backend_version, complete, regime, sources, warnings}`; an inconsistent premise adds the materialisation 422's `consistent: false`, `rule` and `detail`; a profile check adds `in_profile` and `violations` and needs no backend. The native backend answers `false` (sound) or `unknown`, never a `true` it cannot prove. `?async=true` answers 202 with a job.",
             vec![qp("async", false, "`true`: run as a background job and answer 202 with its id")],
             vec![("200", "The check's result"), ("202", "Queued as a job"), ("400", "Unknown task, missing conclusion/class, invalid Turtle, or both premise and graphs"), ("401", "Authentication required"), ("403", "No read access to a source graph"), ("404", "Dataset not found"), ("413", "More triples than the DL backend accepts"), ("422", "The premise is not in OWL 2 DL (`{in_profile: false, violations}`)"), ("502", "The DL backend failed"), ("503", "No DL backend configured, or it cannot be reached"), ("504", "The DL backend did not answer in time (`{result: \"unknown\"}`)")], true)),
+    ]);
+    mount(paths, "/api/reasoning/jobs", vec![
+        (M::Get, o("Reasoning", "Reasoning jobs",
+            "The caller's background runs (`?async=true`), newest first; an admin sees every user's. Each as `GET /api/reasoning/jobs/{job_id}` answers it, plus `dataset` (the dataset the run reasons over, or `null`). `?dataset=` narrows the list to one dataset. Jobs live in process memory for an hour after they finish.",
+            vec![qp("dataset", false, "Only the jobs over this dataset")],
+            vec![("200", "`{jobs: [...]}`"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules", vec![
+        (M::Get, o("Reasoning", "Stored SWRL rules",
+            "The dataset's stored SWRL rules. `sets`: the rule sets this API keeps in the dataset's managed rules graph `urn:ots:rules:<dataset>` (an `entailment`-role graph), each `{id, iri, label, format, source, options, updated_at, updated_by, rules: [{iri, functional}]}` — the source as written and every rule in OWL 2 functional syntax. `other`: the rules in the dataset's other `entailment`- and `model`-role graphs and its model version, read-only, per graph (`{graph, rules, error}`; a private graph only for the dataset's writers). Also `can_write`, `inference_graph`, `last_run` and `formats`.",
+            vec![pp("dataset_id")], vec![("200", "The stored rules"), ("404", "Dataset not found"), ("503", "No SWRL support in this build")], false)),
+        (M::Post, o("Reasoning", "Add a rule set",
+            "Body `{label?, rules, format?, rdf_format?, base_iri?, prefixes?}`: rules in any syntax `POST /api/swrl/execute` reads (`format`, default `swrlapi`). Every rule is checked as a run checks it, against the regime the dataset runs its rules with (class-expression atoms need one), and a property atom the text or SWRLAPI syntax leaves open must be settled by the rule (a literal, a class atom, …); a refused rule writes nothing. The rules are stored in the SWRL RDF syntax with their source, and the dataset's rules (with its regime in `materialize` mode) run again at once. Response: `{id, rules, run}`, `run` as `POST …/rules/run` answers. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("201", "Stored"), ("400", "Rules refused (the message names the rule, atom or built-in)"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules/run", vec![
+        (M::Post, o("Reasoning", "Run the stored rules",
+            "Run the dataset's stored rules now: with its regime when it is in `materialize` mode (an `owl2-dl` run is queued: `queued: true`), else alone into `urn:entailment:swrl:<dataset>`. Response `{regime, queued, report, error}`, `report` the rules report `GET …/entailment` shows (`rule_graphs`, `rules`, `target_graph`, `triples_inferred`, `rounds`, `converged`, `error`, `ran_at`). Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "What the run did"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules/:set_id", vec![
+        (M::Put, o("Reasoning", "Replace a rule set",
+            "Body as `POST …/rules`; replaces the set's rules, source and label, then runs the rules again. Requires write access to the dataset.",
+            vec![pp("dataset_id"), pp("set_id")], vec![("200", "Replaced"), ("400", "Rules refused"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset or rule set not found")], true)),
+        (M::Delete, o("Reasoning", "Remove a rule set",
+            "Removes the set and its rules, then runs the remaining rules again (their consequences go with them). Requires write access to the dataset.",
+            vec![pp("dataset_id"), pp("set_id")], vec![("200", "`{deleted, run}`"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset or rule set not found")], true)),
     ]);
     mount(paths, "/api/reasoning/jobs/:job_id", vec![
         (M::Get, o("Reasoning", "Reasoning job",
@@ -3064,10 +3143,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Reasoning status",
-                "Counts of entailed triples per entailment graph.",
+                "`{graphs, dl_backend}`: the number of entailed triples in each shared entailment graph (`urn:entailment:<regime>`), and the server's OWL 2 DL backend (`native`, `konclude` or `sidecar` from `OTS_DL_BACKEND`; `null`: `owl2-dl` is unavailable).",
                 vec![],
                 vec![
-                    ("200", "Triple counts per graph"),
+                    ("200", "Triple counts per graph and the DL backend"),
                     ("401", "Authentication required"),
                 ],
                 true,
@@ -3082,7 +3161,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Debug query rewriting",
-                "Return the rewritten query for a given reasoning regime (no execution).",
+                "Body `{query, regime?, dataset?}`: the query rewritten under OWL 2 QL (the default regime; any other regime returns it unchanged), not run. The TBox is read from the graphs the caller may read (an admin: the unnamed default graph), or with `dataset` from that dataset's reasoning sources, read-checked as a materialisation's are.",
                 vec![],
                 vec![
                     ("200", "Rewritten query"),
@@ -3106,7 +3185,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                  `swrlapi` (human-readable; `prefixes` then the server's registry) or \
                  `ruleml` (SWRL §4 XML). Rule bodies read the default graph, or a \
                  `dataset`'s reasoning sources and `source_graphs`, read-checked like \
-                 /api/reasoning/materialize. Derived triples go to `target_graph` (an \
+                 /api/reasoning/materialize; `identity` picks the sameAs policy of a run \
+                 with a `regime` and no `dataset`, as there. Derived triples go to `target_graph` (an \
                  absolute IRI), else the dataset's inference graph (its writers only), \
                  else the default graph. All SWRL §8 built-ins are evaluated natively and \
                  may bind variables; data-range atoms are evaluated natively; class-expression \
@@ -3437,15 +3517,15 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                      `full` (default), `watermark` (only rows past the last cursor), or \
                      `snapshot` — a virtual (`sparql`) source's whole graph as the endpoint \
                      serves it, with no mapping involved; a snapshot run carries no `mapping`. \
-                     `onDataError` decides what a row value that cannot become its term does \
+                     `on_data_error` decides what a row value that cannot become its term does \
                      (R2RML §4.3): `abort` (default) fails the run and names the offending rows; \
-                     `skip` leaves those terms out and reports the rows as `dataErrors` on the run.",
+                     `skip` leaves those terms out and reports the rows as `data_errors` on the run.",
                     vec![],
                     vec![
                         ("201", "The run"),
                         (
                             "400",
-                            "Unknown mode or onDataError, no mapping outside snapshot mode, a \
+                            "Unknown mode or on_data_error, no mapping outside snapshot mode, a \
                              snapshot of a database, or the mapping belongs to another datasource",
                         ),
                         ("404", "Datasource or mapping not found"),
@@ -3532,17 +3612,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
 
     mount(paths, "/api/sources/gates", vec![
-        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`autoThreshold`, `reviewThreshold`), `datatypeMismatchCap`, `ambiguityMargin`, `enumMatchMinimum`, the dry-run classifier's `systematicShare` and `systematicMinSubjects`, `driftKlThreshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
+        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`auto_threshold`, `review_threshold`), `datatype_mismatch_cap`, `ambiguity_margin`, `enum_match_minimum`, the dry-run classifier's `systematic_share` and `systematic_min_subjects`, `drift_kl_threshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
             vec![], vec![("200", "The gates, JSON or Turtle")], true)),
         (M::Put, o("Sources", "Change the mapping gates", "A partial update: every field optional, an unknown field refused rather than ignored. Bands that cross, a fraction outside `[0, 1]` or a weight set summing to zero are a 400. Recorded in the commit log.",
             vec![], vec![("200", "The gates as they now stand"), ("400", "A value that cannot be applied"), ("422", "An unknown field")], true)),
     ]);
     mount(paths, "/api/sources/:id/dry-run", vec![
-        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mappingGraph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sampleSize` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triplesMaps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapesGraph`, else the registered mapping's, else the model version's (`model` + `modelVersion`). A violation hitting at least `systematicShare` of a type's subjects over at least `systematicMinSubjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
+        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mapping_graph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sample_size` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triples_maps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapes_graph`, else the registered mapping's, else the model version's (`model` + `model_version`). A violation hitting at least `systematic_share` of a type's subjects over at least `systematic_min_subjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
             vec![], vec![("200", "The dry-run result"), ("400", "The request names no mapping, two, or a table nothing reads"), ("404", "Datasource or mapping not found"), ("502", "The datasource did not answer"), ("503", "Server overloaded")], true)),
     ]);
     mount(paths, "/api/sources/:id/drift", vec![
-        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profileVersion` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `klThreshold`, default the gates' `driftKlThreshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `modelVersionBump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `openTicket: false` only reports.",
+        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profile_version` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `kl_threshold`, default the gates' `drift_kl_threshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `model_version_bump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `open_ticket: false` only reports.",
             vec![], vec![("200", "The drift report, with the ticket it opened or updated"), ("400", "Fewer than two profile versions, or an unknown one"), ("404", "Datasource or mapping not found")], true)),
     ]);
     mount(paths, "/api/sources/:id/tickets", vec![
@@ -3558,8 +3638,8 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![], vec![("200", "The closed ticket"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/mappings/convert", vec![
-        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, emptyAsNull?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `emptyAsNull` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
-            vec![], vec![("200", "`{rml, triplesMaps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
+        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, empty_as_null?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `empty_as_null` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
+            vec![], vec![("200", "`{rml, triples_maps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
     ]);
     mount(
         paths,
@@ -3681,7 +3761,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Sources",
                     "Get a run",
-                    "One run, including graphTriples — what its graph holds now, which is how a \
+                    "One run, including graph_triples — what its graph holds now, which is how a \
                      caller tells a kept candidate from a collected one.",
                     vec![],
                     vec![("200", "The run"), ("404", "Not found")],
@@ -3784,8 +3864,8 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![], vec![("200", "`{applied, status, fixes: [{rule, path, from, to, constraint}], patch, unfixable}`"), ("404", "Not found"), ("422", "Nothing can be fixed without inventing a value")], true)),
     ]);
     mount(paths, "/api/reviews/:id/suggest", vec![
-        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allowModelAssist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
-            vec![], vec![("200", "`{model, applied: false, valuesShared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
+        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allow_model_assist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
+            vec![], vec![("200", "`{model, applied: false, values_shared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
     ]);
     mount(paths, "/api/runs/:id/promote", vec![
         (M::Post, o("Sources", "Promote a corrected candidate", "Runs the SHACL write gate again over the run's kept candidate graph as it now stands — after the fixer, a patch or a human edit — and, when it passes, gives it the production role exactly as a passing run would: one pointer swap, the previous graph demoted and kept, LDES members published. Recorded as a `ds:Promotion` activity on the run's PROV trail naming who promoted it; the run's review items are marked `promoted`.",
@@ -4884,11 +4964,33 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Search",
                 "Rebuild full-text index",
-                "Rebuild the full-text search index over literals. Requires authentication.",
+                "Rebuild the full-text search index over literals from the store, synchronously: `{indexed}` is the number of literals indexed. Admin only; the outcome is kept for `GET /api/text-search/status`.",
                 vec![],
                 vec![
-                    ("200", "Reindex started/completed"),
+                    ("200", "`{indexed}`"),
                     ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                    ("500", "The rebuild failed"),
+                    ("503", "No full-text index on this server"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/text-search/status",
+        vec![(
+            M::Get,
+            o(
+                "Search",
+                "Full-text index status",
+                "`{available, documents, stale, substring_pushdown, reindexing, last_reindex}`: whether the index is open, how many literals it holds, whether writes are waiting to reach it, whether substring push-down is usable, whether a reindex is running, and the latest reindex this process ran (`started_at`, `finished_at`, `duration_ms`, `indexed` or `error`, `by`). Without an index: `{available: false, reason}`. Admin only.",
+                vec![],
+                vec![
+                    ("200", "Index status"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
                 ],
                 true,
             ),
@@ -6538,9 +6640,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "List backups",
-                    "Available store backups.",
+                    "The backups in the backup directory, newest first: `[{id, created_at, software_version, rdf_path, rdf_sha256, rdf_quad_count, sqlite_path, sqlite_sha256, encrypted}]`. super_admin only.",
                     vec![],
-                    vec![("200", "Array of backups"), ("403", "Admin role required")],
+                    vec![("200", "Array of backups"), ("403", "super_admin role required"), ("503", "Backups are not configured")],
                     true,
                 ),
             ),
@@ -6549,9 +6651,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "Create backup",
-                    "Trigger a new store backup.",
+                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `BACKUP_ENCRYPT=true`). With `BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
                     vec![],
-                    vec![("201", "Backup created"), ("403", "Admin role required")],
+                    vec![("200", "The new backup's manifest and `s3`"), ("403", "super_admin role required"), ("500", "The backup failed"), ("503", "Backups are not configured")],
                     true,
                 ),
             ),
@@ -6565,11 +6667,67 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Verify backup",
-                "Verify the integrity of a backup.",
+                "Recompute the SHA-256 of a backup's files and compare them with its manifest: `{id, verified}`. super_admin only.",
                 vec![],
                 vec![
                     ("200", "Verification result"),
-                    ("403", "Admin role required"),
+                    ("403", "super_admin role required"),
+                    ("503", "Backups are not configured"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/status",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Backup status",
+                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_hours, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
+                vec![],
+                vec![("200", "Backup status"), ("403", "super_admin role required")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/:id/restore",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Stage a restore",
+                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `BACKUP_DECRYPT_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
+                vec![],
+                vec![
+                    ("200", "`{id, requested_by, requested_at}`"),
+                    ("403", "super_admin role required"),
+                    ("422", "No such backup, a checksum mismatch, or an encrypted backup without a decryption identity"),
+                    ("503", "Backups are not configured"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/restore",
+        vec![(
+            M::Delete,
+            o(
+                "Admin",
+                "Cancel a staged restore",
+                "Withdraw the restore staged for the next start. super_admin only.",
+                vec![],
+                vec![
+                    ("204", "Cancelled"),
+                    ("403", "super_admin role required"),
+                    ("404", "No restore is staged"),
+                    ("503", "Backups are not configured"),
                 ],
                 true,
             ),
@@ -7413,6 +7571,59 @@ mod tests {
         assert!(
             v["paths"]["/api/datasets/{dataset_id}/services"]["post"].is_object(),
             "missing SPARQL service create operation"
+        );
+    }
+
+    /// Every property name the spec describes, with its JSON path.
+    fn collect_properties(node: &serde_json::Value, at: &str, out: &mut Vec<(String, String)>) {
+        match node {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    let here = format!("{at}/{k}");
+                    if k == "properties" {
+                        if let Some(props) = v.as_object() {
+                            for name in props.keys() {
+                                out.push((name.clone(), here.clone()));
+                            }
+                        }
+                    }
+                    collect_properties(v, &here, out);
+                }
+            }
+            serde_json::Value::Array(a) => a
+                .iter()
+                .enumerate()
+                .for_each(|(i, v)| collect_properties(v, &format!("{at}/{i}"), out)),
+            _ => {}
+        }
+    }
+
+    /// The HTTP API names every JSON field in snake_case (owner decision,
+    /// 2026-10): no schema the spec describes may have a camelCase (or any
+    /// upper-case) property.
+    /// Formats defined elsewhere keep their own names and are listed here
+    /// with the standard that fixes them.
+    #[test]
+    fn spec_has_no_camel_case_properties() {
+        // Field names fixed by an external specification, not by this API.
+        const EXTERNAL: &[&str] = &[];
+        let v = serde_json::to_value(openapi_spec()).unwrap();
+        let mut props = Vec::new();
+        collect_properties(&v, "", &mut props);
+        assert!(
+            props.len() > 100,
+            "expected many properties, got {}",
+            props.len()
+        );
+        let camel: Vec<&(String, String)> = props
+            .iter()
+            .filter(|(name, _)| {
+                name.chars().any(|c| c.is_ascii_uppercase()) && !EXTERNAL.contains(&name.as_str())
+            })
+            .collect();
+        assert!(
+            camel.is_empty(),
+            "camelCase properties in the OpenAPI spec: {camel:#?}"
         );
     }
 

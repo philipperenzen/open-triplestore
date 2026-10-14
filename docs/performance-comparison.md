@@ -11,6 +11,13 @@ unpatched), Apache Jena Fuseki, QLever, Virtuoso Open Source and Eclipse RDF4J.
 > below comes from [`docs/perf-data/2026-10-03/`](perf-data/2026-10-03/), produced
 > by the harness in [`scripts/bench-compare/`](../scripts/bench-compare/). Read
 > the [threats to validity](#7-threats-to-validity) before quoting a number.
+>
+> **Open Triplestore re-measured 2026-10-13** after the round-3 performance
+> fixes ([§5.8](#58-open-triplestore-after-the-round-3-fixes-2026-10-13)): the
+> 2026-10-03 commit and the fixed branch head, built the same way and run back to
+> back, with upstream Oxigraph re-run in the same window to cross-check every
+> answer. The other stores were **not** re-run; every number of theirs in this
+> document is from 2026-10-03. Sections 5.1–5.7 are the 2026-10-03 campaign.
 
 ## Contents
 
@@ -26,6 +33,18 @@ unpatched), Apache Jena Fuseki, QLever, Virtuoso Open Source and Eclipse RDF4J.
 
 ## 1. Summary
 
+- **After the round-3 fixes (2026-10-13, [§5.8](#58-open-triplestore-after-the-round-3-fixes-2026-10-13)).**
+  Measured against the 2026-10-03 commit in the same window: the BSBM explore
+  mix with one client runs at 16,570 query mixes per hour at 10k (5,358
+  before) and 64,685 at 1k (24,923 before). Upstream Oxigraph, re-run in the
+  same window, did 33,719 and 117,023, so Open Triplestore is now about 2×
+  slower than its own engine at 10k, not 6×; DESCRIBE (Q9) went from 42.6 ms to
+  1.0 ms. The correlated `NOT EXISTS` (F10) takes 366 ms at 10k (a timeout
+  before) and 42 ms at 1k (5.0 s). The 10k load into 4 GiB peaked at 1.5–1.9 GiB
+  in eight loads, none OOM-killed (3.8 GiB before); whole-dataset SHACL
+  validation at 10k completed in 15.7 s, where the old build's container died
+  in the same run. Every answer matched upstream Oxigraph's, instance by
+  instance. The bullets below are the 2026-10-03 campaign.
 - **No store is fastest everywhere.** On the BSBM explore mix with one client,
   upstream Oxigraph leads at 1k products (136,476 query mixes per hour) and
   Virtuoso at 10k (49,962). Open Triplestore is third at 1k (50,897) and third
@@ -438,7 +457,153 @@ its container peaked at 4,071 of 4,096 MiB.
 | Virtuoso | 10k | 2,926 | 2,998 | 3,125 | 3,280 | — |
 | RDF4J | 10k | 1,385 | 1,175 | 1,063 | 1,326 | — |
 
+### 5.8 Open Triplestore after the round-3 fixes (2026-10-13)
+
+The round-3 performance work (issues
+[#467](https://github.com/philipperenzen/open-triplestore/issues/467)–[#471](https://github.com/philipperenzen/open-triplestore/issues/471)
+and [#527](https://github.com/philipperenzen/open-triplestore/issues/527)) was
+measured with the same harness, data and query instances as above, on the same
+laptop. To separate the code from the day, both Open Triplestore builds ran in
+one window, back to back: **Before** is commit `570a7a30` (the 2026-10-03
+commit), **After** is `9e49fa50` (develop `56a44aef`, the open sibling PR stack
+#517–#522 and the fixes). Both were
+built from the same `Dockerfile.ots` with thin LTO (the shipped fat-LTO link
+needs about 14 GB, more than the Docker VM had free next to other containers),
+so neither column is directly comparable with §5.1–5.7, which used fat LTO.
+Upstream Oxigraph 0.5.11 was re-run in the same window, for the answer
+cross-check below and as a reference; its 2026-10-03 numbers are shown next to
+it. That it came out 13–23 % slower in this window than on 2026-10-03 is the
+size of the day's effect on this machine. Data:
+[`docs/perf-data/2026-10-13/`](perf-data/2026-10-13/).
+
+**1k, BSBM explore, one client** — median ms
+
+| Query | Before (`570a7a30`) | After | Oxigraph 0.5.11, same window | Oxigraph 0.5.11, 2026-10-03 |
+| --- | --: | --: | --: | --: |
+| Q1 | 0.69 | 0.66 | 0.49 | 0.41 |
+| Q2 | 1.09 | 1.07 | 1.06 | 0.95 |
+| Q3 | 0.82 | 0.78 | 0.62 | 0.48 |
+| Q4 | 0.85 | 0.82 | 0.83 | 0.69 |
+| Q5 | 2.03 | 2.18 | 4.04 | 3.61 |
+| Q7 | 3.51 | 4.10 | 1.25 | 1.00 |
+| Q8 | 5.84 | 6.88 | 0.90 | 0.71 |
+| Q9 | 41.5 | 0.87 | 0.27 | 0.23 |
+| Q10 | 1.60 | 1.50 | 0.75 | 0.62 |
+| Q11 | 0.69 | 0.66 | 0.34 | 0.29 |
+| Q12 | 0.80 | 0.83 | 0.45 | 0.37 |
+| **QMpH** | **24,923** | **64,685** | **117,023** | **136,476** |
+
+**1k, SPARQL 1.1 feature mix** — median ms
+
+| Query | Before (`570a7a30`) | After | Oxigraph 0.5.11, same window | Oxigraph 0.5.11, 2026-10-03 |
+| --- | --: | --: | --: | --: |
+| F01-path-closure | 2.93 | 3.85 | 4.66 | 3.93 |
+| F02-path-sequence-inverse | 0.91 | 1.08 | 1.81 | 1.36 |
+| F03-path-alternative | 93.6 | 124 | 136 | 161 |
+| F04-path-oneormore-join | 2.76 | 3.77 | 2.61 | 3.28 |
+| F05-agg-group-avg | 320 | 291 | 180 | 360 |
+| F06-agg-having | 9.04 | 9.20 | 5.88 | 10.2 |
+| F07-agg-count-distinct | 146 | 11.8 | 16.1 | 23.5 |
+| F08-optional-unbound | 2.84 | 3.75 | 7.87 | 15.8 |
+| F09-minus | 5.28 | 6.53 | 35.8 | 33.2 |
+| F10-not-exists | 5,047 | 42.3 | 118,901 | 111,630 |
+| F11-subquery-topk | 16.7 | 18.9 | 63.6 | 58.3 |
+| F12-subquery-agg-join | 357 | 364 | 217 | 180 |
+| F13-values-union | 8.55 | 8.77 | 1.20 | 0.85 |
+| F14-count-all | 45.2 | 87.8 | 141 | 136 |
+
+
+**10k, BSBM explore, one client** — median ms
+
+| Query | Before (`570a7a30`) | After | Oxigraph 0.5.11, same window | Oxigraph 0.5.11, 2026-10-03 |
+| --- | --: | --: | --: | --: |
+| Q1 | 44.8 | 3.41 | 1.57 | 1.01 |
+| Q2 | 5.01 | 2.91 | 1.43 | 1.08 |
+| Q3 | 39.9 | 5.35 | 2.70 | 1.85 |
+| Q4 | 21.5 | 5.99 | 2.83 | 2.13 |
+| Q5 | 110 | 62.1 | 31.4 | 25.8 |
+| Q7 | 9.98 | 4.01 | 2.07 | 1.40 |
+| Q8 | 6.55 | 2.73 | 1.36 | 0.87 |
+| Q9 | 42.6 | 1.00 | 0.34 | 0.24 |
+| Q10 | 44.3 | 2.34 | 1.06 | 0.72 |
+| Q11 | 2.51 | 1.15 | 0.41 | 0.29 |
+| Q12 | 2.36 | 1.46 | 0.56 | 0.40 |
+| **QMpH** | **5,358** | **16,570** | **33,719** | **43,681** |
+
+**10k, SPARQL 1.1 feature mix** — median ms
+
+| Query | Before (`570a7a30`) | After | Oxigraph 0.5.11, same window | Oxigraph 0.5.11, 2026-10-03 |
+| --- | --: | --: | --: | --: |
+| F01-path-closure | 17.6 | 21.0 | 9.84 | 8.39 |
+| F02-path-sequence-inverse | 3.67 | 5.03 | 2.00 | 1.19 |
+| F03-path-alternative | 3,492 | 3,163 | 1,777 | 1,326 |
+| F04-path-oneormore-join | 18.4 | 21.0 | 13.1 | 11.7 |
+| F05-agg-group-avg | 4,948 | 4,588 | 2,821 | 2,175 |
+| F06-agg-having | 79.1 | 90.7 | 64.0 | 55.3 |
+| F07-agg-count-distinct | 320 | 305 | 212 | 189 |
+| F08-optional-unbound | 117 | 126 | 76.8 | 70.1 |
+| F09-minus | 1,211 | 1,138 | 685 | 533 |
+| F10-not-exists | timeout | 366 | timeout | timeout |
+| F11-subquery-topk | 1,326 | 1,468 | 671 | 635 |
+| F12-subquery-agg-join | 5,226 | 5,834 | 5,461 | 3,158 |
+| F13-values-union | 2.37 | 2.33 | 1.31 | 0.99 |
+| F14-count-all | 2,102 | 2,846 | 1,500 | 1,473 |
+
+**Load, SHACL and concurrency.**
+
+| | Before (`570a7a30`) | After |
+| --- | --: | --: |
+| 10k load over the Graph Store protocol (s) | 149.3 | 105.9 |
+| 10k load, peak container memory (MiB) | 3,843 | 1,744 |
+| 1k load (s) / peak (MiB) | 15.6 / 786 | 11.5 / 617 |
+| SHACL validation at 10k, median of 5 (s) | — (container gone) | 15.7 |
+| SHACL validation at 10k, peak memory (MiB) | 4,092 | 3,958 |
+| SHACL validation at 1k, median (s) | 0.53 | 0.27 |
+| 10k QMpH with 1 / 4 / 8 clients | 5,640 / 29,220 / 53,880 | 16,020 / 65,220 / 61,620 |
+| 1k QMpH with 1 / 4 / 8 clients | 28,740 / 182,160 / 285,300 | 66,060 / 230,940 / 239,520 |
+
+The old build's container went away during whole-dataset SHACL validation at
+10k (connection refused, its last log line the run index reaching its budget at
+4,092 MiB sampled); the new build answered all six runs. Across six repeated 10k
+loads of an earlier commit of the branch with the same load path and two more
+campaign loads, none was OOM-killed and the sampled peaks were 1,513–1,883 MiB
+([attempts](perf-data/2026-10-13/ots-10k-load-attempts.json)); on 2026-10-03
+two of six were.
+
+**Answers.** Every query instance that both builds and upstream Oxigraph ran got
+the same result count from all three (5,847 instances at 1k, 7,702 at 10k,
+including the correlated `NOT EXISTS`, which Oxigraph answered at 1k; at 10k only
+the new build finished it, with 43,428 offers)
+([`crosscheck.txt`](perf-data/2026-10-13/crosscheck.txt)).
+
+**What changed, and what did not.**
+
+- **DESCRIBE and the stalls.** Q9 went from 42.6 to 1.0 ms at 10k and from
+  41.5 to 0.87 ms at 1k, and the p95 latencies at 10k fell from 44–71 ms to
+  2–36 ms for Q1, Q3, Q4, Q7, Q9 and Q10. The 40 ms floor did not reproduce on develop before
+  these fixes in a probe of the same endpoint, so which change removed it
+  (`TCP_NODELAY`, now set on every connection, or changes merged between
+  `570a7a30` and develop) was not isolated.
+- **Correlated `NOT EXISTS`** is now a hash semi-join (§ vendored changes 10 and
+  11 in [`vendor/README.md`](../vendor/README.md)): 366 ms at 10k, between
+  Fuseki's 1.7 s and Virtuoso's 78 ms on 2026-10-03.
+- **Per-query overhead**: the shared SPARQL parser is built once instead of on
+  every parse; a dataset whose default graph merges its data graph with its
+  shapes graph no longer hashes every match of a pattern that only one graph
+  matches; a query that times out is cancelled instead of running on.
+- **Still slower than upstream Oxigraph**: about 2× on the 10k explore mix,
+  mostly Q5 (62 ms against 31 ms) and the analytical feature queries at 10k
+  (F03, F05, F09, F11, F14: 1.6–2.2× Oxigraph in the same window). `COUNT(*)` over the whole dataset
+  (F14) is slower than before at both scales (88 against 45 ms at 1k, 2.8 against
+  2.1 s at 10k): the default graph now merges the data and shapes graphs as a set
+  (develop's SPARQL fix for duplicate rows), which the old build did not. Several
+  1k feature queries (F01, F02, F04, F08, F09) are 19–37 % slower than before;
+  not investigated.
+
 ## 6. Where Open Triplestore loses
+
+The bullets are the 2026-10-03 findings; where the round-3 fixes changed one,
+its 2026-10-13 status follows it (§5.8).
 
 - **Its own engine is faster than it is** — 2.7× on the explore mix at 1k, 6×
   at 10k. A follow-up probe ([`diagnostics.json`](perf-data/2026-10-03/diagnostics.json))
@@ -449,14 +614,19 @@ its container peaked at 4,071 of 4,096 MiB.
   10k), so something per query works in proportion to the store outside the
   evaluator's index lookups. Not yet isolated —
   [#468](https://github.com/philipperenzen/open-triplestore/issues/468).
+  *2026-10-13:* about 2× at 10k and 1.8× at 1k against Oxigraph run in the same
+  window; DESCRIBE 1.0 ms. The rest is Q5 and the analytical queries at 10k.
 - **Above 2 M triples in a 4 GiB container the accelerator is off**, by design
-  (`OTS_PARALLEL_QUERY_MAX_TRIPLES`, default 2,000,000 at this memory size), and
+  (`OTS_PARALLEL_QUERY_MAX_TRIPLES`, default 2,000,000 at this memory size; since
+  round 3, 1,048,576 in 4 GiB, a quarter of the limit at about 1 KiB a triple), and
   every query goes to RocksDB. That is why the 10k explore mix drops from
   50,897 to 7,229 QMpH while Oxigraph and Virtuoso barely move. With more memory
   the cap rises; this comparison kept every store at 4 GiB.
 - **Memory headroom.** The load and the accelerator build can coincide and
   exceed 4 GiB (2 of 6 loads OOM-killed), and SHACL at 10k came within 25 MiB of
   the limit — [#469](https://github.com/philipperenzen/open-triplestore/issues/469).
+  *2026-10-13:* no OOM in eight 10k loads (peaks 1.5–1.9 GiB); SHACL at 10k
+  still peaks at 3,958 MiB.
 - **Loading** is 4–11× slower than the other stores' bulk loaders at 10k and
   2–3× slower than Oxigraph, Fuseki and RDF4J over HTTP; full-text indexing of every
   literal is part of the cost (BSBM's reviews and comments are long texts).
@@ -464,11 +634,13 @@ its container peaked at 4,071 of 4,096 MiB.
   than upstream Oxigraph, still 25–190× slower than Fuseki, QLever and Virtuoso
   at 1k and a timeout at 10k —
   [#471](https://github.com/philipperenzen/open-triplestore/issues/471).
+  *2026-10-13:* 42 ms at 1k, 366 ms at 10k.
 - **Analytical queries at 10k** (F03, F05, F09, F11, F12, F14): 0.8–4.5 s where
   QLever and Virtuoso take 10–260 ms. Without the accelerator these run on the
   row-at-a-time evaluator over RocksDB.
 - **`COUNT(DISTINCT)` at 1k** (F07): 125 ms against 8–24 ms for the others,
-  slower than upstream Oxigraph's 24 ms; not investigated.
+  slower than upstream Oxigraph's 24 ms; not investigated. *2026-10-13:* 11.8 ms
+  (changes merged since `570a7a30`).
 
 ## 7. Threats to validity
 
@@ -504,6 +676,12 @@ its container peaked at 4,071 of 4,096 MiB.
   marked as such.
 - **One HTTP connection per client** in a Python client: per-request overhead is
   the same for every store, but it is part of every latency.
+- **The 2026-10-13 re-run (§5.8)** used thin LTO for both Open Triplestore
+  builds, ran on a busier laptop (other jobs, the host swapping; the load
+  average at the start of each run is in its run file), and compares the after
+  build with the other stores' 2026-10-03 numbers only through upstream
+  Oxigraph, which was re-run in the same window. The datasets were regenerated
+  with the same generator; their checksums match 2026-10-03.
 
 ## 8. What was not measured
 
@@ -528,6 +706,7 @@ its container peaked at 4,071 of 4,096 MiB.
 W=$HOME/bench-work
 scripts/bench-compare/fetch.sh "$W" 1000 10000
 docker build -f scripts/bench-compare/Dockerfile.ots -t ots-bench:$(git rev-parse --short HEAD) .
+# (--build-arg CARGO_PROFILE_RELEASE_LTO=thin when the Docker VM cannot spare ~14 GB for the fat-LTO link)
 python3 scripts/bench-compare/campaign.py --data-root "$W/data" --cache "$W/cache" --out "$W/results/raw" \
   --ots-image ots-bench:$(git rev-parse --short HEAD) --stores ots,oxigraph,fuseki,qlever,virtuoso,rdf4j \
   --scales 1k,10k --require-quiet 10k

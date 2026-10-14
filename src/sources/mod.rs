@@ -110,15 +110,15 @@ pub enum ValidationError {
     Secret(#[from] SecretError),
     #[error(
         "this store only opens datasources read-only; grant the account SELECT and register it \
-         with readOnly true"
+         with read_only true"
     )]
     ReadWrite,
     #[error(
-        "a statement timeout is required in the production posture: set statementTimeoutMs so a \
+        "a statement timeout is required in the production posture: set statement_timeout_ms so a \
          slow query cannot hold a connection open indefinitely"
     )]
     MissingTimeout,
-    #[error("statementTimeoutMs must be between 1 and {max} milliseconds")]
+    #[error("statement_timeout_ms must be between 1 and {max} milliseconds")]
     TimeoutRange { max: u64 },
     #[error(
         "a networked datasource must be on the federation egress allowlist ({env}) in the \
