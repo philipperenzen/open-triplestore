@@ -1083,7 +1083,8 @@ curl -X POST http://localhost:7878/api/shacl/export/ids \
      -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/turtle' \
      --data-binary @shapes.ttl
-# → {"format":"ids","document":"<?xml …","specification_count":2,"losses":[…]}
+# → {"format":"ids","document":"<?xml …","specification_count":2,
+#    "verbatim_specifications":2,"losses":[…]}
 
 # the bare document instead of the report
 curl -X POST 'http://localhost:7878/api/shacl/export/ids?raw=true' …
@@ -1098,7 +1099,15 @@ constraints. Import → export → import is a fixpoint: the second import
 produces the same Turtle as the first (`tests/spec_export_http.rs`), and the
 exported document passes the importer's XSD and audit checks. A specification
 whose shapes were edited after import is not exported from its stale source;
-it is listed in `losses` instead.
+it is listed in `losses` instead. `verbatim_specifications` counts the
+specifications written back from their recorded source; when it equals
+`specification_count` and `losses` is empty, the export is a lossless
+re-export of the imported document.
+
+In the web UI, the shape library's **Export to IDS** action on a shape graph
+runs this export and says which case it is — a lossless re-export, partly
+written back, or translated from the shapes — lists every loss, and offers the
+`.ids` file for download.
 
 **Other shapes go through the older translator, and `losses` is the reason
 the report is the default representation.** IDS's whole expressive surface for
@@ -1163,6 +1172,13 @@ curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
 
 Without `create=true` the response carries the Turtle and the report only.
 
+In the web UI, **Import IDS** in the shape library checks a document first
+(converting without storing), shows its specifications and what could not be
+carried, and creates the shape graph on request. A refused document shows the
+audit report item by item: the import answers a refusal as
+`{error, stage, problems}`, with `stage` `xml`, `schema` (the IDS 1.0 XSD) or
+`audit`, and `problems` listing every problem found.
+
 **Validation first.** The document is checked against the IDS 1.0 XSD
 (elements, their order and attributes, `ifcVersion` tokens, cardinality values)
 and the IDS audit rules after the buildingSMART IDS Audit Tool: entity names
@@ -1183,7 +1199,12 @@ does not become shapes that quietly pass. The standard property-set templates
 **What the shapes check.** The shapes are SHACL-SPARQL over the **IDS
 projection** of the IFC lift — the graph an IFC import writes to
 `…/building/ids` (see [geo-3d-platform.md §9](geo-3d-platform.md)). Run a
-pipeline or a dataset validation over that graph. Each specification becomes a
+pipeline or a dataset validation over that graph. In the web UI, the dataset
+page's **Exchange** section has an **IDS check**: pick an IDS-imported shape
+graph and a building's projection graph, and it runs a SHACL Studio pipeline
+scoped to exactly that pair (made on first use, reused after, so its runs are
+kept), showing the result per specification — passed, the entities that fail
+a requirement, or no applicable entity where the specification requires one. Each specification becomes a
 node shape:
 
 - **targets**: the exact classes its entity facet admits; a pattern or
