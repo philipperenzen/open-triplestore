@@ -1222,10 +1222,16 @@ the same quads, so results are identical (a parity suite asserts equality across
 named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP BY`/
 `DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
 The mirror is a derived index: rebuilt lazily after writes and **bounded by a
-triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two engine copies cost
-~2× the dataset in RAM, the columnar copy about 48 bytes a quad on top) so it never
-mirrors a store larger than RAM — above the cap the copies stay off and the persistent store answers, leaving the 1–100M disk tiers
-(data > RAM) unaffected.
+triple-count cap** (a quarter of the memory limit at ~1 KiB a triple — 1M in a 4 GiB
+container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY*`-tunable; the two
+engine copies cost ~2× the dataset in RAM, the columnar copy about 48 bytes a quad on
+top) so it never mirrors a store larger than RAM — above the cap the copies stay off and
+the persistent store answers, leaving the 1–100M disk tiers (data > RAM) unaffected. A
+build waits for writes to stay quiet (5 s after a burst of writes to a store over 50k
+triples), stops as soon
+as a write starts, and on Linux does not start unless the process's resident memory plus
+the copies fit in 80 % of the limit (issue #469: a 3.5M-triple load into 4 GiB was
+OOM-killed in 2 of 6 attempts when a build ran next to it).
 
 Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
 in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):
