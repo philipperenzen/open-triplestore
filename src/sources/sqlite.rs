@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use ots_plugin_api::sources::{
     is_low_cardinality, BatchSink, ColumnInfo, ColumnProfile, ConnectParams, DetectedPattern,
-    ForeignKey, IndexInfo, NumericSummary, Row, SourceConnection, SourceConnector, SourceError,
-    TableInfo, TableKind, TableProfile, Value, ValueCount, ValueKind,
+    ForeignKey, IdentifierRules, IndexInfo, NumericSummary, Row, SourceConnection, SourceConnector,
+    SourceError, TableInfo, TableKind, TableProfile, Value, ValueCount, ValueKind,
     LOW_CARDINALITY_MAX_VALUE_LEN, PROFILE_SAMPLE_ROWS, TOP_K,
 };
 use rusqlite::types::ValueRef;
@@ -754,6 +754,12 @@ impl SourceConnection for SqliteConnection {
             foreign_keys: info.foreign_keys,
             sampled_rows: sample.len() as u64,
         })
+    }
+
+    /// SQLite compares every identifier, delimited or not, without regard to
+    /// the case of ASCII letters, and keeps names as written.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::SQLITE)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

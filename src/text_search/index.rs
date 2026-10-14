@@ -285,6 +285,11 @@ impl TextIndex {
         Ok(())
     }
 
+    /// How many literal documents the index holds (as of its last reload).
+    pub fn num_docs(&self) -> u64 {
+        self.reader.searcher().num_docs()
+    }
+
     /// Whether substring push-down may be used against this index.
     pub fn substring_pushdown_available(&self) -> bool {
         self.raw_complete.load(Ordering::Relaxed)

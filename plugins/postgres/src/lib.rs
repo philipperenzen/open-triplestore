@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use ots_plugin_api::sources::catalogue::{self, canonical, Dialect, Executor};
 use ots_plugin_api::sources::{
-    BatchSink, ConnectParams, Row, SourceConnection, SourceConnector, SourceError, TableInfo,
-    TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
+    BatchSink, ConnectParams, IdentifierRules, Row, SourceConnection, SourceConnector, SourceError,
+    TableInfo, TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
 };
 use ots_plugin_api::Plugin;
 use postgres::config::SslMode;
@@ -407,6 +407,12 @@ impl SourceConnection for PostgresConnection {
 
     fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
         catalogue::unique_keys(self, &PgDialect, table)
+    }
+
+    /// PostgreSQL folds an unquoted name to lower case (where SQL 2008 folds
+    /// to upper case) and compares names exactly.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::POSTGRESQL)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

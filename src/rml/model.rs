@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use ots_plugin_api::sources::IdentifierRules;
 use oxigraph::model::Term;
 
 /// A complete RML mapping document containing one or more TriplesMap entries.
@@ -144,6 +145,11 @@ pub struct LogicalSource {
     /// How a file source's bytes are read: encoding, compression, CSV
     /// dialect, XML namespaces (RML-IO `rml:Source`, CSVW).
     pub access: Access,
+    /// How the connection that runs a relational source resolves SQL
+    /// identifiers (R2RML §5), once the run knows it: `rr:tableName` is then
+    /// folded by the dialect's rules. `None` until then — parsing a mapping
+    /// does not know the database it will run against.
+    pub identifiers: Option<IdentifierRules>,
 }
 
 /// How the bytes of a file source become records (RML-IO §Source and the
@@ -233,9 +239,12 @@ impl LogicalSource {
             // wrapped as a subquery (a join, a cursor, a column check) cannot.
             return Some(q.trim().trim_end_matches(';').trim_end().to_string());
         }
-        self.table_name
-            .as_ref()
-            .map(|t| format!("SELECT * FROM {}", super::sqlident::table_sql(t, quote)))
+        self.table_name.as_ref().map(|t| {
+            format!(
+                "SELECT * FROM {}",
+                super::sqlident::table_sql(t, quote, self.identifiers.as_ref())
+            )
+        })
     }
 
     /// The table a catalogue lookup (unique keys) can answer for: a named
@@ -244,7 +253,7 @@ impl LogicalSource {
         if self.query.is_some() {
             return None;
         }
-        super::sqlident::catalogue_table(self.table_name.as_deref()?)
+        super::sqlident::catalogue_table(self.table_name.as_deref()?, self.identifiers.as_ref())
     }
 }
 
@@ -710,6 +719,7 @@ mod tests {
             table_name: Some("products".into()),
             nulls: Vec::new(),
             access: Access::default(),
+            identifiers: None,
         };
         assert_eq!(table.sql(&quote).unwrap(), "SELECT * FROM \"products\"");
         let query = LogicalSource {
@@ -739,6 +749,7 @@ mod tests {
             table_name: None,
             nulls: Vec::new(),
             access: Access::default(),
+            identifiers: None,
         };
         assert_eq!(file.sql(&quote), None);
     }

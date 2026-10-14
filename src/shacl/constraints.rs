@@ -4,6 +4,7 @@ use super::view::{DataView, GraphSel};
 use oxigraph::model::{Literal, Term};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
@@ -1698,14 +1699,15 @@ fn eval_path_native(
     }
 }
 
-/// Transitive closure of `inner` starting at `from` (BFS with a visited set);
-/// `include_start` distinguishes `*` from `+`.
+/// Transitive closure of `inner` starting at `from`; `include_start`
+/// distinguishes `*` from `+`.
 ///
-/// Emission is tracked apart from termination: for `+` the start node is not
-/// emitted up front, but it *is* emitted once when a cycle leads back to it —
-/// `<s> <p>+ ?v` in SPARQL yields `s` for `s p a . a p s`. The old walk marked
-/// the start visited before the search and only emitted on first visit, so a
-/// focus node on a cycle never counted among its own `+` values.
+/// The `+` reach set (every node one or more steps away) is what is computed
+/// and memoised per run ([`super::view::ClosureMemo`]); `*` adds the start.
+/// A cycle back to the start makes it part of its own `+` set — `<s> <p>+ ?v`
+/// in SPARQL yields `s` for `s p a . a p s` — and `*` lists it once. The
+/// values come back sorted by their N-Triples form, so the order of a report
+/// does not depend on which closures other rayon workers memoised first.
 fn closure(
     view: &DataView<'_>,
     from: &Term,
@@ -1713,26 +1715,64 @@ fn closure(
     include_start: bool,
     sel: GraphSel,
 ) -> Vec<Term> {
-    let mut visited: HashSet<Term> = HashSet::new();
-    let mut emitted: HashSet<Term> = HashSet::new();
-    let mut out = Vec::new();
-    let mut queue = std::collections::VecDeque::new();
-    visited.insert(from.clone());
-    if include_start {
-        emitted.insert(from.clone());
-        out.push(from.clone());
-    }
-    queue.push_back(from.clone());
-    while let Some(node) = queue.pop_front() {
-        for next in eval_path_native(view, &node, inner, sel) {
-            if emitted.insert(next.clone()) {
-                out.push(next.clone());
+    let memo = view.closure_memo();
+    let path = memo.path_id(inner);
+    let reach = match path.and_then(|p| memo.get(p, sel, from)) {
+        Some(reach) => reach,
+        None => {
+            let reach: Arc<[Term]> = reach_one_or_more(view, from, inner, sel, path).into();
+            if let Some(p) = path {
+                memo.insert(p, sel, from.clone(), reach.clone());
             }
-            if visited.insert(next.clone()) {
+            reach
+        }
+    };
+    let mut out = Vec::with_capacity(reach.len() + usize::from(include_start));
+    if include_start {
+        out.push(from.clone());
+        out.extend(reach.iter().filter(|t| *t != from).cloned());
+    } else {
+        out.extend(reach.iter().cloned());
+    }
+    out
+}
+
+/// The nodes reachable from `from` in one or more `inner` steps, breadth
+/// first, sorted by N-Triples form. A reached node whose own reach set the run
+/// memoised contributes that set and is not walked: the set is closed under
+/// `inner`, so nothing past it is missed.
+fn reach_one_or_more(
+    view: &DataView<'_>,
+    from: &Term,
+    inner: &PropertyPath,
+    sel: GraphSel,
+    path: Option<usize>,
+) -> Vec<Term> {
+    let memo = view.closure_memo();
+    let mut reached: HashSet<Term> = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    for next in eval_path_native(view, from, inner, sel) {
+        if reached.insert(next.clone()) {
+            queue.push_back(next);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        if let Some(known) = path.and_then(|p| memo.get(p, sel, &node)) {
+            for t in known.iter() {
+                if !reached.contains(t) {
+                    reached.insert(t.clone());
+                }
+            }
+            continue;
+        }
+        for next in eval_path_native(view, &node, inner, sel) {
+            if reached.insert(next.clone()) {
                 queue.push_back(next);
             }
         }
     }
+    let mut out: Vec<Term> = reached.into_iter().collect();
+    out.sort_by_cached_key(|t| t.to_string());
     out
 }
 

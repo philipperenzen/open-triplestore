@@ -592,6 +592,7 @@ impl QueryEvaluator {
             self.cancellation_token.clone().unwrap_or_default(),
             dataset_spec,
             self.run_stats,
+            !self.without_optimizations,
         )
     }
 }

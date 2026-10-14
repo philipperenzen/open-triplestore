@@ -20,7 +20,7 @@
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
-    MessageSquarePlus, MessageSquareText
+    MessageSquarePlus, MessageSquareText, HardDrive, Rss, Brain, ShieldCheck
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -68,6 +68,8 @@
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
   const lazyAdminPrefixes       = () => import('./pages/AdminPrefixes.svelte');
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
+  const lazyAdminMaintenance    = () => import('./pages/AdminMaintenance.svelte');
+  const lazyAdminLdes           = () => import('./pages/AdminLdes.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyAdminFeedback       = () => import('./pages/AdminFeedback.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
@@ -81,6 +83,12 @@
   const lazyFiles               = () => import('./pages/Files.svelte');
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
+  const lazyDatasetReasoning = () => import('./pages/DatasetReasoning.svelte');
+  const lazyDatasetShex      = () => import('./pages/DatasetShex.svelte');
+  const lazyDatasetPatch     = () => import('./pages/DatasetPatch.svelte');
+  const lazyDatasetVersionDiff = () => import('./pages/DatasetVersionDiff.svelte');
+  const lazyReasoning        = () => import('./pages/Reasoning.svelte');
+  const lazyShexValidation   = () => import('./pages/ShexValidation.svelte');
 
   // Overridable at runtime (no rebuild) via /config.json's "branding.title" — see runtimeConfig.ts.
   $: BRAND = $runtimeBranding.title;
@@ -106,6 +114,8 @@
         { to: '/import', labelKey: 'nav.importData', icon: Upload, match: (p) => p.startsWith('/import'), authRequired: true },
         { to: '/sources', labelKey: 'nav.sqlSources', icon: DatabaseZap, match: (p) => p.startsWith('/sources'), authRequired: true, adminOnly: true },
         { to: '/shacl', labelKey: 'nav.validate', icon: CheckCircle2, match: (p) => p.startsWith('/validation') || p.startsWith('/shacl'), authRequired: true },
+        { to: '/shex', labelKey: 'nav.shex', icon: ShieldCheck, match: (p) => p.startsWith('/shex'), authRequired: true },
+        { to: '/reasoning', labelKey: 'nav.reasoning', icon: Brain, match: (p) => p.startsWith('/reasoning'), authRequired: true },
       ],
     },
     {
@@ -283,6 +293,8 @@
       ['/import', 'pages.import.title', 'pages.import.detail'],
       ['/validation', 'pages.validation.title', 'pages.validation.detail'],
       ['/shacl', 'pages.shaclStudio.title', 'pages.shaclStudio.detail'],
+      ['/shex', 'pages.shex.title', 'pages.shex.detail'],
+      ['/reasoning', 'pages.reasoning.title', 'pages.reasoning.detail'],
       ['/graphs', 'pages.graphList.title', 'pages.graphList.detail'],
       ['/datasets', 'pages.datasets.title', 'pages.datasets.detail'],
       ['/files', 'pages.files.title', 'pages.files.detail'],
@@ -292,6 +304,8 @@
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
+      ['/admin/maintenance', 'pages.adminMaintenance.title', 'pages.adminMaintenance.detail'],
+      ['/admin/ldes', 'pages.adminLdes.title', 'pages.adminLdes.detail'],
       ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
       ['/admin/feedback', 'pages.adminFeedback.title', 'pages.adminFeedback.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
@@ -482,6 +496,14 @@
               <Link to="/admin/operations" class={`nav-item ${currentPath.startsWith('/admin/operations') ? 'selected' : ''}`} on:click={navClick}>
                 <Gauge size={16} />
                 <span class="nav-item-label">{$t('nav.adminOperations')}</span>
+              </Link>
+              <Link to="/admin/maintenance" class={`nav-item ${currentPath.startsWith('/admin/maintenance') ? 'selected' : ''}`} on:click={navClick}>
+                <HardDrive size={16} />
+                <span class="nav-item-label">{$t('nav.adminMaintenance')}</span>
+              </Link>
+              <Link to="/admin/ldes" class={`nav-item ${currentPath.startsWith('/admin/ldes') ? 'selected' : ''}`} on:click={navClick}>
+                <Rss size={16} />
+                <span class="nav-item-label">{$t('nav.adminLdes')}</span>
               </Link>
               <Link to="/admin/prefixes" class={`nav-item ${currentPath.startsWith('/admin/prefixes') ? 'selected' : ''}`} on:click={navClick}>
                 <Tags size={16} />
@@ -727,6 +749,24 @@
         <Route path="/datasets/:id/cesium" let:params>
           <LazyPage loader={lazyCesiumView} id={params.id} />
         </Route>
+        <Route path="/datasets/:id/reasoning" let:params>
+          <LazyPage loader={lazyDatasetReasoning} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/shex" let:params>
+          <LazyPage loader={lazyDatasetShex} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/patch" let:params>
+          <LazyPage loader={lazyDatasetPatch} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/versions/diff" let:params>
+          <LazyPage loader={lazyDatasetVersionDiff} id={params.id} />
+        </Route>
+        <Route path="/reasoning">
+          <LazyPage loader={lazyReasoning} />
+        </Route>
+        <Route path="/shex">
+          <LazyPage loader={lazyShexValidation} />
+        </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
         </Route>
@@ -746,6 +786,12 @@
         </Route>
         <Route path="/admin/operations">
           <LazyPage loader={lazyAdminOperations} />
+        </Route>
+        <Route path="/admin/maintenance">
+          <LazyPage loader={lazyAdminMaintenance} />
+        </Route>
+        <Route path="/admin/ldes">
+          <LazyPage loader={lazyAdminLdes} />
         </Route>
         <Route path="/admin/prefixes">
           <LazyPage loader={lazyAdminPrefixes} />

@@ -45,7 +45,6 @@ impl OnDataError {
 
 /// The rows of a run that raised data errors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DataErrors {
     /// Rows that raised at least one data error.
     pub rows: u64,
@@ -97,7 +96,7 @@ impl DataErrors {
         format!(
             "data error: {} row{} would generate an invalid RDF term{more}, so the run was \
              aborted and nothing was written (R2RML §4.3). {}. To leave those terms out and \
-             have the rows reported instead, run with onDataError \"skip\" \
+             have the rows reported instead, run with on_data_error \"skip\" \
              (?on_data_error=skip on the file-mapping endpoints).",
             self.rows,
             if self.rows == 1 { "" } else { "s" },
@@ -239,8 +238,24 @@ pub fn check_columns(
         .iter()
         .map(|n| format!("\"{}\" (in {})", n.column, n.place))
         .collect();
+    // A name that differs from a column only in case is almost always an
+    // unquoted name the database folded (R2RML §5).
+    let folded: Vec<String> = missing
+        .iter()
+        .filter_map(|n| {
+            let column = available
+                .iter()
+                .find(|c| c.to_lowercase() == n.column.to_lowercase())?;
+            Some(format!(
+                "\"{}\" differs from the column \"{column}\" only in case: an unquoted name is \
+                 folded by the database's rules, so write the column delimited, as \"\\\"{}\\\"\"",
+                n.column,
+                column.replace('"', "\"\"")
+            ))
+        })
+        .collect();
     Err(format!(
-        "TriplesMap <{}> reads {} that its logical source does not have: {}. The source has {}{}",
+        "TriplesMap <{}> reads {} that its logical source does not have: {}. The source has {}{}{}",
         tm.iri,
         if missing.len() == 1 {
             "a column"
@@ -261,6 +276,11 @@ pub fn check_columns(
             format!(" and {more} more")
         } else {
             String::new()
+        },
+        if folded.is_empty() {
+            String::new()
+        } else {
+            format!(". {} (R2RML §5)", folded.join("; "))
         }
     ))
 }

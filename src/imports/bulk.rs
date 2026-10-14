@@ -331,6 +331,12 @@ pub fn parse_and_load_bulk_gated(
     #[allow(clippy::type_complexity)] // (quads, graphs)-or-error per file; clear inline
     let parsed: Vec<Result<(Vec<Quad>, Vec<String>), String>> =
         inputs.par_iter().map(parse_one).collect();
+    // A dataset that imports with Skolem IRIs: the parse ran on rayon's
+    // threads, the opt-in is this thread's (`SkolemImportGuard`).
+    let parsed: Vec<_> = parsed
+        .into_iter()
+        .map(|r| r.map(|(q, g)| (crate::store::engine::apply_import_skolem(q), g)))
+        .collect();
 
     let mut all_quads: Vec<Quad> = Vec::new();
     let mut touched_graphs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();

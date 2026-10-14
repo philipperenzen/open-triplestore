@@ -130,7 +130,7 @@ The relay listens only on the compose network (no host port is published, so it 
 ## SSO provider setup (OIDC / SAML)
 
 > **SAML needs the `saml` build feature.** The published Docker image has it
-> (the Dockerfile's `CARGO_FEATURES`). `full`, and so a plain `cargo build`,
+> (the Dockerfile builds the `image` feature, which includes it). `full`, and so a plain `cargo build`,
 > does not: the feature links libxml2 and libxmlsec1 and needs pkg-config and
 > libclang to build ([build features](build-features.md)).
 

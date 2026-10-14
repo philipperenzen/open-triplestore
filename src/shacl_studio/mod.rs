@@ -42,3 +42,4 @@ pub mod scheduler;
 pub mod seed;
 pub mod seed_standards;
 pub mod store;
+pub mod trigger;

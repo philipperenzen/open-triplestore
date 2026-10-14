@@ -305,7 +305,13 @@ pub(crate) fn read_scope(
 pub(crate) fn default_data_graph(state: &AppState, dataset_id: &str) -> Option<String> {
     let entries = state.auth_db.list_dataset_graph_entries(dataset_id).ok()?;
     let states = states_graph(dataset_id);
-    let candidates: Vec<_> = entries.iter().filter(|e| e.graph_iri != states).collect();
+    let candidates: Vec<_> = entries
+        .iter()
+        .filter(|e| {
+            e.graph_iri != states
+                && !crate::provenance::is_any_statement_provenance_graph(&e.graph_iri)
+        })
+        .collect();
     candidates
         .iter()
         .find(|e| e.graph_role == Some(GraphKind::Instances))

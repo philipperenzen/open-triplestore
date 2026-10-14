@@ -21,7 +21,7 @@
 //!
 //! Everything else (`owl:TransitiveProperty`, functional properties, keys,
 //! chains, `owl:sameAs`, unions, cardinalities, …) is outside the profile; it
-//! is not used and is reported in [`ReasoningReport::ignored_axioms`].
+//! is not used and is counted per construct in [`ReasoningReport::ignored`].
 //!
 //! Data ranges are decided on values, through the OWL 2 datatype map
 //! ([`super::datatypes`]): a data role's values lie in the intersection of
@@ -78,11 +78,11 @@ use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
 use super::common::{
-    IgnoredAxiom, ReasoningError, ReasoningReport, IGNORED_SAMPLE, OWL2_QL_ENTAILMENT_GRAPH,
+    example_label, IgnoredAxioms, ReasoningError, ReasoningReport, OWL2_QL_ENTAILMENT_GRAPH,
 };
 use super::datatypes::{self, Dt, Value};
 use crate::store::TripleStore;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::debug;
@@ -130,24 +130,46 @@ const OWL_DIFFERENT_FROM: &str = "http://www.w3.org/2002/07/owl#differentFrom";
 const OWL_REAL: &str = "http://www.w3.org/2002/07/owl#real";
 const OWL_RATIONAL: &str = "http://www.w3.org/2002/07/owl#rational";
 
-/// Axiom-level vocabulary outside OWL 2 QL: `(type or predicate, is a type)`.
-/// Class expressions outside the profile are reported through the axiom
-/// that uses them.
-const NON_PROFILE: &[(&str, bool)] = &[
-    ("http://www.w3.org/2002/07/owl#TransitiveProperty", true),
-    ("http://www.w3.org/2002/07/owl#FunctionalProperty", true),
+/// Axiom-level vocabulary outside OWL 2 QL: `(type or predicate, is a type,
+/// the construct it is reported as)`. Class and property expressions outside
+/// the profile are reported by the constructor that put them outside it.
+const NON_PROFILE: &[(&str, bool, &str)] = &[
+    (
+        "http://www.w3.org/2002/07/owl#TransitiveProperty",
+        true,
+        "TransitiveObjectProperty",
+    ),
+    (
+        "http://www.w3.org/2002/07/owl#FunctionalProperty",
+        true,
+        "FunctionalObjectProperty",
+    ),
     (
         "http://www.w3.org/2002/07/owl#InverseFunctionalProperty",
         true,
+        "InverseFunctionalObjectProperty",
     ),
     (
         "http://www.w3.org/2002/07/owl#NegativePropertyAssertion",
         true,
+        "NegativeObjectPropertyAssertion",
     ),
-    ("http://www.w3.org/2002/07/owl#sameAs", false),
-    ("http://www.w3.org/2002/07/owl#hasKey", false),
-    ("http://www.w3.org/2002/07/owl#propertyChainAxiom", false),
-    ("http://www.w3.org/2002/07/owl#disjointUnionOf", false),
+    (
+        "http://www.w3.org/2002/07/owl#sameAs",
+        false,
+        "SameIndividual",
+    ),
+    ("http://www.w3.org/2002/07/owl#hasKey", false, "HasKey"),
+    (
+        "http://www.w3.org/2002/07/owl#propertyChainAxiom",
+        false,
+        "ObjectPropertyChain",
+    ),
+    (
+        "http://www.w3.org/2002/07/owl#disjointUnionOf",
+        false,
+        "DisjointUnion",
+    ),
 ];
 
 /// Prefix of the fresh roles that stand for qualified existentials. Not an
@@ -221,28 +243,23 @@ struct Axioms {
     ignored: Ignored,
 }
 
-/// Axioms outside the profile: a count and the first few.
+/// Axioms outside the profile, by construct: how many (each axiom subject
+/// counted once per construct) and the first one read.
 #[derive(Default, Clone)]
 struct Ignored {
-    seen: HashSet<(String, String)>,
-    sample: Vec<IgnoredAxiom>,
+    seen: HashSet<(&'static str, String)>,
+    by_construct: BTreeMap<&'static str, (usize, String)>,
 }
 
 impl Ignored {
-    fn add(&mut self, axiom: &str, subject: &str, reason: &str) {
-        if self.seen.insert((axiom.to_string(), subject.to_string()))
-            && self.sample.len() < IGNORED_SAMPLE
-        {
-            self.sample.push(IgnoredAxiom {
-                axiom: axiom.to_string(),
-                subject: subject.to_string(),
-                reason: reason.to_string(),
-            });
+    fn add(&mut self, construct: &'static str, subject: String) {
+        if self.seen.insert((construct, subject.clone())) {
+            self.by_construct.entry(construct).or_insert((0, subject)).0 += 1;
         }
     }
 
-    fn count(&self) -> usize {
-        self.seen.len()
+    fn rows(&self) -> Vec<IgnoredAxioms> {
+        IgnoredAxioms::rows(self.by_construct.iter().map(|(c, v)| (*c, v)))
     }
 }
 
@@ -854,13 +871,6 @@ fn node(t: &Term) -> Option<NamedOrBlankNode> {
     }
 }
 
-fn label(t: &Term) -> String {
-    match t {
-        Term::NamedNode(n) => n.as_str().to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// A QL subclass expression.
 enum SubExpr {
     Basic(Basic),
@@ -886,6 +896,10 @@ struct Loader<'s, 'a> {
     defs: HashMap<String, Term>,
     /// `∃U.D` on the left, one fresh role per `(U, D)`.
     restricted: HashMap<(String, DataRange), Role>,
+    /// The construct that put the expression being read outside the profile:
+    /// set where [`Self::sub_expr`] / [`Self::sup_expr`] give up, taken by
+    /// [`Self::ignore`].
+    why: Option<&'static str>,
 }
 
 impl Loader<'_, '_> {
@@ -905,8 +919,47 @@ impl Loader<'_, '_> {
             || self.ax.datatypes.contains(iri)
     }
 
-    fn ignore(&mut self, axiom: &str, subject: &Term, reason: &str) {
-        self.ax.ignored.add(axiom, &label(subject), reason);
+    /// Report the axiom on `subject` as not used: under the construct that
+    /// put one of its expressions outside the profile, else under `axiom`.
+    fn ignore(&mut self, axiom: &'static str, subject: &Term) {
+        let construct = self.why.take().unwrap_or(axiom);
+        self.ax.ignored.add(construct, example_label(subject));
+    }
+
+    /// Note why the expression being read is outside the profile (the
+    /// innermost reason wins).
+    fn outside(&mut self, construct: &'static str) {
+        self.why.get_or_insert(construct);
+    }
+
+    /// The constructor of a class expression this loader does not read in
+    /// the position it was found in.
+    fn constructor(&self, t: &Term) -> Result<&'static str, ReasoningError> {
+        const BY_PREDICATE: &[(&str, &str)] = &[
+            ("unionOf", "ObjectUnionOf"),
+            ("intersectionOf", "ObjectIntersectionOf"),
+            ("complementOf", "ObjectComplementOf"),
+            ("oneOf", "ObjectOneOf"),
+            ("allValuesFrom", "ObjectAllValuesFrom"),
+            ("hasValue", "ObjectHasValue"),
+            ("hasSelf", "ObjectHasSelf"),
+            ("cardinality", "cardinality restriction"),
+            ("minCardinality", "cardinality restriction"),
+            ("maxCardinality", "cardinality restriction"),
+            ("qualifiedCardinality", "cardinality restriction"),
+            ("minQualifiedCardinality", "cardinality restriction"),
+            ("maxQualifiedCardinality", "cardinality restriction"),
+            ("onProperties", "n-ary data restriction"),
+        ];
+        if !matches!(t, Term::BlankNode(_)) {
+            return Ok("malformed class expression");
+        }
+        for (local, construct) in BY_PREDICATE {
+            if self.src.object(t, &format!("{OWL_NS}{local}"))?.is_some() {
+                return Ok(construct);
+            }
+        }
+        Ok("unknown class expression")
     }
 
     fn fresh_role(&mut self) -> Role {
@@ -1003,22 +1056,33 @@ impl Loader<'_, '_> {
     fn sub_expr(&mut self, t: &Term) -> Result<SubExpr, ReasoningError> {
         Ok(match t {
             Term::NamedNode(n) if n.as_str() == OWL_NOTHING => SubExpr::Bottom,
-            Term::NamedNode(n) if n.as_str() == OWL_THING => SubExpr::Unsupported,
+            Term::NamedNode(n) if n.as_str() == OWL_THING => {
+                self.outside("owl:Thing as a subclass expression");
+                SubExpr::Unsupported
+            }
             Term::NamedNode(n) => SubExpr::Basic(Basic::Class(n.as_str().to_string())),
             Term::BlankNode(_) => {
                 let (Some(on), Some(filler)) = (
                     self.src.object(t, OWL_ON_PROPERTY)?,
                     self.src.object(t, OWL_SOME_VALUES_FROM)?,
                 ) else {
+                    let c = self.constructor(t)?;
+                    self.outside(match c {
+                        "ObjectIntersectionOf" => "ObjectIntersectionOf as a subclass expression",
+                        "ObjectComplementOf" => "ObjectComplementOf as a subclass expression",
+                        c => c,
+                    });
                     return Ok(SubExpr::Unsupported);
                 };
                 let Some(role) = self.prop_expr(&on)? else {
+                    self.outside("property expression outside OWL 2 QL");
                     return Ok(SubExpr::Unsupported);
                 };
                 if matches!(&filler, Term::NamedNode(f) if f.as_str() == OWL_THING) {
                     return Ok(SubExpr::Basic(Basic::Exists(role)));
                 }
                 if role.inverse {
+                    self.outside("qualified ObjectSomeValuesFrom as a subclass expression");
                     return Ok(SubExpr::Unsupported);
                 }
                 match self.data_range(&filler, 0)? {
@@ -1028,11 +1092,37 @@ impl Loader<'_, '_> {
                         SubExpr::Basic(Basic::Exists(role))
                     }
                     Some(d) => SubExpr::Basic(Basic::Exists(self.restriction(&role.iri, d))),
-                    None => SubExpr::Unsupported,
+                    None => {
+                        self.outside(match &filler {
+                            Term::NamedNode(f) if self.is_datatype(f.as_str()) => {
+                                "datatype outside the OWL 2 QL datatype map"
+                            }
+                            Term::BlankNode(_) if self.is_data_range_node(&filler)? => {
+                                "data range outside OWL 2 QL"
+                            }
+                            _ => "qualified ObjectSomeValuesFrom as a subclass expression",
+                        });
+                        SubExpr::Unsupported
+                    }
                 }
             }
-            _ => SubExpr::Unsupported,
+            _ => {
+                self.outside("malformed class expression");
+                SubExpr::Unsupported
+            }
         })
+    }
+
+    /// A blank node that reads as a data range rather than a class
+    /// expression (a faceted datatype, a datatype complement, a union or
+    /// one-of of literals).
+    fn is_data_range_node(&self, t: &Term) -> Result<bool, ReasoningError> {
+        for local in ["onDatatype", "datatypeComplementOf", "withRestrictions"] {
+            if self.src.object(t, &format!("{OWL_NS}{local}"))?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Read a superclass expression into `out`; `false` when it is outside
@@ -1044,6 +1134,7 @@ impl Loader<'_, '_> {
         depth: usize,
     ) -> Result<bool, ReasoningError> {
         if depth > 16 {
+            self.outside("class expression nested too deeply");
             return Ok(false);
         }
         match t {
@@ -1059,6 +1150,7 @@ impl Loader<'_, '_> {
             Term::BlankNode(_) => {
                 if let Some(list) = self.src.object(t, OWL_INTERSECTION_OF)? {
                     let Some(members) = self.src.list(&list)? else {
+                        self.outside("malformed intersectionOf list");
                         return Ok(false);
                     };
                     for m in &members {
@@ -1082,9 +1174,12 @@ impl Loader<'_, '_> {
                     self.src.object(t, OWL_ON_PROPERTY)?,
                     self.src.object(t, OWL_SOME_VALUES_FROM)?,
                 ) else {
+                    let c = self.constructor(t)?;
+                    self.outside(c);
                     return Ok(false);
                 };
                 let Some(role) = self.prop_expr(&on)? else {
+                    self.outside("property expression outside OWL 2 QL");
                     return Ok(false);
                 };
                 if let Term::NamedNode(f) = &filler {
@@ -1110,15 +1205,28 @@ impl Loader<'_, '_> {
                 }
                 match &filler {
                     // A datatype outside the QL map.
-                    Term::NamedNode(f) if self.is_datatype(f.as_str()) => return Ok(false),
+                    Term::NamedNode(f) if self.is_datatype(f.as_str()) => {
+                        self.outside("datatype outside the OWL 2 QL datatype map");
+                        return Ok(false);
+                    }
                     Term::NamedNode(f) => {
                         out.push(SupAtom::Qualified(role, f.as_str().to_string()));
                     }
-                    _ => return Ok(false),
+                    Term::BlankNode(_) if self.is_data_range_node(&filler)? => {
+                        self.outside("data range outside OWL 2 QL");
+                        return Ok(false);
+                    }
+                    _ => {
+                        self.outside("ObjectSomeValuesFrom with a class expression filler");
+                        return Ok(false);
+                    }
                 }
                 Ok(true)
             }
-            _ => Ok(false),
+            _ => {
+                self.outside("malformed class expression");
+                Ok(false)
+            }
         }
     }
 
@@ -1148,6 +1256,7 @@ impl Loader<'_, '_> {
 
     /// `sub ⊑ sup`; `true` when it is in the profile (and was added).
     fn inclusion(&mut self, sub: &Term, sup: &Term) -> Result<bool, ReasoningError> {
+        self.why = None;
         match self.sub_expr(sub)? {
             SubExpr::Bottom => Ok(true),
             SubExpr::Unsupported => Ok(false),
@@ -1164,6 +1273,7 @@ impl Loader<'_, '_> {
     }
 
     fn disjoint(&mut self, a: &Term, b: &Term) -> Result<bool, ReasoningError> {
+        self.why = None;
         Ok(match (self.sub_expr(a)?, self.sub_expr(b)?) {
             (SubExpr::Unsupported, _) | (_, SubExpr::Unsupported) => false,
             (SubExpr::Basic(x), SubExpr::Basic(y)) => {
@@ -1206,10 +1316,10 @@ impl Loader<'_, '_> {
         for (dt, dr) in self.defs.clone() {
             if self.data_range(&dr, 0)?.is_none() {
                 self.defs.remove(&dt);
+                self.why = None;
                 self.ignore(
-                    "owl:equivalentClass",
+                    "DatatypeDefinition",
                     &Term::NamedNode(NamedNode::new_unchecked(dt)),
-                    "a datatype definition outside OWL 2 QL",
                 );
             }
         }
@@ -1227,7 +1337,7 @@ impl Loader<'_, '_> {
         for (s, o) in src.pairs(RDFS_SUB_CLASS_OF)? {
             let s = Term::from(s);
             if !self.inclusion(&s, &o)? {
-                self.ignore("rdfs:subClassOf", &s, "a class expression outside OWL 2 QL");
+                self.ignore("SubClassOf", &s);
             }
         }
         for (s, o) in src.pairs(OWL_EQUIV_CLASS)? {
@@ -1235,30 +1345,19 @@ impl Loader<'_, '_> {
             if definitions.contains(&(s.clone(), o.clone())) {
                 continue;
             }
+            // One direction in the profile is used; the other is reported.
             let forward = self.inclusion(&s, &o)?;
+            let why = self.why.take();
             let backward = self.inclusion(&o, &s)?;
-            if !forward && !backward {
-                self.ignore(
-                    "owl:equivalentClass",
-                    &s,
-                    "a class expression outside OWL 2 QL",
-                );
-            } else if !forward || !backward {
-                self.ignore(
-                    "owl:equivalentClass",
-                    &s,
-                    "only one direction is in OWL 2 QL; the other is not used",
-                );
+            self.why = why.or(self.why);
+            if !forward || !backward {
+                self.ignore("EquivalentClasses", &s);
             }
         }
         for (s, o) in src.pairs(OWL_DISJOINT_WITH)? {
             let s = Term::from(s);
             if !self.disjoint(&s, &o)? {
-                self.ignore(
-                    "owl:disjointWith",
-                    &s,
-                    "a class expression outside OWL 2 QL",
-                );
+                self.ignore("DisjointClasses", &s);
             }
         }
         for a in src.subjects_of_type(OWL_ALL_DISJOINT_CLASSES)? {
@@ -1268,17 +1367,14 @@ impl Loader<'_, '_> {
                 None => None,
             };
             let Some(members) = members else {
-                self.ignore("owl:AllDisjointClasses", &a, "no member list");
+                self.why = None;
+                self.ignore("malformed AllDisjointClasses", &a);
                 continue;
             };
             for (i, x) in members.iter().enumerate() {
                 for y in &members[i + 1..] {
                     if !self.disjoint(x, y)? {
-                        self.ignore(
-                            "owl:AllDisjointClasses",
-                            &a,
-                            "a class expression outside OWL 2 QL",
-                        );
+                        self.ignore("DisjointClasses", &a);
                     }
                 }
             }
@@ -1295,11 +1391,7 @@ impl Loader<'_, '_> {
             let s = Term::from(s);
             match roles(&self, &s, &o)? {
                 Some((x, y)) => self.ax.role_incl.push((x, y)),
-                None => self.ignore(
-                    "rdfs:subPropertyOf",
-                    &s,
-                    "a property expression outside OWL 2 QL",
-                ),
+                None => self.ignore("property expression outside OWL 2 QL", &s),
             }
         }
         for (s, o) in src.pairs(OWL_EQUIV_PROP)? {
@@ -1309,11 +1401,7 @@ impl Loader<'_, '_> {
                     self.ax.role_incl.push((x.clone(), y.clone()));
                     self.ax.role_incl.push((y, x));
                 }
-                None => self.ignore(
-                    "owl:equivalentProperty",
-                    &s,
-                    "a property expression outside OWL 2 QL",
-                ),
+                None => self.ignore("property expression outside OWL 2 QL", &s),
             }
         }
         for (s, o) in src.pairs(OWL_INVERSE_OF)? {
@@ -1327,22 +1415,14 @@ impl Loader<'_, '_> {
                     self.ax.role_incl.push((x.clone(), y.inv()));
                     self.ax.role_incl.push((y.inv(), x));
                 }
-                None => self.ignore(
-                    "owl:inverseOf",
-                    &s,
-                    "a property expression outside OWL 2 QL",
-                ),
+                None => self.ignore("property expression outside OWL 2 QL", &s),
             }
         }
         for (s, o) in src.pairs(OWL_PROPERTY_DISJOINT_WITH)? {
             let s = Term::from(s);
             match roles(&self, &s, &o)? {
                 Some((x, y)) => self.ax.role_ni.push((x, y)),
-                None => self.ignore(
-                    "owl:propertyDisjointWith",
-                    &s,
-                    "a property expression outside OWL 2 QL",
-                ),
+                None => self.ignore("property expression outside OWL 2 QL", &s),
             }
         }
         for a in src.subjects_of_type(OWL_ALL_DISJOINT_PROPERTIES)? {
@@ -1352,18 +1432,15 @@ impl Loader<'_, '_> {
                 None => None,
             };
             let Some(members) = members else {
-                self.ignore("owl:AllDisjointProperties", &a, "no member list");
+                self.why = None;
+                self.ignore("malformed AllDisjointProperties", &a);
                 continue;
             };
             for (i, x) in members.iter().enumerate() {
                 for y in &members[i + 1..] {
                     match roles(&self, x, y)? {
                         Some((x, y)) => self.ax.role_ni.push((x, y)),
-                        None => self.ignore(
-                            "owl:AllDisjointProperties",
-                            &a,
-                            "a property expression outside OWL 2 QL",
-                        ),
+                        None => self.ignore("property expression outside OWL 2 QL", &a),
                     }
                 }
             }
@@ -1372,15 +1449,18 @@ impl Loader<'_, '_> {
         for (p, c) in src.pairs(RDFS_DOMAIN)? {
             let p = Term::from(p);
             let mut sups = Vec::new();
+            self.why = None;
             match self.prop_expr(&p)? {
                 Some(r) if self.sup_expr(&c, &mut sups, 0)? => self.add_sub(Basic::Exists(r), sups),
-                _ => self.ignore("rdfs:domain", &p, "a class expression outside OWL 2 QL"),
+                Some(_) => self.ignore("ObjectPropertyDomain", &p),
+                None => self.ignore("property expression outside OWL 2 QL", &p),
             }
         }
         for (p, c) in ranges {
             let p = Term::from(p);
+            self.why = None;
             let Some(r) = self.prop_expr(&p)? else {
-                self.ignore("rdfs:range", &p, "a property expression outside OWL 2 QL");
+                self.ignore("property expression outside OWL 2 QL", &p);
                 continue;
             };
             if let Some(d) = self.data_range(&c, 0)? {
@@ -1390,22 +1470,18 @@ impl Loader<'_, '_> {
                 continue;
             }
             if matches!(&c, Term::NamedNode(c) if self.is_datatype(c.as_str())) {
-                self.ignore(
-                    "rdfs:range",
-                    &p,
-                    "a datatype outside the OWL 2 QL datatype map",
-                );
+                self.ignore("datatype outside the OWL 2 QL datatype map", &p);
                 continue;
             }
             if self.ax.data_props.contains(&r.iri) {
-                self.ignore("rdfs:range", &p, "a data range outside OWL 2 QL");
+                self.ignore("data range outside OWL 2 QL", &p);
                 continue;
             }
             let mut sups = Vec::new();
             if self.sup_expr(&c, &mut sups, 0)? {
                 self.add_sub(Basic::Exists(r.inv()), sups);
             } else {
-                self.ignore("rdfs:range", &p, "a class expression outside OWL 2 QL");
+                self.ignore("ObjectPropertyRange", &p);
             }
         }
 
@@ -1432,15 +1508,27 @@ impl Loader<'_, '_> {
             }
         }
 
-        for &(iri, is_type) in NON_PROFILE {
-            let name = format!("owl:{}", iri.trim_start_matches(OWL_NS));
+        for &(iri, is_type, construct) in NON_PROFILE {
             let subjects: Vec<NamedOrBlankNode> = if is_type {
                 src.subjects_of_type(iri)?
             } else {
                 src.pairs(iri)?.into_iter().map(|(s, _)| s).collect()
             };
             for s in subjects {
-                self.ignore(&name, &Term::from(s), "outside OWL 2 QL");
+                let s = Term::from(s);
+                let construct = match construct {
+                    "FunctionalObjectProperty" if matches!(&s, Term::NamedNode(p) if self.ax.data_props.contains(p.as_str())) => {
+                        "FunctionalDataProperty"
+                    }
+                    "NegativeObjectPropertyAssertion"
+                        if src.object(&s, &format!("{OWL_NS}targetValue"))?.is_some() =>
+                    {
+                        "NegativeDataPropertyAssertion"
+                    }
+                    c => c,
+                };
+                self.why = None;
+                self.ignore(construct, &s);
             }
         }
         Ok(self.ax)
@@ -1454,6 +1542,7 @@ impl QlTBox {
             ax: Axioms::default(),
             defs: HashMap::new(),
             restricted: HashMap::new(),
+            why: None,
         }
         .load()?;
         Ok(Self::build(ax))
@@ -1802,9 +1891,7 @@ impl<'a> QLQueryRewriter<'a> {
             iterations: 1,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
-            ignored_axioms: tbox.ignored.count(),
-            ignored_sample: tbox.ignored.sample.clone(),
-            ..Default::default()
+            ignored: tbox.ignored.rows(),
         }
     }
 }

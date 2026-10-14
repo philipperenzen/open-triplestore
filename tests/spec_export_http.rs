@@ -133,6 +133,10 @@ async fn ids_survives_an_import_export_import_round_trip() {
     assert_eq!(st, StatusCode::OK, "{exported}");
     let ev: Value = serde_json::from_str(&exported).unwrap();
     assert_eq!(ev["specification_count"], 1, "{exported}");
+    assert_eq!(
+        ev["verbatim_specifications"], 1,
+        "the imported specification is written back from its recorded source: {exported}"
+    );
     let doc = ev["document"].as_str().unwrap();
     assert!(doc.contains("IFCWALL"), "the entity survives: {doc}");
     assert!(

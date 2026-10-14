@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { AlertTriangle, Trash2, Loader2, PenLine } from 'lucide-svelte';
+  import { t } from 'svelte-i18n';
 
   /** Modal heading */
   export let title = 'Are you sure?';
@@ -91,7 +92,7 @@
     {#if requirePhrase !== null}
       <div class="confirm-phrase-wrap">
         <label class="confirm-phrase-label" for="confirm-phrase-input">
-          Type <strong>{requirePhrase}</strong> to confirm
+          {$t('components.confirmModal.typePre')}<strong>{requirePhrase}</strong>{$t('components.confirmModal.typePost')}
         </label>
         <input
           id="confirm-phrase-input"

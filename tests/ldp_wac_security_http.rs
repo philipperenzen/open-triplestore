@@ -1187,7 +1187,8 @@ async fn security_owners_root_policy_starts_closed() {
 // ─── 11 ────────────────────────────────────────────────────────────────────────
 
 /// Plan test 11. `Link: rel="acl"` and `WAC-Allow` are present and correct on
-/// GET and HEAD, and the ACL link is on every LDP response.
+/// GET and HEAD, and the ACL link is on every LDP response — a 404 for a
+/// resource that does not exist included.
 #[tokio::test]
 async fn security_acl_link_and_wac_allow_headers() {
     let e = env();
@@ -1274,4 +1275,109 @@ async fn security_acl_link_and_wac_allow_headers() {
     assert_eq!(st, StatusCode::CREATED);
     let (_, headers, _) = get(app, Some(&e.bob), "/ldp/h/doc").await;
     assert_eq!(wac_allow(&headers), "user=\"read\", public=\"read\"");
+
+    // A resource that does not exist is a 404 that still carries the ACL link
+    // and the caller's modes for that path, so ACL discovery and creating it
+    // with PUT keep working: never created, mentioned by another resource
+    // (an object of `doc`), deleted, and an intermediate path.
+    let (st, _, _) = send(
+        app,
+        Method::PUT,
+        "/ldp/h/linker",
+        Some(&e.alice),
+        &[("Content-Type", TURTLE)],
+        &format!("<{BASE}/ldp/h/linker> <http://example.org/p> <{BASE}/ldp/h/ghost> ."),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/deep/a/b").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/h/gone").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete(app, &e.alice, "/ldp/h/gone").await.0,
+        StatusCode::NO_CONTENT
+    );
+    // Alice owns `/ldp/h/` (its default reaches her missing paths there) but
+    // not the intermediate `/ldp/deep/`, where only the open root reaches.
+    for (path, modes) in [
+        ("/ldp/h/never", "read write append control"),
+        ("/ldp/h/ghost", "read write append control"),
+        ("/ldp/h/gone", "read write append control"),
+        ("/ldp/deep/", "read write append"),
+    ] {
+        let acl = format!("<{BASE}{}.acl>; rel=\"acl\"", path.trim_end_matches('/'));
+        for method in [Method::GET, Method::HEAD] {
+            let (st, headers, body) = send(
+                app,
+                method.clone(),
+                path,
+                Some(&e.alice),
+                &[("Accept", TURTLE)],
+                "",
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+            assert!(link_has(&headers, &acl), "{method} {path}: {headers:?}");
+            assert!(
+                link_has(&headers, "rel=\"http://www.w3.org/ns/ldp#constrainedBy\""),
+                "{method} {path}: {headers:?}"
+            );
+            assert_eq!(
+                wac_allow(&headers),
+                format!("user=\"{modes}\", public=\"\""),
+                "{method} {path}: the modes alice would hold, inherited"
+            );
+        }
+    }
+    // Bob's modes on a missing path are his, inherited from the open root.
+    let (st, headers, _) = get(app, Some(&e.bob), "/ldp/h/never").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(
+        wac_allow(&headers),
+        "user=\"read write append\", public=\"\""
+    );
+    // Creating where the 404 pointed works.
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/h/never").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        get(app, Some(&e.alice), "/ldp/h/never").await.0,
+        StatusCode::OK
+    );
+    // The ACL of a resource that does not exist is a 404 that links the ACL
+    // to itself.
+    let (st, headers, _) = get(app, Some(&e.alice), "/ldp/h/missing.acl").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(
+        link_has(
+            &headers,
+            &format!("<{BASE}/ldp/h/missing.acl>; rel=\"acl\"")
+        ),
+        "{headers:?}"
+    );
+    // A caller who may not read the path learns nothing about whether it
+    // exists: 403 either way.
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/closed/x").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (st, _) = put_acl(
+        app,
+        &e.alice,
+        "/ldp/closed/.acl",
+        &grant_all("me", &format!("{BASE}/ldp/closed"), true, "alice"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    for path in ["/ldp/closed/x", "/ldp/closed/missing"] {
+        let (st, headers, _) = get(app, Some(&e.bob), path).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{path}");
+        assert!(headers.get("wac-allow").is_none(), "{path}: {headers:?}");
+    }
 }

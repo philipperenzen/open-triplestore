@@ -19,11 +19,11 @@ use rml_corpus::*;
 
 /// Empirical baseline: 112 pass / 5 known-fail / 0 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("RMLTC0002c-JSON", "the reference IDs names a key no record has; the RML-IO registry makes a JSONPath reference to a missing member NULL, not an error, as this engine does"),
-    ("RMLTC0002c-XML", "the reference IDs names an element no record has; the RML-IO registry makes an XPath reference that selects nothing NULL, not an error, as this engine does"),
-    ("RMLTC0007h-CSV", "rr:graph \"…\" names a graph with a literal, which R2RML §7.4 and RML-Core refuse as a non-conforming mapping; the legacy suite expects it ignored"),
-    ("RMLTC0007h-JSON", "rr:graph with a literal is a non-conforming mapping (R2RML §7.4); the legacy suite expects it ignored"),
-    ("RMLTC0007h-XML", "rr:graph with a literal is a non-conforming mapping (R2RML §7.4); the legacy suite expects it ignored"),
+    ("RMLTC0002c-JSON", "test-suite defect (#516): the reference IDs names a key no record has; the RML-IO registry makes a JSONPath reference to a missing member NULL, not an error, as this engine does"),
+    ("RMLTC0002c-XML", "test-suite defect (#516): the reference IDs names an element no record has; the RML-IO registry makes an XPath reference that selects nothing NULL, not an error, as this engine does"),
+    ("RMLTC0007h-CSV", "test-suite defect (#516): rr:graph \"…\" names a graph with a literal, which R2RML §7.4 and RML-Core refuse as a non-conforming mapping; the legacy suite expects it ignored"),
+    ("RMLTC0007h-JSON", "test-suite defect (#516): rr:graph with a literal is a non-conforming mapping (R2RML §7.4); the legacy suite expects it ignored"),
+    ("RMLTC0007h-XML", "test-suite defect (#516): rr:graph with a literal is a non-conforming mapping (R2RML §7.4); the legacy suite expects it ignored"),
 ];
 
 /// Cases the runner does not run.

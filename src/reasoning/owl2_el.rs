@@ -264,16 +264,7 @@ impl<'a> El2Classifier<'a> {
             iterations: rounds,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
-            ignored: loaded
-                .ignored
-                .iter()
-                .map(|(construct, (count, example))| IgnoredAxioms {
-                    construct: construct.to_string(),
-                    count: *count,
-                    example: example.clone(),
-                })
-                .collect(),
-            ..Default::default()
+            ignored: IgnoredAxioms::rows(loaded.ignored.iter().map(|(c, v)| (*c, v))),
         })
     }
 
