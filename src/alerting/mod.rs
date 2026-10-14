@@ -1,9 +1,9 @@
 //! Operational alerting.
 //!
 //! Two backends, both opt-in via env vars:
-//! - SMTP (gated by the `alerting` Cargo feature, configured via `ALERT_SMTP_*`;
-//!   without `ALERT_SMTP_HOST` it uses the account-email relay, `SMTP_*`)
-//! - HTTP webhook (always available, configured via `ALERT_WEBHOOK_URL`)
+//! - SMTP (gated by the `alerting` Cargo feature, configured via `OTS_ALERT_SMTP_*`;
+//!   without `OTS_ALERT_SMTP_HOST` it uses the account-email relay, `OTS_SMTP_*`)
+//! - HTTP webhook (always available, configured via `OTS_ALERT_WEBHOOK_URL`)
 //!
 //! Every successful dispatch is recorded in the audit log as `alert_sent`.
 //! Failures are logged at WARN but never propagated; alerting must never
@@ -52,18 +52,19 @@ impl AlertConfig {
     ///
     /// The SMTP relay comes from one place as a whole, so credentials are
     /// never sent to a host they were not configured for:
-    /// - with `ALERT_SMTP_HOST` set, from `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`,
-    ///   `ALERT_SMTP_PASS` and `ALERT_SMTP_TLS` (`none`|`starttls`|`implicit`,
+    /// - with `OTS_ALERT_SMTP_HOST` set, from `OTS_ALERT_SMTP_PORT`, `OTS_ALERT_SMTP_USERNAME`,
+    ///   `OTS_ALERT_SMTP_PASSWORD` and `OTS_ALERT_SMTP_TLS` (`none`|`starttls`|`implicit`,
     ///   default implicit TLS, as before);
-    /// - otherwise from the account-email relay: `SMTP_HOST`, `SMTP_PORT`,
-    ///   `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_TLS`/`SMTP_STARTTLS`,
+    /// - otherwise from the account-email relay: `OTS_SMTP_HOST`, `OTS_SMTP_PORT`,
+    ///   `OTS_SMTP_USERNAME`, `OTS_SMTP_PASSWORD` and `OTS_SMTP_TLS`,
     ///   resolved exactly as the mailer resolves them.
     ///
-    /// The sender is `ALERT_SMTP_FROM`, else `SMTP_FROM`, else (on the
+    /// The sender is `OTS_ALERT_SMTP_FROM`, else `OTS_SMTP_FROM`, else (on the
     /// account relay) the mailer's default. Recipients are only ever
-    /// `ALERT_SMTP_TO`, so the fallback alone sends no ops alert anywhere.
+    /// `OTS_ALERT_SMTP_TO`, so the fallback alone sends no ops alert anywhere.
     pub fn from_env() -> Self {
-        Self::from_lookup(|name| std::env::var(name).ok(), env_secret_opt)
+        // Every value read here was validated by the configuration registry.
+        Self::from_lookup(|name| crate::config::current().value(name), env_secret_opt)
     }
 
     /// [`Self::from_env`] over an arbitrary lookup: `var` reads a plain
@@ -74,9 +75,9 @@ impl AlertConfig {
     ) -> Self {
         let var = |name: &str| var(name).filter(|v| !v.trim().is_empty());
         let port = |name: &str| var(name).and_then(|s| s.parse::<u16>().ok());
-        let alert_from = var("ALERT_SMTP_FROM").or_else(|| var("SMTP_FROM"));
+        let alert_from = var("OTS_ALERT_SMTP_FROM").or_else(|| var("OTS_SMTP_FROM"));
         let mut cfg = Self {
-            smtp_to: var("ALERT_SMTP_TO")
+            smtp_to: var("OTS_ALERT_SMTP_TO")
                 .map(|s| {
                     s.split(',')
                         .map(|x| x.trim().to_string())
@@ -84,18 +85,18 @@ impl AlertConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            webhook_url: var("ALERT_WEBHOOK_URL"),
+            webhook_url: var("OTS_ALERT_WEBHOOK_URL"),
             ..Self::default()
         };
-        if let Some(host) = var("ALERT_SMTP_HOST") {
+        if let Some(host) = var("OTS_ALERT_SMTP_HOST") {
             cfg.smtp_host = Some(host);
-            cfg.smtp_port = port("ALERT_SMTP_PORT");
-            cfg.smtp_user = var("ALERT_SMTP_USER");
-            cfg.smtp_pass = secret("ALERT_SMTP_PASS");
-            cfg.smtp_tls = var("ALERT_SMTP_TLS").map(|v| {
+            cfg.smtp_port = port("OTS_ALERT_SMTP_PORT");
+            cfg.smtp_user = var("OTS_ALERT_SMTP_USERNAME");
+            cfg.smtp_pass = secret("OTS_ALERT_SMTP_PASSWORD");
+            cfg.smtp_tls = var("OTS_ALERT_SMTP_TLS").map(|v| {
                 crate::email::parse_tls(&v).unwrap_or_else(|| {
                     tracing::warn!(
-                        "alerting: unrecognized ALERT_SMTP_TLS value {:?} (expected \
+                        "alerting: unrecognized OTS_ALERT_SMTP_TLS value {:?} (expected \
                          none|starttls|implicit) — using implicit TLS",
                         v.trim()
                     );
@@ -103,17 +104,16 @@ impl AlertConfig {
                 })
             });
             cfg.smtp_from = alert_from;
-        } else if let Some(host) = var("SMTP_HOST") {
-            let p = port("SMTP_PORT");
+        } else if let Some(host) = var("OTS_SMTP_HOST") {
+            let p = port("OTS_SMTP_PORT");
             cfg.smtp_tls = Some(crate::email::resolve_tls(
                 p.unwrap_or(587),
-                var("SMTP_TLS").as_deref(),
-                var("SMTP_STARTTLS").as_deref(),
+                var("OTS_SMTP_TLS").as_deref(),
             ));
             cfg.smtp_host = Some(host);
             cfg.smtp_port = p;
-            cfg.smtp_user = var("SMTP_USERNAME");
-            cfg.smtp_pass = secret("SMTP_PASSWORD");
+            cfg.smtp_user = var("OTS_SMTP_USERNAME");
+            cfg.smtp_pass = secret("OTS_SMTP_PASSWORD");
             cfg.smtp_from = alert_from.or_else(|| Some(crate::email::DEFAULT_FROM.to_string()));
         }
         cfg
@@ -184,8 +184,8 @@ impl AlertManager {
     /// Send a plain-text email to explicit recipients — used for targeted
     /// notifications (e.g. "your saved query broke") rather than the fixed
     /// ops `smtp_to` list. Best-effort; returns whether anything was delivered.
-    /// Requires the `alerting` feature and an SMTP relay (`ALERT_SMTP_*`, else
-    /// the account-email `SMTP_*`).
+    /// Requires the `alerting` feature and an SMTP relay (`OTS_ALERT_SMTP_*`, else
+    /// the account-email `OTS_SMTP_*`).
     #[cfg(feature = "alerting")]
     pub async fn send_direct(&self, to: &[String], subject: &str, body: &str) -> bool {
         use lettre::{message::header::ContentType, AsyncTransport, Message};
@@ -325,7 +325,7 @@ mod tests {
         };
         assert!(
             !no_recipients.is_enabled(),
-            "an SMTP host with no ALERT_SMTP_TO cannot deliver"
+            "an SMTP host with no OTS_ALERT_SMTP_TO cannot deliver"
         );
 
         let smtp = AlertConfig {
@@ -344,17 +344,17 @@ mod tests {
         }
     }
 
-    /// Without `ALERT_SMTP_HOST`, alerting uses the account-email relay as a
+    /// Without `OTS_ALERT_SMTP_HOST`, alerting uses the account-email relay as a
     /// whole: host, port, credentials, TLS mode and sender.
     #[test]
     fn smtp_falls_back_to_the_account_relay() {
         let vars = [
-            ("SMTP_HOST", "mail.example.org"),
-            ("SMTP_PORT", "2525"),
-            ("SMTP_USERNAME", "relay-user"),
-            ("SMTP_PASSWORD", "relay-pass"),
-            ("SMTP_TLS", "none"),
-            ("ALERT_SMTP_TO", "ops@example.org, oncall@example.org"),
+            ("OTS_SMTP_HOST", "mail.example.org"),
+            ("OTS_SMTP_PORT", "2525"),
+            ("OTS_SMTP_USERNAME", "relay-user"),
+            ("OTS_SMTP_PASSWORD", "relay-pass"),
+            ("OTS_SMTP_TLS", "none"),
+            ("OTS_ALERT_SMTP_TO", "ops@example.org, oncall@example.org"),
         ];
         let cfg = AlertConfig::from_lookup(lookup(&vars), lookup(&vars));
         assert_eq!(cfg.smtp_host.as_deref(), Some("mail.example.org"));
@@ -367,30 +367,30 @@ mod tests {
         assert!(cfg.is_enabled());
 
         // The mailer's own TLS resolution applies: port 465 means implicit
-        // TLS, anything else STARTTLS, unless SMTP_TLS says otherwise.
+        // TLS, anything else STARTTLS, unless OTS_SMTP_TLS says otherwise.
         let vars = [
-            ("SMTP_HOST", "mail.example.org"),
-            ("SMTP_FROM", "ops <a@example.org>"),
+            ("OTS_SMTP_HOST", "mail.example.org"),
+            ("OTS_SMTP_FROM", "ops <a@example.org>"),
         ];
         let cfg = AlertConfig::from_lookup(lookup(&vars), lookup(&vars));
         assert_eq!(cfg.smtp_tls, Some(SmtpTls::StartTls));
         assert_eq!(cfg.smtp_from.as_deref(), Some("ops <a@example.org>"));
-        assert!(!cfg.is_enabled(), "no ALERT_SMTP_TO, no ops alert");
+        assert!(!cfg.is_enabled(), "no OTS_ALERT_SMTP_TO, no ops alert");
     }
 
-    /// With `ALERT_SMTP_HOST` set, nothing comes from the account relay's
+    /// With `OTS_ALERT_SMTP_HOST` set, nothing comes from the account relay's
     /// credentials or TLS mode, so they never reach a host they were not
     /// configured for; the default stays implicit TLS.
     #[test]
     fn an_alert_relay_never_borrows_the_account_credentials() {
         let vars = [
-            ("ALERT_SMTP_HOST", "alerts.example.org"),
-            ("ALERT_SMTP_FROM", "alerts <a@example.org>"),
-            ("SMTP_HOST", "mail.example.org"),
-            ("SMTP_USERNAME", "relay-user"),
-            ("SMTP_PASSWORD", "relay-pass"),
-            ("SMTP_TLS", "none"),
-            ("SMTP_PORT", "25"),
+            ("OTS_ALERT_SMTP_HOST", "alerts.example.org"),
+            ("OTS_ALERT_SMTP_FROM", "alerts <a@example.org>"),
+            ("OTS_SMTP_HOST", "mail.example.org"),
+            ("OTS_SMTP_USERNAME", "relay-user"),
+            ("OTS_SMTP_PASSWORD", "relay-pass"),
+            ("OTS_SMTP_TLS", "none"),
+            ("OTS_SMTP_PORT", "25"),
         ];
         let cfg = AlertConfig::from_lookup(lookup(&vars), lookup(&vars));
         assert_eq!(cfg.smtp_host.as_deref(), Some("alerts.example.org"));
@@ -407,18 +407,21 @@ mod tests {
             ("bogus", SmtpTls::Implicit),
         ] {
             let vars = [
-                ("ALERT_SMTP_HOST", "alerts.example.org"),
-                ("ALERT_SMTP_TLS", value),
+                ("OTS_ALERT_SMTP_HOST", "alerts.example.org"),
+                ("OTS_ALERT_SMTP_TLS", value),
             ];
             let cfg = AlertConfig::from_lookup(lookup(&vars), lookup(&vars));
-            assert_eq!(cfg.smtp_tls, Some(mode), "ALERT_SMTP_TLS={value}");
+            assert_eq!(cfg.smtp_tls, Some(mode), "OTS_ALERT_SMTP_TLS={value}");
         }
     }
 
     /// Nothing configured, nothing enabled — and blank values are unset.
     #[test]
     fn no_relay_without_a_host() {
-        let vars = [("ALERT_SMTP_HOST", " "), ("SMTP_USERNAME", "relay-user")];
+        let vars = [
+            ("OTS_ALERT_SMTP_HOST", " "),
+            ("OTS_SMTP_USERNAME", "relay-user"),
+        ];
         let cfg = AlertConfig::from_lookup(lookup(&vars), lookup(&vars));
         assert_eq!(cfg.smtp_host, None);
         assert_eq!(cfg.smtp_user, None);

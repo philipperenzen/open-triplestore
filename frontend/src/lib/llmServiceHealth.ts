@@ -20,6 +20,8 @@ export interface LlmGatewayRow {
   detailKey: string;
   /** Gateway base URL for a tooltip, when the server reported one. */
   address: string | null;
+  /** Why the gateway is unreachable, for the tooltip (when the server says). */
+  reason?: string;
 }
 
 export interface LlmServiceRow {
@@ -60,7 +62,7 @@ const MODEL_NOT_LISTED_KEY = 'nav.llmModelNotListed';
  * - Unreachable but configured: gateway "unreachable" and every feature row
  *   `warn` — the features are expected to work and do not. Yellow, never red:
  *   the LLM is optional, and the bundled docker-compose.yml sets
- *   `LLM_GATEWAY_URL` even when its `ollama` service was never started.
+ *   `OTS_LLM_GATEWAY_URL` even when its `ollama` service was never started.
  * - Unreachable and not configured (or an older server that does not say):
  *   gateway `warn` ("not configured") and no feature rows — nothing is broken,
  *   there is just no LLM.
@@ -87,7 +89,12 @@ export function llmServiceHealthView(status: LlmHealth | null | undefined): LlmS
   }
   if (status.configured === true) {
     return {
-      gateway: { state: 'warn', detailKey: 'nav.llmUnreachable', address },
+      gateway: {
+        state: 'warn',
+        detailKey: 'nav.llmUnreachable',
+        address,
+        reason: typeof status.unreachable_reason === 'string' ? status.unreachable_reason : undefined,
+      },
       services: serviceRows(status, () => ['warn', null]),
     };
   }

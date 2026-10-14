@@ -21,7 +21,7 @@
 //! directly, which keeps `/api/auth/me` working for provider-issued tokens.
 //!
 //! Clients live in the `oauth_clients` table (admin CRUD) and can be seeded
-//! declaratively from `OAUTH_CLIENTS_JSON` for infra-as-code deployments.
+//! declaratively from `OTS_OAUTH_CLIENTS_JSON` for infra-as-code deployments.
 //! There is deliberately no implicit/hybrid flow, no plain PKCE method, and
 //! no wildcard redirect matching.
 
@@ -173,7 +173,7 @@ impl ProviderKeys {
     }
 }
 
-/// Seed clients from `OAUTH_CLIENTS_JSON` (infra-as-code): a JSON array of
+/// Seed clients from `OTS_OAUTH_CLIENTS_JSON` (infra-as-code): a JSON array of
 /// `{client_id, name, redirect_uris: [..], public?, secret?}`. Secrets are
 /// stored encrypted; entries upsert (existing secrets survive omission).
 ///
@@ -184,9 +184,9 @@ impl ProviderKeys {
 /// or unresolvable secret is a startup error, and nothing is seeded until
 /// every entry's secret has resolved. Invalid JSON is still only a warning.
 pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) -> anyhow::Result<()> {
-    match std::env::var("OAUTH_CLIENTS_JSON") {
-        Ok(v) if !v.trim().is_empty() => seed_clients_from_json(db, jwt_secret, &v),
-        _ => Ok(()),
+    match crate::config::OAUTH_CLIENTS_JSON.get() {
+        Some(v) => seed_clients_from_json(db, jwt_secret, &v),
+        None => Ok(()),
     }
 }
 
@@ -207,7 +207,7 @@ pub fn seed_clients_from_json(db: &AuthDb, jwt_secret: &str, raw: &str) -> anyho
     let parsed: Vec<SeedClient> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("OAUTH_CLIENTS_JSON is not valid JSON ({e}); skipping client seed");
+            tracing::warn!("OTS_OAUTH_CLIENTS_JSON is not valid JSON ({e}); skipping client seed");
             return Ok(());
         }
     };
@@ -217,7 +217,7 @@ pub fn seed_clients_from_json(db: &AuthDb, jwt_secret: &str, raw: &str) -> anyho
     for c in parsed {
         let secret = match c.secret.as_deref() {
             Some(v) => {
-                let setting = format!("OAUTH_CLIENTS_JSON client '{}' secret", c.client_id);
+                let setting = format!("OTS_OAUTH_CLIENTS_JSON client '{}' secret", c.client_id);
                 let secret = crate::secrets::resolve_configured(&setting, v.trim())
                     .map_err(|e| anyhow::anyhow!("{setting}: {e}"))?;
                 Some(secret)

@@ -979,7 +979,9 @@ async fn the_patch_route_checks_a_base_sequence_against_the_change_log() {
     let (s, body) = post_patch(&app, &token, "?if-base-sequence=0", None, name_patch(20)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(
-        body.as_str().unwrap().contains("OTS_CHANGE_CAPTURE"),
+        body.as_str()
+            .unwrap()
+            .contains("OTS_CHANGE_CAPTURE_ENABLED"),
         "{body}"
     );
 
@@ -1116,7 +1118,7 @@ async fn a_rewrite_merge_rematerialises_entailment_under_narrow_and_off() {
 
 /// A scripted OpenAI-compatible gateway: each completion pops the next reply
 /// and keeps the request. One per test binary, on its own runtime thread,
-/// with `LLM_GATEWAY_URL` pointing at it.
+/// with `OTS_LLM_GATEWAY_URL` pointing at it.
 mod gateway {
     use std::collections::VecDeque;
     use std::sync::{Mutex, OnceLock};
@@ -1159,7 +1161,10 @@ mod gateway {
                     axum::serve(listener, app).await.unwrap();
                 });
             });
-            std::env::set_var("LLM_GATEWAY_URL", format!("http://{}", rx.recv().unwrap()));
+            std::env::set_var(
+                "OTS_LLM_GATEWAY_URL",
+                format!("http://{}", rx.recv().unwrap()),
+            );
             gw
         })
     }

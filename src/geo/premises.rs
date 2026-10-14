@@ -27,7 +27,7 @@
 //! literal typed `geo:wktLiteral` under a property of the dataset's own is not
 //! looked for (that would need a scan). The registry copies are public
 //! reference models; nothing is added when the seeder is off
-//! (`SEED_STANDARD_VOCABS=false`) and they do not exist.
+//! (`OTS_SEED_STANDARD_VOCABS_ENABLED=false`) and they do not exist.
 
 use std::sync::OnceLock;
 

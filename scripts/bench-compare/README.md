@@ -75,7 +75,7 @@ the 1-minute load average is under `--max-load` (default 6) and at least
   2 runs per feature query) and the same number of measured runs (100 mixes;
   10 runs per feature query; 5 SHACL runs).
 - Result caches are off where a store has one (Open Triplestore
-  `OTS_QUERY_CACHE=off`, QLever `-c 0GB`), and Open Triplestore's per-IP rate
+  `OTS_QUERY_CACHE_ENABLED=off`, QLever `-c 0GB`), and Open Triplestore's per-IP rate
   limiter is off. No other tuning beyond the memory settings above.
 - The load generator runs in its own container (2 CPUs) on the store's Docker
   network and keeps one HTTP connection per client.

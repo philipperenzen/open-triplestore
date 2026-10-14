@@ -73,7 +73,7 @@ jobs:
       - name: Start the image and wait for /livez
         run: |
           docker run -d --name ots -p 127.0.0.1:7878:7878 \
-            -e SEED_STANDARDS_DEMO=false -e SEED_IFC_URL= \
+            -e OTS_SEED_STANDARDS_DEMO_ENABLED=false -e OTS_OFFLINE=true \
             open-triplestore:ci
           for i in $(seq 1 90); do
             if curl -sf http://127.0.0.1:7878/livez; then

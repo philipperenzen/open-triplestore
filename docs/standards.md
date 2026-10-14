@@ -46,7 +46,7 @@ applies.
 | RDF Patch (RDF Delta) | Change log line format; patch logs | Full — the format (`H`, several `TX`/`TC`/`TA` blocks, `PA`/`PD` in keyword or quoted form, `A`/`D` triples and quads) applied atomically per dataset, through the SHACL write gates; blank nodes (`_:x`, `<_:x>`) name the store's own nodes; `PA`/`PD` change the dataset's prefix table, which its Turtle/TriG exports declare; version diffs served as patches with prefix changes, chained through `H prev`. RDF Patch Logs per dataset: append with `H id`/`H prev` checking (409), `init`, `current`, `patch/{version\|id}`; version cuts are journaled, other writes are not. Extensions: prefixed names in `A`/`D` rows, `?graph=` for triples. RDF 1.2 triple terms are refused (RDF Patch has no syntax for them). Spec-derived rules in `tests/rdf_patch_conformance.rs`. See [versioning.md](versioning.md#rdf-patch). |
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Full — publisher: time-ordered fixed-size fragments under one root node with `GreaterThanOrEqualToRelation` / `LessThanOrEqualToRelation` bounds, frozen once full; monotonic timestamps; entity-level version objects with declared delete path and object; `tree:shape`, `ldes:pollingInterval`, ETag / `304`, `429` when busy, dereferenceable members; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node. Client (unordered mode): §3.1 initialisation, allowlisted redirects, retries with back-off, every listed RDF format, §3.4 member extraction with named graphs, SHACL-path version semantics, a bookmark on `xsd:dateTime` values, immutable pages fetched once, legacy retention classes. Optional and not implemented: spatial and substring fragmentations, search forms, transactions, ordered mode, scheduled polling. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
-| DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Full¹⁷ — DCAT 3 catalogue: DCAT 3 §11 versions, data services with `dcat:servesDataset`, temporal coverage, update frequency, DCAT range typing; `DCAT_PROFILE` adds the AP/AP-NL properties (identifiers, language, file types, catalogue records). CI validates it against SEMIC's DCAT-AP 3.0.1 shapes and Geonovum's DCAT-AP-NL 3 shapes. See [dcat.md](dcat.md). |
+| DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Full¹⁷ — DCAT 3 catalogue: DCAT 3 §11 versions, data services with `dcat:servesDataset`, temporal coverage, update frequency, DCAT range typing; `OTS_DCAT_PROFILE` adds the AP/AP-NL properties (identifiers, language, file types, catalogue records). CI validates it against SEMIC's DCAT-AP 3.0.1 shapes and Geonovum's DCAT-AP-NL 3 shapes. See [dcat.md](dcat.md). |
 | VoID | Dataset statistics, partitions and linksets | Full¹⁷ — per dataset, over the graphs the caller may read: statistics, class and property partitions, vocabularies, example resources, features, data dumps, SPARQL endpoint; linkset-role graphs as `void:Linkset`s; store-wide counts only, never partitions. See [dcat.md](dcat.md#void-statistics). |
 | RML / R2RML | RML-Core / RML-IO, legacy RML and R2RML: CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Full⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
@@ -129,7 +129,7 @@ checks every file's SHA-256 ([conformance/ids.md](conformance/ids.md)).
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1272 conformance tests across 44 suites; a further 905 tests in 115 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
+1272 conformance tests across 44 suites; a further 907 tests in 115 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -220,7 +220,7 @@ behavior and will flip green when the limitation is resolved.
      status codes; `tests/sparql_scope_boundary_http.rs` the read boundary.
      The W3C protocol test section is not vendored.
 3. **Federation/`SERVICE` is deny-by-default.** It is off as an SSRF mitigation
-   until `OTS_REMOTE_ALLOWLIST` lists the URL prefixes the server may contact; a
+   until `OTS_SERVICE_ALLOWLIST` lists the URL prefixes the server may contact; a
    `SERVICE` naming anything else is a failed invocation — an error, or under
    `SERVICE SILENT` the single empty solution — which is the spec's own failure
    semantics, so the posture does not lower the grade. The §3.2 semantics
@@ -283,7 +283,7 @@ behavior and will flip green when the limitation is resolved.
    and the Simple Features and GML 3.2.1 geometry class hierarchies. The Query
    Rewrite Extension: a triple pattern with one of the 24 relation predicates also
    matches where the geometries imply the relation, in queries and update `WHERE`
-   clauses (on by default, `OTS_GEOSPARQL_QUERY_REWRITE=off`). **GeoSPARQL 1.0**
+   clauses (on by default, `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off`). **GeoSPARQL 1.0**
    meets every requirement of 11-052r4, per the requirement matrix in
    [conformance/geosparql.md](conformance/geosparql.md#3-requirement-matrix), and
    is graded Full. **GeoSPARQL 1.1** meets every requirement of 22-047r1 outside
@@ -505,7 +505,7 @@ behavior and will flip green when the limitation is resolved.
 13. **JSON-LD 1.1** — every JSON-LD parse resolves a remote `@context`
     through the server's document loader (since 2026-10-03; until then any
     context named by IRI failed): the bundled W3C contexts of ActivityStreams,
-    CSVW, LDP and ODRL offline, other URLs only when `OTS_REMOTE_ALLOWLIST`
+    CSVW, LDP and ODRL offline, other URLs only when `OTS_JSONLD_CONTEXT_ALLOWLIST`
     covers them, size-capped and cached ([formats.md](formats.md#json-ld-remote-contexts)).
     Graded *Full* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
     which run as a regression ratchet with no published score

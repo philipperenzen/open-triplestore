@@ -3,9 +3,9 @@
 //! Two corpora feed the index:
 //!
 //! * **LOV corpus** — a `lov.nq.gz` N-Quads dump (one named graph per
-//!   vocabulary).  Located via `VOCAB_CORPUS_PATH`, `{data_dir}/vocab/`, or
+//!   vocabulary).  Located via `OTS_VOCAB_CORPUS_PATH`, `{data_dir}/vocab/`, or
 //!   the image-baked `assets/vocab/` copy; optionally downloaded once at boot
-//!   (`VOCAB_CORPUS_URL`, sha256-verified) when absent.  The image-baked copy
+//!   (`OTS_VOCAB_CORPUS_URL`, sha256-verified) when absent.  The image-baked copy
 //!   is filtered to the vocabularies this project may redistribute
 //!   (`assets/vocab/lov-redistributable.txt`); the full dump an operator
 //!   downloads or mounts also holds vocabularies whose licence does not
@@ -55,10 +55,8 @@ pub const DEFAULT_CORPUS_SHA256: &str =
 /// Candidate corpus locations, in order.
 pub fn corpus_candidates(data_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(p) = std::env::var("VOCAB_CORPUS_PATH") {
-        if !p.is_empty() {
-            out.push(PathBuf::from(p));
-        }
+    if let Some(p) = crate::config::VOCAB_CORPUS_PATH.get() {
+        out.push(p);
     }
     out.push(data_dir.join("vocab").join("lov.nq.gz"));
     out.push(PathBuf::from("assets/vocab/lov.nq.gz"));
@@ -74,23 +72,22 @@ pub fn find_corpus(data_dir: &Path) -> Option<PathBuf> {
 
 /// Download the corpus to `{data_dir}/vocab/lov.nq.gz` if configured.
 ///
-/// Returns the corpus path when available afterwards.  `VOCAB_CORPUS_URL=""`
-/// disables the download; a custom URL skips checksum verification unless
-/// `VOCAB_CORPUS_SHA256` is provided.
+/// Returns the corpus path when available afterwards. `OTS_OFFLINE` (on in
+/// production) disables the download; a custom `OTS_VOCAB_CORPUS_URL` skips
+/// checksum verification unless `OTS_VOCAB_CORPUS_SHA256` is provided.
 pub async fn ensure_corpus(data_dir: &Path) -> Option<PathBuf> {
     if let Some(existing) = find_corpus(data_dir) {
         return Some(existing);
     }
-    let url = std::env::var("VOCAB_CORPUS_URL").unwrap_or_else(|_| DEFAULT_CORPUS_URL.to_string());
-    if url.is_empty() {
-        info!("LOV corpus not present and download disabled (VOCAB_CORPUS_URL=\"\")");
+    if crate::config::OFFLINE.get() {
+        info!("LOV corpus not present and OTS_OFFLINE is on: not downloading it");
         return None;
     }
-    let expected_sha = match std::env::var("VOCAB_CORPUS_SHA256") {
-        Ok(s) if !s.is_empty() => Some(s),
-        Ok(_) => None,
-        Err(_) if url == DEFAULT_CORPUS_URL => Some(DEFAULT_CORPUS_SHA256.to_string()),
-        Err(_) => None,
+    let url = crate::config::VOCAB_CORPUS_URL.get();
+    let expected_sha = match crate::config::VOCAB_CORPUS_SHA256.get() {
+        Some(s) => Some(s),
+        None if url == DEFAULT_CORPUS_URL => Some(DEFAULT_CORPUS_SHA256.to_string()),
+        None => None,
     };
 
     info!("Downloading LOV corpus from {} (one-off, ~18 MB)", url);

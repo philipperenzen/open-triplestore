@@ -193,7 +193,7 @@
     {:else}
       <dl class="xc-facts">
         <div class="xc-wide"><dt>{$t('pages.adminMaintenance.backups.dir')}</dt><dd><code class="xc-code">{status.dir}</code></dd></div>
-        <div><dt>{$t('pages.adminMaintenance.backups.schedule')}</dt><dd>{$t('pages.adminMaintenance.backups.everyHours', { values: { n: status.schedule_hours } })}</dd></div>
+        <div><dt>{$t('pages.adminMaintenance.backups.schedule')}</dt><dd>{$t('pages.adminMaintenance.backups.everyHours', { values: { n: Math.round((status.schedule_secs / 3600) * 100) / 100 } })}</dd></div>
         <div><dt>{$t('pages.adminMaintenance.backups.retention')}</dt><dd>{$t('pages.adminMaintenance.backups.keepN', { values: { n: status.retention } })}</dd></div>
         <div>
           <dt>{$t('pages.adminMaintenance.backups.encryption')}</dt>

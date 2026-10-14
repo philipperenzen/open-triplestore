@@ -79,6 +79,7 @@ mod helpers {
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
             dl: Default::default(),
+            config: open_triplestore::config::current().clone(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -1416,13 +1417,13 @@ mod graph_store {
     #[tokio::test]
     async fn payload_too_large_returns_413() {
         let (state, token) = admin_state();
-        // The Graph Store body limit is `OTS_MAX_UPLOAD_MB` (default 512 MB),
+        // The Graph Store body limit is `OTS_MAX_UPLOAD_BYTES` (default 512 MiB),
         // read when the router is built. Pin it to 1 MB for this app only —
         // the variable is set just around the build so no other router in
         // this binary picks it up — and send a body over that.
-        std::env::set_var("OTS_MAX_UPLOAD_MB", "1");
+        std::env::set_var("OTS_MAX_UPLOAD_BYTES", "1MiB");
         let app = test_app(state);
-        std::env::remove_var("OTS_MAX_UPLOAD_MB");
+        std::env::remove_var("OTS_MAX_UPLOAD_BYTES");
         let big_body = vec![b'a'; 2 * 1024 * 1024];
         let resp = app
             .oneshot(

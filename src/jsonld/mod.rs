@@ -12,7 +12,7 @@
 //!    unchanged; see `PROVENANCE.md` there) and served offline, whatever the
 //!    allowlist says.
 //! 2. **Cached** — a context fetched before is reused for [`CACHE_TTL`].
-//! 3. **Fetched** — only from a URL covered by `OTS_REMOTE_ALLOWLIST`, the
+//! 3. **Fetched** — only from a URL covered by `OTS_JSONLD_CONTEXT_ALLOWLIST`, the
 //!    same operator allowlist SPARQL federation and LDES sync use (unset means
 //!    no outbound requests, so remote contexts are denied by default). The
 //!    request follows at most [`MAX_HOPS`] redirects, each to an allowlisted
@@ -30,8 +30,7 @@ use std::time::{Duration, Instant};
 
 use oxigraph::io::{JsonLdProfileSet, LoadedDocument, RdfFormat, ReaderQuadParser};
 
-pub const MAX_BYTES_ENV: &str = "OTS_JSONLD_CONTEXT_MAX_BYTES";
-const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+pub const MAX_BYTES_ENV: &str = crate::config::JSONLD_CONTEXT_MAX_BYTES.name();
 /// How long a fetched context is reused.
 pub const CACHE_TTL: Duration = Duration::from_secs(3600);
 const CACHE_CAPACITY: usize = 128;
@@ -72,11 +71,7 @@ pub const BUNDLED: &[BundledContext] = &[
 ];
 
 fn max_bytes() -> usize {
-    std::env::var(MAX_BYTES_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_BYTES)
+    crate::config::JSONLD_CONTEXT_MAX_BYTES.get() as usize
 }
 
 fn json_ld() -> RdfFormat {
@@ -163,7 +158,7 @@ fn not_allowed(url: &str) -> LoadError {
     format!(
         "the JSON-LD context <{url}> is neither bundled with this server nor allowed by {}; \
          ask the operator to add it there (bundled: ActivityStreams, CSVW, LDP, ODRL)",
-        crate::remote::ALLOWLIST_ENV
+        crate::remote::Purpose::JsonldContext.setting()
     )
     .into()
 }
@@ -208,7 +203,7 @@ fn fetch(url: &str) -> Result<LoadedDocument, LoadError> {
     let limit = max_bytes();
     let mut current = url.trim().to_string();
     for _ in 0..=MAX_HOPS {
-        if !crate::remote::is_allowed(&current) {
+        if !crate::remote::is_allowed(crate::remote::Purpose::JsonldContext, &current) {
             return Err(not_allowed(&current));
         }
         let target = current.clone();

@@ -10,7 +10,7 @@
 //! * PUT /api/admin/oauth/providers/:id accepts the body the admin form sends
 //!   and keeps the redacted client secret and SAML certificate when absent.
 //! * [P1-2] The client IP in audit rows and in the LLM guard's guest budget is
-//!   the TCP peer; `X-Forwarded-For` counts only from a `TRUSTED_PROXY_CIDRS`
+//!   the TCP peer; `X-Forwarded-For` counts only from a `OTS_TRUSTED_PROXY_CIDRS`
 //!   peer. The peer is injected as `ConnectInfo`, as the real server does.
 //!
 //! Driven through the real Axum router via `tower::ServiceExt::oneshot` (no socket).
@@ -554,7 +554,7 @@ fn anonymous_nl_sparql(peer: &str, forwarded_for: &str) -> Request<Body> {
 async fn llm_guest_budget_cannot_be_reset_with_a_forged_header() {
     // Nothing listens on port 1: a request the guard lets through fails fast
     // with 503 at the gateway; one the guard refuses is a 429.
-    std::env::set_var("LLM_GATEWAY_URL", "http://127.0.0.1:1");
+    std::env::set_var("OTS_LLM_GATEWAY_URL", "http://127.0.0.1:1");
     let app = test_app(test_state());
 
     // The guest budget defaults to 5 per minute per client IP.
@@ -588,4 +588,226 @@ async fn llm_guest_budget_cannot_be_reset_with_a_forged_header() {
         .await
         .unwrap();
     assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+// ─── Configuration: GET /api/admin/config and runtime settings ────────────────
+
+async fn call(
+    app: Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let req = match body {
+        Some(v) => b
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(v.to_string()))
+            .unwrap(),
+        None => b.body(Body::empty()).unwrap(),
+    };
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// The effective configuration is for administrators only, names every
+/// setting with its source, and never shows a secret value — only a
+/// reference, which is no secret.
+#[tokio::test]
+async fn admin_config_is_admin_only_and_never_shows_a_secret() {
+    std::env::set_var("OTS_LLM_API_KEY", "sk-raw-secret-value-1234");
+    std::env::set_var("OTS_SMTP_PASSWORD", "file:/run/secrets/smtp");
+    let (state, admin) = admin_state();
+    let user = make_user(&state, "cfg-reader");
+
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&user),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a non-admin may not read the configuration"
+    );
+
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("sk-raw-secret-value-1234"),
+        "a raw secret leaked: {body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let settings = v["settings"].as_array().expect("settings");
+    let get = |n: &str| {
+        settings
+            .iter()
+            .find(|s| s["name"] == n)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(get("OTS_LLM_API_KEY")["value"], "[redacted]", "{body}");
+    assert_eq!(get("OTS_LLM_API_KEY")["source"], "env");
+    assert_eq!(get("OTS_SMTP_PASSWORD")["value"], "file:/run/secrets/smtp");
+    assert_eq!(get("OTS_SMTP_PASSWORD")["source"], "file");
+    assert_eq!(get("OTS_PORT")["source"], "default");
+    assert!(v["profile"].is_string());
+    std::env::remove_var("OTS_LLM_API_KEY");
+    std::env::remove_var("OTS_SMTP_PASSWORD");
+}
+
+/// A runtime setting: an administrator overrides it without a restart, the
+/// override is validated like the environment variable, takes effect on the
+/// next request, and a reset hands the decision back to the environment.
+#[tokio::test]
+async fn runtime_settings_override_validate_apply_and_reset() {
+    let (state, admin) = admin_state();
+    let user = make_user(&state, "settings-user");
+    let register = |name: &'static str| {
+        let state = state.clone();
+        async move {
+            call(
+                test_app(state),
+                Method::POST,
+                "/api/auth/register",
+                None,
+                Some(serde_json::json!({
+                    "username": name,
+                    "email": format!("{name}@example.org"),
+                    "password": "a-long-enough-password-1",
+                })),
+            )
+            .await
+            .0
+        }
+    };
+
+    // Listed, with its configured value and no override.
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/settings",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reg = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "OTS_REGISTRATION_ENABLED")
+        .cloned()
+        .expect("registration is a runtime setting");
+    assert_eq!(reg["overridden"], false);
+    assert_eq!(reg["value"], "true");
+
+    // Only admins change settings.
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&user),
+        Some(serde_json::json!({ "value": "false" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Validated like the variable: no aliases, no unknown settings, and a
+    // startup-only setting cannot be changed at runtime.
+    for (name, value, want) in [
+        ("OTS_REGISTRATION_ENABLED", "maybe", StatusCode::BAD_REQUEST),
+        (
+            "OTS_OIDC_PROVIDER_TOKEN_POLICY",
+            "legacy",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("OTS_NO_SUCH_SETTING", "1", StatusCode::NOT_FOUND),
+        ("OTS_PORT", "8080", StatusCode::NOT_FOUND),
+    ] {
+        let (st, body) = call(
+            test_app(state.clone()),
+            Method::PUT,
+            &format!("/api/admin/settings/{name}"),
+            Some(&admin),
+            Some(serde_json::json!({ "value": value })),
+        )
+        .await;
+        assert_eq!(st, want, "{name}={value}: {body}");
+    }
+
+    // Close registration: it applies on the next request.
+    assert!(register("before-close").await.is_success());
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&admin),
+        Some(serde_json::json!({ "value": "off" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["setting"]["value"], "false", "stored in canonical form");
+    assert_eq!(v["setting"]["source"], "admin");
+    assert_eq!(v["setting"]["configured"], "true");
+    assert_eq!(register("after-close").await, StatusCode::FORBIDDEN);
+
+    // The effective configuration shows the override as such.
+    let (_, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&admin),
+        None,
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reg = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "OTS_REGISTRATION_ENABLED")
+        .cloned()
+        .unwrap();
+    assert_eq!(reg["source"], "admin");
+    assert_eq!(reg["runtime"], true);
+
+    // Reset: the environment (here the default) decides again.
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&admin),
+        Some(serde_json::json!({ "value": null })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("\"overridden\":false"), "{body}");
+    assert!(register("after-reset").await.is_success());
 }

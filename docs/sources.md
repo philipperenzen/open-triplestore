@@ -75,13 +75,13 @@ What this buys you:
   credential, the database name or path, the host and the account before it
   reaches a caller.
 
-The same references configure `OIDC` client secrets, `LLM_API_KEY`,
-`SMTP_PASSWORD`, `ALERT_SMTP_PASS`, `S3_SECRET_KEY`, the JWT signing secret
-`JWT_SECRET`, the service-registry bearer `LD_REGISTRY_TOKEN`, a replication
+The same references configure `OIDC` client secrets, `OTS_LLM_API_KEY`,
+`OTS_SMTP_PASSWORD`, `OTS_ALERT_SMTP_PASSWORD`, `OTS_S3_SECRET_KEY`, the JWT signing secret
+`OTS_JWT_SECRET`, the service-registry bearer `OTS_REGISTRY_TOKEN`, a replication
 follower's `OTS_REPLICATION_TOKEN` and a plugin's credentials (the accounts
-dashboard's `ACCOUNTS_DASHBOARD_GATEWAY_KEY`). A raw value in any of those is
+dashboard's `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY`). A raw value in any of those is
 accepted outside the production posture with a deprecation warning, and
-refused inside it: a raw `JWT_SECRET` or `LD_REGISTRY_TOKEN` stops the server
+refused inside it: a raw `OTS_JWT_SECRET` or `OTS_REGISTRY_TOKEN` stops the server
 at startup, a raw replication token or gateway key is dropped with an error in
 the log.
 
@@ -98,7 +98,7 @@ warnings:
 | Datasource credential is a raw value | **refused** | **refused** |
 | Unresolvable secret reference | **refused** | **refused** |
 | `statement_timeout_ms` omitted | defaults to 30 000 | **refused** |
-| Networked datasource host not on `OTS_REMOTE_ALLOWLIST` | warning | **refused** |
+| Networked datasource host not on `OTS_SOURCES_ALLOWLIST` | warning | **refused** |
 | File-backed datasource outside `OTS_SOURCES_DIR` | allowed | **refused** |
 | Read-write datasource account | **refused** | **refused** |
 
@@ -122,7 +122,7 @@ carries the drivers its operator asked for and no others.
 | `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls over the platform's roots; `options.sslrootcert` adds a private CA bundle |
 | `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls over the bundled Mozilla roots; `options.sslrootcert` adds a private CA bundle |
 | `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls over the platform's roots; `options.sslrootcert` replaces them with one CA certificate (a `.pem`, `.crt` or `.der` file holding exactly one) |
-| `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
+| `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_SOURCES_ALLOWLIST` |
 
 The published Docker image carries all three connectors. A build from source
 carries them only when asked, since `full` leaves them out:
@@ -203,8 +203,8 @@ button. The dialect is `sparql`; `host`, `port`, `database` (the endpoint's
 path, `/sparql` by default) and `tls` name the endpoint, and `username` plus
 the credential reference become HTTP Basic, resolved at the moment of use.
 Every request the store makes to it goes through the remote allowlist
-([`OTS_REMOTE_ALLOWLIST`](security.md)), in every posture: a virtual source is
-never a way around the door SPARQL federation and LDES sync use.
+([`OTS_SOURCES_ALLOWLIST`](administration.md#outbound-requests)), in every
+posture: a virtual source is never a way around the allowlist.
 
 ```bash
 curl -X POST http://localhost:7878/api/sources -H "Authorization: Bearer $TOKEN" \
@@ -1265,7 +1265,7 @@ Stated plainly, because a gap you know about is cheaper than one you discover:
 | `VAULT_TOKEN_FILE` / `VAULT_TOKEN` | *(unset)* | Vault token; the file form is the Vault Agent sink and is re-read per resolution |
 | `VAULT_NAMESPACE` | *(unset)* | Vault Enterprise namespace |
 | `VAULT_CACERT` | *(unset)* | PEM bundle for a private CA in front of Vault |
-| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Shared with SPARQL federation and LDES sync; a networked datasource's host must be covered in production |
+| `OTS_SOURCES_ALLOWLIST` | *(unset)* | The datasource allowlist (separate from SPARQL federation's and LDES sync's); a networked datasource's host must be covered in production |
 
 See also: [RML Mapping Guide](rml.md), [SHACL](shacl.md),
 [Named Graphs](named-graphs.md), [Security](security.md).

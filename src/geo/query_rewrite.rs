@@ -42,7 +42,7 @@
 //! graph pattern, so the pattern still joins with its neighbours.
 //!
 //! It applies to queries and to the `WHERE` clause of `DELETE`/`INSERT`
-//! updates. It is on by default; `OTS_GEOSPARQL_QUERY_REWRITE=off` (or `0`,
+//! updates. It is on by default; `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` (or `0`,
 //! `false`, `no`) turns it off for a server ([`enabled_from_env`]).
 //!
 //! Cost: a query that names no relation pays one substring scan
@@ -65,9 +65,6 @@ use spargebra::{GraphUpdateOperation, Query, Update};
 const GEO: &str = "http://www.opengis.net/ont/geosparql#";
 /// The GeoSPARQL function namespace, which names the matching functions.
 const GEOF: &str = "http://www.opengis.net/def/function/geosparql/";
-
-/// The environment variable that turns the rewrite off.
-pub const ENV_VAR: &str = "OTS_GEOSPARQL_QUERY_REWRITE";
 
 /// The 24 topological relations of the Simple Features, Egenhofer and RCC8
 /// families: `geo:<name>` is the property, `geof:<name>` the function.
@@ -102,20 +99,9 @@ pub const RELATIONS: [&str; 24] = [
 const SERIALISATIONS: [&str; 4] = ["asWKT", "asGML", "asGeoJSON", "asKML"];
 
 /// Whether the rewrite is on for this process: on unless
-/// [`OTS_GEOSPARQL_QUERY_REWRITE`](ENV_VAR) says `off`, `0`, `false` or `no`.
+/// `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED` is false.
 pub fn enabled_from_env() -> bool {
-    switch_value(std::env::var(ENV_VAR).ok().as_deref())
-}
-
-/// The switch's reading of a value: unset or anything but `off`, `0`,
-/// `false`, `no` (any case) is on.
-fn switch_value(v: Option<&str>) -> bool {
-    v.is_none_or(|v| {
-        !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "off" | "0" | "false" | "no"
-        )
-    })
+    crate::config::GEOSPARQL_QUERY_REWRITE_ENABLED.get()
 }
 
 /// A cheap test on the query text: whether it can contain a relation
@@ -600,19 +586,5 @@ mod tests {
             "SELECT * WHERE { SERVICE <http://example.org/sparql> { ?a geo:sfWithin ?b } }"
         )
         .is_none());
-    }
-
-    #[test]
-    fn the_switch_reads_off_values() {
-        for (v, on) in [
-            (None, true),
-            (Some("off"), false),
-            (Some("0"), false),
-            (Some(" FALSE "), false),
-            (Some("no"), false),
-            (Some("on"), true),
-        ] {
-            assert_eq!(switch_value(v), on, "{v:?}");
-        }
     }
 }

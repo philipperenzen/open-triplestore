@@ -29,7 +29,7 @@ const B1 = { id: 'backup-20261006T080000Z', created_at: '2026-10-06T08:00:00Z', 
 const B0 = { ...B1, id: 'backup-20261005T080000Z', created_at: '2026-10-05T08:00:00Z' };
 const STATUS = {
   configured: true, dir: '/data/backups', retention: 7, encrypted: false, decrypt_identity_configured: false,
-  schedule_hours: 24, count: 2, latest: B1,
+  schedule_secs: 86400, count: 2, latest: B1,
   s3: { enabled: true, object_store_configured: true, last_upload: { id: B1.id, at: '2026-10-06T08:00:05Z', ok: true, error: null } },
   pending_restore: null, last_restore: null,
 };

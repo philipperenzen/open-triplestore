@@ -64,42 +64,42 @@ const MIN_MAX_TRIPLES: usize = 100_000;
 /// Fraction of the memory budget the process may use, RAM copies included,
 /// for a build to start (see [`ParallelMirror::build_fits_in_memory`]).
 const BUILD_HEADROOM_PERCENT: u64 = 80;
-/// Default quiet period (ms) before a mirror build that will run in the
-/// background (a store over [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`]). A bulk
-/// load over the Graph Store protocol sends 100 MB chunks with sub-second gaps
-/// between them; with the 500 ms quiet period a build of two RAM copies started
-/// in such a gap and ran on next to the following chunk. Tunable via
-/// `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`.
-const DEFAULT_BACKGROUND_QUIET_MS: u64 = 5_000;
+// Default quiet period (ms) before a mirror build that will run in the
+// background (a store over [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`]). A bulk
+// load over the Graph Store protocol sends 100 MB chunks with sub-second gaps
+// between them; with the 500 ms quiet period a build of two RAM copies started
+// in such a gap and ran on next to the following chunk. Tunable via
+// `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`. (default 5000 ms, in the configuration registry).
 /// Quads between two checks of whether a write has started during a build.
 const BUILD_CANCEL_CHECK_EVERY: usize = 4096;
 /// Absolute ceiling on the auto-derived cap, regardless of how much RAM is
 /// available: past this, RocksDB (the reason the store is persistent) is the
 /// right tier, and building two ever-larger RAM copies stops paying off.
 const ABSOLUTE_MAX_TRIPLES: usize = 24_000_000;
-/// Fraction of the detected memory budget the mirror is allowed to use for its
-/// two copies (1/`MIRROR_BUDGET_DIVISOR`). Conservative so RocksDB's block
-/// cache, the spatial indexes, and transient import buffers still fit.
+// Fraction of the detected memory budget the mirror is allowed to use for its
+// two copies (1/`MIRROR_BUDGET_DIVISOR`). Conservative so RocksDB's block
+// cache, the spatial indexes, and transient import buffers still fit.
 const MIRROR_BUDGET_DIVISOR: u64 = 4;
-/// Deliberately HIGH estimate of the bytes both RAM copies (the subject-hash
-/// shards together with the unsharded full store, each carrying several index
-/// permutations) cost per triple. Over-estimating errs toward leaving the
-/// accelerator OFF (slower but safe) rather than OOM-killing the process — the
-/// failure mode that flapped the container during a large seed.
+// Deliberately HIGH estimate of the bytes both RAM copies (the subject-hash
+// shards together with the unsharded full store, each carrying several index
+// permutations) cost per triple. Over-estimating errs toward leaving the
+// accelerator OFF (slower but safe) rather than OOM-killing the process — the
+// failure mode that flapped the container during a large seed.
 const BYTES_PER_TRIPLE_BOTH_COPIES: u64 = 1024;
-/// Hard cap on shard count regardless of core count / configuration.
+// Hard cap on shard count regardless of core count / configuration.
 const MAX_SHARDS: usize = 16;
-/// Default quiet period (ms) a write burst must clear before the mirror is
-/// (re)built. After any write the two RAM copies are stale; rebuilding them over a
-/// multi-million-triple store costs seconds, so doing it on the very next query —
-/// then again after the next write — turns a write-heavy phase (the boot seed's
-/// vocabulary/metadata writes interleaved with its registry existence checks, or a
-/// bulk import) into dozens of back-to-back full-store rebuilds that peg a core for
-/// minutes with no client traffic. Holding off until writes go quiet collapses that
-/// to a single rebuild; queries in the meantime fall back to the persistent store
-/// (correct, just unaccelerated). `0` disables the debounce (rebuild eagerly).
-/// Tunable via `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS`.
-const DEFAULT_REBUILD_QUIET_MS: u64 = 500;
+// Default quiet period (ms) a write burst must clear before the mirror is
+// (re)built. After any write the two RAM copies are stale; rebuilding them over a
+// multi-million-triple store costs seconds, so doing it on the very next query —
+// then again after the next write — turns a write-heavy phase (the boot seed's
+// vocabulary/metadata writes interleaved with its registry existence checks, or a
+// bulk import) into dozens of back-to-back full-store rebuilds that peg a core for
+// minutes with no client traffic. Holding off until writes go quiet collapses that
+// to a single rebuild; queries in the meantime fall back to the persistent store
+// (correct, just unaccelerated). `0` disables the debounce (rebuild eagerly).
+// Tunable via `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS` (default 500 ms, in
+// the configuration registry).
+
 /// Store size (triples) up to which a due rebuild runs inline on the query that
 /// notices it. Small stores rebuild in well under a second, so the query keeps
 /// the old read-your-write behaviour. Above this the rebuild moves to a
@@ -130,7 +130,7 @@ struct Inner {
     /// (`opengraph::columnar`): consulted first for the queries it accepts.
     /// `None` before the first build, over the cap, or when switched off.
     columnar: RwLock<Option<Arc<Columnar>>>,
-    /// `OTS_COLUMNAR_QUERY` (default on): build and consult the columnar copy.
+    /// `OTS_COLUMNAR_QUERY_ENABLED` (default on): build and consult the columnar copy.
     columnar_enabled: bool,
     /// Set on every write; the next query rebuilds before using either copy.
     dirty: AtomicBool,
@@ -212,30 +212,17 @@ impl Inner {
 }
 
 impl ParallelMirror {
-    /// Build from environment configuration:
-    ///   * `OTS_PARALLEL_QUERY`             — `0`/`false`/`off`/`no` disables it (default on)
-    ///   * `OTS_PARALLEL_QUERY_MAX_TRIPLES` — memory cap in triples (default 2,000,000)
-    ///   * `OTS_PARALLEL_QUERY_SHARDS`      — shard count (default = cores, capped at 16)
+    /// Build from the configuration: `OTS_PARALLEL_QUERY_ENABLED` (on/off),
+    /// `OTS_PARALLEL_QUERY_MAX_TRIPLES` (memory cap in triples, default from
+    /// the memory limit) and `OTS_PARALLEL_QUERY_SHARDS` (default the core
+    /// count, at most 16).
     pub fn from_env() -> Self {
-        let enabled = std::env::var("OTS_PARALLEL_QUERY")
-            .map(|v| {
-                !matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off" | "no"
-                )
-            })
-            .unwrap_or(true);
-        let max_triples = std::env::var("OTS_PARALLEL_QUERY_MAX_TRIPLES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or_else(ram_aware_default_max_triples);
-        let shard_count = std::env::var("OTS_PARALLEL_QUERY_SHARDS")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or_else(default_shards)
-            .clamp(1, MAX_SHARDS);
-        Self::new(enabled, shard_count, max_triples)
+        use crate::config as c;
+        Self::new(
+            c::PARALLEL_QUERY_ENABLED.get(),
+            c::PARALLEL_QUERY_SHARDS.get(),
+            c::PARALLEL_QUERY_MAX_TRIPLES.get(),
+        )
     }
 
     /// Explicit construction (used by tests).
@@ -245,14 +232,7 @@ impl ParallelMirror {
                 shards: RwLock::new(None),
                 full: RwLock::new(None),
                 columnar: RwLock::new(None),
-                columnar_enabled: std::env::var("OTS_COLUMNAR_QUERY")
-                    .map(|v| {
-                        !matches!(
-                            v.trim().to_ascii_lowercase().as_str(),
-                            "0" | "false" | "off" | "no"
-                        )
-                    })
-                    .unwrap_or(true),
+                columnar_enabled: crate::config::COLUMNAR_QUERY_ENABLED.get(),
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),
@@ -262,8 +242,16 @@ impl ParallelMirror {
                 enabled,
                 base: Instant::now(),
                 last_write_ms: AtomicU64::new(0),
-                rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
-                background_quiet_ms: AtomicU64::new(env_background_quiet_ms()),
+                rebuild_quiet_ms: AtomicU64::new(
+                    crate::config::PARALLEL_QUERY_REBUILD_QUIET
+                        .get()
+                        .as_millis() as u64,
+                ),
+                background_quiet_ms: AtomicU64::new(
+                    crate::config::PARALLEL_QUERY_BACKGROUND_QUIET
+                        .get()
+                        .as_millis() as u64,
+                ),
                 last_probed_len: AtomicUsize::new(0),
                 writes_since_clean: AtomicUsize::new(0),
                 inline_rebuild_max: AtomicUsize::new(DEFAULT_INLINE_REBUILD_MAX_TRIPLES),
@@ -773,29 +761,12 @@ impl ParallelMirror {
     }
 }
 
-fn default_shards() -> usize {
+/// The default shard count: the cores, at most 16.
+pub fn default_shards() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, MAX_SHARDS)
-}
-
-/// Resolve the rebuild quiet period (ms) from the environment, falling back to
-/// [`DEFAULT_REBUILD_QUIET_MS`]. `0` disables the debounce (eager rebuild).
-fn env_rebuild_quiet_ms() -> u64 {
-    std::env::var("OTS_PARALLEL_QUERY_REBUILD_QUIET_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_REBUILD_QUIET_MS)
-}
-
-/// The background build's quiet period (ms), from
-/// `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS` or [`DEFAULT_BACKGROUND_QUIET_MS`].
-fn env_background_quiet_ms() -> u64 {
-    std::env::var("OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BACKGROUND_QUIET_MS)
 }
 
 /// This process's resident set size in bytes (Linux `/proc/self/statm`), or
@@ -877,7 +848,7 @@ pub(crate) fn detect_memory_limit_bytes() -> Option<u64> {
 /// `OTS_PARALLEL_QUERY_MAX_TRIPLES` always wins over this; the result is clamped
 /// to `[MIN_MAX_TRIPLES, ABSOLUTE_MAX_TRIPLES]`, and is [`DEFAULT_MAX_TRIPLES`]
 /// when the budget can't be detected.
-fn ram_aware_default_max_triples() -> usize {
+pub fn ram_aware_default_max_triples() -> usize {
     match detect_memory_limit_bytes() {
         Some(bytes) => ram_cap_for(bytes),
         None => DEFAULT_MAX_TRIPLES,

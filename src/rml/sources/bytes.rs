@@ -9,14 +9,10 @@ use std::io::Read;
 
 use crate::rml::model::{Access, Compression};
 
-const MAX_ENV: &str = "OTS_RML_MAX_SOURCE_BYTES";
+const MAX_ENV: &str = crate::config::RML_MAX_SOURCE_BYTES.name();
 
 fn max_bytes() -> u64 {
-    std::env::var(MAX_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(256 * 1024 * 1024)
+    crate::config::RML_MAX_SOURCE_BYTES.get()
 }
 
 /// Read everything `r` yields, refusing more than `cap` bytes.

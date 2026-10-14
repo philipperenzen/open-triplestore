@@ -80,31 +80,22 @@ impl Default for DlConfig {
 }
 
 impl DlConfig {
-    /// Read the environment. An unknown `OTS_DL_BACKEND` is logged and leaves
-    /// the regime unconfigured (503), rather than silently picking one.
+    /// Read the configuration (validated at startup: an unknown
+    /// `OTS_DL_BACKEND` stops the start).
     pub fn from_env() -> Self {
-        let mut c = DlConfig::default();
-        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        if let Some(b) = var("OTS_DL_BACKEND") {
-            match DlBackendKind::parse(&b) {
-                Some(kind) => c.backend = Some(kind),
-                None => tracing::error!(
-                    "OTS_DL_BACKEND={b} is not one of native, konclude, sidecar; \
-                     the owl2-dl regime stays unavailable"
-                ),
-            }
-        }
-        if var("OTS_EXTERNAL_REASONER").is_some() || var("OTS_EXTERNAL_REASONER_BIN").is_some() {
-            tracing::warn!(
-                "OTS_EXTERNAL_REASONER / OTS_EXTERNAL_REASONER_BIN were removed; \
-                 set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN instead"
-            );
-        }
-        if let Some(b) = var("OTS_KONCLUDE_BIN") {
-            c.konclude_bin = b.trim().to_string();
-        }
-        c.sidecar_url = var("OTS_REASONER_URL").map(|u| u.trim().trim_end_matches('/').to_string());
-        // A secret reference (`env:`, `file:`, `vault:`) like `LLM_API_KEY`: a
+        use crate::config as cfg;
+        let mut c = DlConfig {
+            backend: cfg::DL_BACKEND.get().and_then(|b| DlBackendKind::parse(&b)),
+            konclude_bin: cfg::KONCLUDE_BIN.get(),
+            sidecar_url: cfg::REASONER_URL
+                .get()
+                .map(|u| u.trim_end_matches('/').to_string()),
+            timeout: cfg::REASONER_TIMEOUT.get(),
+            max_triples: cfg::REASONER_MAX_TRIPLES.get(),
+            debounce: cfg::DL_DEBOUNCE.get(),
+            ..DlConfig::default()
+        };
+        // A secret reference (`env:`, `file:`, `vault:`) like `OTS_LLM_API_KEY`: a
         // raw token is accepted with a warning outside the production posture
         // and refused in it; one that does not resolve leaves the sidecar
         // without a token (it then refuses the call) rather than sending the
@@ -112,15 +103,6 @@ impl DlConfig {
         c.sidecar_token = crate::secrets::env_secret_opt("OTS_REASONER_TOKEN")
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
-        if let Some(s) = var("OTS_REASONER_TIMEOUT_SECS").and_then(|v| v.trim().parse().ok()) {
-            c.timeout = Duration::from_secs(s);
-        }
-        if let Some(n) = var("OTS_REASONER_MAX_TRIPLES").and_then(|v| v.trim().parse().ok()) {
-            c.max_triples = n;
-        }
-        if let Some(ms) = var("OTS_DL_DEBOUNCE_MS").and_then(|v| v.trim().parse().ok()) {
-            c.debounce = Duration::from_millis(ms);
-        }
         if c.backend == Some(DlBackendKind::Sidecar) && c.sidecar_url.is_none() {
             tracing::error!("OTS_DL_BACKEND=sidecar needs OTS_REASONER_URL");
         }

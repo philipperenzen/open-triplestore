@@ -63,6 +63,7 @@ mod tests {
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
             dl: Default::default(),
+            config: crate::config::current().clone(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -182,12 +183,12 @@ mod tests {
         );
     }
 
-    // ─── `CORS_ORIGINS=*` mirrors any origin so any-host browser clients connect ──
+    // ─── `OTS_CORS_ORIGINS=*` mirrors any origin so any-host browser clients connect ──
 
     #[tokio::test]
     async fn cors_wildcard_mirrors_any_origin_with_credentials() {
         // A browser client served from another origin preflights a credentialed
-        // request against a store launched with CORS_ORIGINS=*. The store
+        // request against a store launched with OTS_CORS_ORIGINS=*. The store
         // must echo that exact origin (never the literal '*') and allow credentials, or
         // the browser blocks the response. It must also reflect the requested headers —
         // including ones outside the fixed allow-list — so any-origin mode is actually
@@ -242,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_session_cookies_are_samesite_strict() {
-        // The CORS_ORIGINS=* mirror mode reflects any origin WITH credentials. That is
+        // The OTS_CORS_ORIGINS=* mirror mode reflects any origin WITH credentials. That is
         // only safe because the browser withholds the session cookies on cross-site
         // requests — which holds solely while those cookies are SameSite=Strict. If a
         // future change downgrades them to Lax/None this test fails, instead of silently

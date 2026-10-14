@@ -1,4 +1,4 @@
-//! `JWT_SECRET` goes through the secrets module like every other credential:
+//! `OTS_JWT_SECRET` goes through the secrets module like every other credential:
 //! a reference (`file:/path`, `env:NAME`) resolves to the signing secret, and
 //! a raw value is refused under `OTS_ENV=production` with the module's
 //! `RawSecretRefused` message — the error the server stops with at startup
@@ -43,10 +43,10 @@ fn a_reference_starts_and_a_raw_value_is_refused_in_production() {
     assert_eq!(outcome.0.unwrap(), SECRET, "a file: reference starts");
     let err = outcome
         .1
-        .expect_err("a raw JWT_SECRET is refused")
+        .expect_err("a raw OTS_JWT_SECRET is refused")
         .to_string();
     assert!(
-        err.starts_with("JWT_SECRET: ") && err.contains("holds a raw secret value"),
+        err.starts_with("OTS_JWT_SECRET: ") && err.contains("holds a raw secret value"),
         "the RawSecretRefused message, prefixed with the setting: {err}"
     );
     assert!(

@@ -13,8 +13,8 @@
 //!
 //! ```toml
 //! id = "my-bundle"
-//! # optional — defaults to SEED_BUNDLE_MY_BUNDLE; set it to false/0/no/off to skip
-//! opt_out_env = "SEED_MY_BUNDLE"
+//! # optional — defaults to OTS_SEED_BUNDLE_MY_BUNDLE_ENABLED; set it to false to skip
+//! opt_out_env = "OTS_SEED_MY_BUNDLE_ENABLED"
 //!
 //! [organisation]
 //! slug = "my-org"

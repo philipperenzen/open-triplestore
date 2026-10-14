@@ -61,11 +61,7 @@ pub fn hex_upper(bytes: &[u8]) -> String {
 
 /// The configured sources directory, if any.
 pub fn sources_dir() -> Option<PathBuf> {
-    std::env::var(SOURCES_DIR_ENV)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    crate::config::SOURCES_DIR.get()
 }
 
 /// Whether a source's endpoint may be contacted. A file-backed dialect has no
@@ -79,7 +75,7 @@ pub fn egress_allowed(source: &SqlSource) -> bool {
         return true;
     }
     match source.egress_url() {
-        Some(url) => crate::remote::is_allowed(&url),
+        Some(url) => crate::remote::is_allowed(crate::remote::Purpose::Sources, &url),
         // A networked dialect with no host cannot be reached at all.
         None => false,
     }
@@ -210,7 +206,7 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
             tracing::warn!(
                 source = %source.id,
                 "datasource host is not on {}; this is a registration error in the production posture",
-                crate::remote::ALLOWLIST_ENV
+                crate::remote::Purpose::Sources.setting()
             );
         }
         return Ok(());
@@ -219,7 +215,7 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
     if connector.is_networked() {
         if !egress_allowed(source) {
             return Err(ValidationError::NotAllowlisted {
-                env: crate::remote::ALLOWLIST_ENV,
+                env: crate::remote::Purpose::Sources.setting(),
             });
         }
     } else if !under_sources_dir(&source.database) {

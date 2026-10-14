@@ -262,7 +262,7 @@ docker pull ghcr.io/philipperenzen/open-triplestore:0.2
 The image is built with `--features image` — `full`, `saml` and the three SQL
 connectors (see [build features](build-features.md)). Run it the same way as a locally-built
 image — see [`../README.md`](../README.md#quick-start) for ports, volumes, and the
-required `JWT_SECRET`.
+required `OTS_JWT_SECRET`.
 
 ## Repository settings the maintainer applies (UI/admin)
 

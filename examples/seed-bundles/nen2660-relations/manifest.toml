@@ -19,7 +19,7 @@
 # fetched.
 
 id = "nen2660-relations"
-opt_out_env = "SEED_NEN2660_RELATIONS"
+opt_out_env = "OTS_SEED_NEN2660_RELATIONS_ENABLED"
 
 [organisation]
 slug = "nen2660-relations"

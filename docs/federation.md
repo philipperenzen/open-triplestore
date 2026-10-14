@@ -16,8 +16,8 @@ the remote: `P` goes out as written.
 A call either returns the remote's complete answer or **fails**. It fails
 when:
 
-- the endpoint is not covered by `OTS_REMOTE_ALLOWLIST` (or no allowlist is
-  set);
+- the endpoint is not covered by `OTS_SERVICE_ALLOWLIST` (or no allowlist is
+  set; the LDES, datasource and JSON-LD lists do not count);
 - the request errors, the remote answers a non-2xx status, or the response
   is not a SPARQL results document with solutions;
 - it takes longer than `OTS_REMOTE_TIMEOUT_SECS` (default 10);
@@ -73,7 +73,7 @@ The calls one query makes share a budget:
   answers do not count). Over either cap the call fails as above, naming the
   variable;
 - its `SERVICE` calls must finish within `OTS_SERVICE_DEADLINE_SECS` of the
-  query's start (default: the SPARQL query timeout, `SPARQL_QUERY_TIMEOUT_SECS`,
+  query's start (default: the SPARQL query timeout, `OTS_SPARQL_QUERY_TIMEOUT_SECS`,
   itself 30 by default). A request is cut short at the deadline, and the
   query then fails with an error naming the variable, also under `SERVICE
   SILENT`: a query past its deadline does not go on as if the remote had
@@ -82,7 +82,7 @@ The calls one query makes share a budget:
 ## Outbound: acting for a user at a peer
 
 ```
-OTS_REMOTE_ALLOWLIST=https://peer.example.org/
+OTS_SERVICE_ALLOWLIST=https://peer.example.org/
 OTS_REMOTE_AUTH=assert
 ```
 
@@ -108,7 +108,7 @@ its OIDC-provider key (the one behind `/oauth/jwks`):
 
 | Claim | Value |
 |---|---|
-| `iss` | this instance's `BASE_URL` |
+| `iss` | this instance's `OTS_BASE_URL` |
 | `sub` | the user's id |
 | `aud` | the peer's origin (`https://peer.example.org`) |
 | `exp` | five minutes |
@@ -123,13 +123,13 @@ as before.
 
 ```
 OTS_TRUSTED_ISSUERS=https://portal.example.org,https://lab.example.org
-BASE_URL=https://peer.example.org
+OTS_BASE_URL=https://peer.example.org
 ```
 
 A bearer whose `iss` is a trusted peer is verified against that peer's JWKS
 (discovery at `<iss>/.well-known/openid-configuration`, fetched over https —
 loopback http only for local development), must carry this instance's
-`BASE_URL` as its audience, and is then provisioned as a local *federated*
+`OTS_BASE_URL` as its audience, and is then provisioned as a local *federated*
 user: read-only (writes need a local credential), with the default OIDC role,
 and a member of every local organisation whose slug appears in the
 assertion's `org:` groups. From there every local rule applies unchanged —

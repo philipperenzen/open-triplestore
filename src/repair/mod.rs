@@ -45,11 +45,7 @@ use crate::store::TripleStore;
 /// once (default 1, §5.4). Taken in addition to the expensive-operation
 /// permit, so resident sandbox memory stays bounded by this times the cap.
 pub fn concurrency() -> usize {
-    std::env::var("OTS_REPAIR_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1)
+    crate::config::REPAIR_CONCURRENCY.get()
 }
 
 /// What the repair layer keeps per store: its semaphore and, once the server

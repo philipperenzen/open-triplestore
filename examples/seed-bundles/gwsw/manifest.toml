@@ -17,7 +17,7 @@
 # relicense anyway.
 
 id = "gwsw"
-opt_out_env = "SEED_GWSW"
+opt_out_env = "OTS_SEED_GWSW_ENABLED"
 
 [organisation]
 slug = "rioned"

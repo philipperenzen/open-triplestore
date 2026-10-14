@@ -40,10 +40,7 @@ pub const CURSOR: &str = "studio-trigger";
 const BATCH: usize = 2_000;
 
 fn incremental_max() -> usize {
-    std::env::var("OTS_STUDIO_INCREMENTAL_MAX")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(10_000)
+    crate::config::STUDIO_INCREMENTAL_MAX.get()
 }
 
 /// What one tick did.

@@ -166,11 +166,7 @@ fn a_follower_bootstraps_through_the_leaders_rate_limiter_and_tails_it_live() {
         p.refetched_graphs >= GRAPHS,
         "every graph fetched whole: {p:?}"
     );
-    // The server reads only these two spellings as "off".
-    let limiter_off = matches!(
-        std::env::var("RATE_LIMIT_DISABLED").as_deref(),
-        Ok("1") | Ok("true")
-    );
+    let limiter_off = !open_triplestore::config::RATE_LIMIT_ENABLED.get();
     if !limiter_off {
         assert!(
             throttled.load(Ordering::SeqCst) > 0,
