@@ -32,8 +32,6 @@ use crate::store::changes::{self, Chain};
 use crate::store::set_hash::SetHash;
 use crate::store::TripleStore;
 
-pub const DEFAULT_CHECKPOINT_EVERY: usize = 100;
-pub const DEFAULT_CHECKPOINT_FRACTION: f64 = 0.25;
 /// Below this many changed quads the size rule never forces a checkpoint:
 /// a small base is cheap to copy, but a handful of edits is cheaper still.
 const SIZE_RULE_FLOOR: i64 = 1_000;
