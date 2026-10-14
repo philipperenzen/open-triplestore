@@ -109,6 +109,18 @@ fn fn_string() {
     assert_eq!(eval(r#"REGEX("foobar", "^bar")"#), "false");
 }
 
+/// XPath regular expressions are XML Schema 1.0 ones: `{` and `}` are
+/// ordinary characters outside a quantifier (XPath F&O §7.6.1; XML Schema
+/// Part 2 Appendix F).
+#[test]
+fn regex_braces_are_ordinary_characters() {
+    assert_eq!(eval(r#"REGEX("{x}", "^({)(.*)(})$")"#), "true");
+    assert_eq!(eval(r#"REGEX("<x/>", "^({)(.*)(})$")"#), "false");
+    assert_eq!(eval(r#"REGEX("aa", "^a{2}$")"#), "true");
+    assert_eq!(eval(r#"REGEX("a{2}", "^a\\{2\\}$")"#), "true");
+    assert_eq!(eval(r#"REPLACE("{a}", "}", ")")"#), "{a)");
+}
+
 // ───────────────────────────── Numeric functions ─────────────────────────────
 
 #[test]

@@ -116,6 +116,42 @@ residual: a triple term written as a constant *inside an expression*
 spareval's expression evaluator, so `sameTerm` against a stored triple term with a
 non-canonical literal is false. Graph patterns are not affected.
 
+11. **A correlated `EXISTS` becomes a hash semi-join** (`spareval` evaluator).
+   When the pattern only uses the outer bindings to restrict its own solutions
+   (checked on the plan: every shared variable bound in all its solutions, and
+   read by a `FILTER` or `OPTIONAL` only where that operator binds it), the
+   evaluator also evaluates the pattern once, standalone (hash joins, no lateral
+   probes), into a hash table on the shared variables, interleaved with the
+   per-row evaluations once those took 5 ms, so the work stays within about twice
+   the better plan's, and answers every later row with one lookup. Bounded at 2^21 keys; off without optimizations and on
+   `wasm32-unknown-unknown`. Draft: `spareval/UPSTREAM-PR-exists-semi-join.md`.
+
+12. **A merged default graph streams when one graph matches** (`spareval`
+   dataset). The default `internal_triples_for_pattern` of change 2 kept a hash
+   set of every match of every pattern over a multi-graph default graph. It now
+   drops the graphs with no match first (one probe each) and streams the matches
+   untouched when only one graph is left — a dataset service whose default graph
+   is a data graph plus its shapes graph, in the store comparison. Draft:
+   `spareval/UPSTREAM-PR-merged-default-graph-single-match.md`.
+
+13. **A configured parser is cheap to clone** (`spargebra` parser). The custom
+   aggregate set is shared (`Arc`) between clones, so `opengraph::sparql_parser`
+   keeps one parser with the GeoSPARQL aggregates and hands out clones instead
+   of rebuilding it per query (issue #527: about 0.35 µs per query once six
+   aggregates were declared). The `SELECT`-variable-reuse check of change 9 no
+   longer copies the in-scope variable set. Draft:
+   `spargebra/UPSTREAM-PR-cheap-parser-clone.md`.
+
+14. **The RocksDB path of a merged default graph** (`oxigraph` storage and
+   `DatasetView`). Backport of the `oxigraph` half of upstream #1920, left out
+   of change 2: `quads_for_pattern_in_union` merges the per-graph scans, which
+   share a triple order, and deduplicates by key instead of a hash set of every
+   match; once one scan is left (or there is one graph) it is streamed without
+   keys. The memory backend keeps the hash set, after dropping graphs with no
+   match. With change 2's hash set, `COUNT(*)` over a 3.5M-triple data graph
+   merged with its shapes graph took 4.4 s in the store comparison (1.7 s before
+   change 2 deduplicated). Draft: `oxigraph/UPSTREAM-PR-merged-union-streaming.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
@@ -270,7 +306,48 @@ One commit each, in this order:
    variables of the SELECT expressions before it, which the `Extend` chain
    already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
    suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
+10. **Braces in `REGEX` patterns** (`spareval` `compile_pattern`). SPARQL's
+    `REGEX` takes XPath regular expressions, which are XML Schema 1.0 ones:
+    `{` and `}` are ordinary characters wherever they do not make a quantifier
+    `{n}`, `{n,}` or `{n,m}`. The `regex` crate refuses an unescaped `{` that
+    starts no repetition, so `REGEX(?s, "^({)(.*)(})$")` was an error (the
+    filter dropped every row). Those braces are now escaped before the pattern
+    is compiled. No W3C entry reaches it; the OGC GeoSPARQL validator's S18
+    shape does (through `sh:pattern`, `tests/ogc_geosparql_shacl_roundtrip.rs`),
+    and `regex_braces_are_ordinary_characters` in
+    `tests/sparql_functions_conformance.rs` pins it. Draft:
+    `spareval/UPSTREAM-PR-regex-braces.md`.
+11. **Custom aggregate calls with several arguments** (`spargebra` parser
+    and algebra). SPARQL 1.1 lets a custom aggregate take an argument list
+    (`iriOrFunction` with `ArgList`, §18.5.1 aggregates over a list of
+    expressions); spargebra parsed one expression. `AggregateExpression::FunctionCall`
+    gets `extra_args` (the arguments after the first, empty for the built-ins),
+    which the parser, `Display`, SSE, used-variable lookup and the nested
+    aggregate check all handle. A custom aggregate call is now parsed before
+    `iriOrFunction`, which read `ex:agg(DISTINCT ?x)` as the bare IRI `ex:agg`:
+    every `DISTINCT` custom aggregate call used to be a parse error. GeoSPARQL 1.1's
+    `geof:aggConcaveHull(?geom, targetPercent)` needs it
+    (`tests/geosparql_conformance.rs`, `ogc_req42_agg_concave_hull_*`). Draft:
+    `spargebra/UPSTREAM-PR-custom-aggregate-arguments.md`.
+12. **The extra arguments through the optimizer** (`sparopt` algebra). The same
+    field on sparopt's `AggregateExpression::FunctionCall`, mapped both ways.
+    Draft: `sparopt/UPSTREAM-PR-custom-aggregate-arguments.md`.
+13. **Evaluating them** (`spareval`). `AggregateFunctionAccumulator` gets
+    `accumulate_arguments`, called with every argument's value per solution for
+    a call with several (its default takes exactly one; `false` makes the
+    result unbound), and the evaluator evaluates every argument, under
+    `DISTINCT` de-duplicating argument lists. Draft:
+    `spareval/UPSTREAM-PR-custom-aggregate-arguments.md`.
 
+10. **`EXISTS` patterns are optimized** (`sparopt` optimizer). The join
+   reordering and filter pushing passes stopped at expressions, so the pattern of
+   an `EXISTS` kept its written order, its joins were cartesian products and its
+   filters stayed on top; evaluated once per outer row, a correlated
+   `FILTER NOT EXISTS { ?r :reviewFor ?p ; :rating ?x }` read every `:rating`
+   triple for each row (store comparison F10, issue #471). A last pass now
+   reorders each `EXISTS` pattern knowing which variables the outer pattern
+   binds, and `Optimizer::optimize_for_standalone_evaluation` plans one with no
+   input. Draft: `sparopt/UPSTREAM-PR-exists-join-order.md`.
 ### Verifying the fork
 
 The fork diff is every commit after the one that added this directory. To see it

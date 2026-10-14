@@ -14,6 +14,82 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geof:aggConcaveHull(?geom, targetPercent)`** (GeoSPARQL 1.1 §10.10): the
+  aggregate takes its target, a constant or an expression of the group key,
+  from 0 (the most concave hull) to 1 (the convex hull); 0.5 without it, as
+  before. A group whose solutions disagree on the target, or a target outside
+  0..1, is unbound (#525). This needs custom aggregate calls with several
+  arguments, which the vendored SPARQL crates now parse, optimise and evaluate
+  (`vendor/README.md`, changes 11–13; `AggregateFunctionAccumulator` gains
+  `accumulate_arguments`). The other five GeoSPARQL aggregates take one
+  argument; a second makes their result unbound.
+- **D-entailment by value under every regime, and `rdfD1` on request.**
+  Under `?entailment=` (and `entailment_dataset=` with a regime) a literal
+  constant in a triple pattern matches every literal of the same value:
+  `"010"^^xsd:integer`, `"10"^^xsd:integer` and `"10.0"^^xsd:decimal` match
+  one another, `"1E400"^^xsd:double` matches `"INF"^^xsd:double`, while
+  `"1"^^xsd:integer` and `"1"^^xsd:double` do not (disjoint value spaces).
+  Strings and booleans are matched through a `VALUES` table of their forms,
+  other values through the server's `sameValue` function
+  (`https://open-triplestore.org/def/function/rdf/sameValue`). The RDFS
+  materialiser applies `rdfD1` when asked (`"rdfd1": true` on
+  `POST /api/reasoning/materialize`, `RdfsMaterializer::with_rdfd1`): one blank
+  node per data value, typed with its datatypes, takes the literal's place in
+  a copy of each triple. `RdfsMaterializer::with_recognized_datatypes` sets
+  the `D` of a run. Every W3C RDF 1.1 Semantics case now passes
+  (`docs/conformance/entailment.md`).
+- **Delta versions.** With change capture on (`OTS_CHANGE_CAPTURE=on`), a
+  dataset's first version is a checkpoint (a copy, as before) and the next
+  ones are deltas: a base checkpoint, a range of the change log and a content
+  hash — nothing copied when the version is cut. A delta reads like a
+  checkpoint: its graphs are built on first read (never for an anonymous
+  caller, who gets `503` with `Retry-After`; `507` over
+  `OTS_MATERIALISATION_MAX_QUADS`), dropped again after
+  `OTS_MATERIALISATION_TTL_SECS`, and verified against the content hash when
+  the version is published, which makes it physical. A cut is a checkpoint
+  when capture is off, the version is Published, `"checkpoint": true` asks
+  for one, a graph is shared with another dataset, no anchored checkpoint
+  covers the graphs, the chain since it is broken, or the chain has grown
+  (`OTS_CHECKPOINT_EVERY`, `OTS_CHECKPOINT_FRACTION`); the response says why.
+  Diffs and branch `ahead`/`behind` between versions on one chain come from
+  the change log (`"source": "chain"`), branches copy nothing, a restore
+  applies the chain's inverse in one transaction across all graphs when it
+  can (`"tier": 1`), and a checkpoint a delta chains from is never deleted or
+  collected. Version records gain `kind`, `base_version`, `patch_range`,
+  `anchor`, `content_hash`, `quad_count`, `change_count`, `chain_broken`,
+  `materialised`. See docs/versioning.md, "Delta versions".
+- **A dataset's change feed.** `GET /api/datasets/:id/changes` lists the
+  change-log rows of the dataset's graphs the caller may read;
+  `…/changes/:seq` serves one change as an RDF Patch and `…/inverse` the patch
+  that undoes it; `PUT`/`DELETE …/changes/cursors/:name` keeps a reader's
+  position (pinning retention). `GET /api/admin/changes/stats` accounts for
+  the log per dataset. A commit whose write the log recorded carries
+  `seq_from`/`seq_to` and `net_added`/`net_removed`.
+- **RDF Patch:** RDF 1.2 triple terms (`<<( s p o )>>` as an object, an
+  extension: the format has no syntax for them, and a change or version diff
+  that holds one must carry it), inverse patches (`H prev`), change headers
+  (`H seq`, `H epoch`, `H commit`), and `H base-digest`, which makes an apply
+  conditional on the graphs' content (`412`). A patch applies through the same
+  engine primitive as version restores and builds (`apply_quad_ops`), recorded
+  in the change log under one commit; the response adds the write's `seq`.
+  A patch-log version entry over a delta version is rendered from the change
+  log between the two versions it compares, or from the versions once built.
+- **Statement provenance (opt-in).** `PUT /api/datasets/:id/settings` with
+  `{"provenance": "minimal" | "full"}`: every change to the dataset's
+  statements is annotated in RDF 1.2 in `urn:ots:statement-provenance:<id>` —
+  a named reifier per statement, an event per change with its operation,
+  change-log sequence number and commit (`full` adds actor and time). The
+  graph is no reasoning premise, never gated, no LDES member, not part of a
+  version by default, and out of the dataset's browse scope.
+- **Skolem IRIs on import (opt-in).** `{"skolem": true}` gives blank nodes
+  imported into the dataset's graphs durable, content-derived IRIs, so a
+  re-import changes nothing.
+- **Write-triggered validation pipelines.** `trigger_on_write` — stored but
+  never read until now — runs the pipeline after a write to its data graphs
+  (with change capture on), over only the nodes the write touched when it can,
+  merged into its last report.
+- **`POST /api/admin/versions/sweep`** purges what deleted datasets left
+  behind: their versions, unreferenced version graphs, stale change-log pins.
 - **Web UI for the exchange formats and maintenance tasks that were API-only.**
   The dataset page has an **Exchange** section: the LDES stream's settings
   (publishing, members per page, polling interval, retention policy, with the
@@ -244,6 +320,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`GET /health` lists the standards the build serves** (`capabilities`, from
   the compiled feature set). The Home page shows these as its chips instead of
   a hard-coded list.
+- **Performance comparison with other open-source triplestores.**
+  [`docs/performance-comparison.md`](docs/performance-comparison.md) measures
+  Open Triplestore against upstream Oxigraph 0.5.11, Apache Jena Fuseki 6.2.0,
+  QLever, Virtuoso Open Source 7.2.17 and Eclipse RDF4J 6.1.0 on one machine,
+  one store at a time, each in a 4 GiB / 4-CPU container: BSBM explore at 1k
+  and 10k products, load time, a SPARQL 1.1 feature mix, SHACL validation and
+  1/4/8 concurrent clients, with median/p95 latency, QMpH, peak memory and a
+  per-query result-count cross-check. The harness is `scripts/bench-compare/`
+  (pinned images, fetched BSBM generator, quiet-window and disk checks); the
+  data is in `docs/perf-data/2026-10-03/`. It reports where this store loses —
+  slower than its own engine with the accelerator off, its load path, memory
+  headroom in 4 GiB, correlated `NOT EXISTS` — and links the issues filed for
+  them (#468–#471). Linked from the comparison matrix, `docs/performance.md`
+  and the README; also in the in-app docs viewer.
 
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
@@ -735,6 +825,59 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- With change capture on, a write adjusts the graph-count index by its known
+  delta instead of rescanning the graph; the full-text index, entailment and
+  LDES take the write's own change-log rows instead of rescanning graphs.
+- `CLEAR`, `DROP`, `CREATE` and `LOAD` of a named graph are bounded to that
+  graph: the count index recounts it alone, and the change log records it
+  exactly instead of as a store-wide unknown change.
+- A streamed load of a multi-graph file, with change capture on, records exact
+  rows per graph instead of one store-wide unknown row (which broke every
+  version chain on every boot that seeded such a file).
+- A change log kept from an earlier run stays readable while capture is off,
+  and the next run that records starts a new epoch.
+- Deleting a dataset (or its organisation) deletes its versions.
+- Version operations on one dataset are serialised: two concurrent creates of
+  one label make one version and a `400`. A pipeline's auto-versions and
+  validate-and-commit no longer overwrite a version cut in the same second.
+
+- **The in-memory query accelerator is sized from the memory budget and
+  never builds next to a bulk load** (#469). Its default cap is a quarter of
+  the memory limit at about 1 KiB a triple, with no 2M-triple floor: 1,048,576
+  triples in a 4 GiB container (2M only where no limit can be read). On Linux
+  a build waits until resident memory plus the projected copies fit in 80% of
+  the limit, stops as soon as a write starts, and after a burst of writes to a store over
+  50k triples waits for 5 s of quiet writes (`OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS`).
+  Loading 3.5M triples over the Graph Store protocol into the shipped 4 GiB
+  container was OOM-killed in 2 of 6 attempts because a build ran in the gap
+  between two chunks.
+- **A correlated `EXISTS` / `NOT EXISTS` is answered as a hash semi-join**
+  (#471). The optimizer now orders the pattern inside an `EXISTS` (its joins
+  were cartesian products and its filters stayed on top), and once the outer
+  rows outnumber what one evaluation of the pattern costs, the evaluator
+  evaluates the pattern once and answers every later row with a hash lookup,
+  when the pattern only uses the outer bindings to restrict its own solutions.
+  Vendored `spareval`/`sparopt` changes 10 and 11 (`vendor/README.md`).
+- **SHACL paths over several data graphs** (#467): one quad scan per hop over
+  the merged data graphs instead of one per graph, `sh:class` from a prepared
+  instance set, and path closures memoised per run. Closure values come back
+  sorted by their N-Triples form.
+- **The store comparison re-measured for Open Triplestore**
+  (`docs/performance-comparison.md` §5.8, data in `docs/perf-data/2026-10-13/`):
+  the 2026-10-03 commit and the fixed head built the same way and run back to
+  back, upstream Oxigraph re-run in the same window to cross-check every answer
+  (all agree). BSBM explore at 10k: 5,358 → 16,570 query mixes per hour
+  (Oxigraph 33,719 in the same window); correlated `NOT EXISTS` at 10k: a
+  timeout → 366 ms; no OOM in eight 10k loads into 4 GiB. The other stores'
+  numbers stay those of 2026-10-03. `scripts/bench-compare/Dockerfile.ots`
+  copies `vendor/`, caches `target/` and takes the LTO mode as a build argument.
+- **Per-query overhead** (#468, #527): the shared SPARQL parser is built once
+  and cloned (it was rebuilt with every declared custom aggregate on each
+  parse — six since the GeoSPARQL 1.1 aggregates, about 0.35 µs per query);
+  a default graph made of several graphs streams a pattern's matches without
+  the merge's hash set when only one graph has any; the accelerator's
+  columnar copy is not asked (no parse) while the store is over its cap; the
+  server sets `TCP_NODELAY`.
 - **A refused IDS import answers JSON.** `POST /api/shacl/import/ids` answers
   a document that is not well-formed, fails the IDS 1.0 XSD or fails the IDS
   audit rules with `422 {error, stage, problems}` (`stage`: `xml`, `schema`,
@@ -890,6 +1033,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   literal is ill-typed (JSON-LD 1.1 §10.2), and no JSON-LD download could hold
   it. An RML run that would generate one reports a data error. See
   `docs/datatypes.md`.
+
+- **`geof:getSRID` and `geof:geometryType` return `xsd:anyURI` literals**, as
+  their GeoSPARQL 1.1 signatures give (§10.9.39, §10.9.18), instead of IRIs
+  (#510). `FILTER(geof:getSRID(?g) = <http://…/CRS84>)` no longer matches; compare
+  with `"http://…/CRS84"^^xsd:anyURI`, or with `STR()` on both sides.
+  `geof:transform` takes the result as its target as before.
+- **Lexical forms take no whitespace normalization.** The OWL 2 / RDFS
+  datatype map reads a literal's lexical form as written, as RDF 1.1 does:
+  `" 3 "^^xsd:int`, `" false"^^xsd:boolean` and `" abc "^^xsd:token` are
+  ill-typed (an inconsistency for RDFS and the OWL 2 reasoners), where the
+  XML Schema whitespace facet used to be applied first. `rdf:XMLLiteral`
+  lexical forms are checked: content that is not well-balanced,
+  namespace-well-formed XML (`"<"`) is ill-typed.
+- **A `sh:pattern` the engine cannot evaluate fails the shapes graph.** A
+  pattern that is not a regular expression, or `sh:flags` that SPARQL `REGEX`
+  does not have, used to make every value pass; the shapes graph is now
+  refused at load, naming the shape (422 from a gate).
+- **Rubric sweep of the graded rows (2026-10-06).** Every known failure of the
+  vendored suites is classified under the Full rubric and the rest are filed:
+  #504 (RDF 1.2, waiting on w3c/rdf-xml#97), #505 and #506 (OWL 2 DL test
+  defects and a HermiT limit), #507 and #508 (SHACL test defects), #509
+  (GeoSPARQL DGGS) and #510 (GeoSPARQL `getSRID` / `geometryType` return type,
+  since fixed, above). No grade changed by the sweep.
+  The W3C OWL 2 DL runner takes its per-check budget from
+  `OTS_TEST_W3C_OWL2_TIMEOUT_SECS`.
 
 - **Standards Score recounted once for the second merge train: 26 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
@@ -1932,6 +2100,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- **Braces in `REGEX` and `sh:pattern`.** XPath regular expressions are XML
+  Schema 1.0 ones, where `{` and `}` outside a quantifier are ordinary
+  characters; the engine refused them, so `REGEX(?s, "^({)(.*)(})$")` was an
+  error and the OGC GeoSPARQL validator's S18 shape passed a GML literal given
+  as GeoJSON. Both the SHACL engine and the vendored SPARQL evaluator now
+  escape them before compiling (`vendor/README.md`, change 10); the OGC
+  validator corpus matches its oracle on all 48 examples.
+- `POST /api/datasets/:id/patch` answered `500` to an anonymous caller; it
+  is `401`.
+- Graph Store `GET` as JSON-LD of a graph holding RDF 1.2 triple terms
+  answered `200` and then broke off the body; it is `406` before any byte.
+- A `source` commit read back from the commit trail as `data-model`.
+- Validate-and-commit without a `graph` committed into the dataset's first
+  registered graph, and replaced it — which could be the dataset's
+  property-states graph. It now skips the graphs the server keeps for the
+  dataset's history.
+
+- **A query that timed out kept running** (#468). `/sparql`, the dataset
+  service endpoints and saved queries answered "Query execution timed out"
+  and left the evaluation running on its blocking thread to the end; it is
+  now cancelled at the timeout, or when the client goes away before the first
+  result.
+- **A Graph Store POST held two extra copies of its body** (#469): the body is
+  checked as UTF-8 in place, and a load marks its new quads instead of cloning
+  them.
 - **R2RML: SQL values take their datatype's canonical lexical form.** The
   natural mapping (R2RML §10.2) writes a `DOUBLE` 30 as `"3.0E1"^^xsd:double`,
   a decimal as `1.5` / `2.0`, an integer without a sign or leading zeros, and
@@ -2592,6 +2785,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **The statement-provenance graph is system-managed.** Only the server's
+  change-log consumer writes `urn:ots:statement-provenance:<id>`. SPARQL
+  Update, the Graph Store, RDF Patch and patch-log appends, imports,
+  validate-and-commit, restores and RML/LDES targets refuse it with `403`, for
+  admins too, and no dataset may register it; an admin's variable-graph
+  `DELETE`/`INSERT` skips it. Before, any writer of the dataset could forge or
+  erase its statement history (#533).
 - **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
   DOMPurify up to 3.4.15 could leave event handlers armed in a removed
   subtree, or return markup that runs on reparse, in `IN_PLACE` mode

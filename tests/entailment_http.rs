@@ -55,7 +55,21 @@ fn rows(v: &Value) -> usize {
 
 #[tokio::test]
 async fn dataset_regime_materialises_on_write_and_joins_queries_on_request() {
-    let (state, token) = admin_state();
+    regime_scenario(admin_state()).await;
+}
+
+/// The same with change capture on, where a write's own rows decide whether
+/// the entailment graph is extended (the write only added) or rebuilt.
+#[tokio::test]
+async fn dataset_regime_materialises_from_the_change_log() {
+    use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
+    let store = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD);
+    regime_scenario(admin_state_with_store(store)).await;
+}
+
+async fn regime_scenario((state, token): (open_triplestore::server::AppState, String)) {
     state
         .auth_db
         .create_dataset(

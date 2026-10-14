@@ -64,7 +64,7 @@ its literal is an `rdf:XMLLiteral`, and those wait on an open W3C issue:
 
 | Entries | Gap |
 |---|---|
-| `rdf11/rdf-xml#xml-canon-test001`, `#xml-canon-test002`; `rdf12/rdf-xml/eval#rdf12-xml-an-13`, `#rdf12-xml-an-14` | `rdf:parseType="Literal"`: oxrdfxml keeps the in-scope namespace declarations on the literal's root element (`"<br xmlns:rdf=… xmlns:eg=…></br>"`). The suite expected that form from June 2025 and went back to `"<br></br>"` on 2026-04-20 (rdf-tests d974697, and 7633586 on 2026-05-31 for the RDF 1.2 entries); the canonical form of `rdf:XMLLiteral` is open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened 2026-04-20). |
+| `rdf11/rdf-xml#xml-canon-test001`, `#xml-canon-test002`; `rdf12/rdf-xml/eval#rdf12-xml-an-13`, `#rdf12-xml-an-14` | `rdf:parseType="Literal"`: oxrdfxml keeps the in-scope namespace declarations on the literal's root element (`"<br xmlns:rdf=… xmlns:eg=…></br>"`). The suite expected that form from June 2025 and went back to `"<br></br>"` on 2026-04-20 (rdf-tests d974697, and 7633586 on 2026-05-31 for the RDF 1.2 entries); the canonical form of `rdf:XMLLiteral` is open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened 2026-04-20). Full rubric: (b), tracked in [#504](https://github.com/philipperenzen/open-triplestore/issues/504). |
 
 Until 2026-10-03, 22 more Turtle and TriG entries failed (`bareword_decimal`,
 `bareword_double`, `double_lower_case_e`, `numeric_with_leading_0`,

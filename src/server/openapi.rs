@@ -1696,10 +1696,6 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Get, o("Versions", "Diff two versions", "What changed from `ver` to `other` (another version, or `live` for the current graphs): per-graph `added` / `removed` counts as JSON, or with `?format=rdf-patch` (or `Accept: application/rdf-patch`) an RDF Patch that turns `ver` into `other` — `PD` / `PA` rows for the prefix-table changes when both sides recorded a table, then `D` / `A` quads against the live graph names, blank nodes by the store's ids. A diff to a version has a name-based `H id`, and its `H prev` names the diff from the version cut before `ver` to `ver`, so consecutive diffs chain. Graphs a non-writer may not read are left out.",
             vec![], vec![("200", "JSON counts or `application/rdf-patch`"), ("404", "Dataset or version not found")], false)),
     ]);
-    mount(paths, "/api/datasets/:dataset_id/patch", vec![
-        (M::Post, o("Versions", "Apply an RDF Patch", "Apply an RDF Patch (`application/rdf-patch`) to the dataset, atomically, as one commit: `A` / `D` quads must name a registered graph (triples go to the registered graph `?graph=` names, else 400), the SHACL write gates run over each touched graph's future contents (422 with the report), blank nodes name the store's own nodes, and `PA` / `PD` rows change the dataset's prefix table. Not journaled in the dataset's patch log; append to `…/log` for that. Response: `{applied, id, aborted, transactions, added, removed, graphs}`.",
-            vec![], vec![("200", "Applied (or nothing to apply)"), ("400", "Invalid patch, or a graph the dataset does not hold"), ("401", "Authentication required"), ("403", "Write access required"), ("415", "Not an RDF Patch"), ("422", "A SHACL write gate refused it")], true)),
-    ]);
     mount(paths, "/api/datasets/:dataset_id/prefixes", vec![
         (M::Get, o("Datasets", "Dataset prefix table", "The dataset's own prefixes, `[{label, namespace, updated_by, updated_at}]` by label: part of its data, changed by an applied RDF Patch's `PA` / `PD` rows, recorded with each version and restored with it, and declared by the dataset's Turtle and TriG exports ahead of the prefix registry. The label may be empty (the default prefix `:`).",
             vec![], vec![("200", "The table"), ("404", "Dataset not found")], false)),
@@ -6409,6 +6405,223 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 ),
             ),
         ],
+    );
+    mount(
+        paths,
+        "/api/admin/changes/stats",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log statistics",
+                "Size accounting for the change log and the delta versions built on it: rows and payload bytes per dataset, live builds of delta versions and the quads they hold, checkpoints and deltas per dataset, rows of graphs no dataset holds, store-scoped rows, and the pins and cursors holding retention back, with their owners.",
+                vec![],
+                vec![
+                    ("200", "Statistics"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/versions/sweep",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Sweep orphaned versions",
+                "Purge what deleted datasets and interrupted operations left behind: every version of a dataset that no longer exists (graphs, registry records, change-log pins), version graphs no registry record names, pins of versions the registry no longer holds, and builds of delta versions past their time-to-live.",
+                vec![],
+                vec![
+                    ("200", "`{purged_datasets, orphan_graphs_dropped, pins_released, builds_dropped}`"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "The dataset's change feed",
+                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
+                vec![
+                    qp("since", false, "Return rows with seq above this (default 0)."),
+                    qp("limit", false, "Rows per page, 1-5000 (default 500)."),
+                    qp("wait_ms", false, "Long-poll up to this many milliseconds (at most 30000) when nothing is new."),
+                ],
+                vec![("200", "Rows in commit order"), ("404", "Dataset not found")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/:seq",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "One change as an RDF Patch",
+                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`.",
+                vec![],
+                vec![
+                    ("200", "The patch"),
+                    ("404", "Not a change of this dataset, or not readable"),
+                    ("409", "The row carries no quads (`extent` counts or unknown)"),
+                    ("410", "Retention removed the change"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/:seq/inverse",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "The patch that undoes one change",
+                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch.",
+                vec![],
+                vec![
+                    ("200", "The patch"),
+                    ("404", "Not a change of this dataset, or not readable"),
+                    ("409", "The row carries no quads"),
+                    ("410", "Retention removed the change"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/cursors/:name",
+        vec![
+            (
+                M::Put,
+                ob(
+                    "Versions",
+                    "Set a feed cursor",
+                    "Keep a reader's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("seq", ObjectBuilder::new().schema_type(Type::Integer))
+                            .required("seq"),
+                        json!({ "seq": 42 }),
+                    ),
+                    vec![
+                        ("200", "The cursor"),
+                        ("400", "Invalid name or seq beyond the log"),
+                        ("401", "Authentication required"),
+                        ("403", "Someone else's cursor"),
+                        ("409", "Change capture is off"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Versions",
+                    "Delete a feed cursor",
+                    "Drop a cursor; its owner or an admin.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "Someone else's cursor"),
+                        ("404", "No such cursor"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/settings",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Versions",
+                    "Dataset settings",
+                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, which needs change capture).",
+                    vec![],
+                    vec![("200", "The settings"), ("404", "Dataset not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Put,
+                ob(
+                    "Versions",
+                    "Change dataset settings",
+                    "Set `skolem` and/or `provenance`; a field left out keeps its value. Dataset writers only.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("skolem", ObjectBuilder::new().schema_type(Type::Boolean))
+                            .property("provenance", ObjectBuilder::new().schema_type(Type::String)),
+                        json!({ "provenance": "minimal" }),
+                    ),
+                    vec![
+                        ("200", "The settings"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Dataset not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/patch",
+        vec![(
+            M::Post,
+            ob(
+                "Versions",
+                "Apply an RDF Patch",
+                "Apply an RDF Patch (`application/rdf-patch`) to the dataset, atomically, as one commit recorded in the change log: `A` / `D` quads must name a registered graph (triples go to the registered graph `?graph=` names, else 400), `H base-digest` makes the apply conditional on the set hash of the graphs the rows name (412), the SHACL write gates run over each touched graph's future contents (422 with the report), blank nodes name the store's own nodes, RDF 1.2 triple terms `<<( s p o )>>` are accepted as objects, and `PA` / `PD` rows change the dataset's prefix table. The repair layer's `?if-base-commit=` / `?if-base-sequence=` preconditions apply (409). Not journaled in the dataset's patch log; append to `…/log` for that. Response: `{applied, id, aborted, transactions, added, removed, graphs, seq}` — `added` / `removed` are the net change, `seq` the write's last change-log sequence number when the log recorded it.",
+                vec![],
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/rdf-patch",
+                        ContentBuilder::new()
+                            .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
+                            .example(Some(json!(
+                                "TX .\nD <http://e/s> <http://e/p> \"old\" <urn:g> .\nA <http://e/s> <http://e/p> \"new\" <urn:g> .\nTC ."
+                            )))
+                            .build(),
+                    )
+                    .build(),
+                vec![
+                    ("200", "Applied (or `applied: false` for TA / no rows)"),
+                    ("400", "Invalid patch, or a graph the dataset does not hold"),
+                    ("401", "Authentication required"),
+                    ("403", "Write access required"),
+                    ("409", "An `if-base-*` precondition does not hold"),
+                    ("412", "H base-digest does not match the graphs"),
+                    ("415", "Not an RDF Patch"),
+                    ("422", "A SHACL write gate refused it"),
+                ],
+                true,
+            ),
+        )],
     );
     mount(
         paths,

@@ -30,8 +30,10 @@ const LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 /// A state whose store holds one public and one private graph, each with a
 /// resource whose label mentions "viaduct", plus a live Tantivy index.
 fn state_with_index() -> (AppState, tempfile::TempDir) {
-    let mut state = test_state();
+    state_with_index_over(test_state())
+}
 
+fn state_with_index_over(mut state: AppState) -> (AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     state.text_index = Some(Arc::new(TextIndex::open(dir.path()).unwrap()));
     // The store is written below; the index rebuilds itself from it lazily.
@@ -192,6 +194,102 @@ async fn a_write_is_visible_to_the_next_search() {
     assert!(
         after.contains("http://example.org/new"),
         "a write must be searchable on the next query, got: {after}"
+    );
+}
+
+/// With change capture on, a write maintains the index from its own change
+/// log rows — the documents it added and removed — instead of re-reading the
+/// graph it touched. A literal written behind the index's back (straight
+/// into the underlying store, past the engine) therefore stays unindexed,
+/// which is how the test tells the two apart; a re-read of the graph would
+/// find it.
+#[tokio::test]
+async fn a_write_updates_the_index_from_its_change_log_rows() {
+    use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
+    let store = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD);
+    let (state, _dir) = state_with_index_over(common::test_state_with_store(store));
+    let token = mint_token("u1", "alice", "user");
+    // Graph Store writes take a graph-ACL grant, which an admin holds.
+    state
+        .auth_db
+        .create_user(
+            "adm",
+            "admin",
+            "admin@test.com",
+            "hash",
+            SystemRole::SuperAdmin,
+        )
+        .unwrap();
+    let admin = mint_token("adm", "admin", "super_admin");
+    let search =
+        |word: &str| format!("SELECT ?s WHERE {{\n  (?s ?score) text:search (\"{word}\" 10) .\n}}");
+    // The first search builds the index.
+    let (_, body) = sparql(&state, &search("viaduct"), Some(&token)).await;
+    assert!(body.contains("http://example.org/bridge"), "got: {body}");
+
+    // Behind the index's back: straight into the underlying Oxigraph store,
+    // past the engine's write bracket, so neither the change log nor the
+    // search journal sees it. (A write through the engine reaches the index
+    // on its own now — see `a_store_write_reaches_the_index_without_any_caller_hook`.)
+    {
+        use oxigraph::model::{GraphNameRef, Literal, NamedNodeRef, QuadRef};
+        let ghost = Literal::new_simple_literal("Ghostword");
+        state
+            .store
+            .store()
+            .insert(QuadRef::new(
+                NamedNodeRef::new("http://example.org/ghost").unwrap(),
+                NamedNodeRef::new(LABEL).unwrap(),
+                &ghost,
+                GraphNameRef::NamedNode(NamedNodeRef::new(PUBLIC_GRAPH).unwrap()),
+            ))
+            .unwrap();
+    }
+    let write = |method: &str, uri: String, ct: &str, body: String| {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", ct)
+            .header("authorization", format!("Bearer {admin}"))
+            .body(Body::from(body))
+            .unwrap();
+        test_app(state.clone()).oneshot(req)
+    };
+    let resp = write(
+        "POST",
+        format!("/store?graph={}", common::url_encode(PUBLIC_GRAPH)),
+        "text/turtle",
+        format!("<http://example.org/new> <{LABEL}> \"Drawbridge\" ."),
+    )
+    .await
+    .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let resp = write(
+        "POST",
+        "/sparql".to_string(),
+        "application/sparql-update",
+        format!(
+            "DELETE DATA {{ GRAPH <{PUBLIC_GRAPH}> {{ \
+               <http://example.org/bridge> <{LABEL}> \"Viaduct Riverside\" }} }}"
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let (_, body) = sparql(&state, &search("drawbridge"), Some(&token)).await;
+    assert!(body.contains("http://example.org/new"), "added: {body}");
+    let (_, body) = sparql(&state, &search("riverside"), Some(&token)).await;
+    assert!(
+        !body.contains("http://example.org/bridge"),
+        "removed: {body}"
+    );
+    let (_, body) = sparql(&state, &search("ghostword"), Some(&token)).await;
+    assert!(
+        !body.contains("http://example.org/ghost"),
+        "only the write's own quads were indexed: {body}"
     );
 }
 

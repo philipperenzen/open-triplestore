@@ -500,6 +500,73 @@ impl<'a> RocksDbStorageReader<'a> {
         }
     }
 
+    /// The quads matching the pattern in the RDF merge of `graph_names` (`None`:
+    /// the default graph and every named graph), each triple once, with the
+    /// graph name set to the default graph. Backport of upstream #1920's RocksDB
+    /// path: the per-graph scans are sorted by the same triple order, so they
+    /// are merged and deduplicated by comparing keys, with no hash set.
+    pub fn quads_for_pattern_in_union(
+        &self,
+        subject: Option<&EncodedTerm>,
+        predicate: Option<&EncodedTerm>,
+        object: Option<&EncodedTerm>,
+        graph_names: Option<&[Option<EncodedTerm>]>,
+    ) -> RocksDbMergedDecodingQuadIterator<'a> {
+        let order = TripleOrder::from_pattern(subject, predicate, object);
+        let iters = if let Some(graph_names) = graph_names {
+            graph_names
+                .iter()
+                .map(|graph_name| {
+                    let graph_name = graph_name.as_ref().unwrap_or(&EncodedTerm::DefaultGraph);
+                    self.quads_for_pattern(subject, predicate, object, Some(graph_name))
+                })
+                .collect()
+        } else {
+            vec![
+                self.quads_for_pattern(
+                    subject,
+                    predicate,
+                    object,
+                    Some(&EncodedTerm::DefaultGraph),
+                ),
+                self.quads_for_pattern_in_named_graphs(subject, predicate, object),
+            ]
+        };
+        RocksDbMergedDecodingQuadIterator::new(iters, order)
+    }
+
+    fn quads_for_pattern_in_named_graphs(
+        &self,
+        subject: Option<&EncodedTerm>,
+        predicate: Option<&EncodedTerm>,
+        object: Option<&EncodedTerm>,
+    ) -> RocksDbChainedDecodingQuadIterator<'a> {
+        RocksDbChainedDecodingQuadIterator::new(match subject {
+            Some(subject) => match predicate {
+                Some(predicate) => match object {
+                    Some(object) => {
+                        self.spog_quads(&encode_term_triple(subject, predicate, object))
+                    }
+                    None => self.spog_quads(&encode_term_pair(subject, predicate)),
+                },
+                None => match object {
+                    Some(object) => self.ospg_quads(&encode_term_pair(object, subject)),
+                    None => self.spog_quads(&encode_term(subject)),
+                },
+            },
+            None => match predicate {
+                Some(predicate) => match object {
+                    Some(object) => self.posg_quads(&encode_term_pair(predicate, object)),
+                    None => self.posg_quads(&encode_term(predicate)),
+                },
+                None => match object {
+                    Some(object) => self.ospg_quads(&encode_term(object)),
+                    None => self.spog_quads(&[]),
+                },
+            },
+        })
+    }
+
     pub fn quads(&self) -> RocksDbChainedDecodingQuadIterator<'a> {
         RocksDbChainedDecodingQuadIterator::pair(self.dspo_quads(&[]), self.gspo_quads(&[]))
     }
@@ -881,6 +948,147 @@ impl Iterator for RocksDbChainedDecodingQuadIterator<'_> {
             second.next()
         } else {
             None
+        }
+    }
+}
+
+/// The triple order a scan for a pattern returns its quads in, within one graph
+/// (see [`RocksDbStorageReader::quads_for_pattern_in_union`]).
+#[derive(Clone, Copy)]
+enum TripleOrder {
+    Spo,
+    Pos,
+    Osp,
+}
+
+impl TripleOrder {
+    fn from_pattern(
+        subject: Option<&EncodedTerm>,
+        predicate: Option<&EncodedTerm>,
+        object: Option<&EncodedTerm>,
+    ) -> Self {
+        if subject.is_some() {
+            if predicate.is_none() && object.is_some() {
+                Self::Osp
+            } else {
+                Self::Spo
+            }
+        } else if predicate.is_some() {
+            Self::Pos
+        } else if object.is_some() {
+            Self::Osp
+        } else {
+            Self::Spo
+        }
+    }
+
+    fn key(self, quad: &EncodedQuad) -> Vec<u8> {
+        let mut key = Vec::with_capacity(3 * WRITTEN_TERM_MAX_SIZE);
+        match self {
+            Self::Spo => write_spo_quad(&mut key, quad),
+            Self::Pos => write_pos_quad(&mut key, quad),
+            Self::Osp => write_osp_quad(&mut key, quad),
+        }
+        key
+    }
+}
+
+struct QuadHead {
+    key: Vec<u8>,
+    quad: EncodedQuad,
+}
+
+/// A k-way merge of per-graph scans sorted by the same [`TripleOrder`], each
+/// triple once, in the default graph.
+#[must_use]
+pub struct RocksDbMergedDecodingQuadIterator<'a> {
+    iters: Vec<RocksDbChainedDecodingQuadIterator<'a>>,
+    heads: Vec<Option<QuadHead>>,
+    exhausted: Vec<bool>,
+    /// Set once every scan but one is exhausted: the rest of that scan holds
+    /// no repeat and nothing smaller than what was emitted, so it is streamed
+    /// without keys (the common case of a data graph merged with a small side
+    /// graph the pattern does not match).
+    single: Option<usize>,
+    order: TripleOrder,
+    previous: Option<EncodedQuad>,
+}
+
+impl<'a> RocksDbMergedDecodingQuadIterator<'a> {
+    fn new(iters: Vec<RocksDbChainedDecodingQuadIterator<'a>>, order: TripleOrder) -> Self {
+        let heads = std::iter::repeat_with(|| None).take(iters.len()).collect();
+        let exhausted = vec![false; iters.len()];
+        Self {
+            iters,
+            heads,
+            exhausted,
+            single: None,
+            order,
+            previous: None,
+        }
+    }
+}
+
+impl Iterator for RocksDbMergedDecodingQuadIterator<'_> {
+    type Item = Result<EncodedQuad, StorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // One graph: its scan holds each triple once already.
+        if self.iters.len() == 1 {
+            return self.iters[0].next().map(|quad| {
+                let mut quad = quad?;
+                quad.graph_name = EncodedTerm::DefaultGraph;
+                Ok(quad)
+            });
+        }
+        if let Some(index) = self.single {
+            if self.heads[index].is_none() {
+                return self.iters[index].next().map(|quad| {
+                    let mut quad = quad?;
+                    quad.graph_name = EncodedTerm::DefaultGraph;
+                    Ok(quad)
+                });
+            }
+        }
+        loop {
+            for ((head, iter), exhausted) in self
+                .heads
+                .iter_mut()
+                .zip(&mut self.iters)
+                .zip(&mut self.exhausted)
+            {
+                if head.is_none() && !*exhausted {
+                    if let Some(quad) = iter.next() {
+                        let quad = match quad {
+                            Ok(quad) => quad,
+                            Err(error) => return Some(Err(error)),
+                        };
+                        *head = Some(QuadHead {
+                            key: self.order.key(&quad),
+                            quad,
+                        });
+                    } else {
+                        *exhausted = true;
+                    }
+                }
+            }
+            if self.single.is_none() && self.exhausted.iter().filter(|e| !**e).count() == 1 {
+                self.single = self.exhausted.iter().position(|e| !*e);
+            }
+            let index = self
+                .heads
+                .iter()
+                .enumerate()
+                .filter_map(|(index, head)| Some((index, &head.as_ref()?.key)))
+                .min_by(|(_, a), (_, b)| a.cmp(b))
+                .map(|(index, _)| index)?;
+            let mut quad = self.heads.get_mut(index)?.take()?.quad;
+            quad.graph_name = EncodedTerm::DefaultGraph;
+            if self.previous.as_ref() == Some(&quad) {
+                continue;
+            }
+            self.previous = Some(quad.clone());
+            return Some(Ok(quad));
         }
     }
 }

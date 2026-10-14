@@ -1,0 +1,56 @@
+{
+ "date": "2026-10-13",
+ "datasets": {
+  "1k": {
+   "generator": "BSBM tools 0.2, Generator -fc -pc 1000 -s nt",
+   "triples": 374911,
+   "bytes": 95715671,
+   "sha256": "6f19f6aeba949d0869434b582c8c9ee503b5c7de90b5ec80fae0a1bb0612912f"
+  },
+  "10k": {
+   "generator": "BSBM tools 0.2, Generator -fc -pc 10000 -s nt",
+   "triples": 3564773,
+   "bytes": 919087340,
+   "sha256": "72309dd91f82545d8a379675ff72bebd0aea2dfd9cc61e410ebad539def5c7b5"
+  }
+ },
+ "bsbmtools_zip_sha256": "40f5e59baadec3af0014b7647989d3e0fc0476af25e84a4bc9d7f8cd81520aaa",
+ "query_instances": "bench.py params --seed 20261003 --warmup 20 --mixes 100 --concurrent-mixes 200",
+ "stores": {
+  "ots-before": {
+   "name": "Open Triplestore",
+   "version": "0.7.0",
+   "commit": "570a7a30",
+   "build": "scripts/bench-compare/Dockerfile.ots of the branch head with --build-arg CARGO_PROFILE_RELEASE_LTO=thin (no vendor/ at this commit), rust:1.94-bookworm",
+   "image": "ots-bench:570a7a30-thin (local)",
+   "engine": "oxigraph 0.5.11 (crates.io)"
+  },
+  "ots-after": {
+   "name": "Open Triplestore",
+   "version": "0.7.0",
+   "commit": "9e49fa50 (perf/round3-fixes, on develop 56a44aef)",
+   "build": "scripts/bench-compare/Dockerfile.ots --build-arg CARGO_PROFILE_RELEASE_LTO=thin, rust:1.94-bookworm",
+   "image": "ots-bench:9e49fa50 (local)",
+   "engine": "oxigraph 0.5.11, vendored (vendor/README.md)"
+  },
+  "oxigraph": {
+   "name": "Oxigraph server",
+   "version": "0.5.11",
+   "image": "ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767"
+  }
+ },
+ "client_image": "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+ "limits": {
+  "memory": "4g (memswap 4g)",
+  "cpus": 4,
+  "client_cpus": 2
+ },
+ "commands": [
+  "scripts/bench-compare/fetch.sh $WORK 1000 10000",
+  "docker build -f scripts/bench-compare/Dockerfile.ots -t ots-bench:570a7a30 .",
+  "python3 scripts/bench-compare/campaign.py --data-root $WORK/data --cache $WORK/cache --out $WORK/results/raw --stores ots,oxigraph,fuseki,qlever,virtuoso,rdf4j --scales 1k,10k --ots-image ots-bench:570a7a30 --max-load 6 --poll 180 --max-wait 2700 --require-quiet 10k",
+  "python3 scripts/bench-compare/campaign.py ... --stores ots --scales 1k,10k   (re-run: the first 1k run had no quiet window, the first 10k load was OOM-killed)",
+  "python3 scripts/bench-compare/bench.py report --results $WORK/results/raw --out docs/perf-data/2026-10-03 --stores ots,oxigraph,fuseki,qlever,virtuoso,rdf4j --triples 1k=374911,10k=3564773"
+ ],
+ "note": "Open Triplestore re-measured before and after the round-3 performance fixes, both images built the same way (thin LTO) and run back to back; Oxigraph 0.5.11 re-run in the same window for the per-instance answer cross-check. The other stores were not re-run: their numbers stay those of 2026-10-03. The datasets were regenerated with the same generator in UTC (the generator's dates follow the time zone); their SHA-256 matches 2026-10-03."
+}

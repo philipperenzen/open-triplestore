@@ -814,6 +814,54 @@ OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 OTS_PARALLEL_QUERY_MAX_TRIPLE
   cargo test --release --features full --test scale_shacl_9m -- --nocapture
 ```
 
+##### Validation after a write, a shape update and the write gate (2026-10-01)
+
+The 9M measurement above timed whole-dataset validation. The delta
+versioning note (`docs/notes/delta-versioning-design.md` §8.3) asks for three
+more numbers on the same data, and the change log adds a fourth workload:
+
+1. the whole-dataset **pipeline run** (the Studio path, in-process);
+2. the **write-triggered run** after an edit of a few hundred quads, which
+   revalidates only the nodes the edit touched and merges them into the last
+   report ([shacl.md](shacl.md), "Run on write");
+3. the **shape-update revalidation**: one property shape edited, every
+   target revalidated, because no change log can narrow a change to the
+   shapes;
+4. the **write gate's sandbox** for a 1 000-quad Graph Store `POST` into the
+   instance graph, which copies the whole graph into a temporary store before
+   it validates the merge (`seed_existing_graph`).
+
+They are the second test of `tests/scale_shacl_9m.rs`, run with change
+capture on. At its default size, 20 000 assets, it runs in every suite run
+and asserts what matters at any size: the merged incremental report equals a
+full validation result for result, the shape update finds exactly the
+violations it introduced, and the gate refuses a write into a graph that
+does not conform.
+
+What the suite run printed on the branch (debug build, 20 000 assets, a
+shared machine under heavy load — an ordering, not a benchmark):
+
+| 20 000 assets, ~180 000 quads | seconds |
+|---|--:|
+| pipeline run, whole dataset | 2.08 |
+| full validation, for comparison | 1.96 |
+| write-triggered run after a 104-quad edit | 0.72 |
+| shape update, full revalidation | 2.04 |
+| gate sandbox, 999-quad `POST` | 9.89 |
+
+Two things hold at any size. The shape-update revalidation is a
+whole-dataset run, so at 9M it costs what the 9M table above says (6–14 s),
+inside the threshold that keeps SHACL→SQL deferred. The **write gate's
+sandbox costs about five whole validations**: serialising the graph to
+Turtle and parsing it back dominates the validation it exists for, so the
+lever there is the change log — validate the focus nodes of the merged
+write, as the write trigger does — not a SQL translation. The 9M figures for
+this test have not been taken; the run is:
+
+```bash
+OTS_SCALE_ASSETS=1000000 cargo test --release --features full --test scale_shacl_9m -- --nocapture write_triggered
+```
+
 **Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
 is now one transaction — `clear_graph` plus every parsed quad inserted on
 the same `Transaction`, one commit — so a concurrent reader sees the old
@@ -1174,10 +1222,16 @@ the same quads, so results are identical (a parity suite asserts equality across
 named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP BY`/
 `DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
 The mirror is a derived index: rebuilt lazily after writes and **bounded by a
-triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two engine copies cost
-~2× the dataset in RAM, the columnar copy about 48 bytes a quad on top) so it never
-mirrors a store larger than RAM — above the cap the copies stay off and the persistent store answers, leaving the 1–100M disk tiers
-(data > RAM) unaffected.
+triple-count cap** (a quarter of the memory limit at ~1 KiB a triple — 1M in a 4 GiB
+container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY*`-tunable; the two
+engine copies cost ~2× the dataset in RAM, the columnar copy about 48 bytes a quad on
+top) so it never mirrors a store larger than RAM — above the cap the copies stay off and
+the persistent store answers, leaving the 1–100M disk tiers (data > RAM) unaffected. A
+build waits for writes to stay quiet (5 s after a burst of writes to a store over 50k
+triples), stops as soon
+as a write starts, and on Linux does not start unless the process's resident memory plus
+the copies fit in 80 % of the limit (issue #469: a 3.5M-triple load into 4 GiB was
+OOM-killed in 2 of 6 attempts when a build ran next to it).
 
 Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
 in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):

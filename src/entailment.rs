@@ -142,6 +142,8 @@ fn dataset_options(db: &AuthDb, dataset_id: &str) -> crate::server::routes::Regi
             .ok()
             .flatten()
             .is_some_and(|c| c.eq_ref),
+        // rdfD1 is opt-in per request; a dataset's setting never turns it on.
+        rdfd1: false,
     }
 }
 
@@ -221,8 +223,12 @@ fn materialized_datasets_for(
     )?;
     let mut out: Vec<(String, String)> = Vec::new();
     for g in graphs {
-        // A dataset's own entailment graph is never a trigger.
-        if g.starts_with("urn:entailment:") {
+        // A dataset's own entailment graph is never a trigger, nor is its
+        // statement-provenance graph: annotations are no premise (delta note
+        // §6.3).
+        if g.starts_with("urn:entailment:")
+            || crate::provenance::is_any_statement_provenance_graph(g)
+        {
             continue;
         }
         for row in stmt.query_map(params![g], |r| {
