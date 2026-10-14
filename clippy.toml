@@ -1,0 +1,10 @@
+# reqwest is built with `rustls-no-provider`; a client built before ring is
+# installed as the rustls crypto provider panics. src/http_client.rs installs it.
+# `allow-invalid`: crates without reqwest (or without its blocking client) cannot
+# resolve these paths, which is fine.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "use crate::http_client::client(), which installs the rustls crypto provider first", allow-invalid = true },
+    { path = "reqwest::Client::builder", reason = "use crate::http_client::builder(), which installs the rustls crypto provider first", allow-invalid = true },
+    { path = "reqwest::ClientBuilder::new", reason = "use crate::http_client::builder(), which installs the rustls crypto provider first", allow-invalid = true },
+    { path = "reqwest::blocking::Client::new", reason = "install the rustls crypto provider first (see src/http_client.rs)", allow-invalid = true },
+]

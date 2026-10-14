@@ -394,7 +394,7 @@ pub async fn fetch_idp_metadata(url: &str) -> anyhow::Result<IdpMetadata> {
     if !crate::auth::oidc_rs::is_secure_idp_url(url) {
         anyhow::bail!("the metadata URL must use https (http only for localhost)");
     }
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()?;

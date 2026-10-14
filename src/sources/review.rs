@@ -1048,12 +1048,12 @@ pub async fn promote_run(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/sources/:id/reviews", get(list_source_reviews))
-        .route("/api/reviews/:id", get(get_item))
-        .route("/api/reviews/:id/status", post(set_status))
-        .route("/api/reviews/:id/autofix", post(autofix))
-        .route("/api/reviews/:id/suggest", post(suggest))
-        .route("/api/runs/:id/promote", post(promote_run))
+        .route("/api/sources/{id}/reviews", get(list_source_reviews))
+        .route("/api/reviews/{id}", get(get_item))
+        .route("/api/reviews/{id}/status", post(set_status))
+        .route("/api/reviews/{id}/autofix", post(autofix))
+        .route("/api/reviews/{id}/suggest", post(suggest))
+        .route("/api/runs/{id}/promote", post(promote_run))
 }
 
 #[cfg(test)]

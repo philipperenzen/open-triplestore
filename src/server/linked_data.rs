@@ -26,7 +26,7 @@ use super::AppState;
 
 /// Builds the IRI dereference routes.
 pub fn dereference_routes() -> Router<AppState> {
-    Router::new().route("/resource/*path", get(dereference_handler))
+    Router::new().route("/resource/{*path}", get(dereference_handler))
 }
 
 /// Builds the well-known VoID/DCAT dataset description routes.
@@ -36,7 +36,7 @@ pub fn well_known_routes() -> Router<AppState> {
 
 /// Builds organisation-scoped well-known VoID/DCAT routes.
 pub fn well_known_org_routes() -> Router<AppState> {
-    Router::new().route("/:org_id/.well-known/void", get(org_void_handler))
+    Router::new().route("/{org_id}/.well-known/void", get(org_void_handler))
 }
 
 /// Optional `?format=` query parameter to override Accept header negotiation.

@@ -997,7 +997,9 @@ pub async fn admin_create_saml_key(
     State(state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
-    body: Option<Json<SamlKeyCreate>>,
+    // `Result(..).ok()`, not `Option<Json<_>>`: axum 0.8's optional Json
+    // rejects a JSON content type with an empty body; an absent body is fine.
+    body: Result<Json<SamlKeyCreate>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let provider = match saml_provider_by_id(&state, &id) {
         Ok(p) => p,

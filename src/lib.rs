@@ -51,6 +51,7 @@ pub mod entailment;
 pub mod federation;
 pub mod feedback;
 pub mod geo;
+pub mod http_client;
 pub mod ifc;
 pub mod imports;
 pub mod jsonld;

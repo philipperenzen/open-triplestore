@@ -323,7 +323,7 @@ fn client(purpose: Purpose) -> &'static reqwest::Client {
         OnceLock::new(),
     ];
     CLIENTS[purpose.index()].get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
             .redirect(redirect_policy(purpose))
             .build()

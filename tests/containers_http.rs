@@ -51,7 +51,7 @@ fn sample_icdd() -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         for (name, bytes) in [
             ("Index.rdf", index.as_bytes()),
             (
@@ -86,7 +86,7 @@ fn linkset_icdd(about: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         for (name, bytes) in [
             ("Index.rdf", index.as_bytes()),
             ("Payload triples/links.ttl", links.as_bytes()),
@@ -273,12 +273,12 @@ async fn icdd_container_imports_exports_and_round_trips() {
         "Payload triples/",
     ] {
         assert!(
-            (0..archive.len()).any(|i| archive.by_index(i).unwrap().name() == dir),
+            (0..archive.len()).any(|i| archive.by_index(i).unwrap().name().unwrap() == dir),
             "{dir} folder entry"
         );
     }
     let names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect();
     assert!(names.contains(&"Index.rdf".to_string()), "{names:?}");
     assert!(
@@ -575,7 +575,7 @@ async fn export_hides_private_graphs_from_viewers() {
         let mut all = String::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i).unwrap();
-            all.push_str(f.name());
+            all.push_str(&f.name().unwrap());
             all.push('\n');
             let mut s = String::new();
             f.read_to_string(&mut s).unwrap();
@@ -629,7 +629,7 @@ fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         for (name, bytes) in files {
             if let Some(dir) = name.strip_suffix('/') {
                 w.add_directory(dir, opts).unwrap();
@@ -815,7 +815,7 @@ fn state_with_store(ids: &[&str]) -> (open_triplestore::server::AppState, String
 fn archive_index(zip_bytes: &[u8]) -> (Vec<String>, String) {
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes.to_vec())).unwrap();
     let names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect();
     let mut index = String::new();
     archive
@@ -957,7 +957,7 @@ async fn icdd_validate_endpoint_reports_part1_findings() {
                 let mut f = a.by_index(i).unwrap();
                 let mut b = Vec::new();
                 f.read_to_end(&mut b).unwrap();
-                (f.name().to_string(), b)
+                (f.name().unwrap().to_string(), b)
             })
             .collect()
     };

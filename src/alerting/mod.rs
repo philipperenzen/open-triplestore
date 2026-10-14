@@ -135,7 +135,7 @@ impl AlertManager {
     pub fn new(cfg: AlertConfig, audit: Arc<AuditLogger>) -> Self {
         Self {
             cfg,
-            http: reqwest::Client::new(),
+            http: crate::http_client::client(),
             audit,
         }
     }

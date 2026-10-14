@@ -82,7 +82,7 @@ pub fn management_routes() -> Router<AppState> {
         .route("/api/admin/changes", get(admin_changes))
         .route("/api/admin/changes/status", get(admin_changes_status))
         .route(
-            "/api/admin/changes/cursors/:name",
+            "/api/admin/changes/cursors/{name}",
             put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
         )
         .route(
@@ -92,19 +92,19 @@ pub fn management_routes() -> Router<AppState> {
         // A dataset's change feed: reads, on the SPARQL group's rate tier
         // (delta note §7).
         .route(
-            "/api/datasets/:dataset_id/changes",
+            "/api/datasets/{dataset_id}/changes",
             get(crate::dataset_changes::feed),
         )
         .route(
-            "/api/datasets/:dataset_id/changes/:seq",
+            "/api/datasets/{dataset_id}/changes/{seq}",
             get(crate::dataset_changes::change),
         )
         .route(
-            "/api/datasets/:dataset_id/changes/:seq/inverse",
+            "/api/datasets/{dataset_id}/changes/{seq}/inverse",
             get(crate::dataset_changes::change_inverse),
         )
         .route(
-            "/api/datasets/:dataset_id/settings",
+            "/api/datasets/{dataset_id}/settings",
             get(crate::dataset_settings::get_settings),
         )
         .route("/api/replication/status", get(replication_status))
@@ -9028,7 +9028,9 @@ pub async fn validate_dataset(
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Query(q): Query<ValidateQuery>,
-    body: Option<Json<ValidateBody>>,
+    // `Result(..).ok()`, not `Option<Json<_>>`: axum 0.8's optional Json
+    // rejects a JSON content type with an empty body; an absent body is fine.
+    body: Result<Json<ValidateBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Bound concurrent expensive operations (SHACL validation) — see expensive_semaphore.
     let _permit = state.expensive_semaphore.acquire().await.map_err(|_| {
@@ -9104,6 +9106,7 @@ pub async fn validate_dataset(
     // bound / shapes-role sources.
     let explicit = body
         .as_ref()
+        .ok()
         .and_then(|b| b.shapes_graph.clone())
         .filter(|s| !s.trim().is_empty());
     let shapes_graphs: Vec<String> = if let Some(iri) = explicit {
@@ -10968,20 +10971,20 @@ pub fn reasoning_routes() -> Router<AppState> {
         .route("/api/reasoning/materialize", post(reasoning_materialize))
         .route("/api/reasoning/check", post(reasoning_check))
         .route("/api/reasoning/jobs", get(reasoning_jobs_list))
-        .route("/api/reasoning/jobs/:job_id", get(reasoning_job))
+        .route("/api/reasoning/jobs/{job_id}", get(reasoning_job))
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
         .route("/api/text-search/status", get(text_search_status))
         // Identity policy (owl:sameAs) — per dataset and per organisation.
         .route(
-            "/api/datasets/:dataset_id/identity",
+            "/api/datasets/{dataset_id}/identity",
             get(crate::entailment::get_dataset_identity)
                 .put(crate::entailment::put_dataset_identity)
                 .delete(crate::entailment::delete_dataset_identity),
         )
         .route(
-            "/api/organisations/:org_id/identity",
+            "/api/organisations/{org_id}/identity",
             get(crate::entailment::get_org_identity)
                 .put(crate::entailment::put_org_identity)
                 .delete(crate::entailment::delete_org_identity),
@@ -12007,7 +12010,7 @@ async fn text_search_status(
 pub fn shex_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/datasets/:dataset_id/shex/validate",
+            "/api/datasets/{dataset_id}/shex/validate",
             post(shex_validate),
         )
         .route("/api/shex/validate", post(shex_validate_inline))

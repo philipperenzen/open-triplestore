@@ -147,9 +147,17 @@ async fn overview(State(ctx): State<PluginContext>, headers: HeaderMap) -> Respo
     .into_response()
 }
 
+/// reqwest is built without a rustls crypto provider; install ring (the
+/// provider the host uses) before building a client, or the build panics.
+#[allow(clippy::disallowed_methods)] // the plugin's one client construction
+fn http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
+}
+
 async fn fetch_gateway_usage(base: &str, key: Option<&str>) -> serde_json::Value {
     let url = format!("{base}/v1/usage?group_by=user");
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
     if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
         req = req.bearer_auth(key);

@@ -445,7 +445,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
         let downloaded = block_on_current_runtime(async {
             // Wikimedia's robot policy 403s requests without a descriptive
             // User-Agent — reqwest's default is not accepted.
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .user_agent("open-triplestore-seed/1.0 (https://opentriplestore.org; demo content bootstrap)")
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
@@ -530,7 +530,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             b.label
         );
         let downloaded = block_on_current_runtime(async {
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
             let bytes = client

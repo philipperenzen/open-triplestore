@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use opengraph::hash_join::{HashJoin, Row};
 use std::collections::HashMap;
+use std::hint::black_box;
 
 fn make_rows(n: usize, key_range: usize) -> Vec<Row> {
     (0..n)

@@ -130,7 +130,7 @@ const GATEWAY_HINT: &str =
 fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .connect_timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
             .build()

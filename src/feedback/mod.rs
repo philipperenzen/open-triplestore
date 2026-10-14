@@ -495,7 +495,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/feedback/mine", get(list_my_reports))
         .route("/api/admin/feedback", get(admin_list_reports))
         .route(
-            "/api/admin/feedback/:id",
+            "/api/admin/feedback/{id}",
             patch(admin_update_report).delete(admin_delete_report),
         )
 }

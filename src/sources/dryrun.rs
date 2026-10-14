@@ -763,7 +763,7 @@ pub async fn dry_run(
 }
 
 pub fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route("/api/sources/:id/dry-run", axum::routing::post(dry_run))
+    axum::Router::new().route("/api/sources/{id}/dry-run", axum::routing::post(dry_run))
 }
 
 #[cfg(test)]

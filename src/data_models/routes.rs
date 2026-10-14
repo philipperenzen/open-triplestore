@@ -10,33 +10,39 @@ use crate::server::AppState;
 pub fn data_model_public_routes() -> Router<AppState> {
     Router::new()
         .route("/api/models", get(handlers::list_data_models))
-        .route("/api/models/:id", get(handlers::get_data_model))
-        .route("/api/models/:id/versions", get(handlers::list_versions))
-        .route("/api/models/:id/versions/:ver", get(handlers::get_version))
+        .route("/api/models/{id}", get(handlers::get_data_model))
+        .route("/api/models/{id}/versions", get(handlers::list_versions))
         .route(
-            "/api/models/:id/versions/:ver/data",
+            "/api/models/{id}/versions/{ver}",
+            get(handlers::get_version),
+        )
+        .route(
+            "/api/models/{id}/versions/{ver}/data",
             get(handlers::get_version_data),
         )
         .route(
-            "/api/models/:id/latest/data",
+            "/api/models/{id}/latest/data",
             get(handlers::get_latest_data),
         )
-        .route("/api/models/:id/diff", get(handlers::diff_versions))
+        .route("/api/models/{id}/diff", get(handlers::diff_versions))
         .route(
-            "/api/models/:id/collaborators",
+            "/api/models/{id}/collaborators",
             get(handlers::list_collaborators),
         )
-        .route("/api/models/:id/commits", get(handlers::list_commits))
-        .route("/api/models/:id/dependents", get(handlers::list_dependents))
+        .route("/api/models/{id}/commits", get(handlers::list_commits))
         .route(
-            "/api/models/:id/branches",
+            "/api/models/{id}/dependents",
+            get(handlers::list_dependents),
+        )
+        .route(
+            "/api/models/{id}/branches",
             get(handlers::list_branches).post(handlers::create_branch),
         )
         .route(
-            "/api/models/:id/merge/preview",
+            "/api/models/{id}/merge/preview",
             get(handlers::merge_preview),
         )
-        .route("/api/models/:id/term", get(super::deref::describe_term))
+        .route("/api/models/{id}/term", get(super::deref::describe_term))
         // The version profile reads what `/data` serves, so it is read by
         // whoever may read the entry — anonymously for a public model. It
         // used to sit under the admin-gated sources router, answering 401
@@ -53,49 +59,49 @@ pub fn data_model_auth_routes() -> Router<AppState> {
     Router::new()
         .route("/api/models", post(handlers::create_data_model))
         .route(
-            "/api/models/:id",
+            "/api/models/{id}",
             delete(handlers::delete_data_model).patch(handlers::update_data_model),
         )
-        .route("/api/models/:id/versions", post(handlers::upload_version))
+        .route("/api/models/{id}/versions", post(handlers::upload_version))
         .route(
-            "/api/models/:id/versions/:ver",
+            "/api/models/{id}/versions/{ver}",
             patch(handlers::update_version_notes).delete(handlers::delete_version),
         )
         .route(
-            "/api/models/:id/versions/:ver/data",
+            "/api/models/{id}/versions/{ver}/data",
             patch(handlers::patch_version_data),
         )
         .route(
-            "/api/models/:id/versions/:ver/draft",
+            "/api/models/{id}/versions/{ver}/draft",
             post(handlers::create_draft),
         )
         .route(
-            "/api/models/:id/versions/:ver/rebase",
+            "/api/models/{id}/versions/{ver}/rebase",
             post(handlers::rebase_version),
         )
-        .route("/api/models/:id/merge", post(handlers::merge_apply))
+        .route("/api/models/{id}/merge", post(handlers::merge_apply))
         .route(
-            "/api/models/:id/versions/:ver/stage",
+            "/api/models/{id}/versions/{ver}/stage",
             post(handlers::stage_version),
         )
         .route(
-            "/api/models/:id/versions/:ver/publish",
+            "/api/models/{id}/versions/{ver}/publish",
             post(handlers::publish_version),
         )
         .route(
-            "/api/models/:id/versions/:ver/deprecate",
+            "/api/models/{id}/versions/{ver}/deprecate",
             post(handlers::deprecate_version),
         )
         .route(
-            "/api/models/:id/versions/:ver/subgraph/stage",
+            "/api/models/{id}/versions/{ver}/subgraph/stage",
             post(handlers::stage_sub_graph),
         )
         .route(
-            "/api/models/:id/versions/:ver/subgraph/publish",
+            "/api/models/{id}/versions/{ver}/subgraph/publish",
             post(handlers::publish_sub_graph),
         )
         .route(
-            "/api/models/:id/versions/:ver/subgraph/deprecate",
+            "/api/models/{id}/versions/{ver}/subgraph/deprecate",
             post(handlers::deprecate_sub_graph),
         )
 }

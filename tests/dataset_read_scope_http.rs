@@ -616,7 +616,7 @@ fn zip_contains(bytes: &[u8], needle: &str) -> bool {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("valid zip");
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).unwrap();
-        if f.name().contains(needle) {
+        if f.name().unwrap().contains(needle) {
             return true;
         }
         let mut buf = Vec::new();

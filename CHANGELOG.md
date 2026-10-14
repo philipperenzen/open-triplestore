@@ -1218,6 +1218,24 @@ ignored):
   and SKOS use every triple and OWL 2 DL refuses input outside its profile,
   so they never report `ignored`. See `docs/reasoning.md`.
 
+- **Every dependency is on its latest release** (one consolidated update in
+  place of the Dependabot PRs). Rust majors: axum 0.8, tower_governor 0.8,
+  reqwest 0.13, rusqlite 0.40 (r2d2_sqlite 0.35), tiberius 0.13, utoipa 6,
+  geo 0.33, nom 8, zip 9, parry3d-f64 0.31, tokio-postgres-rustls 0.14,
+  criterion 0.8, lopdf 0.45, kamadak-exif 0.6; frontend: three 0.186,
+  web-ifc 0.0.78, Playwright 1.64 and the rest. `oxiri` stays on 0.2 with the
+  vendored Oxigraph crates (#541) and TypeScript on 6.0 until typescript-eslint
+  supports 7 (#540). What operators notice:
+  - **Outbound HTTPS trusts the operating system's certificate store**
+    (reqwest 0.13's platform verifier) instead of a bundled copy of the
+    Mozilla roots, so a CA installed on the host or in the image (the Docker
+    image ships `ca-certificates`) is honoured for remote SPARQL, JSON-LD
+    contexts, IdP metadata, webhooks and the LLM gateway.
+  - **rustls runs on ring everywhere.** The server installs ring as the
+    process-wide crypto provider at start; the SQL Server connector
+    (tiberius 0.13) moved from rustls 0.21 to 0.23, which retires three
+    rustls-webpki advisories.
+
 - **RML / R2RML and JSON-LD 1.1 are graded Full; the Standards Score is 28
   of 28** (`docs/standards.md` footnotes 9 and 13,
   `docs/triplestore-comparison.md`). Each row had kept one deliberate

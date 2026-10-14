@@ -1312,7 +1312,7 @@ pub fn routes() -> Router<AppState> {
     // `:ver` matches the parameter name the other `/api/models/:id/versions/…`
     // routes use: the router rejects two names for the same path segment.
     Router::new().route(
-        "/api/models/:id/versions/:ver/profile",
+        "/api/models/{id}/versions/{ver}/profile",
         get(get_model_profile),
     )
 }

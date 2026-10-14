@@ -754,10 +754,10 @@ pub async fn close_ticket_handler(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/sources/:id/drift", post(drift))
-        .route("/api/sources/:id/tickets", get(list_source_tickets))
-        .route("/api/tickets/:id", get(get_ticket_handler))
-        .route("/api/tickets/:id/close", post(close_ticket_handler))
+        .route("/api/sources/{id}/drift", post(drift))
+        .route("/api/sources/{id}/tickets", get(list_source_tickets))
+        .route("/api/tickets/{id}", get(get_ticket_handler))
+        .route("/api/tickets/{id}/close", post(close_ticket_handler))
 }
 
 #[cfg(test)]
