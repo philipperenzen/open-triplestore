@@ -413,6 +413,7 @@ as a reference shows the reference.
 | `OTS_SOURCES_ALLOWLIST` | *(unset)* | Endpoints [SQL and SPARQL datasources](sources.md) may reach (also `SERVICE <urn:source:…>`, which uses a registered source's endpoint). |
 | `OTS_JSONLD_CONTEXT_ALLOWLIST` | *(unset)* | Remote JSON-LD `@context` URLs an upload may load ([formats.md](formats.md#json-ld-remote-contexts)); the bundled W3C contexts need no entry. |
 | `OTS_OFFLINE` | `false` (`true` in production) | No download at startup: the LOV corpus (`VOCAB_CORPUS_URL`) and the demo IFC and STL models are not fetched. See [outbound requests](#outbound-requests). |
+| `SEED_IFC_URL` | *(the bundled sample)* | Downloads the headline IFC demo model from this URL instead (at first boot, unless `OTS_OFFLINE`). |
 | `OTS_ICDD_ONTOLOGY_DIR` | *(unset)* | Directory holding ISO's `Container.rdf` and `Linkset.rdf` (download them from <https://standards.iso.org/iso/21597/-1/ed-1/en/>; this project does not ship them). ICDD exports embed both unchanged in `Ontology resources/`; without them an export carries the `ontology-resource-missing` warning and is not ISO 21597-1 Part 1-conformant. See [containers.md](containers.md). |
 | `OTS_JSONLD_CONTEXT_MAX_BYTES` | `1048576` | Largest remote JSON-LD context the document loader reads; a bigger one fails the parse. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
