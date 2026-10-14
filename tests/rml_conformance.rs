@@ -891,6 +891,67 @@ fn r2rml_ill_typed_datatype_override_is_a_data_error() {
     );
 }
 
+// R2RML §10.3: a datatype-override literal's lexical form is the natural RDF
+// lexical form of the value, not the source's own spelling. A REAL 0.25 is
+// "2.5E-1", which xsd:decimal does not accept — a data error; an INTEGER 7
+// typed xsd:decimal is "7", which it does; a DECIMAL 0.25 is "0.25".
+#[test]
+fn r2rml_datatype_override_takes_the_natural_lexical_form() {
+    let ddl = "CREATE TABLE m (id INTEGER PRIMARY KEY, r REAL, i INTEGER, d DECIMAL(10,2));
+               INSERT INTO m VALUES (1, 0.25, 7, 0.25);";
+    let map = |col: &str, dt: &str| {
+        format!(
+            "{PFX}
+             ex:M a rr:TriplesMap ;
+               rr:logicalTable [ rr:tableName \"m\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/m/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:v ;
+                 rr:objectMap [ rr:column \"{col}\" ; rr:datatype {dt} ] ] ."
+        )
+    };
+    let err = relational(ddl, &map("r", "xsd:decimal"), OnDataError::Abort)
+        .err()
+        .expect("a REAL typed xsd:decimal is ill-typed");
+    assert!(
+        err.contains("\"2.5E-1\"") && err.contains("decimal"),
+        "{err}"
+    );
+    let (_, outcome) = relational(ddl, &map("r", "xsd:decimal"), OnDataError::Skip).unwrap();
+    assert_eq!(
+        outcome.data_errors.rows, 1,
+        "skipped and reported, never written"
+    );
+
+    for (col, dt, want) in [
+        (
+            "r",
+            "xsd:double",
+            "\"2.5E-1\"^^<http://www.w3.org/2001/XMLSchema#double>",
+        ),
+        (
+            "i",
+            "xsd:decimal",
+            "\"7\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+        ),
+        (
+            "d",
+            "xsd:decimal",
+            "\"0.25\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+        ),
+        ("r", "xsd:string", "\"2.5E-1\""),
+    ] {
+        let (store, _) = relational(ddl, &map(col, dt), OnDataError::Abort).unwrap();
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT * WHERE {{ GRAPH <urn:run:test> {{ ?s ex:v {want} }} }}")
+            ),
+            1,
+            "{col} as {dt}"
+        );
+    }
+}
+
 // ── Mapping validation (R2RML: a non-conforming mapping is refused) ──
 
 #[test]

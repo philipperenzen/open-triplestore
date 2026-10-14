@@ -33,8 +33,13 @@
 //!   and the result must be isomorphic to the expected document parsed by the
 //!   same processor, both read with the entry's `rdfDirection` option. The
 //!   comparison is at the RDF level, not JSON-LD object equality: the
-//!   serialiser writes every quad as it is (no `@list`, `@json` or
-//!   `@direction` folding), the expected outputs are expanded.
+//!   serialiser streams, so it may write a subject's properties in more than
+//!   one node object, and it does no `@direction` folding (the expected
+//!   outputs are expanded). It does convert well-formed lists to `@list` and
+//!   `rdf:JSON` literals to `@json` values, as the algorithm does — the unit
+//!   tests in `src/jsonld/mod.rs` pin the JSON form. A
+//!   `NegativeEvaluationTest` passes when serialising fails (an invalid JSON
+//!   literal) or the output does not parse back.
 //!
 //! Entries are skipped by design (and counted, never silently) when they test
 //! an option this processor does not offer: JSON-LD 1.0-only behaviour
@@ -55,27 +60,16 @@ use serde_json::Value;
 const ROOT: &str = "tests/fixtures/w3c-jsonld-api";
 const BASE: &str = "https://w3c.github.io/json-ld-api/tests/";
 
-/// Entries that fail, `(section#id, reason)`. Each one is a deliberate
-/// difference of the serialiser (oxjsonld's streaming JSON-LD writer) from
-/// the fromRdf algorithm, kept so that a JSON-LD download returns every quad
-/// the store holds, as written (`docs/conformance/jsonld.md`).
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    (
-        "fromRdf#t0016",
-        "every quad is written as is; fromRdf folds a well-formed list into @list and drops the rdf:type rdf:List quads of its nodes",
-    ),
-    (
-        "fromRdf#tjs08",
-        "an rdf:JSON literal that is not valid JSON is written as a typed literal; fromRdf refuses it (invalid JSON literal)",
-    ),
-    (
-        "fromRdf#tjs09",
-        "an rdf:JSON literal that is not valid JSON is written as a typed literal; fromRdf refuses it (invalid JSON literal)",
-    ),
-];
+/// Entries that fail, `(section#id, reason)`. None: the serialiser follows
+/// the fromRdf algorithm since 2026-10-06 — `@list` conversion that drops the
+/// `rdf:type rdf:List` quads of list nodes (`0016`) and `invalid JSON literal`
+/// for an `rdf:JSON` literal that is not JSON (`js08`, `js09`), which the
+/// store also refuses on every write path (`src/store/literals.rs`). A new
+/// entry needs a reason that the Full rubric of `docs/standards.md` accepts.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// Fewest passing entries across both sections.
-const PASS_FLOOR: usize = 493;
+const PASS_FLOOR: usize = 496;
 
 fn json_ld() -> RdfFormat {
     RdfFormat::JsonLd {

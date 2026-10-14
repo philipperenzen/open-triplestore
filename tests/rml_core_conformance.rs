@@ -18,7 +18,7 @@ use rml_corpus::*;
 
 /// Empirical baseline: 75 pass / 1 known-fail / 0 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("RMLTC0027b-JSON", "rml:UnsafeIRI writes template values unencoded, and the expected output holds <http://example.com/Person/Emily Smith> — an IRI with a space, which RDF does not allow; the store refuses to make it and the run reports a data error"),
+    ("RMLTC0027b-JSON", "test-suite defect (#514): rml:UnsafeIRI writes template values unencoded, and the expected output holds <http://example.com/Person/Emily Smith> — an IRI with a space, which RDF does not allow; the store refuses to make it and the run reports a data error"),
 ];
 
 /// Cases the runner does not run.

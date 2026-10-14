@@ -1,0 +1,15 @@
+# Eclipse RDF4J 6.1.0 server (Eclipse Distribution License 1.0, BSD-3-Clause),
+# Native Store repository created over the REST API by campaign.py.
+name: benchcmp
+services:
+  rdf4j:
+    image: eclipse/rdf4j-workbench:6.1.0-tomcat@sha256:7a18cecfc879f3143b5a57fe31176a0774fa57e5313f639c6f51756f390f7670
+    environment:
+      JAVA_OPTS: "-Xmx3g -Dorg.eclipse.rdf4j.appdata.basedir=/var/rdf4j"
+    volumes: [db:/var/rdf4j, "${BENCH_DATA:?}:/bench:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:8080"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

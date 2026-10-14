@@ -710,6 +710,9 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v18: the capabilities graph follows the 2026-10-06 regrades in
+// docs/standards.md: RML / R2RML (SQL identifiers resolved by SQL's rules) and
+// JSON-LD 1.1 (the fromRdf list and JSON-literal conversions) are Full.
 // v17: SHACL Advanced is Full (validation under sh:entailment, round-2
 // merge train); the other rows are as v16 left them.
 // v16: the capabilities graph follows the second round of 2026-10-03
@@ -752,7 +755,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 17;
+const DEMO_CONTENT_VERSION: u32 = 18;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
