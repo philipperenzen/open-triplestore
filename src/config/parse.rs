@@ -75,6 +75,21 @@ pub fn number(spec: &Spec, raw: &str) -> Result<u64, String> {
     }
 }
 
+/// A ratio setting's value: a decimal in `(min, max]`.
+pub fn ratio(spec: &Spec, raw: &str) -> Result<f64, String> {
+    let Kind::Ratio { min, max } = spec.kind else {
+        return Err(format!("{} is not a ratio setting", spec.name));
+    };
+    let t = raw.trim();
+    let f: f64 = t
+        .parse()
+        .map_err(|_| format!("`{t}` is not a decimal number"))?;
+    if !f.is_finite() || f <= min || f > max {
+        return Err(format!("{t} is outside ({min}, {max}]"));
+    }
+    Ok(f)
+}
+
 /// An absolute `http` or `https` URL.
 pub fn http_url(raw: &str) -> Result<(), String> {
     let u = url::Url::parse(raw.trim()).map_err(|e| format!("`{raw}` is not a URL: {e}"))?;
@@ -92,6 +107,7 @@ pub fn validate(spec: &Spec, raw: &str) -> Result<String, String> {
     match spec.kind {
         Kind::Bool => bool(t).map(|b| b.to_string()),
         Kind::Int { .. } | Kind::Bytes { .. } => number(spec, t).map(|n| n.to_string()),
+        Kind::Ratio { .. } => ratio(spec, t).map(|f| f.to_string()),
         Kind::Enum(choices) => choices
             .iter()
             .find(|c| c.eq_ignore_ascii_case(t))

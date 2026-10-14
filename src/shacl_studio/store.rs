@@ -401,6 +401,18 @@ impl ShaclStudioStore {
     }
 
     /// Pipelines that carry a cron schedule — polled by the scheduler.
+    /// Pipelines that run when their data changes.
+    pub fn list_triggered_pipelines(&self) -> anyhow::Result<Vec<ValidationPipeline>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PIPE_COLS} FROM validation_pipelines WHERE trigger_on_write = 1"
+        ))?;
+        let rows = stmt
+            .query_map([], read_pipeline)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn list_scheduled_pipelines(&self) -> anyhow::Result<Vec<ValidationPipeline>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(

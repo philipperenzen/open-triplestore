@@ -62,19 +62,65 @@ impl SpecImporter for IdsImporter {
         &["application/xml", "text/xml"]
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<ImportedShapes> {
-        let root = parse_xml(bytes)?;
-        let doc = read(&root)
-            .map_err(|e| anyhow::anyhow!("not a valid IDS 1.0 document: {}", e.join("; ")))?;
+        let root = parse_xml(bytes).map_err(|e| IdsRefusal {
+            stage: RefusalStage::Xml,
+            problems: vec![e.to_string()],
+        })?;
+        let doc = read(&root).map_err(|problems| IdsRefusal {
+            stage: RefusalStage::Schema,
+            problems,
+        })?;
         let problems = audit(&doc);
         if !problems.is_empty() {
-            anyhow::bail!(
-                "the IDS fails the IDS audit rules, so no model could satisfy it: {}",
-                problems.join("; ")
-            );
+            return Err(IdsRefusal {
+                stage: RefusalStage::Audit,
+                problems,
+            }
+            .into());
         }
         Ok(convert(&doc))
     }
 }
+
+/// Which check refused an IDS document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RefusalStage {
+    /// Not well-formed XML.
+    Xml,
+    /// Not valid against the IDS 1.0 XSD.
+    Schema,
+    /// Fails the IDS audit rules: no model could satisfy it.
+    Audit,
+}
+
+/// An IDS document the importer refused, with every problem found, so the
+/// caller can list them (the HTTP import answers them as JSON).
+#[derive(Debug, Clone)]
+pub struct IdsRefusal {
+    pub stage: RefusalStage,
+    pub problems: Vec<String>,
+}
+
+impl std::fmt::Display for IdsRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.stage {
+            RefusalStage::Xml => write!(f, "{}", self.problems.join("; ")),
+            RefusalStage::Schema => write!(
+                f,
+                "not a valid IDS 1.0 document: {}",
+                self.problems.join("; ")
+            ),
+            RefusalStage::Audit => write!(
+                f,
+                "the IDS fails the IDS audit rules, so no model could satisfy it: {}",
+                self.problems.join("; ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IdsRefusal {}
 
 // ── XML ─────────────────────────────────────────────────────────────────────
 

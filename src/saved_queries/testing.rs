@@ -59,6 +59,15 @@ pub async fn test_queries_for_new_version(state: &AppState, dataset_id: &str, ne
             return;
         }
     };
+    // A delta's graphs are built on demand: build them for the tests.
+    if let Err(e) = crate::dataset_versions::materialise::ensure_built(state, &version, false).await
+    {
+        tracing::warn!(
+            "saved-query version test: version {new_version} could not be built: {}",
+            e.message()
+        );
+        return;
+    }
     let graph_set: HashSet<String> = version.snapshot_graphs.iter().cloned().collect();
 
     for sq in queries {

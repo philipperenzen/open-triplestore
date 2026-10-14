@@ -1542,6 +1542,9 @@ pub enum AggregateExpression {
         name: AggregateFunction,
         expr: Expression,
         distinct: bool,
+        /// The arguments after `expr` (custom aggregates only), evaluated per
+        /// solution like `expr`.
+        extra_args: Vec<Expression>,
     },
 }
 
@@ -1555,10 +1558,15 @@ impl AggregateExpression {
                 name,
                 expr,
                 distinct,
+                extra_args,
             } => Self::FunctionCall {
                 name: name.clone(),
                 expr: Expression::from_sparql_algebra(expr),
                 distinct: *distinct,
+                extra_args: extra_args
+                    .iter()
+                    .map(Expression::from_sparql_algebra)
+                    .collect(),
             },
         }
     }
@@ -1574,10 +1582,12 @@ impl From<&AggregateExpression> for AlAggregateExpression {
                 name,
                 expr,
                 distinct,
+                extra_args,
             } => Self::FunctionCall {
                 name: name.clone(),
                 expr: expr.into(),
                 distinct: *distinct,
+                extra_args: extra_args.iter().map(Into::into).collect(),
             },
         }
     }

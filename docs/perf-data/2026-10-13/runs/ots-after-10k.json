@@ -1,0 +1,86 @@
+{
+ "store": "ots",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 105.937,
+   "peak_mem_bytes": 1828582326.272,
+   "load_after": [
+    8.5986328125,
+    6.9609375,
+    6.64013671875
+   ],
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "explore": {
+   "seconds": 26.634,
+   "peak_mem_bytes": 1435592818.688,
+   "load_after": [
+    7.5400390625,
+    7.0224609375,
+    6.69482421875
+   ]
+  },
+  "features": {
+   "seconds": 242.128,
+   "peak_mem_bytes": 1437740302.336,
+   "load_after": [
+    4.66162109375,
+    5.51171875,
+    6.078125
+   ]
+  },
+  "concurrent": {
+   "seconds": 203.198,
+   "peak_mem_bytes": 1486058684.416,
+   "load_after": [
+    4.8154296875,
+    5.7822265625,
+    6.10693359375
+   ]
+  },
+  "shacl": {
+   "seconds": 95.86,
+   "peak_mem_bytes": 4150012149.76,
+   "load_after": [
+    5.91259765625,
+    5.9951171875,
+    6.1591796875
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload concurrent --out /out/concurrent.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --clients 1,4,8 --seconds 60 --token <token>",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/ots/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   3.8896484375,
+   5.943359375,
+   6.2890625
+  ],
+  "waited_s": 120,
+  "free_gib": 29.6,
+  "swap": "total = 16384.00M  used = 15711.69M  free = 672.31M  (encrypted)"
+ },
+ "started": "2026-10-13T18:28:48+0200",
+ "db_bytes_after_load": 1945526272,
+ "image": "sha256:cb141250fe88c92b6feb8df2ed886c81812347da93a292a66a5cf64a2df16442 ots-bench:9e49fa50",
+ "finished": "2026-10-13T18:41:04+0200",
+ "load_after": [
+  5.91259765625,
+  5.9951171875,
+  6.1591796875
+ ]
+}

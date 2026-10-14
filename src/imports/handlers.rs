@@ -283,6 +283,8 @@ pub async fn bulk_import(
         // their licence records true and refuses altered copies of content
         // whose licence allows none (IMBOR).
         for g in graphs {
+            // Nor a system-managed statement-provenance graph (#533).
+            crate::provenance::refuse_direct_write(g)?;
             if dataset_graph::graph_held_by_model_registry(&authz_store, &authz_base, g) {
                 return Err(format!(
                     "Target graph <{g}> belongs to the model registry; change models through the \
@@ -497,7 +499,13 @@ pub async fn bulk_import(
 
     let text_state = state.clone();
     let text_outcome = outcome.clone();
+    let skolem = meta
+        .dataset_id
+        .as_deref()
+        .filter(|d| crate::dataset_settings::get(&state.auth_db, d).skolem)
+        .map(|_| state.base_url.to_string());
     let mut result = tokio::task::spawn_blocking(move || {
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
         let gate_ctx = crate::shacl_studio::gate::GateContext {
             main_store: &gate_store,

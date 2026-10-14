@@ -1368,3 +1368,95 @@ async fn sparql_update_protocol_using_parameters() {
     .await;
     assert_eq!(v, strs(&["false"]));
 }
+
+// ── rdf:JSON literals: an ill-typed one is refused on every write ─────────────
+
+/// `rdf:JSON` takes a JSON text (JSON-LD 1.1 §10.2). A literal whose lexical
+/// form is not JSON is ill-typed: no JSON-LD serialiser can write it (W3C
+/// json-ld-api fromRdf js08 / js09), so the store refuses it with a 400 on
+/// every protocol write, and writes nothing of the request.
+#[tokio::test]
+async fn an_ill_typed_json_literal_is_refused_on_every_protocol_write() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let rdf_json = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON";
+    let g = "http://example.org/json-literals";
+    let bad = format!("<http://ex/s> <http://ex/p> \"[{{]\"^^<{rdf_json}> .");
+    let good = format!("<http://ex/s> <http://ex/ok> \"{{\\\"a\\\":[1,2]}}\"^^<{rdf_json}> .");
+
+    let writes: Vec<(Method, String, &str, String)> = vec![
+        (Method::PUT, graph_uri(g), "text/turtle", bad.clone()),
+        (Method::POST, graph_uri(g), "text/turtle", bad.clone()),
+        (
+            Method::POST,
+            "/store?default".to_string(),
+            "application/n-triples",
+            bad.clone(),
+        ),
+        (
+            Method::POST,
+            "/sparql".to_string(),
+            "application/sparql-update",
+            format!("INSERT DATA {{ GRAPH <{g}> {{ {bad} }} }}"),
+        ),
+        (
+            Method::POST,
+            "/sparql".to_string(),
+            "application/sparql-update",
+            format!(
+                "INSERT {{ GRAPH <{g}> {{ <http://ex/s> <http://ex/p> ?o }} }} \
+                 WHERE {{ BIND(STRDT(\"bareword\", <{rdf_json}>) AS ?o) }}"
+            ),
+        ),
+    ];
+    for (method, uri, ct, body) in writes {
+        let (st, text, _) = send(
+            &app,
+            method.clone(),
+            uri.clone(),
+            Some(&token),
+            Some(ct),
+            None,
+            &body,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{method} {uri}: {text}");
+        assert!(text.contains("ill-typed"), "{method} {uri}: {text}");
+    }
+    assert!(
+        matches!(
+            state.store.query(
+                "ASK { { <http://ex/s> ?p ?o } UNION { GRAPH ?g { <http://ex/s> ?p ?o } } }"
+            ),
+            Ok(oxigraph::sparql::QueryResults::Boolean(false))
+        ),
+        "nothing of a refused write may have been stored"
+    );
+
+    // Valid JSON is stored, and the graph downloads as JSON-LD with the value
+    // as a @json value.
+    let (st, text, _) = send(
+        &app,
+        Method::PUT,
+        graph_uri(g),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        &good,
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {text}");
+    let (st, body, _) = send(
+        &app,
+        Method::GET,
+        graph_uri(g),
+        Some(&token),
+        None,
+        Some("application/ld+json"),
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.to_string().contains(r#""@type":"@json""#), "{body}");
+}

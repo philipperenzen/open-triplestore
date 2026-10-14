@@ -13,7 +13,7 @@ The [Data Import](/import) wizard can upload many files in a single request via 
 
 ## Backups
 
-When a backup directory is configured, admins can create, list, and verify backups. A backup is a compressed snapshot of the RDF data and the account database, with a checksum manifest for integrity verification and optional encryption at rest. Endpoints: `GET` / `POST /api/admin/backup` to create and list, and `POST /api/admin/backup/{id}/verify` to verify against the manifest.
+When a backup directory is configured, super admins can create, list, verify and restore backups, from **Admin → Backups & index** or the API. A backup is a compressed snapshot of the RDF data and the account database, with a checksum manifest for integrity verification and optional encryption at rest. Endpoints: `GET` / `POST /api/admin/backup` to list and create, `POST /api/admin/backup/{id}/verify` to verify against the manifest, `GET /api/admin/backup/status` for the configuration, the S3 copy and any staged or last restore, and `POST /api/admin/backup/{id}/restore` / `DELETE /api/admin/backup/restore` to stage a restore for the next start and to withdraw it (see [administration.md](administration.md#backups)).
 
 ## Rate limiting
 

@@ -4,10 +4,14 @@
 //!
 //! Each entry's action is loaded into a fresh store and, for the `RDF` and
 //! `RDFS` regimes, materialized with the RDFS engine (`simple` runs no
-//! rules). A positive / negative entailment test then passes when the
-//! result graph, its blank nodes read as variables, does / does not match
-//! the asserted and derived triples. A result of `false` stands for an
-//! inconsistent action: the RDFS engine must report a datatype clash.
+//! rules), recognizing the entry's `mf:recognizedDatatypes` (the `D` of
+//! D-entailment) and with `rdfD1` on. A positive / negative entailment test
+//! then passes when the result graph, its blank nodes read as variables,
+//! does / does not match the asserted and derived triples, its literals
+//! matched by value as the server's regimes match them
+//! (`reasoning::value_match`; by term under `simple`). A result of `false`
+//! stands for an inconsistent action: the RDFS engine must report a
+//! datatype clash.
 //!
 //! The `RDF` regime runs the RDFS closure too (the engine has no RDF-only
 //! mode), so a negative `RDF` case whose result only RDFS entails fails;
@@ -22,6 +26,7 @@
 
 use open_triplestore::reasoning::common::ReasoningError;
 use open_triplestore::reasoning::rdfs::RdfsMaterializer;
+use open_triplestore::reasoning::value_match;
 use open_triplestore::store::TripleStore;
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::{Graph, NamedNode, NamedOrBlankNode, Term, Triple};
@@ -34,25 +39,10 @@ const TG: &str = "urn:entailment:rdfs";
 
 /// `(entry local name, why)`: cases that fail today. See
 /// docs/conformance/entailment.md.
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("datatypes-non-well-formed-literal-1", "the case recognizes no datatypes; this store always recognizes its datatype map, so the ill-typed xsd:integer literal is an inconsistency here"),
-    ("datatypes-semantic-equivalence-between-datatypes", "D-entailment between equal values of different datatypes (an integer and a decimal) is not materialized by the RDFS engine"),
-    ("datatypes-semantic-equivalence-within-type-1", "D-entailment between value-equal literals of one datatype in different lexical forms: the store keeps literals as written (since 2026-10-03), and the RDFS engine does not materialize the other forms"),
-    ("datatypes-semantic-equivalence-within-type-2", "as datatypes-semantic-equivalence-within-type-1"),
-    ("double-infinity", "as datatypes-semantic-equivalence-within-type-1: value-equal xsd:double forms of infinity"),
-    ("double-round-same", "as datatypes-semantic-equivalence-within-type-1: xsd:double forms that round to the same value"),
-    ("float-infinity", "as datatypes-semantic-equivalence-within-type-1: value-equal xsd:float forms of infinity"),
-    ("float-round-same", "as datatypes-semantic-equivalence-within-type-1: xsd:float forms that round to the same value"),
-    ("literal-type", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
-    ("pfps-10-non-well-formed-literal-1", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
-    ("rdfs-entailment-test001", "the lexical forms of rdf:XMLLiteral are not checked, so an ill-formed one is not reported"),
-    ("xmlsch-02-whitespace-facet-2", "an xsd:int lexical form with whitespace around it is ill-typed in RDF 1.1 but is not reported (whitespace facet not applied)"),
-    ("xmlsch-02-whitespace-facet-3", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
-    ("xmlsch-02-whitespace-facet-4", "an xsd:int lexical form with whitespace around it is ill-typed in RDF 1.1 but is not reported (whitespace facet not applied)"),
-];
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// Pass floor, a little below the current count.
-const PASS_FLOOR: usize = 35;
+const PASS_FLOOR: usize = 49;
 
 #[derive(Debug)]
 struct Entry {
@@ -60,6 +50,8 @@ struct Entry {
     positive: bool,
     regime: String,
     action: String,
+    /// `mf:recognizedDatatypes`.
+    recognized: Vec<String>,
     /// `None` for `mf:result false`.
     result: Option<String>,
 }
@@ -87,6 +79,25 @@ fn parse(path_or_iri: &str) -> Result<Vec<Triple>, String> {
 
 fn object(g: &Graph, s: &NamedOrBlankNode, p: &NamedNode) -> Option<Term> {
     g.object_for_subject_predicate(s, p).map(|o| o.into_owned())
+}
+
+/// The members of the RDF list at `head`.
+fn list(g: &Graph, head: Option<Term>) -> Vec<String> {
+    let (first, rest) = (nn(RDF, "first"), nn(RDF, "rest"));
+    let mut out = Vec::new();
+    let mut cur = head;
+    while let Some(node) = cur {
+        let n = match &node {
+            Term::NamedNode(n) => NamedOrBlankNode::from(n.clone()),
+            Term::BlankNode(b) => NamedOrBlankNode::from(b.clone()),
+            _ => break,
+        };
+        if let Some(Term::NamedNode(m)) = object(g, &n, &first) {
+            out.push(m.as_str().to_string());
+        }
+        cur = object(g, &n, &rest);
+    }
+    out
 }
 
 fn entries() -> Vec<Entry> {
@@ -127,6 +138,7 @@ fn entries() -> Vec<Entry> {
             positive,
             regime: lexical("entailmentRegime"),
             action: lexical("action"),
+            recognized: list(&g, object(&g, &s, &nn(MF, "recognizedDatatypes"))),
             result,
         });
     }
@@ -146,8 +158,13 @@ fn pattern_term(t: &Term) -> String {
     }
 }
 
-/// Whether the asserted and derived triples match `graph`.
-fn entails(store: &TripleStore, graph: &[Triple]) -> Result<bool, String> {
+/// Whether the asserted and derived triples match `graph`; with
+/// `recognized`, literals of those datatypes match by value.
+fn entails(
+    store: &TripleStore,
+    graph: &[Triple],
+    recognized: Option<&[String]>,
+) -> Result<bool, String> {
     let body: String = graph
         .iter()
         .map(|t| {
@@ -160,8 +177,13 @@ fn entails(store: &TripleStore, graph: &[Triple]) -> Result<bool, String> {
             )
         })
         .collect();
+    let ask = format!("ASK {{ {body} }}");
+    let ask = match recognized {
+        Some(d) => value_match::rewrite(&ask, Some(d)).unwrap_or(ask),
+        None => ask,
+    };
     match store
-        .query_over(&format!("ASK {{ {body} }}"), &[TG.to_string()])
+        .query_over(&ask, &[TG.to_string()])
         .map_err(|e| e.to_string())?
     {
         oxigraph::sparql::QueryResults::Boolean(b) => Ok(b),
@@ -178,8 +200,14 @@ fn run(e: &Entry) -> Result<(), String> {
         .load_str(&nt, RdfFormat::NTriples, None)
         .map_err(|e| e.to_string())?;
     let mut inconsistent = false;
-    if e.regime != "simple" {
-        match RdfsMaterializer::with_target(&store, TG).materialize() {
+    let simple = e.regime == "simple";
+    let recognized = (!simple).then_some(e.recognized.as_slice());
+    if !simple {
+        match RdfsMaterializer::with_target(&store, TG)
+            .with_recognized_datatypes(e.recognized.iter().cloned())
+            .with_rdfd1(true)
+            .materialize()
+        {
             Ok(_) => {}
             Err(ReasoningError::Inconsistency { .. }) => inconsistent = true,
             Err(err) => return Err(err.to_string()),
@@ -189,7 +217,7 @@ fn run(e: &Entry) -> Result<(), String> {
     let got = match &e.result {
         None => inconsistent,
         Some(_) if inconsistent => true,
-        Some(result) => entails(&store, &parse(result)?)?,
+        Some(result) => entails(&store, &parse(result)?, recognized)?,
     };
     if got == e.positive {
         Ok(())
@@ -203,7 +231,7 @@ fn run(e: &Entry) -> Result<(), String> {
             let graph = parse(result)?;
             let missing: Vec<String> = graph
                 .iter()
-                .filter(|t| !entails(&store, std::slice::from_ref(*t)).unwrap_or(false))
+                .filter(|t| !entails(&store, std::slice::from_ref(*t), recognized).unwrap_or(false))
                 .take(5)
                 .map(|t| t.to_string())
                 .collect();

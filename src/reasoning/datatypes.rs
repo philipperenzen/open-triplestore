@@ -441,6 +441,12 @@ pub(crate) enum Value {
 /// lexical space of its datatype (an ill-typed literal: OWL 2 makes an
 /// ontology with one inconsistent). A datatype outside [`Dt::ANY`] gives
 /// [`Value::Other`].
+///
+/// Lexical spaces are XSD 1.1's, taken as RDF 1.1 takes them (RDF 1.1
+/// Concepts §5.3): no whitespace normalization comes first, so `" 3 "` is no
+/// `xsd:int` and `" a "` no `xsd:token` (the W3C RDF 1.1 Semantics cases
+/// `xmlsch-02-whitespace-facet-*`). The `whiteSpace` facet is an XML Schema
+/// processor's step before validation, which an RDF literal never takes.
 pub(crate) fn value_of(lexical: &str, datatype: &str, lang: Option<&str>) -> Option<Value> {
     if let Some(lang) = lang {
         return Some(Value::LangStr(
@@ -466,7 +472,12 @@ pub(crate) fn value_of(lexical: &str, datatype: &str, lang: Option<&str>) -> Opt
                 Value::LangStr(text.to_string(), lang.to_ascii_lowercase())
             }
         }
-        Dt::XmlLiteral => Value::Xml(lexical.to_string()),
+        Dt::XmlLiteral => {
+            if !is_xml_content(lexical) {
+                return None;
+            }
+            Value::Xml(lexical.to_string())
+        }
         Dt::Rational => Value::Number(rational(lexical)?),
         Dt::Decimal => Value::Number(decimal(lexical, true)?),
         Dt::Integer
@@ -492,9 +503,18 @@ pub(crate) fn value_of(lexical: &str, datatype: &str, lang: Option<&str>) -> Opt
         Dt::Float => Value::Float(float_bits(lexical)?),
         Dt::Boolean => Value::Boolean(boolean(lexical)?),
         Dt::String => Value::Str(lexical.to_string()),
-        Dt::NormalizedString => Value::Str(lexical.replace(['\t', '\n', '\r'], " ")),
+        Dt::NormalizedString => {
+            if lexical.contains(['\t', '\n', '\r']) {
+                return None;
+            }
+            Value::Str(lexical.to_string())
+        }
         Dt::Token | Dt::Name | Dt::NcName | Dt::NmToken | Dt::Language => {
-            let s = collapse(lexical);
+            // The lexical space holds the collapsed strings only.
+            if collapse(lexical) != lexical {
+                return None;
+            }
+            let s = lexical.to_string();
             let ok = match dt {
                 Dt::Token => true,
                 Dt::NmToken => is_nmtoken(&s),
@@ -507,7 +527,7 @@ pub(crate) fn value_of(lexical: &str, datatype: &str, lang: Option<&str>) -> Opt
             }
             Value::Str(s)
         }
-        Dt::HexBinary => Value::Hex(hex::decode(lexical.trim()).ok()?),
+        Dt::HexBinary => Value::Hex(hex::decode(lexical).ok()?),
         Dt::Base64Binary => {
             use base64::Engine;
             let s: String = lexical.chars().filter(|c| !c.is_whitespace()).collect();
@@ -974,8 +994,89 @@ fn int_in_range(n: &str, (min, max): (Option<i128>, Option<i128>)) -> bool {
     }
 }
 
-fn is_xsd_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r')
+/// Whether `s` is in the lexical space of `rdf:XMLLiteral` (RDF 1.1
+/// Concepts §5.1): well-balanced, self-contained XML content that, between
+/// a start and an end tag, makes a document that is namespace-well-formed —
+/// every element and attribute prefix declared, every entity reference one
+/// of XML's five or a character reference to an XML character, and no
+/// document type declaration or XML declaration inside.
+fn is_xml_content(s: &str) -> bool {
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+    const WRAPPER: &str = "ots-xml-literal";
+    enum Kind {
+        Start,
+        Other,
+    }
+    let doc = format!("<{WRAPPER}>{s}</{WRAPPER}>");
+    let mut reader = quick_xml::reader::NsReader::from_str(&doc);
+    reader.config_mut().check_end_names = true;
+    reader.config_mut().check_comments = true;
+    let mut depth = 0usize;
+    let mut closed = false;
+    loop {
+        let (ns, event) = match reader.read_resolved_event() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if matches!(ns, ResolveResult::Unknown(_)) {
+            return false;
+        }
+        // The wrapper closed early: whatever follows is a second root.
+        if closed && !matches!(event, Event::Eof) {
+            return false;
+        }
+        let event_kind = match &event {
+            Event::Start(_) => Kind::Start,
+            _ => Kind::Other,
+        };
+        match event {
+            Event::Start(e) | Event::Empty(e) => {
+                for attr in e.attributes() {
+                    let Ok(attr) = attr else { return false };
+                    if matches!(
+                        reader.resolver().resolve_attribute(attr.key).0,
+                        ResolveResult::Unknown(_)
+                    ) || attr
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                if matches!(event_kind, Kind::Start) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    closed = true;
+                }
+            }
+            Event::GeneralRef(r) => {
+                let ok = match r.resolve_char_ref() {
+                    Ok(Some(c)) => is_xml_char(c),
+                    Ok(None) => matches!(
+                        AsRef::<str>::as_ref(&r),
+                        "lt" | "gt" | "amp" | "apos" | "quot"
+                    ),
+                    Err(_) => false,
+                };
+                if !ok {
+                    return false;
+                }
+            }
+            Event::Text(_) | Event::CData(_) | Event::Comment(_) | Event::PI(_) => {}
+            Event::Decl(_) | Event::DocType(_) => return false,
+            Event::Eof => return closed,
+        }
+    }
+}
+
+/// An XML 1.0 `Char`.
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 /// XSD whitespace `collapse`.
@@ -1015,7 +1116,7 @@ fn is_language(s: &str) -> bool {
 
 /// An `xsd:boolean` lexical form.
 fn boolean(lexical: &str) -> Option<bool> {
-    match lexical.trim_matches(is_xsd_space) {
+    match lexical {
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
         _ => None,
@@ -1034,7 +1135,7 @@ enum FloatLex<'a> {
 }
 
 fn float_lexical(lexical: &str) -> Option<FloatLex<'_>> {
-    let s = lexical.trim_matches(is_xsd_space);
+    let s = lexical;
     match s {
         "INF" | "+INF" => return Some(FloatLex::Inf { negative: false }),
         "-INF" => return Some(FloatLex::Inf { negative: true }),
@@ -1109,7 +1210,7 @@ fn float_bits(lexical: &str) -> Option<u32> {
 /// Canonical form of an `xsd:decimal` (or, without `allow_point`, an
 /// `xsd:integer`) lexical form.
 fn decimal(lexical: &str, allow_point: bool) -> Option<String> {
-    let s = lexical.trim();
+    let s = lexical;
     let (neg, body) = match s.as_bytes().first()? {
         b'-' => (true, &s[1..]),
         b'+' => (false, &s[1..]),
@@ -1143,7 +1244,7 @@ fn decimal(lexical: &str, allow_point: bool) -> Option<String> {
 /// Canonical form of an `owl:rational` lexical form `n/d`: the decimal when
 /// the reduced fraction has one, else the reduced `n/d`.
 fn rational(lexical: &str) -> Option<String> {
-    let (n, d) = lexical.trim().split_once('/')?;
+    let (n, d) = lexical.split_once('/')?;
     let n = decimal(n, false)?;
     let d = decimal(d, false)?;
     if d.starts_with('-') || d == "0" {
@@ -1195,7 +1296,11 @@ fn gcd(mut a: u128, mut b: u128) -> u128 {
 
 /// An `xsd:dateTime`: zoned values are normalized to UTC.
 fn date_time(lexical: &str) -> Option<Value> {
-    let s = lexical.trim();
+    // No lexical form holds whitespace (chrono would skip some).
+    if lexical.contains(char::is_whitespace) {
+        return None;
+    }
+    let s = lexical;
     // Split off the zone: `Z`, or `±hh:mm` after the time part.
     let (local, offset_min) = if let Some(rest) = s.strip_suffix('Z') {
         (rest, Some(0i64))
@@ -1293,7 +1398,7 @@ mod tests {
 
     #[test]
     fn strings_and_their_subtypes() {
-        assert_eq!(v("abc", "string"), v(" abc ", "token"));
+        assert_eq!(v("abc", "string"), v("abc", "token"));
         let dts = datatypes_of(&v("abc", "string").unwrap());
         for d in [Dt::Token, Dt::Name, Dt::NcName, Dt::NmToken] {
             assert!(dts.contains(&d), "{d:?}");
@@ -1373,7 +1478,7 @@ mod tests {
     fn value_keys_cross_lexical_forms() {
         let same = |a: Literal, b: Literal| value_key(&a) == value_key(&b);
         assert!(same(lit("1", "integer"), lit("1.0", "decimal")));
-        assert!(same(lit("abc", "string"), lit(" abc ", "token")));
+        assert!(same(lit("abc", "string"), lit("abc", "token")));
         assert!(!same(lit("1", "integer"), lit("1", "string")));
         assert!(!same(lit("1", "integer"), lit("1.0E0", "double")));
         assert!(same(lit("x", "integer"), lit("x", "integer")));
@@ -1585,7 +1690,7 @@ mod tests {
     #[test]
     fn floating_point_lexical_forms() {
         assert_eq!(v("1.5E0", "double"), Some(Value::Double(1.5f64.to_bits())));
-        assert_eq!(v(" 15e-1 ", "double"), v("1.5", "double"));
+        assert_eq!(v("15e-1", "double"), v("1.5", "double"));
         assert_eq!(v("1.", "double"), v("1", "double"));
         assert_eq!(v(".5", "double"), v("0.5", "double"));
         assert_eq!(v("+1.5E+0", "double"), v("1.5", "double"));
@@ -1629,11 +1734,76 @@ mod tests {
         assert_ne!(d, val("1", "integer"));
     }
 
+    /// RDF 1.1 applies no whitespace normalization: surrounding or
+    /// uncollapsed whitespace is outside the lexical space (W3C RDF 1.1
+    /// Semantics `xmlsch-02-whitespace-facet-2`).
+    #[test]
+    fn whitespace_is_outside_the_lexical_spaces() {
+        for (lex, dt) in [
+            (" 3 ", "int"),
+            ("3 ", "integer"),
+            (" 1.5", "decimal"),
+            (" 15e-1 ", "double"),
+            ("1.5\n", "float"),
+            (" false\n", "boolean"),
+            (" 2020-01-01T00:00:00Z", "dateTime"),
+            (" 0A", "hexBinary"),
+            (" abc ", "token"),
+            ("a  b", "token"),
+            (" en-GB ", "language"),
+            ("a\tb", "normalizedString"),
+        ] {
+            assert!(v(lex, dt).is_none(), "{lex:?}^^{dt}");
+        }
+        assert!(v("a b", "token").is_some());
+        assert!(v(" a b ", "string").is_some());
+    }
+
+    /// `rdf:XMLLiteral` holds well-balanced, namespace-well-formed XML
+    /// content (W3C RDF 1.1 Semantics `rdfs-entailment-test001`).
+    #[test]
+    fn xml_literal_lexical_space() {
+        let xml = |s: &str| {
+            value_of(
+                s,
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+                None,
+            )
+        };
+        for good in [
+            "",
+            "text only",
+            "<br/>",
+            "<a b=\"1\">x &amp; y &#169;</a><c/>",
+            "<p:a xmlns:p=\"http://example.org/\">x</p:a>",
+            "<!-- c --><?pi x?><![CDATA[<raw>]]>",
+            "<a xml:lang=\"en\">x</a>",
+        ] {
+            assert!(xml(good).is_some(), "{good:?}");
+        }
+        for bad in [
+            "<",
+            "<a>",
+            "</a>",
+            "<a></b>",
+            "<p:a>x</p:a>",
+            "<a p:b=\"1\"/>",
+            "x &nbsp; y",
+            "&#0;",
+            "a & b",
+            "<a b=\"1\" b=\"2\"/>",
+            "<?xml version=\"1.0\"?><a/>",
+            "<!DOCTYPE a><a/>",
+        ] {
+            assert!(xml(bad).is_none(), "{bad:?}");
+        }
+    }
+
     #[test]
     fn boolean_lexical_forms() {
         assert_eq!(v("true", "boolean"), Some(Value::Boolean(true)));
         assert_eq!(v("1", "boolean"), Some(Value::Boolean(true)));
-        assert_eq!(v(" false\n", "boolean"), Some(Value::Boolean(false)));
+        assert_eq!(v("false", "boolean"), Some(Value::Boolean(false)));
         assert_eq!(v("0", "boolean"), Some(Value::Boolean(false)));
         for bad in ["TRUE", "yes", "", "01", "t"] {
             assert!(v(bad, "boolean").is_none(), "{bad:?}");
@@ -1659,7 +1829,7 @@ mod tests {
         assert!(!is_lang(" en"));
         assert!(!is_lang(""));
         assert!(!is_lang("en-"));
-        assert!(datatypes_of(&val(" en-GB ", "language")).contains(&Dt::Language));
+        assert!(datatypes_of(&val("en-GB", "language")).contains(&Dt::Language));
         assert_eq!(
             in_value_space(&val("en", "string"), Dt::Language),
             Some(true)

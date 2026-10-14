@@ -568,24 +568,16 @@ async fn deleting_a_version_drops_a_shared_validation_graph_once() {
     let ds = dataset_with_graph(&state, &app, &token).await;
     let base = state.base_url.as_str();
     let validation = bindings::version_validation_graph(base, &ds, "0.9.0");
-    let legacy = DatasetVersion {
-        dataset_id: ds.clone(),
-        version: "0.9.0".into(),
-        status: VersionStatus::Draft,
-        graph_iri: format!("{base}/dataset/{ds}/version/0.9.0"),
-        snapshot_graphs: vec![validation.clone()],
-        source_map: vec![GraphMapping {
-            snapshot_graph: validation.clone(),
-            source_graph: VG.into(),
-        }],
-        created_at: "2026-01-01T00:00:00Z".into(),
-        created_by: None,
-        derived_from: None,
-        notes: None,
-        branch: None,
-        conforms_to_model: None,
-        conforms_to_version: None,
-    };
+    let legacy = DatasetVersion::checkpoint(
+        &ds,
+        "0.9.0",
+        VersionStatus::Draft,
+        format!("{base}/dataset/{ds}/version/0.9.0"),
+        vec![GraphMapping::new(validation.clone(), VG.to_string())],
+        None,
+        None,
+        None,
+    );
     registry::insert_version(&state.store, base, &legacy).unwrap();
 
     let (st, v, txt) = req(

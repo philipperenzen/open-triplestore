@@ -524,6 +524,132 @@ impl fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
+/// How a dialect resolves an SQL identifier a mapping writes against the
+/// names its catalogue reports.
+///
+/// R2RML §5 takes column and table names from SQL 2008: a *regular*
+/// identifier (`Name`) is case-insensitive and stands for its upper-case
+/// form, a *delimited* one (`"Name"`) is exactly its text, and identifiers
+/// are compared by SQL's rules. Engines differ where they depart from SQL
+/// 2008, and a processor follows the engine it talks to (R2RML §3): the fold
+/// says what a regular identifier becomes, the comparison how a folded or
+/// delimited name meets a catalogue name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentifierRules {
+    /// What a regular identifier folds to.
+    pub fold: IdentifierFold,
+    /// How a name meets a catalogue name once folded.
+    pub compare: IdentifierCompare,
+    /// Whether names are SQL identifiers at all. A source that is not SQL
+    /// (a virtual SPARQL source) takes every name verbatim.
+    pub sql: bool,
+}
+
+/// What a regular (unquoted) identifier folds to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierFold {
+    /// SQL 2008: upper case.
+    Upper,
+    /// PostgreSQL: lower case — and, as SQL 2008 has it, upper case. A
+    /// mapping is written to R2RML's rules, under which `SPORTCOUNT` names a
+    /// column `"SPORTCOUNT"`; PostgreSQL's own fold to lower case is the
+    /// departure it needs on that engine (R2RML §3), so a regular identifier
+    /// names the column either form matches, PostgreSQL's first.
+    Lower,
+    /// Kept as written: the engine compares without regard to case, or keeps
+    /// case as written (SQL Server with a case-sensitive collation).
+    Preserve,
+}
+
+/// How a (folded or delimited) name meets a catalogue name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierCompare {
+    /// Code point for code point.
+    Exact,
+    /// Without regard to the case of ASCII letters only (SQLite).
+    AsciiCaseInsensitive,
+    /// Without regard to case (MySQL / MariaDB column names, SQL Server under
+    /// a case-insensitive collation).
+    CaseInsensitive,
+}
+
+impl IdentifierRules {
+    /// Core SQL 2008, which R2RML is defined against.
+    pub const SQL_2008: Self = Self {
+        fold: IdentifierFold::Upper,
+        compare: IdentifierCompare::Exact,
+        sql: true,
+    };
+    /// PostgreSQL: unquoted names fold to lower case (and SQL 2008's upper
+    /// case is honoured too, see [`IdentifierFold::Lower`]); names compare
+    /// exactly.
+    pub const POSTGRESQL: Self = Self {
+        fold: IdentifierFold::Lower,
+        compare: IdentifierCompare::Exact,
+        sql: true,
+    };
+    /// SQLite: every identifier, delimited or not, compares without regard
+    /// to the case of ASCII letters.
+    pub const SQLITE: Self = Self {
+        fold: IdentifierFold::Preserve,
+        compare: IdentifierCompare::AsciiCaseInsensitive,
+        sql: true,
+    };
+    /// Engines whose identifiers compare without regard to case (MySQL
+    /// column names, SQL Server under a case-insensitive collation).
+    pub const CASE_INSENSITIVE: Self = Self {
+        fold: IdentifierFold::Preserve,
+        compare: IdentifierCompare::CaseInsensitive,
+        sql: true,
+    };
+    /// Identifiers kept and compared as written (SQL Server under a
+    /// case-sensitive collation).
+    pub const CASE_SENSITIVE: Self = Self {
+        fold: IdentifierFold::Preserve,
+        compare: IdentifierCompare::Exact,
+        sql: true,
+    };
+    /// Not SQL: names are taken verbatim.
+    pub const VERBATIM: Self = Self {
+        fold: IdentifierFold::Preserve,
+        compare: IdentifierCompare::Exact,
+        sql: false,
+    };
+
+    /// The names a regular identifier may stand for, the engine's own first.
+    pub fn regular_names(&self, regular: &str) -> Vec<String> {
+        let mut names = vec![self.fold_regular(regular)];
+        if self.fold == IdentifierFold::Lower {
+            let upper = regular.to_uppercase();
+            if upper != names[0] {
+                names.push(upper);
+            }
+        }
+        names
+    }
+
+    /// The name a regular identifier stands for on this engine.
+    pub fn fold_regular(&self, regular: &str) -> String {
+        match self.fold {
+            IdentifierFold::Upper => regular.to_uppercase(),
+            IdentifierFold::Lower => regular.to_lowercase(),
+            IdentifierFold::Preserve => regular.to_string(),
+        }
+    }
+
+    /// Whether `name` (folded, or a delimited identifier's text) names the
+    /// catalogue's `catalogue_name`.
+    pub fn same(&self, name: &str, catalogue_name: &str) -> bool {
+        match self.compare {
+            IdentifierCompare::Exact => name == catalogue_name,
+            IdentifierCompare::AsciiCaseInsensitive => name.eq_ignore_ascii_case(catalogue_name),
+            IdentifierCompare::CaseInsensitive => {
+                name == catalogue_name || name.to_lowercase() == catalogue_name.to_lowercase()
+            }
+        }
+    }
+}
+
 /// The sink `stream` delivers batches to. Returning `Err` stops the stream.
 pub type BatchSink<'a> = &'a mut dyn FnMut(Vec<Row>) -> Result<(), SourceError>;
 
@@ -604,6 +730,14 @@ pub trait SourceConnection: Send {
     /// The server's version string, when the dialect reports one.
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {
         Ok(None)
+    }
+
+    /// How this connection resolves the identifiers a mapping writes
+    /// ([`IdentifierRules`]). The default is SQL 2008; a connector whose
+    /// engine departs from it says so, and may ask the server (a collation
+    /// decides it on SQL Server).
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::SQL_2008)
     }
 
     /// Profile `table`: its structure, plus aggregates over its values.

@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use ots_plugin_api::sources::{
-    BatchSink, ColumnInfo, ConnectParams, Row, SecretString, SourceConnection, SourceConnector,
-    SourceError, TableInfo, TableKind, Value, ValueKind,
+    BatchSink, ColumnInfo, ConnectParams, IdentifierRules, Row, SecretString, SourceConnection,
+    SourceConnector, SourceError, TableInfo, TableKind, Value, ValueKind,
 };
 use oxigraph::io::RdfFormat;
 use serde_json::Value as Json;
@@ -698,6 +698,12 @@ impl SourceConnection for SparqlConnection {
 
     fn unique_keys(&mut self, _table: &str) -> Result<Vec<Vec<String>>, SourceError> {
         Ok(vec![vec![SUBJECT_COLUMN.to_string()]])
+    }
+
+    /// Not SQL: a column is a variable of the source's own query, named as
+    /// written.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::VERBATIM)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

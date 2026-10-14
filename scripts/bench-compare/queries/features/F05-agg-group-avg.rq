@@ -1,0 +1,10 @@
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+PREFIX inst: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rev: <http://purl.org/stuff/rev#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX country: <http://downlode.org/rdf/iso-3166/countries#>
+# Aggregate: offers and average price per vendor country
+SELECT ?country (COUNT(?offer) AS ?offers) (AVG(xsd:double(str(?price))) AS ?avgPrice) WHERE { ?offer bsbm:vendor ?vendor ; bsbm:price ?price . ?vendor bsbm:country ?country } GROUP BY ?country

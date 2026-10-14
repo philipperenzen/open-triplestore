@@ -405,7 +405,10 @@ fn dataset_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, Api
         .list_dataset_graphs(dataset_id)
         .map_err(e500)?
         .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| {
+            !g.starts_with("urn:system:reports:")
+                && !crate::provenance::is_any_statement_provenance_graph(g)
+        })
         .collect())
 }
 

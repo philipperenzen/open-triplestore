@@ -217,9 +217,12 @@ async function requestRaw(method, path, body, contentType) {
     }
   }
   if (!res.ok) {
-    const msg = await extractErrorMessage(res);
-    const err = new ApiError(msg);
+    // The structured body too: an RDF Patch refused by a SHACL write gate
+    // answers 422 with the report, which the caller shows.
+    const { message, body: errorBody } = await extractError(res);
+    const err = new ApiError(message);
     err.status = res.status;
+    err.body = errorBody;
     throw err;
   }
   const ct = res.headers.get('content-type') || '';
@@ -2053,3 +2056,506 @@ export const setIdentityPolicy = (scope: IdentityScope, id: string, policy: Iden
 /** Drop the resource's own setting: back to the organisation's or the default. */
 export const clearIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
   request('DELETE', identityPath(scope, id));
+
+
+// ─── Uploads with progress ───────────────────────────────────────────────────
+// XMLHttpRequest, not fetch, because only XHR reports upload progress. Same
+// auth as uploadAsset (the HttpOnly cookie, plus the in-memory bearer token
+// when there is one). A non-2xx answer rejects with an ApiError carrying the
+// parsed JSON body, so a caller can show a refusal's report (a strict
+// container import's `validation`, say) and not just its sentence.
+export function xhrSend(
+  method: string,
+  path: string,
+  body: XMLHttpRequestBodyInit,
+  opts: { contentType?: string; onProgress?: (fraction: number) => void } = {},
+): Promise<any> {
+  const token = getAccessToken();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, withBase(path));
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
+    if (opts.onProgress) {
+      const report = opts.onProgress;
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && e.total > 0) report(e.loaded / e.total);
+      });
+    }
+    xhr.onload = () => {
+      let parsed: any = null;
+      try { parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed ?? xhr.responseText);
+        return;
+      }
+      const msg = (parsed && (parsed.message || parsed.error || parsed.detail))
+        || xhr.responseText?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        || xhr.statusText
+        || 'Request failed';
+      const err = new ApiError(msg);
+      err.status = xhr.status;
+      err.body = parsed;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.send(body);
+  });
+}
+
+// ─── Linked Data Event Streams ───────────────────────────────────────────────
+export interface LdesRetention {
+  full_log_duration?: string;
+  version_amount?: number;
+  version_duration?: string;
+  version_delete_duration?: string;
+  starting_from?: string;
+}
+export interface LdesConfig {
+  dataset_id: string;
+  enabled: boolean;
+  configured: boolean;
+  page_size: number;
+  polling_interval: number;
+  retention: LdesRetention | null;
+  members: number;
+  sealed_nodes: number;
+  created_at: string | null;
+  stream: string;
+  can_write: boolean;
+}
+export const getLdesConfig = (datasetId: string): Promise<LdesConfig> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/ldes/config`);
+/** Enable or disable the stream; `retention: {}` clears the policy, absent leaves it. */
+export const putLdesStream = (datasetId: string, body: {
+  enabled: boolean; page_size?: number; polling_interval?: number; retention?: LdesRetention;
+}) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/ldes`, body);
+/** Run a sync now (adds the job when it is new). Answers the run's report. */
+export const runLdesSync = (body: { url: string; dataset_id: string; graph_iri: string }) =>
+  request('POST', '/api/ldes/sync', body);
+export interface LdesSyncJob {
+  dataset_id: string;
+  dataset_name: string | null;
+  source_url: string;
+  graph_iri: string | null;
+  created_by: string | null;
+  last_timestamp: string | null;
+  members_applied: number;
+  synced_at: string | null;
+  last_run_at: string | null;
+  last_status: 'ok' | 'error' | null;
+  last_error: string | null;
+  last_report: Record<string, any> | null;
+}
+export const adminListLdesSyncs = (): Promise<LdesSyncJob[]> => request('GET', '/api/admin/ldes/syncs');
+export const adminForgetLdesSync = (datasetId: string, url: string) =>
+  request('DELETE', `/api/admin/ldes/syncs?dataset_id=${encodeURIComponent(datasetId)}&url=${encodeURIComponent(url)}`);
+
+// ─── Linked-document containers (ICDD) ───────────────────────────────────────
+export const listContainerProfiles = () => request('GET', '/api/containers/profiles');
+/** Import a container archive into a dataset; `strict` refuses (422 + `validation`) a non-conformant one. */
+export const importContainer = (
+  datasetId: string, file: Blob, opts: { strict?: boolean; profile?: string } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const q = new URLSearchParams();
+  if (opts.profile) q.set('profile', opts.profile);
+  if (opts.strict) q.set('strict', 'true');
+  const qs = q.toString();
+  return xhrSend('POST', `/api/datasets/${encodeURIComponent(datasetId)}/containers/import${qs ? `?${qs}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+};
+/** Validate a container without storing anything: `{profile, conforms, violations, warnings, findings}`. */
+export const validateContainer = (file: Blob, onProgress?: (f: number) => void, profile?: string) =>
+  xhrSend('POST', `/api/containers/validate${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+/**
+ * Export a dataset as a container. The archive comes back with the export's
+ * own validation in headers (X-Container-Conforms / -Validation / -Findings),
+ * which a plain download link would hide, so it is fetched here and the
+ * caller saves the blob.
+ */
+export async function exportContainer(datasetId: string, profile = 'icdd'): Promise<{
+  blob: Blob; filename: string; headers: { conforms: string | null; validation: string | null; findings: string | null };
+}> {
+  const res = await fetchRetry429(
+    withBase(`/api/datasets/${encodeURIComponent(datasetId)}/containers/export?profile=${encodeURIComponent(profile)}`),
+    { credentials: 'include' },
+  );
+  if (!res.ok) {
+    const { message, body } = await extractError(res);
+    const err = new ApiError(message);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  const cd = res.headers.get('content-disposition') || '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return {
+    blob: await res.blob(),
+    filename: m ? m[1] : `${datasetId}.icdd`,
+    headers: {
+      conforms: res.headers.get('x-container-conforms'),
+      validation: res.headers.get('x-container-validation'),
+      findings: res.headers.get('x-container-findings'),
+    },
+  };
+}
+
+// ─── CityJSON ingest ─────────────────────────────────────────────────────────
+/** Convert (and with `preview`, only convert) a CityJSON file into a dataset graph. */
+export const ingestCityJson = (
+  datasetId: string, file: File,
+  opts: { targetGraph?: string; publicAsset?: boolean; preview?: boolean } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (opts.targetGraph) fd.append('target_graph', opts.targetGraph);
+  if (opts.publicAsset) fd.append('public', 'true');
+  return xhrSend('POST',
+    `/api/datasets/${encodeURIComponent(datasetId)}/ingest/cityjson${opts.preview ? '?preview=true' : ''}`,
+    fd, { onProgress });
+};
+
+// ─── Constraint specifications (IDS) ─────────────────────────────────────────
+export const listSpecImporters = () => request('GET', '/api/shacl/importers');
+export const listSpecExporters = () => request('GET', '/api/shacl/exporters');
+/**
+ * Import a specification document (IDS XML) as SHACL. A refused document
+ * rejects with `err.body = {error, stage, problems}` — the audit report.
+ */
+export const importSpec = (
+  format: string, xml: string,
+  opts: { create?: boolean; name?: string; visibility?: string } = {},
+) => {
+  const q = new URLSearchParams();
+  if (opts.create) q.set('create', 'true');
+  if (opts.name) q.set('name', opts.name);
+  if (opts.visibility) q.set('visibility', opts.visibility);
+  const qs = q.toString();
+  return requestRaw('POST', `/api/shacl/import/${encodeURIComponent(format)}${qs ? `?${qs}` : ''}`, xml, 'application/xml');
+};
+/** Export Turtle shapes: `{format, document, specification_count, verbatim_specifications, losses}`. */
+export const exportSpec = (format: string, turtle: string, title?: string) =>
+  requestRaw('POST', `/api/shacl/export/${encodeURIComponent(format)}${title ? `?title=${encodeURIComponent(title)}` : ''}`,
+    turtle, 'text/turtle');
+
+// ─── Admin: backups and the text index ───────────────────────────────────────
+export const adminBackupStatus = () => request('GET', '/api/admin/backup/status');
+export const adminListBackups = () => request('GET', '/api/admin/backup');
+export const adminCreateBackup = () => request('POST', '/api/admin/backup', {});
+export const adminVerifyBackup = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/verify`, {});
+export const adminStageRestore = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/restore`, {});
+export const adminCancelRestore = () => request('DELETE', '/api/admin/backup/restore');
+export const textSearchStatus = () => request('GET', '/api/text-search/status');
+export const textSearchReindex = () => request('POST', '/api/text-search/reindex', {});
+// ─── Dataset reasoning — docs/reasoning.md, docs/owl2-dl.md ─────────────────────
+
+export type EntailmentRegime = 'rdfs' | 'owl2-rl' | 'owl2-el' | 'owl2-ql' | 'owl2-dl' | 'skos';
+export type MaterializeRegime = Exclude<EntailmentRegime, 'skos'>;
+
+/** What the last run of a dataset's stored SWRL rules did. */
+export interface RulesReport {
+  rule_graphs: string[];
+  rules: number;
+  target_graph: string;
+  triples_inferred: number;
+  rounds: number;
+  converged: boolean;
+  error?: string | null;
+  ran_at: string;
+}
+
+/** `GET /api/datasets/:id/entailment`. */
+export interface EntailmentState {
+  dataset_id: string;
+  regime: EntailmentRegime | null;
+  mode: 'materialize' | 'off';
+  graph?: string;
+  updated_at?: string;
+  last_run_at?: string | null;
+  last_triples?: number | null;
+  consistent?: boolean | null;
+  inconsistency?: { rule: string; detail: string } | null;
+  /** queued | running | ok | inconsistent | not_converged | not_in_profile | unavailable | timeout | too_large | failed */
+  status?: string | null;
+  error?: string | null;
+  backend?: string | null;
+  complete?: boolean | null;
+  /** `owl2-rl` / `skos`: also derive `x owl:sameAs x` for every term. */
+  eq_ref?: boolean;
+  identity: IdentityPolicyName;
+  identity_source: 'dataset' | 'organisation' | 'default';
+  identity_options: IdentityPolicyName[];
+  reasoning_sources: string[];
+  /** The server's OWL 2 DL backend; null: `owl2-dl` is unavailable. */
+  dl_backend: string | null;
+  inference_graph: string;
+  rules: { graphs: string[]; count: number; error: string | null; last_run: RulesReport | null } | null;
+}
+
+export const getEntailment = (datasetId: string): Promise<EntailmentState> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`);
+export const setEntailment = (
+  datasetId: string,
+  body: { regime: EntailmentRegime; mode: 'materialize' | 'off'; eq_ref?: boolean },
+) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`, body);
+
+/** One axiom construct a regime left out (outside its profile). */
+export interface IgnoredConstruct { construct: string; count: number; example?: string | null }
+
+/** `POST /api/reasoning/materialize` (200). */
+export interface MaterializeReport {
+  regime: string;
+  triples_added: number;
+  iterations: number;
+  elapsed_ms: number;
+  target_graph: string;
+  sources: string[] | null;
+  consistent: boolean | null;
+  ignored?: IgnoredConstruct[];
+  /** The identity policy the run applied. */
+  identity?: IdentityPolicyName;
+  backend?: string;
+  backend_version?: string | null;
+  complete?: boolean;
+  warnings?: string[];
+}
+
+/** The 202 answer of an `?async=true` run. */
+export interface QueuedJob { job_id: string; status: string; location: string }
+
+export const materializeEntailment = (
+  body: { regime: MaterializeRegime; dataset?: string; target_graph?: string; source_graphs?: string[]; eq_ref?: boolean; identity?: IdentityPolicyName },
+  runAsync = false,
+): Promise<MaterializeReport | QueuedJob> =>
+  request('POST', `/api/reasoning/materialize${runAsync ? '?async=true' : ''}`, body);
+
+export type CheckTask = 'consistency' | 'entailment' | 'satisfiability' | 'profile';
+
+/** `POST /api/reasoning/check` (200). */
+export interface CheckResult {
+  task: CheckTask;
+  result: 'true' | 'false' | 'unknown';
+  regime: string;
+  backend: string;
+  backend_version?: string | null;
+  complete: boolean;
+  sources: string[] | null;
+  warnings?: string[];
+  detail?: string;
+  in_profile?: boolean;
+  violations?: { rule: string; detail: string }[];
+  consistent?: boolean | null;
+  rule?: string;
+}
+
+export const reasoningCheck = (
+  body: { task: CheckTask; dataset?: string; source_graphs?: string[]; premise?: string; conclusion?: string; class?: string; identity?: IdentityPolicyName },
+  runAsync = false,
+): Promise<CheckResult | QueuedJob> =>
+  request('POST', `/api/reasoning/check${runAsync ? '?async=true' : ''}`, body);
+
+/** A background materialisation or check. */
+export interface ReasoningJob {
+  id: string;
+  kind: 'materialize' | 'check';
+  dataset: string | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  http_status: number | null;
+  result: Record<string, unknown> | null;
+}
+
+export const listReasoningJobs = (datasetId?: string): Promise<{ jobs: ReasoningJob[] }> =>
+  request('GET', `/api/reasoning/jobs${datasetId ? `?dataset=${encodeURIComponent(datasetId)}` : ''}`);
+export const getReasoningJob = (jobId: string): Promise<ReasoningJob> =>
+  request('GET', `/api/reasoning/jobs/${encodeURIComponent(jobId)}`);
+/** Triples per shared entailment graph, and the server's DL backend (null: owl2-dl unavailable). */
+export const getReasoningStatus = (): Promise<{ graphs: Record<string, number>; dl_backend: string | null }> =>
+  request('GET', '/api/reasoning/status');
+/** The OWL 2 QL rewriting of a query (not run). */
+export const rewriteQuery = (query: string, regime = 'owl2-ql', dataset?: string): Promise<{ rewritten: string }> =>
+  request('POST', '/api/reasoning/rewrite', dataset ? { query, regime, dataset } : { query, regime });
+
+// ─── SWRL — docs/swrl.md ─────────────────────────────────────────────────────────
+
+export type SwrlFormat = 'swrlapi' | 'text' | 'functional' | 'xml' | 'rdf' | 'ruleml';
+
+export interface SwrlRuleSetBody {
+  label?: string;
+  rules: string;
+  format: SwrlFormat;
+  rdf_format?: string;
+  base_iri?: string;
+  prefixes?: Record<string, string>;
+}
+
+/** A rule set kept in the dataset's managed rules graph. */
+export interface SwrlRuleSet {
+  id: string;
+  iri: string;
+  label: string | null;
+  format: SwrlFormat | null;
+  source: string | null;
+  options: { rdf_format?: string | null; base_iri?: string | null; prefixes?: Record<string, string> };
+  updated_at: string | null;
+  updated_by: string | null;
+  rules: { iri: string; functional: string | null }[];
+}
+
+export interface DatasetRules {
+  dataset_id: string;
+  graph: string;
+  can_write: boolean;
+  sets: SwrlRuleSet[];
+  other: { graph: string; rules: { iri: string | null; functional: string }[]; error: string | null }[];
+  inference_graph: string;
+  last_run: RulesReport | null;
+  formats: string[];
+}
+
+/** What running a dataset's rules again did. */
+export interface RulesRun { regime: string | null; queued: boolean; report: RulesReport | null; error: string | null }
+
+const rulesPath = (datasetId: string) => `/api/datasets/${encodeURIComponent(datasetId)}/rules`;
+export const listDatasetRules = (datasetId: string): Promise<DatasetRules> => request('GET', rulesPath(datasetId));
+export const createDatasetRules = (datasetId: string, body: SwrlRuleSetBody): Promise<{ id: string; rules: number; run: RulesRun }> =>
+  request('POST', rulesPath(datasetId), body);
+export const updateDatasetRules = (datasetId: string, setId: string, body: SwrlRuleSetBody): Promise<{ id: string; rules: number; run: RulesRun }> =>
+  request('PUT', `${rulesPath(datasetId)}/${encodeURIComponent(setId)}`, body);
+export const deleteDatasetRules = (datasetId: string, setId: string): Promise<{ deleted: string; run: RulesRun }> =>
+  request('DELETE', `${rulesPath(datasetId)}/${encodeURIComponent(setId)}`);
+export const runDatasetRules = (datasetId: string): Promise<RulesRun> => request('POST', `${rulesPath(datasetId)}/run`);
+
+/** `POST /api/swrl/execute` (200). */
+export interface SwrlExecuteReport {
+  rules_count: number;
+  iterations: number;
+  triples_inferred: number;
+  converged: boolean;
+  stop_reason: 'fixpoint' | 'max_iterations' | 'timeout';
+  rule_results?: { rule_name: string; sparql: string; success: boolean; error: string | null }[];
+  target_graph?: string | null;
+  sources?: string[] | null;
+  regime?: string;
+  rounds?: number;
+  regime_triples?: number;
+  [k: string]: unknown;
+}
+
+export const executeSwrl = (body: SwrlRuleSetBody & {
+  dataset?: string; source_graphs?: string[]; target_graph?: string; regime?: MaterializeRegime; max_iterations?: number; identity?: IdentityPolicyName;
+}): Promise<SwrlExecuteReport> => request('POST', '/api/swrl/execute', body);
+
+// ─── ShEx — docs/shex.md ─────────────────────────────────────────────────────────
+
+export type ShexStatus = 'Conformant' | { NonConformant: string };
+export interface ShexResult { focus_node: string; shape: string; status: ShexStatus }
+export interface ShexReport { conforms: boolean; results: ShexResult[] }
+
+export const validateShex = (
+  datasetId: string | null,
+  body: { schema: string; schema_format?: 'shexc' | 'shexj'; base?: string; shape_map?: string | { node: string; shape: string }[] },
+): Promise<ShexReport> =>
+  request('POST', datasetId ? `/api/datasets/${encodeURIComponent(datasetId)}/shex/validate` : '/api/shex/validate', body);
+
+// ─── RDF Patch and the patch log — docs/versioning.md ───────────────────────────
+
+/** `POST …/patch` and `POST …/log` (the latter adds `version`, `prev`). */
+export interface PatchApplied {
+  applied: boolean;
+  id?: string | null;
+  aborted?: boolean;
+  /** The blocks committed and aborted, and the rows as written. */
+  transactions?: {
+    committed: number;
+    aborted: number;
+    add_rows: number;
+    delete_rows: number;
+    prefix_rows: number;
+  };
+  /** The net change: quads that were not there before, and that went. */
+  added: number;
+  removed: number;
+  graphs?: string[];
+  /** The write's last change-log sequence number, when capture recorded it. */
+  seq?: number | null;
+  reason?: string;
+  version?: number;
+  prev?: string | null;
+}
+
+export interface PatchLogEntry {
+  version: number;
+  id: string;
+  prev?: string | null;
+  kind?: 'patch' | 'version';
+  author?: string | null;
+  dataset_version?: string | null;
+  default_graph?: string | null;
+  graphs?: string[];
+  created_at?: string;
+  withheld?: boolean;
+}
+
+export interface PatchLog {
+  name: string;
+  init?: unknown;
+  latest: { version: number; id: string } | null;
+  entries: PatchLogEntry[];
+}
+
+const graphParam = (graph?: string | null) => (graph ? `?graph=${encodeURIComponent(graph)}` : '');
+export const applyDatasetPatch = (datasetId: string, patch: string, graph?: string | null): Promise<PatchApplied> =>
+  requestRaw('POST', `/api/datasets/${encodeURIComponent(datasetId)}/patch${graphParam(graph)}`, patch, 'application/rdf-patch');
+export const appendDatasetPatchLog = (datasetId: string, patch: string, graph?: string | null): Promise<PatchApplied> =>
+  requestRaw('POST', `/api/datasets/${encodeURIComponent(datasetId)}/log${graphParam(graph)}`, patch, 'application/rdf-patch');
+export const getDatasetPatchLog = (datasetId: string, opts: { after?: number; limit?: number } = {}): Promise<PatchLog> => {
+  const qs = new URLSearchParams();
+  if (opts.after != null) qs.set('after', String(opts.after));
+  if (opts.limit != null) qs.set('limit', String(opts.limit));
+  const q = qs.toString();
+  return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/log${q ? `?${q}` : ''}`);
+};
+/** One patch of the log, by log version or id, as text. */
+export const getDatasetLogPatch = (datasetId: string, ref: string | number): Promise<string> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/log/patch/${encodeURIComponent(String(ref))}`);
+/** Download links (same-origin, the session cookie authorises them). */
+export const datasetLogPatchUrl = (datasetId: string, ref: string | number) =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/patch/${encodeURIComponent(String(ref))}`);
+export const datasetLogInitUrl = (datasetId: string, format: 'trig' | 'nquads' = 'trig') =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/init${format === 'nquads' ? '?format=nquads' : ''}`);
+export const datasetLogCurrentUrl = (datasetId: string) =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/current`);
+
+// ─── Dataset version diff and retention ─────────────────────────────────────────
+
+export interface DatasetVersionDiff {
+  dataset_id: string;
+  from: string;
+  to: string;
+  added: number;
+  removed: number;
+  graphs: { source_graph: string; added: number; removed: number; missing_on_other_side?: boolean; only_on_other_side?: boolean }[];
+}
+
+const diffPath = (datasetId: string, from: string, to: string) =>
+  `/api/datasets/${encodeURIComponent(datasetId)}/versions/${encodeURIComponent(from)}/diff/${encodeURIComponent(to)}`;
+/** Per-graph added/removed counts from `from` to `to` (a version, or `live`). */
+export const diffDatasetVersions = (datasetId: string, from: string, to: string): Promise<DatasetVersionDiff> =>
+  request('GET', diffPath(datasetId, from, to));
+/** The same diff as an RDF Patch (text). */
+export const diffDatasetVersionsPatch = (datasetId: string, from: string, to: string): Promise<string> =>
+  request('GET', `${diffPath(datasetId, from, to)}?format=rdf-patch`);
+export const datasetVersionDiffPatchUrl = (datasetId: string, from: string, to: string) =>
+  withBase(`${diffPath(datasetId, from, to)}?format=rdf-patch`);
+/** Keep the newest `keep` unpublished versions; delete the rest. */
+export const gcDatasetVersions = (datasetId: string, keep: number): Promise<{ kept: number; deleted: string[] }> =>
+  request('POST', `/api/datasets/${encodeURIComponent(datasetId)}/versions/gc`, { keep });

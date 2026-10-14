@@ -61,7 +61,7 @@
   // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2 } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2, Brain, FileDiff } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -79,6 +79,7 @@
   import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
   import Select from '../components/Select.svelte';
   import PartialRunNote from '../components/PartialRunNote.svelte';
+  import DatasetExchange from '../components/exchange/DatasetExchange.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
   import { findTheme, findAdmsStatus, findFrequency } from '../lib/vocab/themes';
 
@@ -1261,6 +1262,7 @@
     { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
     { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
     { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'exchange', label: $i18nT('components.exchange.navLabel') },
     { id: 'identity', label: $i18nT('components.identityPolicy.navLabel'), visible: $isAuthenticated },
     { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
   ]} />
@@ -1356,6 +1358,23 @@
       <LayoutGrid size={22} />
       <strong>{$i18nT('pages.datasetDetail.namedGraphs')}</strong>
       <span>{$i18nT('pages.datasetDetail.namedGraphsDesc')}</span>
+    </Link>
+    <Link to="/datasets/{id}/reasoning" class="action-tile">
+      <Brain size={22} />
+      <strong>{$i18nT('pages.datasetDetail.reasoningTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.reasoningTileDesc')}</span>
+    </Link>
+    {#if $isAuthenticated}
+      <Link to="/datasets/{id}/shex" class="action-tile">
+        <ShieldCheck size={22} />
+        <strong>{$i18nT('pages.datasetDetail.shexTile')}</strong>
+        <span>{$i18nT('pages.datasetDetail.shexTileDesc')}</span>
+      </Link>
+    {/if}
+    <Link to="/datasets/{id}/patch" class="action-tile">
+      <FileDiff size={22} />
+      <strong>{$i18nT('pages.datasetDetail.patchTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.patchTileDesc')}</span>
     </Link>
   </div>
 </div>
@@ -1867,6 +1886,9 @@
         <Link to="/validation?dataset={id}" class="btn btn-sm btn-ghost">
           {$i18nT('pages.datasetDetail.openValidationStudio')}
         </Link>
+        <Link to="/datasets/{id}/shex" class="btn btn-sm btn-ghost">
+          {$i18nT('pages.datasetDetail.openShex')}
+        </Link>
         <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.attachShapesDatasetTitle')} on:click={() => attachTarget = { kind: 'dataset', id, label: dataset?.name || id }}>
           <ShieldCheck size={13} /> {$i18nT('pages.datasetDetail.attachShapes')}
         </button>
@@ -1959,6 +1981,18 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- Exchange formats: event stream, containers, CityJSON, IDS check. -->
+{#if dataset}
+  <DatasetExchange
+    datasetId={id}
+    datasetName={dataset.name || ''}
+    {canWrite}
+    authenticated={$isAuthenticated}
+    {graphs}
+    on:changed={fetchGraphs}
+  />
 {/if}
 
 <!-- Identity policy (owl:sameAs) for reasoning — every identity route needs a

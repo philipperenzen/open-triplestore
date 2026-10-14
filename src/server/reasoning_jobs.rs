@@ -24,6 +24,8 @@ pub struct Job {
     pub id: String,
     pub owner: String,
     pub kind: &'static str,
+    /// The dataset the run reasons over, when it names one.
+    pub dataset: Option<String>,
     pub status: &'static str,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -38,6 +40,7 @@ impl Job {
         json!({
             "id": self.id,
             "kind": self.kind,
+            "dataset": self.dataset,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -57,8 +60,8 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Register a queued job for `owner`; its id.
-pub fn create(owner: &str, kind: &'static str) -> String {
+/// Register a queued job for `owner`, over `dataset` if it names one; its id.
+pub fn create(owner: &str, kind: &'static str, dataset: Option<String>) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let mut map = jobs().lock().unwrap_or_else(|p| p.into_inner());
     map.retain(|_, j| j.finished.is_none_or(|f| f.elapsed() < KEEP_FINISHED));
@@ -78,6 +81,7 @@ pub fn create(owner: &str, kind: &'static str) -> String {
             id: id.clone(),
             owner: owner.to_string(),
             kind,
+            dataset,
             status: "queued",
             created_at: now(),
             started_at: None,
@@ -116,6 +120,26 @@ pub fn finish(id: &str, status: StatusCode, body: Value) {
 pub fn get(id: &str, user: &str, is_admin: bool) -> Option<Job> {
     let map = jobs().lock().unwrap_or_else(|p| p.into_inner());
     map.get(id).filter(|j| is_admin || j.owner == user).cloned()
+}
+
+/// The jobs `user` may see (their own; an admin, every job), newest first,
+/// only those over `dataset` when given. Finished jobs past their hour are
+/// gone.
+pub fn list(user: &str, is_admin: bool, dataset: Option<&str>) -> Vec<Job> {
+    let map = jobs().lock().unwrap_or_else(|p| p.into_inner());
+    let mut out: Vec<Job> = map
+        .values()
+        .filter(|j| is_admin || j.owner == user)
+        .filter(|j| j.finished.is_none_or(|f| f.elapsed() < KEEP_FINISHED))
+        .filter(|j| dataset.is_none_or(|d| j.dataset.as_deref() == Some(d)))
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    out
 }
 
 /// The 202 answer for a job just queued.

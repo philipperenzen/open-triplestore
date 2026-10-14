@@ -6065,6 +6065,57 @@ mod visibility_leaks {
         );
     }
 
+    /// An import whose file holds an `rdf:JSON` literal that is not JSON
+    /// (an ill-typed literal) is refused with a 400, and nothing is loaded.
+    #[tokio::test]
+    async fn bulk_import_refuses_an_ill_typed_json_literal() {
+        let (state, token) = admin_state();
+        let boundary = "BNDjson";
+        let body = multipart_body(
+            boundary,
+            &[
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    b"http://ex.org/g/json",
+                ),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<http://ex.org/s> <http://ex.org/p> \"ok\" .\n<http://ex.org/s> <http://ex.org/j> \"bareword\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> .",
+                ),
+            ],
+        );
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/import/bulk")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = body_text(resp.into_body()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("ill-typed"), "{text}");
+        assert_eq!(
+            state
+                .store
+                .count_graph(Some("http://ex.org/g/json"))
+                .unwrap(),
+            0
+        );
+    }
+
     /// The asset upload route enforces the absolute size ceiling (mirrors the external
     /// form platform's Settings.asset_max_bytes). A body past ASSET_MAX_BYTES is rejected with 413
     /// — the streaming read aborts rather than buffering the whole part into memory.

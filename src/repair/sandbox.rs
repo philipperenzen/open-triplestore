@@ -177,7 +177,11 @@ pub fn resolve(input: ResolveInput<'_>) -> Result<Premises, String> {
         ..Premises::default()
     };
     for e in entries {
-        if e.graph_iri.starts_with("urn:system:reports:") {
+        // Reports and statement-provenance annotations are about the data,
+        // not data a rule may read or repair.
+        if e.graph_iri.starts_with("urn:system:reports:")
+            || crate::provenance::is_any_statement_provenance_graph(&e.graph_iri)
+        {
             continue;
         }
         if let Some(scope) = scope_graphs {

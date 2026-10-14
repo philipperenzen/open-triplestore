@@ -1,0 +1,76 @@
+{
+ "store": "virtuoso",
+ "scale": "1k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)",
+ "phases": {
+  "load": {
+   "seconds": 1.827,
+   "peak_mem_bytes": 496815308.8,
+   "load_after": [
+    2.92919921875,
+    2.85888671875,
+    3.580078125
+   ],
+   "method": "`ld_dir` + `rdf_loader_run()` + `checkpoint` (bulk loader)"
+  },
+  "explore": {
+   "seconds": 8.338,
+   "peak_mem_bytes": 1142461300.736,
+   "load_after": [
+    2.78369140625,
+    2.7783203125,
+    3.4873046875
+   ]
+  },
+  "features": {
+   "seconds": 1.924,
+   "peak_mem_bytes": 1142461300.736,
+   "load_after": [
+    2.78369140625,
+    2.7783203125,
+    3.4873046875
+   ]
+  },
+  "concurrent": {
+   "seconds": 204.717,
+   "peak_mem_bytes": 1346472247.296,
+   "load_after": [
+    3.744140625,
+    2.9560546875,
+    3.37939453125
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp up -d virtuoso",
+  "docker exec benchcmp-virtuoso-1 isql 1111 dba <password> exec=\"ld_dir('/bench', 'dataset.nt', 'http://example.org/bench/bsbm'); rdf_loader_run(); checkpoint; select count(*) from DB.DBA.load_list where ll_error is not null;\"",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload explore --out /out/explore.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload features --out /out/features.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --features /h/queries/features --feature-runs 10",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/raw/virtuoso/1k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store virtuoso --workload concurrent --out /out/concurrent.json --endpoint http://virtuoso:8890/sparql?default-graph-uri=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --params /bench/params.json --clients 1,4,8 --seconds 60",
+  "docker compose -f <repo>/scripts/bench-compare/compose/virtuoso.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   3.2802734375,
+   2.9228515625,
+   3.611328125
+  ],
+  "waited_s": 0,
+  "free_gib": 22.0,
+  "swap": "total = 10240.00M  used = 9265.50M  free = 974.50M  (encrypted)"
+ },
+ "started": "2026-10-03T16:30:20+0200",
+ "db_bytes_after_load": 272670720,
+ "image": "sha256:a1dcc3231b97071dee537e180a7b18f4cef0d8257a77a30265d2237a87f0d3dd openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a",
+ "finished": "2026-10-03T16:35:06+0200",
+ "load_after": [
+  3.744140625,
+  2.9560546875,
+  3.37939453125
+ ]
+}

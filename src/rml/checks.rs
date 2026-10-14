@@ -238,8 +238,24 @@ pub fn check_columns(
         .iter()
         .map(|n| format!("\"{}\" (in {})", n.column, n.place))
         .collect();
+    // A name that differs from a column only in case is almost always an
+    // unquoted name the database folded (R2RML §5).
+    let folded: Vec<String> = missing
+        .iter()
+        .filter_map(|n| {
+            let column = available
+                .iter()
+                .find(|c| c.to_lowercase() == n.column.to_lowercase())?;
+            Some(format!(
+                "\"{}\" differs from the column \"{column}\" only in case: an unquoted name is \
+                 folded by the database's rules, so write the column delimited, as \"\\\"{}\\\"\"",
+                n.column,
+                column.replace('"', "\"\"")
+            ))
+        })
+        .collect();
     Err(format!(
-        "TriplesMap <{}> reads {} that its logical source does not have: {}. The source has {}{}",
+        "TriplesMap <{}> reads {} that its logical source does not have: {}. The source has {}{}{}",
         tm.iri,
         if missing.len() == 1 {
             "a column"
@@ -260,6 +276,11 @@ pub fn check_columns(
             format!(" and {more} more")
         } else {
             String::new()
+        },
+        if folded.is_empty() {
+            String::new()
+        } else {
+            format!(". {} (R2RML §5)", folded.join("; "))
         }
     ))
 }
