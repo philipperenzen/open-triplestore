@@ -562,6 +562,7 @@ async fn write_triggered_shape_update_and_gate_runs() {
         &post,
         RdfFormat::Turtle,
         WriteMode::Merge,
+        None,
     );
     let gate_s = secs(t);
     assert!(verdict.is_err(), "the merged graph does not conform");
