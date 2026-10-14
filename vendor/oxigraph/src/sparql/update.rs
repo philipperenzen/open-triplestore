@@ -254,10 +254,7 @@ impl<'a, 'b: 'a> ReadableUpdateEvaluator<'a, 'b> {
         using_dataset: &Option<QueryDatasetSpecification>,
     ) -> Result<(), UpdateEvaluationError> {
         match update {
-            GraphUpdateOperation::InsertData { data } => {
-                self.eval_insert_data(data);
-                Ok(())
-            }
+            GraphUpdateOperation::InsertData { data } => self.eval_insert_data(data),
             GraphUpdateOperation::DeleteData { data } => {
                 self.eval_delete_data(data);
                 Ok(())
@@ -292,12 +289,19 @@ impl<'a, 'b: 'a> ReadableUpdateEvaluator<'a, 'b> {
         }
     }
 
-    fn eval_insert_data(&mut self, data: &[Quad]) {
+    fn eval_insert_data(&mut self, data: &[Quad]) -> Result<(), UpdateEvaluationError> {
         let mut bnodes = FxHashMap::default();
-        for quad in data {
-            let quad = convert_quad(quad, &mut bnodes);
+        let quads = data
+            .iter()
+            .map(|quad| convert_quad(quad, &mut bnodes))
+            .collect::<Vec<_>>();
+        for quad in &quads {
+            check_inserted(quad)?;
+        }
+        for quad in &quads {
             self.transaction.insert(quad.as_ref());
         }
+        Ok(())
     }
 
     fn eval_delete_data(&mut self, data: &[GroundQuad]) {
@@ -325,6 +329,11 @@ impl<'a, 'b: 'a> ReadableUpdateEvaluator<'a, 'b> {
         let mutations = prepared
             .execute(DatasetView::new(self.transaction.reader()))?
             .collect::<Result<Vec<_>, _>>()?;
+        for mutation in &mutations {
+            if let DeleteInsertQuad::Insert(quad) = mutation {
+                check_inserted(quad)?;
+            }
+        }
         for mutation in mutations {
             match mutation {
                 DeleteInsertQuad::Delete(quad) => self.transaction.remove(quad.as_ref()),
@@ -473,10 +482,7 @@ impl WriteOnlyUpdateEvaluator<'_, '_> {
         using_dataset: &Option<QueryDatasetSpecification>,
     ) -> Result<(), UpdateEvaluationError> {
         match update {
-            GraphUpdateOperation::InsertData { data } => {
-                self.eval_insert_data(data);
-                Ok(())
-            }
+            GraphUpdateOperation::InsertData { data } => self.eval_insert_data(data),
             GraphUpdateOperation::DeleteData { data } => {
                 self.eval_delete_data(data);
                 Ok(())
@@ -511,12 +517,19 @@ impl WriteOnlyUpdateEvaluator<'_, '_> {
         }
     }
 
-    fn eval_insert_data(&mut self, data: &[Quad]) {
+    fn eval_insert_data(&mut self, data: &[Quad]) -> Result<(), UpdateEvaluationError> {
         let mut bnodes = FxHashMap::default();
-        for quad in data {
-            let quad = convert_quad(quad, &mut bnodes);
+        let quads = data
+            .iter()
+            .map(|quad| convert_quad(quad, &mut bnodes))
+            .collect::<Vec<_>>();
+        for quad in &quads {
+            check_inserted(quad)?;
+        }
+        for quad in &quads {
             self.transaction.insert(quad.as_ref());
         }
+        Ok(())
     }
 
     fn eval_delete_data(&mut self, data: &[GroundQuad]) {
@@ -549,6 +562,11 @@ impl WriteOnlyUpdateEvaluator<'_, '_> {
         let mutations = prepared
             .execute(DatasetView::new(storage.snapshot()))?
             .collect::<Result<Vec<_>, _>>()?;
+        for mutation in &mutations {
+            if let DeleteInsertQuad::Insert(quad) = mutation {
+                check_inserted(quad)?;
+            }
+        }
         for mutation in mutations {
             match mutation {
                 DeleteInsertQuad::Delete(quad) => self.transaction.remove(quad.as_ref()),
@@ -673,7 +691,9 @@ fn eval_load(
             })
         });
     for q in parser {
-        insert(q?);
+        let q = q?;
+        check_inserted(&q)?;
+        insert(q);
     }
     Ok(())
 }
@@ -687,6 +707,57 @@ fn eval_load(
     Err(UpdateEvaluationError::Unexpected(
         "HTTP client is not available. Enable the feature 'http-client'".into(),
     ))
+}
+
+/// `rdf:JSON`.
+const RDF_JSON: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON";
+
+/// Refuse to insert a quad holding an ill-typed `rdf:JSON` literal, one whose
+/// lexical form is not a JSON text (JSON-LD 1.1 §10.2, RFC 8259 §2): it denotes
+/// no value, and no JSON-LD serializer can write it.
+fn check_inserted(quad: &OxQuad) -> Result<(), UpdateEvaluationError> {
+    fn ill_typed(term: &Term) -> Option<&crate::model::Literal> {
+        match term {
+            Term::Literal(l)
+                if l.datatype().as_str() == RDF_JSON && !is_json_text(l.value()) =>
+            {
+                Some(l)
+            }
+            #[cfg(feature = "rdf-12")]
+            Term::Triple(t) => ill_typed(&t.object),
+            _ => None,
+        }
+    }
+    match ill_typed(&quad.object) {
+        Some(l) => Err(UpdateEvaluationError::IllTypedLiteral(l.clone())),
+        None => Ok(()),
+    }
+}
+
+/// Whether `text` is exactly one JSON value (RFC 8259 §2).
+fn is_json_text(text: &str) -> bool {
+    use json_event_parser::{JsonEvent, SliceJsonParser};
+    let mut parser = SliceJsonParser::new(text.as_bytes());
+    let (mut values, mut depth) = (0_usize, 0_usize);
+    loop {
+        match parser.parse_next() {
+            Err(_) => return false,
+            Ok(JsonEvent::Eof) => return values == 1,
+            Ok(JsonEvent::StartArray | JsonEvent::StartObject) => {
+                if depth == 0 {
+                    values += 1;
+                }
+                depth += 1;
+            }
+            Ok(JsonEvent::EndArray | JsonEvent::EndObject) => depth = depth.saturating_sub(1),
+            Ok(JsonEvent::ObjectKey(_)) => {}
+            Ok(_) => {
+                if depth == 0 {
+                    values += 1;
+                }
+            }
+        }
+    }
 }
 
 fn convert_quad(quad: &Quad, bnodes: &mut FxHashMap<BlankNode, BlankNode>) -> OxQuad {

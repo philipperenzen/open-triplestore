@@ -27,8 +27,8 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 use ots_plugin_api::sources::catalogue::{self, canonical, Dialect, Executor};
 use ots_plugin_api::sources::{
-    BatchSink, ConnectParams, Row, SourceConnection, SourceConnector, SourceError, TableInfo,
-    TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
+    BatchSink, ConnectParams, IdentifierRules, Row, SourceConnection, SourceConnector, SourceError,
+    TableInfo, TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
 };
 use ots_plugin_api::Plugin;
 use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, EncryptionLevel, QueryItem};
@@ -474,6 +474,24 @@ impl SourceConnection for MssqlConnection {
 
     fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
         catalogue::unique_keys(self, &MssqlDialect, table)
+    }
+
+    /// SQL Server keeps names as written and compares them under the
+    /// database's collation: without regard to case unless the collation is
+    /// case-sensitive (`_CS_`, or a binary `_BIN` one).
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        let collation = self
+            .rows("SELECT CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Collation'))")?
+            .first()
+            .and_then(|r| r.first().cloned())
+            .flatten()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        Ok(if collation.contains("_CS") || collation.contains("_BIN") {
+            IdentifierRules::CASE_SENSITIVE
+        } else {
+            IdentifierRules::CASE_INSENSITIVE
+        })
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

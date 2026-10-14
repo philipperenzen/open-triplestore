@@ -1,4 +1,5 @@
-//! Lexical-space checks for the XSD datatypes R2RML can validate.
+//! Lexical-space checks for the XSD datatypes, and `rdf:JSON`, that R2RML can
+//! validate.
 //!
 //! A literal whose datatype overrides the natural one and whose lexical form
 //! is not in that datatype's lexical space is *ill-typed*, and generating it
@@ -7,9 +8,10 @@
 
 use std::str::FromStr;
 
+use ots_plugin_api::sources::ValueKind;
 use oxsdatatypes::{
     Date, DateTime, DayTimeDuration, Duration, GDay, GMonth, GMonthDay, GYear, GYearMonth, Time,
-    YearMonthDuration,
+    TimezoneOffset, YearMonthDuration,
 };
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -17,6 +19,12 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// Why `lexical` is not a `datatype` value, or `None` when it is (or when
 /// the datatype is not one this module validates).
 pub fn ill_typed(lexical: &str, datatype: &str) -> Option<&'static str> {
+    // rdf:JSON: a JSON text (JSON-LD 1.1 §10.2), which the store also refuses
+    // on every other write path (`store::literals`).
+    if datatype == crate::store::literals::RDF_JSON {
+        return crate::store::literals::json_lexical_error(lexical)
+            .map(|_| "not JSON, which rdf:JSON requires");
+    }
     let local = datatype.strip_prefix(XSD)?;
     let ok = match local {
         "boolean" => matches!(lexical, "true" | "false" | "1" | "0"),
@@ -53,6 +61,109 @@ pub fn ill_typed(lexical: &str, datatype: &str) -> Option<&'static str> {
         _ => return None,
     };
     (!ok).then_some("not in the lexical space of the datatype")
+}
+
+/// The canonical lexical representation of a source value of `kind` in its
+/// natural datatype (R2RML §10.2: the natural RDF lexical form of an SQL
+/// value is "the canonical lexical representation" of its XSD datatype, in
+/// XML Schema Part 2, which R2RML cites): `xsd:integer` without a sign or
+/// leading zeros, `xsd:decimal` with exactly one digit either side of the
+/// point at the least (`1.0`, `-0.5`), `xsd:double` as a mantissa with one
+/// digit before the point and an exponent (`3.0E1`, `1.65E0`), `xsd:boolean`
+/// as `true` / `false`, and `xsd:dateTime` / `xsd:time` with no trailing
+/// zeros in the seconds and a timezone, when there is one, shifted to `Z`.
+/// `None` when the value is not in the datatype's lexical space, or the kind
+/// has no canonical form to compute; the value then stays as the source
+/// wrote it, and a datatype that does not accept it is caught as ill-typed.
+pub fn canonical(lexical: &str, kind: ValueKind) -> Option<String> {
+    match kind {
+        ValueKind::Integer => canonical_integer(lexical),
+        ValueKind::Decimal => canonical_decimal(lexical),
+        ValueKind::Float => canonical_double(lexical),
+        ValueKind::Boolean => match lexical {
+            "true" | "1" => Some("true".into()),
+            "false" | "0" => Some("false".into()),
+            _ => None,
+        },
+        ValueKind::DateTime => {
+            let dt = DateTime::from_str(lexical).ok()?;
+            let dt = match dt.timezone_offset() {
+                Some(_) => dt.adjust(Some(TimezoneOffset::UTC))?,
+                None => dt,
+            };
+            Some(dt.to_string())
+        }
+        ValueKind::Time => {
+            let t = Time::from_str(lexical).ok()?;
+            let t = match t.timezone_offset() {
+                Some(_) => t.adjust(Some(TimezoneOffset::UTC))?,
+                None => t,
+            };
+            Some(t.to_string())
+        }
+        ValueKind::Binary => (lexical.len().is_multiple_of(2)
+            && lexical.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| lexical.to_ascii_uppercase()),
+        _ => None,
+    }
+}
+
+/// `+007` → `7`, `-0` → `0`.
+fn canonical_integer(s: &str) -> Option<String> {
+    if !is_integer(s) {
+        return None;
+    }
+    let negative = s.starts_with('-');
+    let digits = s.trim_start_matches(['+', '-']).trim_start_matches('0');
+    Some(match (digits.is_empty(), negative) {
+        (true, _) => "0".to_string(),
+        (false, true) => format!("-{digits}"),
+        (false, false) => digits.to_string(),
+    })
+}
+
+/// `+01.50` → `1.5`, `2` → `2.0`, `-.0` → `0.0`.
+fn canonical_decimal(s: &str) -> Option<String> {
+    if !is_decimal(s) {
+        return None;
+    }
+    let negative = s.starts_with('-');
+    let body = s.trim_start_matches(['+', '-']);
+    let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+    let int = int.trim_start_matches('0');
+    let frac = frac.trim_end_matches('0');
+    if int.is_empty() && frac.is_empty() {
+        return Some("0.0".into());
+    }
+    Some(format!(
+        "{}{}.{}",
+        if negative { "-" } else { "" },
+        if int.is_empty() { "0" } else { int },
+        if frac.is_empty() { "0" } else { frac }
+    ))
+}
+
+/// `30` → `3.0E1`, `1.65` → `1.65E0`, `0` → `0.0E0`: the shortest mantissa
+/// that reads back as the same double. `INF`, `-INF` and `NaN` as they are.
+fn canonical_double(s: &str) -> Option<String> {
+    match s {
+        "INF" | "+INF" => return Some("INF".into()),
+        "-INF" | "NaN" => return Some(s.into()),
+        _ if !is_float(s) => return None,
+        _ => {}
+    }
+    let x: f64 = s.parse().ok()?;
+    if !x.is_finite() {
+        // Out of range for a double: no canonical form to give.
+        return None;
+    }
+    let exp = format!("{x:e}");
+    let (mantissa, exponent) = exp.split_once('e')?;
+    Some(if mantissa.contains('.') {
+        format!("{mantissa}E{exponent}")
+    } else {
+        format!("{mantissa}.0E{exponent}")
+    })
 }
 
 /// `[+-]?[0-9]+`. Unbounded, as `xsd:integer` is.
@@ -168,6 +279,68 @@ mod tests {
             ("ABC", "hexBinary"),
         ] {
             assert!(ill_typed(v, &x(t)).is_some(), "{v:?} as xsd:{t}");
+        }
+    }
+
+    #[test]
+    fn rdf_json_must_be_json() {
+        let json = crate::store::literals::RDF_JSON;
+        assert_eq!(ill_typed("{\"a\": [1, 2]}", json), None);
+        assert_eq!(ill_typed("\"text\"", json), None);
+        assert!(ill_typed("bareword", json).is_some());
+        assert!(ill_typed("[{]", json).is_some());
+    }
+
+    #[test]
+    fn natural_values_take_their_canonical_form() {
+        for (v, kind, want) in [
+            ("30", ValueKind::Float, Some("3.0E1")),
+            ("30.0", ValueKind::Float, Some("3.0E1")),
+            ("1.65", ValueKind::Float, Some("1.65E0")),
+            ("80.25", ValueKind::Float, Some("8.025E1")),
+            ("2.0000000000000000e+000", ValueKind::Float, Some("2.0E0")),
+            ("0.001", ValueKind::Float, Some("1.0E-3")),
+            ("0", ValueKind::Float, Some("0.0E0")),
+            ("-1.5e300", ValueKind::Float, Some("-1.5E300")),
+            ("INF", ValueKind::Float, Some("INF")),
+            ("NaN", ValueKind::Float, Some("NaN")),
+            ("1e999", ValueKind::Float, None),
+            ("abc", ValueKind::Float, None),
+            ("+007", ValueKind::Integer, Some("7")),
+            ("-0", ValueKind::Integer, Some("0")),
+            ("-12", ValueKind::Integer, Some("-12")),
+            ("1.5", ValueKind::Integer, None),
+            ("+01.50", ValueKind::Decimal, Some("1.5")),
+            ("2", ValueKind::Decimal, Some("2.0")),
+            ("-.50", ValueKind::Decimal, Some("-0.5")),
+            ("-0.00", ValueKind::Decimal, Some("0.0")),
+            ("1", ValueKind::Boolean, Some("true")),
+            ("false", ValueKind::Boolean, Some("false")),
+            (
+                "2009-10-10T12:12:22",
+                ValueKind::DateTime,
+                Some("2009-10-10T12:12:22"),
+            ),
+            (
+                "2009-10-10T12:12:22.500",
+                ValueKind::DateTime,
+                Some("2009-10-10T12:12:22.5"),
+            ),
+            (
+                "2009-10-10T12:12:22+02:00",
+                ValueKind::DateTime,
+                Some("2009-10-10T10:12:22Z"),
+            ),
+            (
+                "2009-10-10T12:12:22+00:00",
+                ValueKind::DateTime,
+                Some("2009-10-10T12:12:22Z"),
+            ),
+            ("12:30:00.100Z", ValueKind::Time, Some("12:30:00.1Z")),
+            ("0fb7", ValueKind::Binary, Some("0FB7")),
+            ("x", ValueKind::Text, None),
+        ] {
+            assert_eq!(canonical(v, kind).as_deref(), want, "{v} as {kind:?}");
         }
     }
 

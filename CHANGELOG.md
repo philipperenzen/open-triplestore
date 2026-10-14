@@ -14,6 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Performance comparison with other open-source triplestores.**
+  [`docs/performance-comparison.md`](docs/performance-comparison.md) measures
+  Open Triplestore against upstream Oxigraph 0.5.11, Apache Jena Fuseki 6.2.0,
+  QLever, Virtuoso Open Source 7.2.17 and Eclipse RDF4J 6.1.0 on one machine,
+  one store at a time, each in a 4 GiB / 4-CPU container: BSBM explore at 1k
+  and 10k products, load time, a SPARQL 1.1 feature mix, SHACL validation and
+  1/4/8 concurrent clients, with median/p95 latency, QMpH, peak memory and a
+  per-query result-count cross-check. The harness is `scripts/bench-compare/`
+  (pinned images, fetched BSBM generator, quiet-window and disk checks); the
+  data is in `docs/perf-data/2026-10-03/`. It reports where this store loses —
+  slower than its own engine with the accelerator off, its load path, memory
+  headroom in 4 GiB, correlated `NOT EXISTS` — and links the issues filed for
+  them (#468–#471). Linked from the comparison matrix, `docs/performance.md`
+  and the README; also in the in-app docs viewer.
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -300,6 +314,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `6687b48`) are vendored under `tests/fixtures/shacl-af-topquadrant/` and run
   by `tests/shacl_af_corpus.rs` as a two-way ratchet: 9 of 10 cases pass
   (`docs/conformance/shacl.md`).
+- **SHACL validation under `sh:entailment sh:Rules` and RDFS.** A shapes graph
+  that declares `sh:entailment sh:Rules` has its SHACL rules run before every
+  validation of it (SHACL-AF §8.3) — on-demand dataset validation, SHACL Studio
+  pipelines, write gates and `shacl::validate` — with the `/infer` engine
+  (`sh:order`, `sh:condition`, `sh:deactivated`, to a fixed point), and the
+  validation sees the data plus what the rules inferred. The inferences go into
+  a graph of a run-local in-memory copy of the data, never into a stored graph:
+  validating writes nothing, and a gate stores only what was written. The RDFS
+  regime (`http://www.w3.org/ns/entailment/RDFS`) uses the `rdfs-entailment`
+  materialiser the same way; declared together, rules and RDFS run in turn
+  until neither adds a triple. See `docs/shacl.md`.
 - **RDF Patch logs per dataset.** Each dataset has an
   [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html) at
   `/api/datasets/{id}/log`: `POST` appends a patch (exactly one `H id`, at
@@ -640,10 +665,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   importing, querying, validation, models, Spark, the API, troubleshooting and
   how to get help.
 - **CI covers S3 storage, `sfcgal3d` and the container image.** Both CIs now
-  run the S3 asset store against MinIO (`tests/storage_s3_live.rs`: object and
+  run the S3 asset store against Versity S3 Gateway (Apache-2.0, pinned by tag
+  and digest, signatures checked) in `tests/storage_s3_live.rs`: object and
   HTTP round trips, overwrite, delete, an absent key reading as absent, wrong
   credentials refusing to start; skipped unless `OTS_TEST_S3_ENDPOINT` is
-  set). Until now the S3 backend had no test that sent it a byte. GitHub
+  set. MinIO, the first choice, no longer publishes community images, and its
+  tags no longer pull. Until now the S3 backend had no test that sent it a byte. GitHub
   compiles and unit-tests `sfcgal3d` in a Debian trixie job, because Ubuntu's
   `libsfcgal-dev` is 1.5 and the feature needs SFCGAL 2.x. Before, only GitLab
   built it. The release image is built and started (`/livez`) on every pull
@@ -658,17 +685,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Standards Score recounted once for the second merge train: 25 of 28.**
+- **RML / R2RML and JSON-LD 1.1 are graded Full; the Standards Score is 28
+  of 28** (`docs/standards.md` footnotes 9 and 13,
+  `docs/triplestore-comparison.md`). Each row had kept one deliberate
+  deviation, which the Full rubric does not accept; both are fixed (below),
+  and every failure that remains is footnoted with its issue: an engine limit
+  of SQLite and MySQL, or a defect in a test suite.
+- **SQL column and table names in mappings are SQL identifiers** (R2RML §5).
+  A regular (unquoted) name stands for its folded form and a delimited one
+  (`"Name"`, `` `Name` ``, `[Name]`) is exactly its text, compared the way the
+  datasource's engine does: PostgreSQL folds to lower case (and honours SQL
+  2008's upper case), SQLite and MySQL compare without regard to case, SQL
+  Server follows the database collation, SQL 2008 (the default) folds to upper
+  case; a virtual SPARQL source takes names verbatim. **Breaking:** on
+  PostgreSQL a mixed-case column created delimited (`"StudentId"`) must now be
+  written delimited (`rr:column "\"StudentId\""`); a regular `StudentId`
+  names `studentid`. A column name that is not one SQL identifier
+  (`rr:column "Unit Price"`) is refused, with the delimited spelling to use;
+  one that differs from a column only in case is refused before the first row
+  with that hint. `rr:tableName` parts fold the same way. Connectors report
+  their rules through the new `SourceConnection::identifier_rules`
+  (`plugins/api`); a connector that does not is read as SQL 2008. W3C
+  R2RMLTC0002f now passes on PostgreSQL. See `docs/sources.md`.
+- **A datatype-override literal carries the value's natural lexical form**
+  (R2RML §10.3). With `rr:datatype` or a datatype map, the literal's lexical
+  form is the canonical form of the SQL value, as for a natural literal, not
+  the source's own spelling, and a form the datatype does not accept is a
+  data error handled by the run's `on_data_error` policy, never written as an
+  ill-typed literal. **Breaking:** a `REAL` 0.25 typed `xsd:decimal` is now
+  `"2.5E-1"`, a data error; type decimals from `DECIMAL` / `NUMERIC` columns.
+- **A JSON-LD download follows the JSON-LD 1.1 serialisation algorithm.** A
+  well-formed RDF list is written as `@list`, without the `rdf:type rdf:List`
+  quads of its nodes (the algorithm drops them; RDF Schema entails them); an
+  `rdf:JSON` literal is written as its `@json` value, or typed with its text
+  when that is not the canonical form `@json` reads back as. W3C json-ld-api
+  fromRdf `0016`, `js08` and `js09` now pass; the runner's known-failure list
+  is empty. The vendored `oxjsonld` carries both changes, each with an
+  upstream draft (`vendor/oxjsonld/UPSTREAM-PR-5-json-literals.md`,
+  `UPSTREAM-PR-6-list-conversion.md`).
+- **An `rdf:JSON` literal that is not JSON is refused with 400** on every write
+  path — uploads and imports, SPARQL UPDATE (constants and computed values
+  alike, through the vendored Oxigraph's update evaluator), the Graph Store
+  Protocol, LDP and RDF Patch — and nothing of the request is written. Such a
+  literal is ill-typed (JSON-LD 1.1 §10.2), and no JSON-LD download could hold
+  it. An RML run that would generate one reports a data error. See
+  `docs/datatypes.md`.
+
+- **Standards Score recounted once for the second merge train: 26 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
   retired for every system (owner decision, 2026-10-03): the W3C test-suite
   licence allows no performance claims on a subset of a suite, so the row
   could not be graded for this project; measured comparisons take its place in
   `docs/performance-comparison.md`. The matrix has 28 rows, and every other
   system's count drops by one. Open Triplestore's column, recounted from the
-  merged matrix, is 25 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
-  RDF 1.2, OWL 2 RL, SHACL Validation, ShEx, SWRL, GeoSPARQL 1.0 and 1.1, DCAT
-  3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its Partial
-  grade. `docs/standards.md` states the Full rubric: a row is Full only when
+  merged matrix, is 26 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
+  RDF 1.2, OWL 2 RL, SHACL Validation, SHACL-AF inference (SHACL Advanced,
+  now validated under `sh:entailment`), ShEx, SWRL, GeoSPARQL 1.0 and 1.1,
+  DCAT 3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its
+  Partial grade. `docs/standards.md` states the Full rubric: a row is Full only when
   every remaining failure is a test-suite defect, blocked on an open external
   specification issue, or a limit of an external database engine, and a
   deliberate deviation keeps it Partial (JSON-LD 1.1 and RML for now).
@@ -921,6 +995,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every `*conformance*` test binary that the backend job's `cargo test
   --workspace` had already run, with fewer features. It now keeps only the
   reasoner-sidecar and seed-bundle steps.
+- **A shapes graph that declares an unsupported `sh:entailment` fails
+  validation.** SHACL §1.5 requires a processor to signal a failure for an
+  entailment regime it does not support; such shapes graphs used to be
+  validated as though the declaration were absent. Any value other than
+  `sh:Rules` and the RDFS regime (in a build with `rdfs-entailment`) now fails
+  the run with an error naming the value — a write gate refuses the write
+  (`422`). Shapes graphs declaring `sh:Rules` now report what the rules infer
+  (see Added). SHACL Advanced is graded *Full* in `docs/standards.md`.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -1690,6 +1772,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- **R2RML: SQL values take their datatype's canonical lexical form.** The
+  natural mapping (R2RML §10.2) writes a `DOUBLE` 30 as `"3.0E1"^^xsd:double`,
+  a decimal as `1.5` / `2.0`, an integer without a sign or leading zeros, and
+  a timestamp or time with a timezone in UTC (`Z`) with no trailing zeros in
+  its seconds; it wrote the value as the database printed it (`30.0`). The
+  store used to canonicalise numeric literals on the way in, which hid this;
+  since it keeps literals as written, five W3C R2RML cases (`R2RMLTC0005a`,
+  `0005b`, `0012a`, `0012e`, `0016b`) failed on every database. Templates
+  get the same form, as §7.3 asks. JSON numbers read under RML-Core, which
+  carry the same natural datatypes, follow the same rule (`1.5` → `1.5E0`).
+  A literal whose datatype the mapping sets (`rr:datatype`, a datatype map)
+  keeps the source's spelling, so a SQLite `REAL` 0.25 typed `xsd:decimal`
+  stays `0.25` rather than becoming the ill-typed `2.5E-1`.
 - **Triple terms and base direction no longer get lost.** The canonical and
   Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
   inside `<<( … )>>` is relabelled or skolemized with the same label as the
@@ -1763,7 +1858,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   container kept listing the member. The parent is now the container that
   lists the member. Found by the new e2e
   check that drives the `/ldp` routes.
-
+- **The Docker image builds again.** `Cargo.toml` declares `[[test]]` targets
+  (`replication`, `ldp_conformance`, `query_cache`), and cargo refuses to load a
+  manifest whose declared target file is missing, even for `cargo build`. The
+  Dockerfile did not copy `tests/`, so `cargo chef cook` and the final build
+  both failed with "can't find `ldp_conformance` test". v0.7.0 is not
+  affected; the next release's image build would have failed after its GitHub
+  Release was published. The planner stage now copies `tests/`, the builder
+  takes its manifest tree from the planner, and a new CI job
+  (`docker-manifests`) checks on every PR that cargo can load what the image
+  builds.
+- **An entailment query counts an asserted and derived triple once.**
+  `/sparql?entailment=<regime>` and `?entailment_dataset=<id>` add the
+  entailment graph to the query's default graph as one more `FROM` graph. A
+  triple that was asserted and also derived sat in both, so it matched twice:
+  rows came back twice and `COUNT` and `SUM` were inflated. The default graph is
+  now the RDF merge of the two, a set, through the vendored evaluator's merge of
+  several `FROM` graphs. `GRAPH ?g` still finds the triple in each graph that
+  holds it. Six cases of the W3C SPARQL 1.1 entailment section (`rdfs05`,
+  `rdfs11`, `sparqldl-13`, `paper-sparqldl-Q1`, `paper-sparqldl-Q1-rdfs`,
+  `paper-sparqldl-Q4`) now pass and are off the runner's known failures.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
@@ -2318,6 +2432,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
+  DOMPurify up to 3.4.15 could leave event handlers armed in a removed
+  subtree, or return markup that runs on reparse, in `IN_PLACE` mode
+  (GHSA-p98j-92pf-mc4p, GHSA-6688-9rhm-gjv2); source-map-js 1.0.0–1.2.1
+  allowed an event-loop denial of service through section offsets
+  (GHSA-68fv-2mgg-jv7q, high). `package.json` now requires DOMPurify 3.4.16
+  or later.
 - **A signed-in caller's DCAT catalogue was marked `Cache-Control: public`.**
   `/.well-known/void` and `/{org}/.well-known/void` are scoped to the caller
   (their datasets, their readable graphs' statistics), but every response said

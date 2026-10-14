@@ -1,0 +1,21 @@
+# Virtuoso Open Source 7.2.17 (GPL-2.0). Buffers sized per OpenLink's
+# virtuoso.ini guidance for 4 GB of RAM; bulk load with ld_dir + rdf_loader_run.
+name: benchcmp
+services:
+  virtuoso:
+    image: openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a
+    environment:
+      DBA_PASSWORD: ${VIRTUOSO_DBA_PASSWORD:?}
+      VIRT_Parameters_NumberOfBuffers: "340000"
+      VIRT_Parameters_MaxDirtyBuffers: "250000"
+      VIRT_Parameters_DirsAllowed: ".,../vad,/usr/share/proj,/bench"
+      VIRT_SPARQL_ResultSetMaxRows: "10000000"
+      VIRT_SPARQL_MaxQueryExecutionTime: "300"
+      VIRT_SPARQL_MaxQueryCostEstimationTime: "0"
+    volumes: [db:/database, "${BENCH_DATA:?}:/bench:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:8890"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

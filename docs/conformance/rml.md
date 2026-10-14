@@ -19,7 +19,7 @@ Construction Community Group has not reviewed them. Every runner is a two-way
 ratchet: a case that fails without being listed fails CI, and so does a listed
 case that passes.
 
-## Results (2026-10-03)
+## Results (2026-10-03; known failures re-checked 2026-10-06)
 
 | Corpus | Cases | Pass | Known failures | Not run |
 |---|---:|---:|---:|---:|
@@ -33,14 +33,18 @@ live-database job; the known failures per database are below.
 
 ## Known failures
 
-| Case | Why |
-|---|---|
-| R2RMLTC0002f (SQLite, PostgreSQL, MySQL) | SQL 2008 folds the regular identifier `Name` to `NAME`, which the delimited column `"Name"` is not, so the case expects an error. This engine matches a regular identifier as written, against the columns the database reports, because folding — to upper case by the standard, to lower case by PostgreSQL — would break mappings that name mixed-case columns without quotes. The suite itself lists the case as MySQL non-compliance. |
-| R2RMLTC0018a (SQLite, MySQL) | Neither database returns a `CHAR(15)` value padded to its length (MySQL only under the deprecated `PAD_CHAR_TO_FULL_LENGTH` mode); the case expects the padding. PostgreSQL passes it. |
-| RMLTC0027b-JSON | `rml:UnsafeIRI` writes template values unencoded, and the expected output holds an IRI with a space in it, which RDF does not allow; the store will not make one, and the run reports a data error. |
-| RMLSTC0009a | The manifest says an error is expected; the suite's own description says none is, and the case ships the output of reading the quoted CSV header as RFC 4180 does, which is what this engine produces. |
-| RMLTC0002c-JSON, RMLTC0002c-XML | The reference names a member no record has. The RML-IO registry makes such a reference NULL, not an error, and this engine follows it; the legacy suite expected an error. |
-| RMLTC0007h-CSV, -JSON, -XML | A graph named by a literal is a non-conforming mapping (R2RML §7.4, RML-Core) and is refused; the legacy suite expected it to be ignored. |
+Each is an engine limit or a test-suite defect, the two kinds the Full rubric
+of [`docs/standards.md`](../standards.md) accepts, and each has its issue.
+
+| Case | Kind | Why |
+|---|---|---|
+| R2RMLTC0002f (SQLite, MySQL) | engine limit ([#511](https://github.com/philipperenzen/open-triplestore/issues/511)) | The case names the delimited column `"Name"` with the regular identifier `Name`, which SQL 2008 folds to `NAME`, and expects an error. Column and table names are resolved as SQL identifiers by each engine's rules (R2RML §5; [sources.md](../sources.md#relational-logical-sources)), so it passes on PostgreSQL. SQLite and MySQL compare names without regard to case, delimited or not, and do not record which were declared delimited, so on them `Name` names `"Name"`. The suite's own harness lists the case as MySQL non-compliance. |
+| R2RMLTC0018a (SQLite) | engine limit ([#512](https://github.com/philipperenzen/open-triplestore/issues/512)) | SQLite has no fixed-length `CHAR`, so `"Venus"` comes back without the padding to `CHAR(15)` the case expects. PostgreSQL pads, and so does MySQL since the connector sets `PAD_CHAR_TO_FULL_LENGTH` per session. |
+| R2RMLTC0002d, R2RMLTC0003b, R2RMLTC0011a, R2RMLTC0014b, R2RMLTC0014c (PostgreSQL) | test-suite defect ([#513](https://github.com/philipperenzen/open-triplestore/issues/513)) | Each names a mixed-case delimited alias of its view (`"StudentId"`, `"FirstName"`, `"deptId"`) with a regular identifier, which R2RML §5 says is not the same name — the very error R2RMLTC0002f expects. PostgreSQL folds the regular name to lower case and the run is refused, naming the column to write delimited. They pass on SQLite and MySQL only because those compare without regard to case. |
+| RMLTC0027b-JSON | test-suite defect ([#514](https://github.com/philipperenzen/open-triplestore/issues/514)) | `rml:UnsafeIRI` writes template values unencoded, and the expected output holds `<http://example.com/Person/Emily Smith>`, an IRI with a space in it. RML-Core's own term generation rules make that a data error, and RDF does not allow the IRI; the run reports the data error. |
+| RMLSTC0009a | test-suite defect ([#515](https://github.com/philipperenzen/open-triplestore/issues/515)) | The manifest says an error is expected; the suite's own `descriptions.csv` says none is, and the case ships the output of reading the quoted CSV header as RFC 4180 does, which is what this engine produces. |
+| RMLTC0002c-JSON, RMLTC0002c-XML | test-suite defect ([#516](https://github.com/philipperenzen/open-triplestore/issues/516)) | The reference names a member no record has. The RML-IO registry makes such a reference NULL, not an error, and this engine follows it; the legacy suite expected an error. |
+| RMLTC0007h-CSV, -JSON, -XML | test-suite defect ([#516](https://github.com/philipperenzen/open-triplestore/issues/516)) | A graph named by a literal is a non-conforming mapping (R2RML §7.4, RML-Core) and is refused; the legacy suite expected it to be ignored. |
 
 ## Not run
 
