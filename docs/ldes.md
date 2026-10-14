@@ -9,6 +9,15 @@ publish a stream, and any dataset can sync one from elsewhere.
 
 ## Publishing a dataset as a stream
 
+In the web UI, the dataset page's **Exchange** section has the stream's
+settings: publishing on or off, members per page (the fragmentation),
+the polling interval and the retention policy, with the stream URL, the member
+count and the number of sealed pages. Readers see the settings; writers can
+change them. The form reads `GET /api/datasets/<id>/ldes/config`, a JSON view
+of the same settings (`enabled`, `configured`, `page_size`,
+`polling_interval`, `retention`, `members`, `sealed_nodes`, `created_at`,
+`stream`, `can_write`), and saves with the `PUT` below.
+
 Enable the stream (write access on the dataset):
 
 ```bash
@@ -36,6 +45,16 @@ whichever is later, so two concurrent writes that read the clock in one order
 and append in the other cannot put a member below a bound a client holds.
 The newest published timestamp is kept on the stream, so it holds even after
 retention removed that member.
+
+How a write is compared depends on the [change log](/docs/versioning). With
+it on, the write's own rows name what changed: their IRI subjects, plus the
+entity a changed blank-node subtree hangs from (walked up at most
+`OTS_LDES_BNODE_DEPTH`, 8, levels) — no graph is scanned. A graph whose rows
+do not carry their quads (a change over the row cap, or one the log could not
+bound), or with more than `OTS_LDES_BNODE_SUBJECTS_MAX` (10 000) blank-node
+subjects in one write, is republished whole. With the log off, every tracked
+graph is indexed before and after the write and the two compared, as
+before.
 
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):
@@ -190,10 +209,22 @@ curl -X POST http://localhost:7878/api/ldes/sync \
        "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances"}'
 ```
 
+Admins manage these sync jobs in **Admin → Event stream sync**: every
+`(dataset, url)` sync with its target graph, bookmark, members applied, the
+last run's time and status, its error when it failed, and its last report; a
+form adds a stream (and runs it), and each job can be run again or forgotten.
+`GET /api/admin/ldes/syncs` lists the jobs (`last_status` `ok` or `error`,
+`last_error`, `last_report`); a failed run is recorded too and keeps the
+previous bookmark, so the next run resumes from it. `DELETE
+/api/admin/ldes/syncs?dataset_id=…&url=…` forgets a job and its client state;
+the mirrored graph stays, and the next sync from that source reads the whole
+stream again.
+
 The `url` may be the event stream, its root node, a redirect to either, or a
 page with exactly one `tree:view` (LDES 1.0 §3.1); the report names the
 `stream` and `root_node` it found and the stream's `polling_interval` — how
-long to wait before the next run, since nothing here schedules one. The client
+long to wait before the next run, since nothing here schedules one
+([#530](https://github.com/philipperenzen/open-triplestore/issues/530)). The client
 reads the stream's context from the root node, follows each page's
 `tree:relation`s, and extracts every member: its triples in the default graph,
 every quad in the graph named after it, and the blank nodes they reach

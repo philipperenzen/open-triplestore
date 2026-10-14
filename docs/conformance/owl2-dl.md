@@ -58,15 +58,19 @@ OTS_TEST_REASONER_URL=http://127.0.0.1:8090 OTS_TEST_REASONER_TOKEN=<token> carg
 
 Without `OTS_TEST_REASONER_URL` the run is skipped (`w3c_owl2_dl_manifest_selection`,
 which checks the selection, runs everywhere). `OTS_TEST_W3C_OWL2_DUMP=<dir>`
-writes each premise, as sent, to `<dir>/<identifier>.nt`.
+writes each premise, as sent, to `<dir>/<identifier>.nt`, and
+`OTS_TEST_W3C_OWL2_TIMEOUT_SECS=<n>` sets the per-check budget (default 60).
 
 ## Known failures
 
-| Test case | Why |
-|---|---|
-| `New-Feature-Rational-002`, `New-Feature-Rational-003` | The premise's RDF list ends in `rdf:` (the namespace IRI) instead of `rdf:nil`. It is not a well-formed OWL 2 document, so the server refuses it as outside OWL 2 DL (422). |
-| `WebOnt-I5.26-001` | The premise holds a class expression that no axiom uses. The OWL 2 RDF mapping leaves its triples unparsed (Mapping to RDF Graphs §3.2.5: the graph must be empty at the end), so the server refuses the input as outside OWL 2 DL (422). |
-| `WebOnt-description-logic-208`, `WebOnt-description-logic-209` | HermiT does not decide consistency within the 60 s limit, so the answer is unknown (504). |
+Each is classified under the Full rubric of [standards.md](../standards.md) (2026-10-06): (a) a
+defect in the test suite, or (c) a limit of an external engine, with its issue.
+
+| Test case | Why | Class |
+|---|---|---|
+| `New-Feature-Rational-002`, `New-Feature-Rational-003` | The premise's RDF list ends in `rdf:` (the namespace IRI) instead of `rdf:nil`. It is not a well-formed OWL 2 document, so the server refuses it as outside OWL 2 DL (422). | (a) [#505](https://github.com/philipperenzen/open-triplestore/issues/505) |
+| `WebOnt-I5.26-001` | The premise holds a class expression that no axiom uses. The OWL 2 RDF mapping leaves its triples unparsed (Mapping to RDF Graphs §3.2.5: the graph must be empty at the end), so the server refuses the input as outside OWL 2 DL (422). | (a) [#505](https://github.com/philipperenzen/open-triplestore/issues/505) |
+| `WebOnt-description-logic-208`, `WebOnt-description-logic-209` | HermiT does not decide consistency within the 60 s limit, so the answer is unknown (504). With a 900 s budget (`OTS_TEST_W3C_OWL2_TIMEOUT_SECS=900`, 2026-10-06) it still had no answer, so a larger CI budget would not help. | (c) HermiT, [#506](https://github.com/philipperenzen/open-triplestore/issues/506) |
 
 ## What the run found
 

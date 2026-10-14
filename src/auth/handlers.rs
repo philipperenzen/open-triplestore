@@ -3377,6 +3377,7 @@ pub async fn delete_organisation(
             .auth_db
             .delete_dataset(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        purge_dataset_versions(&state, dataset_id).await;
     }
 
     // Capture hierarchy before deletion so we can keep graphs consistent and
@@ -4373,8 +4374,32 @@ pub async fn delete_dataset(
         .auth_db
         .delete_dataset(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    purge_dataset_versions(&state, &dataset_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deleted dataset's versions go with it: snapshot and built graphs,
+/// validation graphs, registry records, change-log pins. They used to stay
+/// behind — taking disk, holding back the change log's retention, and
+/// showing up for a new dataset that reused the id. Best-effort.
+async fn purge_dataset_versions(state: &AppState, dataset_id: &str) {
+    let version_lock = crate::dataset_versions::lock::dataset(dataset_id);
+    let _held = version_lock.lock().await;
+    let st = state.clone();
+    let id = dataset_id.to_string();
+    match tokio::task::spawn_blocking(move || {
+        crate::dataset_versions::handlers::purge_all_for_dataset(&st, &id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "versions of deleted dataset {dataset_id} not purged: {}",
+            e.message()
+        ),
+        Err(e) => tracing::warn!("versions of deleted dataset {dataset_id} not purged: {e}"),
+    }
 }
 
 // ─── Dataset Graphs handlers ──────────────────────────────────────────────────
@@ -5189,7 +5214,7 @@ fn gate_shapes_graph_link(
              '{dataset_id}'."
         ));
     }
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,

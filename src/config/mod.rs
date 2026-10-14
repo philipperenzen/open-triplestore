@@ -77,6 +77,8 @@ pub enum Kind {
     Int { min: u64, max: u64 },
     /// A byte count, optionally with a `KiB`, `MiB` or `GiB` suffix.
     Bytes { min: u64 },
+    /// A decimal number in `(min, max]` (`min` excluded).
+    Ratio { min: f64, max: f64 },
     /// Free text.
     Text,
     /// One of a fixed set of words, any case.
@@ -104,6 +106,7 @@ impl Kind {
             Kind::Bool => "bool",
             Kind::Int { .. } => "int",
             Kind::Bytes { .. } => "bytes",
+            Kind::Ratio { .. } => "ratio",
             Kind::Text => "text",
             Kind::Enum(_) => "enum",
             Kind::List => "list",
@@ -333,6 +336,15 @@ impl FromSetting for Option<Duration> {
     }
 }
 
+impl FromSetting for f64 {
+    fn from_setting(spec: &Spec, raw: Option<&str>) -> Result<Self, String> {
+        parse::ratio(spec, required(spec, raw)?)
+    }
+    fn accepts(kind: &Kind) -> bool {
+        matches!(kind, Kind::Ratio { .. })
+    }
+}
+
 impl FromSetting for String {
     fn from_setting(spec: &Spec, raw: Option<&str>) -> Result<Self, String> {
         required(spec, raw).map(str::to_string)
@@ -340,7 +352,7 @@ impl FromSetting for String {
     fn accepts(kind: &Kind) -> bool {
         !matches!(
             kind,
-            Kind::Bool | Kind::List | Kind::Int { .. } | Kind::Bytes { .. }
+            Kind::Bool | Kind::List | Kind::Int { .. } | Kind::Bytes { .. } | Kind::Ratio { .. }
         )
     }
 }

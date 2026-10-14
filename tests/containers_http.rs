@@ -1521,6 +1521,29 @@ async fn icdd_export_embeds_operator_ontology_files() {
 
     // Not configured: the export says it is not Part 1-conformant.
     std::env::remove_var("OTS_ICDD_ONTOLOGY_DIR");
+    // …and the profiles endpoint says why, before anyone exports.
+    let (st, body, _) = send_h(
+        &app,
+        Method::GET,
+        "/api/containers/profiles",
+        Some(&token),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let icdd = json(&body)["profiles"][0].clone();
+    assert_eq!(icdd["id"], "icdd", "{icdd:#}");
+    assert_eq!(
+        icdd["ontology_resources"]["env"], "OTS_ICDD_ONTOLOGY_DIR",
+        "{icdd:#}"
+    );
+    assert_eq!(icdd["ontology_resources"]["configured"], false, "{icdd:#}");
+    assert_eq!(icdd["ontology_resources"]["complete"], false, "{icdd:#}");
+    assert_eq!(
+        icdd["ontology_resources"]["missing"],
+        serde_json::json!(["Container.rdf", "Linkset.rdf"]),
+        "{icdd:#}"
+    );
     let (_, _, h) = send_h(
         &app,
         Method::GET,
@@ -1549,6 +1572,23 @@ async fn icdd_export_embeds_operator_ontology_files() {
     std::fs::write(dir.join("Container.rdf"), stand_in("Container")).unwrap();
     std::fs::write(dir.join("Linkset.rdf"), stand_in("Linkset")).unwrap();
     std::env::set_var("OTS_ICDD_ONTOLOGY_DIR", &dir);
+    let (_, body, _) = send_h(
+        &app,
+        Method::GET,
+        "/api/containers/profiles",
+        Some(&token),
+        Vec::new(),
+    )
+    .await;
+    let onto = json(&body)["profiles"][0]["ontology_resources"].clone();
+    assert_eq!(onto["configured"], true, "{onto:#}");
+    assert_eq!(onto["complete"], true, "{onto:#}");
+    assert!(
+        !body
+            .windows(dir.to_string_lossy().len())
+            .any(|w| w == dir.to_string_lossy().as_bytes()),
+        "the directory is never disclosed"
+    );
     let (st, zip_bytes, h) = send_h(
         &app,
         Method::GET,

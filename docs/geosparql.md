@@ -11,7 +11,7 @@ Four serialisations are geometries, and every `geof:` function accepts any of th
 - `geo:geoJSONLiteral` — an RFC 7946 geometry object (`Point`, `MultiPoint`, `LineString`, `MultiLineString`, `Polygon`, `MultiPolygon`, `GeometryCollection`), always CRS84 longitude/latitude. An altitude on every position is kept as Z. A malformed one is not a geometry: functions over it are unbound.
 - `geo:kmlLiteral` — a KML 2.2 geometry element: `Point`, `LineString`, `LinearRing`, `Polygon` (`outerBoundaryIs`, `innerBoundaryIs`) or `MultiGeometry`, possibly inside a `Placemark`. Coordinates are `lon,lat[,alt]` tuples, always CRS84; an altitude on every tuple is kept as Z. `Model`, `gx:Track` and `gx:MultiTrack` are outside the profile, and malformed KML is not a geometry.
 
-Every function reads a literal's CRS the same way: the WKT prefix or the GML `srsName`. `getSRID` returns it, normalised to the `http://www.opengis.net/def/crs/…` form for GML. Constructive results and `geof:aggUnion` keep it, and binary functions (the sf/eh/rcc8 relations, `geof:relate`, `distance`, the set operations) transform the second operand into the first's CRS. Coordinates are in the CRS's axis order, for WKT and GML alike: EPSG:4326 is latitude first, CRS84 longitude first. An EPSG:4326 `<gml:pos>52 5</gml:pos>` is the same point as `"POINT(5 52)"^^geo:wktLiteral`.
+Every function reads a literal's CRS the same way: the WKT prefix or the GML `srsName`. `getSRID` returns it as an `xsd:anyURI` literal, normalised to the `http://www.opengis.net/def/crs/…` form for GML, which `geof:transform` takes back as its target. Constructive results and `geof:aggUnion` keep it, and binary functions (the sf/eh/rcc8 relations, `geof:relate`, `distance`, the set operations) transform the second operand into the first's CRS. Coordinates are in the CRS's axis order, for WKT and GML alike: EPSG:4326 is latitude first, CRS84 longitude first. An EPSG:4326 `<gml:pos>52 5</gml:pos>` is the same point as `"POINT(5 52)"^^geo:wktLiteral`.
 
 An empty literal is the empty geometry: `""^^geo:wktLiteral` (also with a CRS prefix and nothing after it), `""^^geo:gmlLiteral` and `""^^geo:geoJSONLiteral`. An empty plain string is not a geometry.
 
@@ -73,7 +73,7 @@ The service description (`GET /sparql` with `Accept: text/turtle`) lists every r
 | `geof:spatialDimension(g)` | 2, or 3 with Z |
 | `geof:is3D(g)`, `geof:isMeasured(g)` | Whether positions have Z, M. M is read from the WKT (`POINT M`, `POINT ZM`); GML, GeoJSON and KML have none |
 | `geof:isEmpty(g)`, `geof:isSimple(g)` | Empty; free of self-intersection and self-tangency |
-| `geof:geometryType(g)` | The class as an IRI: the GML element for a GML literal (`gml:Surface`, `gml:Envelope`, in `http://www.opengis.net/ont/gml#`), the Simple Features class otherwise (`sf:Polygon`, in `http://www.opengis.net/ont/sf#`) |
+| `geof:geometryType(g)` | The class as an `xsd:anyURI` literal: the GML element for a GML literal (`gml:Surface`, `gml:Envelope`, in `http://www.opengis.net/ont/gml#`), the Simple Features class otherwise (`sf:Polygon`, in `http://www.opengis.net/ont/sf#`) |
 | `geof:numGeometries(g)`, `geof:geometryN(g, n)` | A collection's member count, and its `n`th member counting from 1 (a geometry that is not a collection is its own first member); `geometryN` is unbound out of range |
 | `geof:minX(g)` … `geof:maxZ(g)` | The extreme ordinate (`xsd:double`) in the literal's CRS; unbound for the empty geometry, and for Z on a 2D geometry |
 | `geof:centroid(g)` | The centroid (the empty point for the empty geometry) |
@@ -81,7 +81,9 @@ The service description (`GET /sparql` with `Accept: text/turtle`) lists every r
 | `geof:concaveHull(g, targetPercent)` | A concave hull without holes (GEOS 3.11 `GEOSConcaveHull`). `targetPercent` runs from 0, the most concave hull, to 1, the convex hull, as in GEOS and PostGIS 3.3+; outside that range the result is unbound. **Default 0.5** when it is left out |
 | `geof:length(g, unit)`, `geof:perimeter(g, unit)` | The length of the lines and a polygon's rings; a non-areal geometry's perimeter is its length, so the two agree, as `metricLength` and `metricPerimeter` do. Units as for `geof:distance` below |
 
-`getSRID` and `geometryType` return IRIs, not `xsd:anyURI` literals.
+`getSRID` and `geometryType` return `xsd:anyURI` literals, as their GeoSPARQL 1.1 signatures give
+(§10.9.39, §10.9.18), so `FILTER(geof:getSRID(?g) = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"^^xsd:anyURI)`
+compares them. Until 2026-10 they returned IRIs; to compare with an IRI, use `STR()` on both sides.
 
 ## Metres on the ellipsoid
 
@@ -133,9 +135,9 @@ The six GeoSPARQL 1.1 spatial aggregates are SPARQL aggregates, with or without 
 | `geof:aggBoundingCircle(?g)` | Their minimum bounding circle, as `geof:boundingCircle` |
 | `geof:aggCentroid(?g)` | The centroid of the group as one collection: a geometry the group holds twice counts twice, and only the highest dimension counts |
 | `geof:aggConvexHull(?g)` | The convex hull |
-| `geof:aggConcaveHull(?g)` | The concave hull at the **default target 0.5**, as `geof:concaveHull` without a target |
+| `geof:aggConcaveHull(?g, targetPercent)` | The concave hull at `targetPercent`, from 0 (the most concave) to 1 (the convex hull), as `geof:concaveHull`; the **default target is 0.5** when it is left out |
 
-`geof:aggConcaveHull` takes one argument. GeoSPARQL 1.1 gives it a second, `targetPercent`, but the SPARQL parser this store uses allows one expression in a custom aggregate call. For another target, use `geof:concaveHull(geof:aggUnion(?g), 0.2)`.
+`targetPercent` is evaluated per solution, like every argument of an aggregate, so it may be a constant (`geof:aggConcaveHull(?g, 0.2)`) or an expression of the group key (`geof:aggConcaveHull(?g, IF(?region = ex:coast, 0.1, 0.5))`). A group whose solutions disagree on it, or a target outside 0..1, has an unbound result, as a non-geometry value does; so does any of the other five aggregates called with a second argument. `DISTINCT` de-duplicates the (geometry, target) pairs. Since 2026-10 ([#525](https://github.com/philipperenzen/open-triplestore/issues/525)); before, the parser took one expression per custom aggregate and the target was always 0.5.
 
 ```sparql
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>

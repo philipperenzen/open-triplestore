@@ -1785,11 +1785,12 @@ fn compile_static_pattern_if_exists(
 }
 
 fn compile_pattern(pattern: &str, flags: Option<&str>) -> Option<Regex> {
-    let mut pattern = Cow::Borrowed(pattern);
     let flags = flags.unwrap_or_default();
-    if flags.contains('q') {
-        pattern = regex::escape(&pattern).into();
-    }
+    let pattern = if flags.contains('q') {
+        Cow::Owned(regex::escape(pattern))
+    } else {
+        xpath_braces(pattern)
+    };
     let mut regex_builder = RegexBuilder::new(&pattern);
     regex_builder.size_limit(REGEX_SIZE_LIMIT);
     for flag in flags.chars() {
@@ -1811,6 +1812,90 @@ fn compile_pattern(pattern: &str, flags: Option<&str>) -> Option<Regex> {
         }
     }
     regex_builder.build().ok()
+}
+
+/// XPath regular expressions are XML Schema 1.0 ones, where `{` and `}` are
+/// ordinary characters wherever they do not make a quantifier (`{n}`,
+/// `{n,}`, `{n,m}`): `({)(.*)(})` matches a braced string. The `regex`
+/// crate needs those escaped.
+fn xpath_braces(pattern: &str) -> Cow<'_, str> {
+    if !pattern.contains(['{', '}']) {
+        return Cow::Borrowed(pattern);
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let (mut i, mut class_depth, mut quantifiable) = (0, 0usize, false);
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(&n) = chars.get(i + 1) {
+                    out.push(n);
+                    i += 1;
+                    // `\p{…}`: the braces belong to the escape.
+                    if matches!(n, 'p' | 'P') && chars.get(i + 1) == Some(&'{') {
+                        while i + 1 < chars.len() {
+                            i += 1;
+                            out.push(chars[i]);
+                            if chars[i] == '}' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                quantifiable = true;
+            }
+            '[' => {
+                class_depth += 1;
+                out.push(c);
+            }
+            ']' if class_depth > 0 => {
+                class_depth -= 1;
+                out.push(c);
+                quantifiable = class_depth == 0;
+            }
+            _ if class_depth > 0 => out.push(c),
+            '{' => {
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&x| x == '}')
+                    .map(|p| i + 1 + p);
+                let quantity = end.filter(|&e| {
+                    let body: String = chars[i + 1..e].iter().collect();
+                    let (lo, hi) = body.split_once(',').unwrap_or((&body, ""));
+                    !lo.is_empty()
+                        && lo.bytes().all(|b| b.is_ascii_digit())
+                        && hi.bytes().all(|b| b.is_ascii_digit())
+                });
+                match quantity {
+                    Some(e) if quantifiable => {
+                        out.extend(&chars[i..=e]);
+                        i = e;
+                        quantifiable = false;
+                    }
+                    _ => {
+                        out.push_str("\\{");
+                        quantifiable = true;
+                    }
+                }
+            }
+            '}' => {
+                out.push_str("\\}");
+                quantifiable = true;
+            }
+            '(' | '|' | '*' | '+' | '?' | '^' => {
+                out.push(c);
+                quantifiable = false;
+            }
+            _ => {
+                out.push(c);
+                quantifiable = true;
+            }
+        }
+        i += 1;
+    }
+    Cow::Owned(out)
 }
 
 /// Equality operator (=)

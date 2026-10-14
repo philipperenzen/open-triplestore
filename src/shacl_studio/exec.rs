@@ -26,22 +26,26 @@ pub fn resolve_data_graphs(
     pipeline: &ValidationPipeline,
 ) -> Vec<String> {
     let mut graphs: Vec<String> = pipeline.graph_iris.clone();
+    // A dataset's graphs, without its statement-provenance graph: the
+    // annotations are not data to validate, and the extra graph would turn a
+    // single-graph dataset's in-place inference into a multi-graph one.
+    let dataset_graphs = |id: &str| {
+        auth_db
+            .list_dataset_graphs(id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
+    };
 
     if pipeline.graph_iris.is_empty() {
         for ds in &pipeline.dataset_ids {
-            if let Ok(g) = auth_db.list_dataset_graphs(ds) {
-                graphs.extend(g);
-            }
+            graphs.extend(dataset_graphs(ds));
         }
     }
 
     for t in &pipeline.targets {
         match t.kind {
-            TargetKind::Dataset => {
-                if let Ok(g) = auth_db.list_dataset_graphs(&t.id) {
-                    graphs.extend(g);
-                }
-            }
+            TargetKind::Dataset => graphs.extend(dataset_graphs(&t.id)),
             TargetKind::Graph => graphs.push(t.id.clone()),
             TargetKind::ShapeGraph => {
                 if let Ok(Some(set)) = studio.get_shape_graph(&t.id) {
@@ -342,6 +346,75 @@ pub fn execute_pipeline(
     })
 }
 
+/// A write-triggered run over only the focus nodes a write touched, merged
+/// into the pipeline's last full report: every result of `previous` about a
+/// node in `focus` is replaced by what validating that node now says; every
+/// other result stands (delta note §8.3: only the focus nodes touched since
+/// the last run need re-checking). Recorded like any run, as
+/// `triggered_by = "write"`. No inference: a pipeline that infers runs in
+/// full.
+pub fn execute_pipeline_incremental(
+    main_store: &TripleStore,
+    auth_db: &AuthDb,
+    studio: &ShaclStudioStore,
+    base_url: &str,
+    pipeline: &ValidationPipeline,
+    previous: &crate::shacl::report::ValidationReport,
+    focus: &std::collections::HashSet<oxigraph::model::Term>,
+) -> anyhow::Result<PipelineRun> {
+    let started = std::time::Instant::now();
+    let data_graphs = resolve_data_graphs(auth_db, studio, pipeline);
+    let shape_graphs = resolve_shape_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
+    let touched: std::collections::HashSet<String> = focus
+        .iter()
+        .map(crate::shacl::constraints::display_term)
+        .collect();
+    let mut results: Vec<crate::shacl::report::ValidationResult> = previous
+        .results
+        .iter()
+        .filter(|r| !touched.contains(&r.focus_node))
+        .cloned()
+        .collect();
+    for shapes_graph in &shape_graphs {
+        let report = crate::shacl::validate_focused(main_store, shapes_graph, &read_graphs, focus)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        results.extend(report.results);
+    }
+    let outcome = super::run::summarise(results, pipeline.severity_threshold);
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let report_json = serde_json::to_string(&outcome.report).unwrap_or_else(|_| "{}".to_string());
+    let run = studio.insert_pipeline_run(
+        &pipeline.id,
+        "write",
+        None,
+        outcome.passes,
+        outcome.report.results_count as i64,
+        outcome.violation_count,
+        outcome.warning_count,
+        outcome.info_count,
+        duration_ms,
+        &report_json,
+        pipeline.retention,
+    )?;
+    studio.touch_pipeline_run(&pipeline.id, &run.ran_at, outcome.passes)?;
+    persist_derived(
+        main_store,
+        auth_db,
+        base_url,
+        pipeline,
+        &data_graphs,
+        &[],
+        &outcome.report,
+        &run.id,
+    );
+    Ok(PipelineRun {
+        report: Some(outcome.report),
+        ..run
+    })
+}
+
 /// Persist a run's derived outputs according to the pipeline's write-target
 /// options. Inferred triples (already materialised in place by the engine) are
 /// additionally copied to a dedicated graph and/or captured in a new version;
@@ -596,56 +669,43 @@ fn snapshot_affected_versions(
     }
     let version = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
     for (ds_id, source_graphs) in by_ds {
-        let source_map = match crate::dataset_versions::snapshot::snapshot_graphs(
-            store,
-            base_url,
-            &ds_id,
-            &version,
-            &source_graphs,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    "pipeline {} version snapshot for {ds_id} failed: {e}",
-                    pipeline.id
-                );
-                continue;
-            }
-        };
-        let snapshot_graphs: Vec<String> = source_map
-            .iter()
-            .map(|m| m.snapshot_graph.clone())
-            .collect();
-        let record = crate::dataset_versions::models::DatasetVersion {
+        // Under the dataset's version lock, so a concurrent cut cannot take
+        // the label between the check and the record.
+        let version_lock = crate::dataset_versions::lock::dataset(&ds_id);
+        let _held = version_lock.blocking_lock();
+        // One label per run, shared by every dataset in it; a second run
+        // within the same second used to overwrite the first one's snapshot
+        // and leave two records under one IRI.
+        let mut label = version.clone();
+        let mut n = 1;
+        while crate::dataset_versions::registry::version_exists(store, base_url, &ds_id, &label) {
+            label = format!("{version}-{n}");
+            n += 1;
+        }
+        let req = crate::dataset_versions::cut::CutRequest {
             dataset_id: ds_id.clone(),
-            version: version.clone(),
+            version: label,
+            source_graphs: source_graphs.clone(),
             status: crate::dataset_versions::models::VersionStatus::Draft,
-            graph_iri: format!("{base_url}/dataset/{ds_id}/version/{version}"),
-            snapshot_graphs,
-            source_map,
-            created_at: chrono::Utc::now().to_rfc3339(),
             created_by: Some(format!("pipeline:{}", pipeline.id)),
-            derived_from: None,
             notes: Some(format!(
                 "Auto-versioned by validation pipeline '{}'",
                 pipeline.name
             )),
             branch: None,
+            derived_from: None,
+            force_checkpoint: false,
+            shared: crate::dataset_versions::cut::shared_graphs(auth_db, &ds_id, &source_graphs),
             conforms_to_model: None,
             conforms_to_version: None,
         };
-        if let Err(e) = crate::dataset_versions::registry::insert_version(store, base_url, &record)
-        {
-            tracing::warn!(
-                "pipeline {} insert_version for {ds_id} failed: {e}",
-                pipeline.id
-            );
-            continue;
+        match crate::dataset_versions::cut::cut(store, base_url, &req) {
+            Ok(made) => {
+                crate::dataset_versions::after_cut(store, base_url, &made.record, &source_graphs);
+                crate::rdf_patch_log::on_version_cut(auth_db, base_url, &made.record, None);
+            }
+            Err(e) => tracing::warn!("pipeline {} version of {ds_id} failed: {e}", pipeline.id),
         }
-        let _ = crate::dataset_versions::registry::update_latest_draft(
-            store, base_url, &ds_id, &version,
-        );
-        crate::rdf_patch_log::on_version_cut(auth_db, base_url, &record, None);
     }
 }
 

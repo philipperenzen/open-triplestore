@@ -891,6 +891,129 @@ fn w3c_negation_not_exists_scoping() {
     assert!(r[0][0].contains("/b>"));
 }
 
+// Correlated EXISTS over many outer rows (issue #471). After a few rows the
+// evaluator also evaluates the EXISTS pattern once and answers from a hash
+// table on the shared variables; these pin that it gives the substitution
+// semantics' answer in each case the table must and must not be used for.
+
+/// 4000 offers over 40 products (offers 4000..4499 have none), 1000 reviews
+/// over products 0..49 with ratings 1..10, a price 1..10 per offer: enough
+/// outer rows for the evaluator to build its table, also in a debug build.
+fn semi_join_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    let mut ttl = String::from("@prefix ex: <http://example.org/> .\n");
+    for i in 0..4500 {
+        ttl.push_str(&format!(
+            "ex:o{i} a ex:Offer ; ex:price {} .\n",
+            1 + (i * 11) % 10
+        ));
+        if i < 4000 {
+            ttl.push_str(&format!("ex:o{i} ex:product ex:p{} .\n", i % 40));
+        }
+    }
+    for j in 0..1000 {
+        ttl.push_str(&format!(
+            "ex:r{j} ex:reviewFor ex:p{} ; ex:rating {} .\n",
+            (j * 7) % 50,
+            1 + (j * 3) % 10
+        ));
+    }
+    load(&s, &ttl);
+    s
+}
+
+/// The ratings of the reviews of product `p`.
+fn semi_join_ratings(p: usize) -> Vec<usize> {
+    (0..1000)
+        .filter(|j| (j * 7) % 50 == p)
+        .map(|j| 1 + (j * 3) % 10)
+        .collect()
+}
+
+#[test]
+fn exists_semi_join_correlated_not_exists() {
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
+         FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
+    );
+    let expected = (0..4000)
+        .filter(|i| !semi_join_ratings(i % 40).iter().any(|x| *x >= 9))
+        .count();
+    assert_eq!(r.len(), expected);
+    assert!(
+        expected > 0 && expected < 4000,
+        "the data must split the offers"
+    );
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p \
+         FILTER EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x >= 9) } }",
+    );
+    assert_eq!(r.len(), 4000 - expected);
+}
+
+#[test]
+fn exists_semi_join_outer_variable_unbound_in_some_rows() {
+    // Offers 4000..4499 have no product: `?p` is unbound there, the pattern
+    // `?r ex:reviewFor ?p` matches every review, so NOT EXISTS is false.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o a ex:Offer \
+         OPTIONAL { ?o ex:product ?p } FILTER NOT EXISTS { ?r ex:reviewFor ?p } }",
+    );
+    let expected = (0..4000)
+        .filter(|i| semi_join_ratings(i % 40).is_empty())
+        .count();
+    assert_eq!(r.len(), expected);
+    assert!(r.iter().all(|row| {
+        let n: usize = row[0]
+            .trim_start_matches("<http://example.org/o")
+            .trim_end_matches('>')
+            .parse()
+            .unwrap();
+        n < 4000
+    }));
+}
+
+#[test]
+fn exists_semi_join_filter_reads_an_outer_only_variable() {
+    // `?price` is bound by the outer pattern only: the inner FILTER sees the
+    // row's price, so the pattern cannot be answered from a table built
+    // without it.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?price \
+         FILTER NOT EXISTS { ?r ex:reviewFor ?p ; ex:rating ?x FILTER (?x > ?price) } }",
+    );
+    let expected = (0..4000)
+        .filter(|i| {
+            let price = 1 + (i * 11) % 10;
+            !semi_join_ratings(i % 40).iter().any(|x| *x > price)
+        })
+        .count();
+    assert_eq!(r.len(), expected);
+}
+
+#[test]
+fn exists_semi_join_two_shared_variables_and_union() {
+    // Shared `?p` and `?x` (the offer's price must equal a rating of the
+    // product), the inner pattern a UNION whose branches both bind them.
+    let s = semi_join_store();
+    let r = select(
+        &s,
+        "PREFIX ex: <http://example.org/> SELECT ?o WHERE { ?o ex:product ?p ; ex:price ?x \
+         FILTER EXISTS { { ?r ex:reviewFor ?p ; ex:rating ?x } UNION { ?p ex:never ?x } } }",
+    );
+    let expected = (0..4000)
+        .filter(|i| semi_join_ratings(i % 40).contains(&(1 + (i * 11) % 10)))
+        .count();
+    assert_eq!(r.len(), expected);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Category: optional
 // W3C tests: opt-simple-1..22
@@ -1890,6 +2013,71 @@ fn cx13_copy_preserves_source_and_self_copy_noop() {
 // merge (SPARQL 1.1 Query §13.2, §18.3; Update §3.1.3): a triple held in two
 // of them is one triple. Four quads, three distinct triples, two of which
 // share the value 10 (so deduplicating values instead of triples would fail).
+/// The same merge on the persistent store, whose scans of the graphs are merged
+/// by key (vendored oxigraph change 14): every pattern shape (each index
+/// order), a graph with no match, three graphs, and the union default graph.
+#[test]
+fn dataset_from_graphs_merge_as_a_set_on_rocksdb() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open_triplestore::store::TripleStore::open(dir.path())
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(false, 1, 0);
+    s.update(
+        r#"INSERT DATA {
+             GRAPH <http://ex/g1> { <http://ex/a> <http://ex/v> 10 . <http://ex/b> <http://ex/v> 20 . <http://ex/a> <http://ex/w> <http://ex/b> }
+             GRAPH <http://ex/g2> { <http://ex/a> <http://ex/v> 10 . <http://ex/c> <http://ex/v> 10 . <http://ex/a> <http://ex/w> <http://ex/b> }
+             GRAPH <http://ex/g3> { <http://ex/z> <http://ex/other> 1 }
+           }"#,
+    )
+    .unwrap();
+    let from = "FROM <http://ex/g1> FROM <http://ex/g2> FROM <http://ex/g3>";
+    let count = |pattern: &str| -> String {
+        select(
+            &s,
+            &format!("SELECT (COUNT(*) AS ?n) {from} WHERE {{ {pattern} }}"),
+        )[0][0]
+            .split('"')
+            .nth(1)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(count("?s ?p ?o"), "5", "spo, all graphs");
+    assert_eq!(count("<http://ex/a> ?p ?o"), "2", "spo, subject bound");
+    assert_eq!(
+        count("<http://ex/a> <http://ex/v> ?o"),
+        "1",
+        "spo, subject and predicate"
+    );
+    assert_eq!(count("?s <http://ex/v> ?o"), "3", "pos, predicate bound");
+    assert_eq!(
+        count("?s <http://ex/v> 10"),
+        "2",
+        "pos, predicate and object"
+    );
+    assert_eq!(count("?s ?p <http://ex/b>"), "1", "osp, object bound");
+    assert_eq!(
+        count("<http://ex/a> ?p <http://ex/b>"),
+        "1",
+        "osp, subject and object"
+    );
+    assert_eq!(count("<http://ex/a> <http://ex/v> 10"), "1", "fully bound");
+    assert_eq!(count("?s <http://ex/other> ?o"), "1", "one graph matches");
+    assert_eq!(count("?s <http://ex/none> ?o"), "0", "no graph matches");
+    // The union default graph (no dataset clause, union mode off: named graphs
+    // are reached through GRAPH) and GRAPH ?g keep one row per graph.
+    assert_eq!(
+        select(
+            &s,
+            "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { <http://ex/a> <http://ex/v> 10 } }"
+        )[0][0]
+            .split('"')
+            .nth(1)
+            .unwrap(),
+        "2"
+    );
+}
+
 #[test]
 fn dataset_from_graphs_merge_as_a_set() {
     let s = ts();

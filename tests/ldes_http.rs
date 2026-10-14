@@ -372,6 +372,92 @@ async fn publishing_captures_every_write_path_and_fragments_the_stream() {
     assert!(serde_json::from_str::<Value>(&body).is_ok(), "{body}");
 }
 
+/// The settings form reads the stream's configuration as JSON: off with the
+/// defaults before it is enabled, then what was saved, with the member and
+/// sealed-page counts; `can_write` follows the caller.
+#[tokio::test]
+async fn stream_settings_read_back_as_json() {
+    let (state, token) = admin_state();
+    setup(&state, "cfg", Visibility::Public);
+    let app = test_app(state.clone());
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/cfg/ldes/config",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let v: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(v["enabled"], false, "{txt}");
+    assert_eq!(v["configured"], false, "{txt}");
+    assert_eq!(v["page_size"], 100, "{txt}");
+    assert_eq!(v["polling_interval"], 60, "{txt}");
+    assert!(v["retention"].is_null(), "{txt}");
+    assert_eq!(v["can_write"], true, "{txt}");
+
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/cfg/ldes",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "enabled": true, "page_size": 1, "polling_interval": 30, "retention": { "version_amount": 2, "full_log_duration": "P30D" } }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (_, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/cfg/ldes/config",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    let v: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(v["enabled"], true, "{txt}");
+    assert_eq!(v["page_size"], 1, "{txt}");
+    assert_eq!(v["polling_interval"], 30, "{txt}");
+    assert_eq!(v["retention"]["version_amount"], 2, "{txt}");
+    assert_eq!(v["retention"]["full_log_duration"], "P30D", "{txt}");
+    assert_eq!(v["members"], 2, "{txt}");
+    assert_eq!(
+        v["sealed_nodes"], 1,
+        "the first one-member page is sealed; the last stays the mutable tail: {txt}"
+    );
+    assert_eq!(
+        v["can_write"], false,
+        "an anonymous reader cannot change it: {txt}"
+    );
+    assert!(
+        v["stream"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/datasets/cfg/ldes"),
+        "{txt}"
+    );
+
+    // A private dataset's settings are as invisible as its stream.
+    setup(&state, "cfg-priv", Visibility::Private);
+    let (st, _, _) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/cfg-priv/ldes/config",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn a_private_stream_is_invisible_to_strangers() {
     let (state, token) = admin_state();
@@ -628,6 +714,123 @@ async fn sync_mirrors_a_remote_stream_and_its_increments() {
     )
     .await;
     assert!(commits.contains("LDES sync"), "{commits}");
+
+    // The admin's list of sync jobs: the job, its graph, its bookmark and the
+    // last report.
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/admin/ldes/syncs",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let jobs: Value = serde_json::from_str(&txt).unwrap();
+    let job = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["source_url"] == stream_url.as_str())
+        .unwrap_or_else(|| panic!("the sync is listed: {txt}"));
+    assert_eq!(job["dataset_id"], "mirror", "{txt}");
+    assert_eq!(job["dataset_name"], "Mirror", "{txt}");
+    assert_eq!(job["graph_iri"], target, "{txt}");
+    assert_eq!(job["created_by"], "adm", "{txt}");
+    assert_eq!(job["last_status"], "ok", "{txt}");
+    assert!(job["last_error"].is_null(), "{txt}");
+    assert_eq!(job["members_applied"], 4, "{txt}");
+    assert_eq!(job["last_report"]["entities_deleted"], 1, "{txt}");
+    assert!(job["last_timestamp"].is_string(), "{txt}");
+
+    // A run that fails is recorded with its error; nobody had to watch it.
+    let gone = format!("{origin}/api/datasets/nope/ldes");
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        "/api/ldes/sync",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "url": gone, "dataset_id": "mirror", "graph_iri": target }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY);
+    let (_, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/admin/ldes/syncs",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    let jobs: Value = serde_json::from_str(&txt).unwrap();
+    let failed = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["source_url"] == gone.as_str())
+        .unwrap_or_else(|| panic!("the failed run is listed: {txt}"));
+    assert_eq!(failed["last_status"], "error", "{txt}");
+    assert!(
+        failed["last_error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{txt}"
+    );
+    assert!(failed["last_report"].is_null(), "{txt}");
+    // The list is the admin's: a plain user is refused.
+    local
+        .auth_db
+        .create_user(
+            "u2",
+            "plain",
+            "plain@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let plain = mint_token("u2", "plain", "user");
+    let (st, _, _) = req(
+        &app,
+        Method::GET,
+        "/api/admin/ldes/syncs",
+        Some(&plain),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Forgetting a job drops it and its bookmark: the next sync from the
+    // source starts from the beginning of the stream again.
+    let forget = format!(
+        "/api/admin/ldes/syncs?dataset_id=mirror&url={}",
+        url_encode(&stream_url)
+    );
+    let (st, _, txt) = req(&app, Method::DELETE, &forget, Some(&token), None, None, "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let (st, _, _) = req(&app, Method::DELETE, &forget, Some(&token), None, None, "").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/ldes/sync",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "url": stream_url, "dataset_id": "mirror", "graph_iri": target }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let r: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(
+        r["members_skipped_older"], 0,
+        "no bookmark after forgetting: {txt}"
+    );
 
     // Not allowlisted: refused before any request.
     std::env::set_var("OTS_LDES_ALLOWLIST", "");

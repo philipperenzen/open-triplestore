@@ -56,6 +56,8 @@ pub enum AuditEventType {
     BackupVerified,
     /// A runtime setting was changed or reset (`/api/admin/settings`).
     SettingChanged,
+    BackupRestoreRequested,
+    BackupRestoreCancelled,
 }
 
 impl AuditEventType {
@@ -97,6 +99,8 @@ impl AuditEventType {
             Self::BackupFailed => "backup_failed",
             Self::BackupVerified => "backup_verified",
             Self::SettingChanged => "setting_changed",
+            Self::BackupRestoreRequested => "backup_restore_requested",
+            Self::BackupRestoreCancelled => "backup_restore_cancelled",
         }
     }
 }

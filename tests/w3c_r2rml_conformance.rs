@@ -45,39 +45,59 @@ use oxigraph::sparql::QueryResults;
 /// The base IRI the suite's expected outputs were generated with.
 const BASE: &str = "http://example.com/base/";
 
-/// Cases that do not pass, per database: `(database, case, reason)`.
+/// Cases that do not pass, per database: `(database, case, reason)`. Each
+/// reason names the issue that records it; under the Full rubric of
+/// `docs/standards.md` each is an engine limit or a test-suite defect.
 const KNOWN_FAILURES: &[(&str, &str, &str)] = &[
     (
         "sqlite",
         "R2RMLTC0002f",
-        "SQL 2008 folds the regular identifier Name to NAME, which the delimited column \"Name\" \
-         is not; SQLite compares identifiers without regard to case, and the engine matches a \
-         regular identifier as the database reports its columns",
-    ),
-    (
-        "postgresql",
-        "R2RMLTC0002f",
-        "SQL 2008 folds the regular identifier Name to NAME (PostgreSQL to name), which the \
-         delimited column \"Name\" is not; the engine matches a regular identifier as written, \
-         as the database reports its columns",
+        "engine limit (#511): SQL 2008 folds the regular identifier Name to NAME, which the \
+         delimited column \"Name\" is not; SQLite compares identifiers without regard to case, \
+         delimited or not, and does not record which were declared delimited",
     ),
     (
         "mysql",
         "R2RMLTC0002f",
-        "MySQL compares column names without regard to case, so Name names the column \
-         \"Name\"; the suite itself lists this case as MySQL non-compliance",
-    ),
-    (
-        "mysql",
-        "R2RMLTC0018a",
-        "MySQL strips the padding of CHAR values unless the server runs with the deprecated \
-         PAD_CHAR_TO_FULL_LENGTH SQL mode; the suite lists this case as MySQL non-compliance",
+        "engine limit (#511): MySQL compares column names without regard to case, delimited \
+         or not, so Name names the column \"Name\"; the suite's harness lists the case as MySQL \
+         non-compliance",
     ),
     (
         "sqlite",
         "R2RMLTC0018a",
-        "SQLite does not pad CHAR(15) values to their declared length, so \"Venus\" comes back \
-         without the trailing spaces the case expects",
+        "engine limit (#512): SQLite has no fixed-length CHAR, so \"Venus\" comes back without \
+         the padding to CHAR(15) the case expects",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0002d",
+        "test-suite defect (#513): the regular StudentId names the delimited alias \
+         \"StudentId\", which R2RML §5 says it is not",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0003b",
+        "test-suite defect (#513): the regular Name names the delimited alias \"Name\", \
+         which R2RML §5 says it is not",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0011a",
+        "test-suite defect (#513): the regular FirstName, LastName, Sport_ID and Description \
+         name delimited mixed-case aliases, which R2RML §5 says they are not",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0014b",
+        "test-suite defect (#513): the regular deptId names the delimited alias \"deptId\", \
+         which R2RML §5 says it is not",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0014c",
+        "test-suite defect (#513): the regular deptId names the delimited alias \"deptId\", \
+         which R2RML §5 says it is not",
     ),
 ];
 

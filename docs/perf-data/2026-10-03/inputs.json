@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-03",
+  "datasets": {
+    "1k": {"generator": "BSBM tools 0.2, Generator -fc -pc 1000 -s nt", "triples": 374911,
+           "bytes": 95715671, "sha256": "6f19f6aeba949d0869434b582c8c9ee503b5c7de90b5ec80fae0a1bb0612912f"},
+    "10k": {"generator": "BSBM tools 0.2, Generator -fc -pc 10000 -s nt", "triples": 3564773,
+            "bytes": 919087340, "sha256": "72309dd91f82545d8a379675ff72bebd0aea2dfd9cc61e410ebad539def5c7b5"}
+  },
+  "bsbmtools_zip_sha256": "40f5e59baadec3af0014b7647989d3e0fc0476af25e84a4bc9d7f8cd81520aaa",
+  "query_instances": "bench.py params --seed 20261003 --warmup 20 --mixes 100 --concurrent-mixes 200",
+  "stores": {
+    "ots": {"name": "Open Triplestore", "version": "0.7.0", "commit": "570a7a30 (origin/develop)",
+            "build": "scripts/bench-compare/Dockerfile.ots: cargo build --release --features full (fat LTO), rust:1.94-bookworm",
+            "image": "ots-bench:570a7a30 (local, image id sha256:1056964d79c2b554e7bb7ea7d9e7ec24d51e929e078bca1502ae019861c6d5a8)",
+            "engine": "oxigraph 0.5.11 (crates.io)"},
+    "oxigraph": {"name": "Oxigraph server", "version": "0.5.11",
+                 "image": "ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767"},
+    "fuseki": {"name": "Apache Jena Fuseki (main, TDB2)", "version": "6.2.0",
+               "jar_sha256": "2c92c598e65ab69d99820052e05f4277ed1d77980a8845f87545ad35b71a76ee",
+               "image": "eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b"},
+    "qlever": {"name": "QLever", "version": "commit caba7eb",
+               "image": "adfreiburg/qlever:commit-caba7eb0d1@sha256:64ad83b43341548f7e8bedaadeb09ef4f2aa50acc7686778e1e9bb830ae1e0ab"},
+    "virtuoso": {"name": "Virtuoso Open Source", "version": "7.2.17",
+                 "image": "openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a"},
+    "rdf4j": {"name": "Eclipse RDF4J server (Native Store)", "version": "6.1.0",
+              "image": "eclipse/rdf4j-workbench:6.1.0-tomcat@sha256:7a18cecfc879f3143b5a57fe31176a0774fa57e5313f639c6f51756f390f7670"}
+  },
+  "client_image": "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+  "limits": {"memory": "4g (memswap 4g)", "cpus": 4, "client_cpus": 2},
+  "commands": [
+    "scripts/bench-compare/fetch.sh $WORK 1000 10000",
+    "docker build -f scripts/bench-compare/Dockerfile.ots -t ots-bench:570a7a30 .",
+    "python3 scripts/bench-compare/campaign.py --data-root $WORK/data --cache $WORK/cache --out $WORK/results/raw --stores ots,oxigraph,fuseki,qlever,virtuoso,rdf4j --scales 1k,10k --ots-image ots-bench:570a7a30 --max-load 6 --poll 180 --max-wait 2700 --require-quiet 10k",
+    "python3 scripts/bench-compare/campaign.py ... --stores ots --scales 1k,10k   (re-run: the first 1k run had no quiet window, the first 10k load was OOM-killed)",
+    "python3 scripts/bench-compare/bench.py report --results $WORK/results/raw --out docs/perf-data/2026-10-03 --stores ots,oxigraph,fuseki,qlever,virtuoso,rdf4j --triples 1k=374911,10k=3564773"
+  ]
+}

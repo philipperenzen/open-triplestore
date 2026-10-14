@@ -130,7 +130,7 @@ async fn ids_import_creates_a_shape_graph_whose_shapes_validate_ifc_rdf() {
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{txt}");
     assert!(txt.contains("ids"), "{txt}");
-    let (st, _, txt) = send(
+    let (st, v, txt) = send(
         &app,
         Method::POST,
         "/api/shacl/import/ids",
@@ -140,6 +140,38 @@ async fn ids_import_creates_a_shape_graph_whose_shapes_validate_ifc_rdf() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(v["stage"], "schema", "a refusal names its check: {txt}");
+    assert!(
+        v["problems"].as_array().is_some_and(|p| !p.is_empty()),
+        "and lists its problems: {txt}"
+    );
+
+    // An IDS no model could satisfy: the audit report, one problem per item.
+    let bad = IDS.replace("IFCWALL", "IFCWALLL");
+    let (st, v, txt) = send(
+        &app,
+        Method::POST,
+        "/api/shacl/import/ids",
+        &token,
+        "application/xml",
+        &bad,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(v["stage"], "audit", "{txt}");
+    let problems = v["problems"].as_array().unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.as_str().is_some_and(|p| p.contains("IFCWALLL"))),
+        "{txt}"
+    );
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("fails the IDS audit rules")),
+        "{txt}"
+    );
 
     // Convert only.
     let (st, v, txt) = send(

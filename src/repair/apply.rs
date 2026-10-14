@@ -262,7 +262,10 @@ fn dataset_graphs(state: &AppState, dataset_id: &str) -> anyhow::Result<Vec<Stri
         .auth_db
         .list_dataset_graphs(dataset_id)?
         .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| {
+            !g.starts_with("urn:system:reports:")
+                && !crate::provenance::is_any_statement_provenance_graph(g)
+        })
         .collect())
 }
 
@@ -419,6 +422,18 @@ pub async fn apply_proposal(
             .collect(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    // A system-managed graph is never a repair target (#533); a proposal over
+    // one could only have been made before the sandbox left it out.
+    if let Some(g) = graphs
+        .iter()
+        .find(|g| crate::provenance::is_any_statement_provenance_graph(g))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            crate::provenance::refuse_direct_write(g).unwrap_err(),
+        )
+            .into_response();
+    }
     if let Some(g) = graphs.iter().find(|g| !registered.contains(*g)) {
         let message = format!("graph <{g}> is no longer registered to the dataset");
         supersede(&state, stored, message.clone());

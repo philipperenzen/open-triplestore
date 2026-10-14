@@ -550,6 +550,37 @@ pub async fn validate_container(
     Ok(Json(validate_blocking(prof, entries).await?))
 }
 
+/// GET /api/containers/profiles — the container profiles this server reads
+/// and writes, and for ICDD whether the operator configured the ISO ontology
+/// files (`OTS_ICDD_ONTOLOGY_DIR`) an export needs to be Part 1-conformant.
+/// Reports file names only, never the directory, so any signed-in user can
+/// see why an export carries the `ontology-resource-missing` warning.
+pub async fn list_profiles() -> Json<serde_json::Value> {
+    let list: Vec<serde_json::Value> = profiles()
+        .iter()
+        .map(|p| {
+            let mut j = serde_json::json!({ "id": p.id(), "label": p.label() });
+            if p.id() == "icdd" {
+                let set = crate::config::ICDD_ONTOLOGY_DIR.get().is_some();
+                let (files, _) = icdd::operator_ontologies();
+                let missing: Vec<&str> = icdd::PART1_ONTOLOGIES
+                    .iter()
+                    .copied()
+                    .filter(|n| !files.iter().any(|f| f.name.eq_ignore_ascii_case(n)))
+                    .collect();
+                j["ontology_resources"] = serde_json::json!({
+                    "env": icdd::ONTOLOGY_DIR_ENV,
+                    "configured": set,
+                    "complete": missing.is_empty(),
+                    "missing": missing,
+                });
+            }
+            j
+        })
+        .collect();
+    Json(serde_json::json!({ "profiles": list }))
+}
+
 /// One stored asset: its id, content type and URL.
 struct StoredAsset {
     id: String,
@@ -866,8 +897,12 @@ pub async fn import_container(
     let st = state.clone();
     let payloads: Vec<(RdfPayload, String)> =
         manifest.payloads.iter().cloned().zip(targets).collect();
+    let skolem = crate::dataset_settings::get(&state.auth_db, &dataset_id)
+        .skolem
+        .then(|| state.base_url.to_string());
     let loaded = tokio::task::spawn_blocking(
         move || -> Vec<Result<(String, PayloadKind, String, usize), String>> {
+            let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
             payloads
                 .iter()
                 .map(|(p, iri)| {

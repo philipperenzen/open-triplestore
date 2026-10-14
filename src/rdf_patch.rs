@@ -1,9 +1,11 @@
 //! RDF Patch (the Apache Jena / RDF Delta line format): the change substrate
-//! for versions and, in due course, for streaming deltas.
+//! for versions, the change log's feed and the dataset patch logs.
 //!
 //! * `GET /api/datasets/:id/versions/:ver/diff/:other?format=rdf-patch` (or
 //!   `Accept: application/rdf-patch`) — the diff as a patch that transforms
 //!   `:ver` into `:other` (`live` for the current graphs), one transaction.
+//! * `GET /api/datasets/:id/changes/:seq[/inverse]` — one change of the
+//!   change log as a patch ([`change_patch`]), or the patch that undoes it.
 //! * `POST /api/datasets/:id/patch` — apply a patch to the dataset's graphs
 //!   atomically, as one commit.
 //!
@@ -12,11 +14,24 @@
 //! `TA` (transaction blocks; several per patch, a `TA` discards its own block
 //! only), `PA` / `PD` (prefixes, the name as a keyword or a quoted string, the
 //! namespace as an IRI or a string) and `A` / `D` (add / delete a triple or a
-//! quad). A blank node, `_:label` or `<_:label>`, names the store's own blank
-//! node with that id, so a patch can delete one and a version diff applies
-//! faithfully. Two extensions: prefixed names in `A` / `D` rows expand through
-//! the patch's own `PA` declarations, and a dataset patch puts triples written
-//! without a graph into the graph its `?graph=` parameter names.
+//! quad). Terms are IRIs, prefixed names, literals, blank nodes and RDF 1.2
+//! triple terms (`<<( s p o )>>`, as an object). A blank node, `_:label` or
+//! `<_:label>`, names the store's own blank node with that id, so a patch can
+//! delete one and a version diff or a change applies faithfully. Two
+//! extensions: prefixed names in `A` / `D` rows expand through the patch's own
+//! `PA` declarations, and a dataset patch puts triples written without a graph
+//! into the graph its `?graph=` parameter names.
+//!
+//! Every patch is applied through one engine primitive,
+//! [`TripleStore::apply_quad_ops`]: the rows in order, in one transaction,
+//! recorded in the change log with their exact net effect. Version
+//! materialisation and restore use the same primitive for their deltas.
+//!
+//! Headers the store writes and reads: `H id`, `H prev` (the patch this one
+//! follows, or inverts), `H seq` / `H epoch` (a change's place in the change
+//! log), `H dataset`, `H commit`, and `H base-digest` — on apply, the set hash
+//! (`store::set_hash`) the graphs the patch's rows name must have before it
+//! applies, else 412.
 
 use std::collections::HashSet;
 
@@ -26,6 +41,8 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use oxigraph::model::vocab::xsd;
+#[cfg(feature = "rdf-12")]
+use oxigraph::model::Triple;
 use oxigraph::model::{
     BlankNode, GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad,
     Term,
@@ -58,6 +75,28 @@ impl PatchQuad {
             self.object.clone(),
             GraphName::NamedNode(graph.clone()),
         ))
+    }
+
+    /// The row a stored quad is written as: a quad in its named graph, a
+    /// triple for the default graph.
+    pub fn from_quad(q: &Quad) -> PatchQuad {
+        PatchQuad {
+            subject: q.subject.clone(),
+            predicate: q.predicate.clone(),
+            object: q.object.clone(),
+            graph: match &q.graph_name {
+                GraphName::NamedNode(n) => Some(n.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    /// The row's terms as written in a patch, without the code and the `.`.
+    fn text(&self) -> String {
+        match &self.graph {
+            Some(g) => format!("{} {} {} {g}", self.subject, self.predicate, self.object),
+            None => format!("{} {} {}", self.subject, self.predicate, self.object),
+        }
     }
 }
 
@@ -143,6 +182,150 @@ impl Patch {
             })
             .collect()
     }
+
+    /// `H base-digest`: the set hash the graphs the patch's rows name must
+    /// have before it applies.
+    pub fn base_digest(&self) -> Option<&str> {
+        self.header_values("base-digest").next()
+    }
+
+    /// The patch that undoes this one: `A` and `D` swapped, rows in reverse
+    /// order, a fresh `H id` and `H prev` naming this patch. The other
+    /// headers are kept, except `H base-digest`: the forward patch's base is
+    /// not the inverse's. Prefix rows are not inverted — a `PA` does not
+    /// record the namespace it replaced.
+    pub fn inverse(&self) -> Patch {
+        let mut headers: Vec<(String, String)> = vec![(
+            "id".to_string(),
+            format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        )];
+        if let Some(id) = self.id() {
+            headers.push(("prev".to_string(), id.to_string()));
+        }
+        headers.extend(
+            self.headers
+                .iter()
+                .filter(|(k, _)| k != "id" && k != "prev" && k != "base-digest")
+                .cloned(),
+        );
+        Patch {
+            headers,
+            ops: self
+                .ops
+                .iter()
+                .rev()
+                .map(|op| match op {
+                    Op::Add(q) => Op::Delete(q.clone()),
+                    Op::Delete(q) => Op::Add(q.clone()),
+                })
+                .collect(),
+            committed: 1,
+            ..Patch::default()
+        }
+    }
+
+    /// The patch as text: its headers, then one transaction with its prefix
+    /// rows and its `A` / `D` rows, every term written in full (the rows need
+    /// no prefix declarations).
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for (k, v) in &self.headers {
+            out.push_str(&format!("H {k} {} .\n", header_term(v)));
+        }
+        out.push_str("TX .\n");
+        for op in &self.prefix_ops {
+            match op {
+                PrefixOp::Add { name, namespace } => out.push_str(&format!(
+                    "PA \"{name}\" <{}> .\n",
+                    escape_sparql_iri(namespace)
+                )),
+                PrefixOp::Delete { name } => out.push_str(&format!("PD \"{name}\" .\n")),
+            }
+        }
+        for op in &self.ops {
+            let (code, q) = match op {
+                Op::Add(q) => ("A", q),
+                Op::Delete(q) => ("D", q),
+            };
+            out.push_str(&format!("{code} {} .\n", q.text()));
+        }
+        out.push_str("TC .\n");
+        out
+    }
+}
+
+/// A header value as a patch term: as it is when it is already a term (`<…>`
+/// or `"…"`), an IRI (or `urn:` name) in angle brackets, anything else as a
+/// quoted string.
+fn header_term(v: &str) -> String {
+    if v.starts_with('<') || v.starts_with('"') {
+        v.to_string()
+    } else if v.contains("://") || v.starts_with("urn:") {
+        format!("<{}>", escape_sparql_iri(v))
+    } else {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// One change of the change log as a patch: its removed quads as `D` rows,
+/// then its added quads as `A` rows, each sorted, with its place in the log
+/// — `H seq`, `H epoch` — and `H dataset` / `H commit` when known. The id is
+/// the change's own (`urn:ots:change:{epoch}:{seq}`), so fetching it twice
+/// gives the same patch. `None` for a row that carries no quads (`counts` or
+/// `unknown`).
+pub fn change_patch(
+    row: &crate::store::changes::ChangeRow,
+    dataset_iri: Option<&str>,
+) -> Option<Patch> {
+    use crate::store::changes::{decode_text, Extent};
+    if row.extent != Extent::Full {
+        return None;
+    }
+    let seq = row.seq?;
+    let mut headers = vec![
+        (
+            "id".to_string(),
+            format!("urn:ots:change:{}:{seq}", row.epoch),
+        ),
+        ("seq".to_string(), seq.to_string()),
+        ("epoch".to_string(), row.epoch.clone()),
+    ];
+    if let Some(d) = dataset_iri {
+        headers.push(("dataset".to_string(), d.to_string()));
+    }
+    if let Some(c) = &row.commit_iri {
+        headers.push(("commit".to_string(), c.clone()));
+    }
+    let sorted = |text: Option<&str>| {
+        let mut rows: Vec<PatchQuad> = decode_text(text).iter().map(PatchQuad::from_quad).collect();
+        rows.sort_by_cached_key(PatchQuad::text);
+        rows
+    };
+    let mut ops: Vec<Op> = sorted(row.removed.as_deref())
+        .into_iter()
+        .map(Op::Delete)
+        .collect();
+    ops.extend(sorted(row.added.as_deref()).into_iter().map(Op::Add));
+    Some(Patch {
+        headers,
+        ops,
+        committed: 1,
+        ..Patch::default()
+    })
+}
+
+/// The patch that undoes one change: [`change_patch`] inverted, with the
+/// deterministic id `urn:ots:change:{epoch}:{seq}:inverse`.
+pub fn change_inverse_patch(
+    row: &crate::store::changes::ChangeRow,
+    dataset_iri: Option<&str>,
+) -> Option<Patch> {
+    let forward = change_patch(row, dataset_iri)?;
+    let mut inverse = forward.inverse();
+    if let Some(id) = forward.id() {
+        inverse.headers[0].1 = format!("{id}:inverse");
+    }
+    Some(inverse)
 }
 
 // ── tokenizer ───────────────────────────────────────────────────────────────
@@ -157,6 +340,9 @@ enum Tok {
     Literal(String),
     /// A keyword, an operation code or a prefixed name.
     Word(String),
+    /// An RDF 1.2 triple term `<<( s p o )>>`: the text between the
+    /// parentheses.
+    Triple(String),
 }
 
 /// Split a patch into rows: each row's line number and its tokens, the
@@ -208,8 +394,51 @@ fn rows(text: &str) -> Result<Vec<(usize, Vec<Tok>)>, String> {
                 i += 1;
                 dot = true;
             }
+            // A triple term, possibly nested: IRIs and literals inside are
+            // skipped whole, so a `>>` in them does not end it.
             '<' if chars.get(i + 1) == Some(&'<') => {
-                return Err(err("RDF 1.2 triple terms (`<<( … )>>`) are not supported"));
+                let start = i;
+                let mut depth = 0usize;
+                loop {
+                    if i >= chars.len() || chars[i] == '\n' {
+                        return Err(err("unterminated triple term"));
+                    }
+                    match chars[i] {
+                        '<' if chars.get(i + 1) == Some(&'<') => {
+                            depth += 1;
+                            i += 2;
+                        }
+                        '>' if chars.get(i + 1) == Some(&'>') => {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '<' => {
+                            while i < chars.len() && chars[i] != '>' && chars[i] != '\n' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        '"' => {
+                            i += 1;
+                            while i < chars.len() && chars[i] != '"' && chars[i] != '\n' {
+                                i += if chars[i] == '\\' { 2 } else { 1 };
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                let text: String = chars[start..i].iter().collect();
+                let inner = text
+                    .strip_prefix("<<(")
+                    .and_then(|t| t.strip_suffix(")>>"))
+                    .ok_or_else(|| {
+                        err(&format!("a triple term is written <<( s p o )>> ({text})"))
+                    })?;
+                row.push(Tok::Triple(inner.trim().to_string()));
             }
             '<' => {
                 let start = i + 1;
@@ -413,7 +642,46 @@ fn term(t: &Tok, prefixes: &[(String, String)], pos: Pos) -> Result<Term, String
         Tok::Literal(l) if pos == Pos::Object => literal(l, prefixes).map(Term::from).map_err(at),
         Tok::Literal(l) => Err(at(format!("must not be a literal ({l})"))),
         Tok::Word(w) => expand_prefixed(w, prefixes).map(Term::from).map_err(at),
+        Tok::Triple(inner) if pos == Pos::Object => triple_term(inner, prefixes).map_err(at),
+        Tok::Triple(inner) => Err(at(format!(
+            "a triple term may only be an object (<<( {inner} )>>)"
+        ))),
     }
+}
+
+/// An RDF 1.2 triple term from the text inside `<<( … )>>`: a subject, a
+/// predicate and an object, each checked as in a row (a literal or a triple
+/// term is only an object).
+#[cfg(feature = "rdf-12")]
+fn triple_term(inner: &str, prefixes: &[(String, String)]) -> Result<Term, String> {
+    let mut rows = rows(&format!("{inner} ."))?;
+    let toks = match (rows.pop(), rows.is_empty()) {
+        (Some((_, toks)), true) if toks.len() == 3 => toks,
+        _ => {
+            return Err(format!(
+                "a triple term holds a subject, a predicate and an object (<<( {inner} )>>)"
+            ))
+        }
+    };
+    let subject = match term(&toks[0], prefixes, Pos::Subject)? {
+        Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+        Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+        _ => unreachable!("a subject position only yields IRIs and blank nodes"),
+    };
+    let Term::NamedNode(predicate) = term(&toks[1], prefixes, Pos::Predicate)? else {
+        unreachable!("a predicate position only yields IRIs");
+    };
+    let object = term(&toks[2], prefixes, Pos::Object)?;
+    Ok(Term::Triple(Box::new(Triple::new(
+        subject, predicate, object,
+    ))))
+}
+
+#[cfg(not(feature = "rdf-12"))]
+fn triple_term(inner: &str, _prefixes: &[(String, String)]) -> Result<Term, String> {
+    Err(format!(
+        "triple terms need a build with RDF 1.2 support (<<( {inner} )>>)"
+    ))
 }
 
 fn quad(args: &[Tok], prefixes: &[(String, String)]) -> Result<PatchQuad, String> {
@@ -462,6 +730,7 @@ fn header_value(t: &Tok) -> String {
             Err(_) => l.clone(),
         },
         Tok::Word(w) => w.clone(),
+        Tok::Triple(t) => format!("<<( {t} )>>"),
     }
 }
 
@@ -584,6 +853,11 @@ pub fn parse(text: &str) -> Result<Patch, String> {
 
 // ── generation ──────────────────────────────────────────────────────────────
 
+/// A triple as a patch row writes it: `s p o`, every term in full.
+pub fn triple_text(q: &Quad) -> String {
+    format!("{} {} {}", q.subject, q.predicate, q.object)
+}
+
 fn triples_of(store: &TripleStore, graph: &str) -> HashSet<String> {
     let mut set = HashSet::new();
     let Ok(g) = NamedNodeRef::new(graph) else {
@@ -594,18 +868,25 @@ fn triples_of(store: &TripleStore, graph: &str) -> HashSet<String> {
         .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(g)))
         .flatten()
     {
-        set.insert(format!("{} {} {}", q.subject, q.predicate, q.object));
+        set.insert(triple_text(&q));
     }
     set
 }
 
+/// One graph's rows in a diff patch: the triples (as [`triple_text`]) to
+/// delete from and to add to the `target` graph.
+#[derive(Debug, Clone, Default)]
+pub struct GraphDiff {
+    pub target: String,
+    pub delete: Vec<String>,
+    pub add: Vec<String>,
+}
+
 /// A patch that transforms the `from` graphs into the `to` graphs, expressed
 /// against `target` graph IRIs: `(target, from, to)` per graph, where a
-/// missing side is the empty graph. Blank nodes are written with the store's
-/// own ids, so the patch applies faithfully to a store that holds them. It
-/// has the given `H id`, an `H prev` (the patch it follows in a chain or
-/// log) and the `PA` / `PD` rows that change the target's prefix table
-/// (`None`: a `PD`), written first in the block.
+/// missing side is the empty graph, read from the store. Blank nodes are
+/// written with the store's own ids, so the patch applies faithfully to a
+/// store that holds them. See [`render_diff`] for the headers.
 pub fn render(
     store: &TripleStore,
     id: &str,
@@ -614,19 +895,50 @@ pub fn render(
     prefix_changes: &[(String, Option<String>)],
     mappings: &[(String, Option<String>, Option<String>)],
 ) -> String {
+    let graphs: Vec<GraphDiff> = mappings
+        .iter()
+        .map(|(target, from, to)| snapshot_diff(store, target, from.as_deref(), to.as_deref()))
+        .collect();
+    render_diff(id, prev, headers, prefix_changes, graphs)
+}
+
+/// The rows that turn graph `from` into graph `to` (a missing side is the
+/// empty graph), against `target`, read from the store.
+pub fn snapshot_diff(
+    store: &TripleStore,
+    target: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> GraphDiff {
+    let from_set = from.map(|g| triples_of(store, g)).unwrap_or_default();
+    let to_set = to.map(|g| triples_of(store, g)).unwrap_or_default();
+    GraphDiff {
+        target: target.to_string(),
+        delete: from_set.difference(&to_set).cloned().collect(),
+        add: to_set.difference(&from_set).cloned().collect(),
+    }
+}
+
+/// A diff patch from its rows, whichever way they were found — by comparing
+/// graphs ([`render`]) or by folding the change log between two versions. It
+/// has the given `H id`, an `H prev` (the patch it follows in a chain or
+/// log), the other headers, and in one transaction the `PA` / `PD` rows that
+/// change the target's prefix table (`None`: a `PD`), then per graph its `D`
+/// rows and its `A` rows, each sorted.
+pub fn render_diff(
+    id: &str,
+    prev: Option<&str>,
+    headers: &[(&str, &str)],
+    prefix_changes: &[(String, Option<String>)],
+    graphs: Vec<GraphDiff>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("H id <{}> .\n", escape_sparql_iri(id)));
     if let Some(prev) = prev {
         out.push_str(&format!("H prev <{}> .\n", escape_sparql_iri(prev)));
     }
     for (k, v) in headers {
-        if v.starts_with('<') || v.starts_with('"') {
-            out.push_str(&format!("H {k} {v} .\n"));
-        } else if v.contains("://") || v.starts_with("urn:") {
-            out.push_str(&format!("H {k} <{v}> .\n"));
-        } else {
-            out.push_str(&format!("H {k} \"{}\" .\n", v.replace('"', "\\\"")));
-        }
+        out.push_str(&format!("H {k} {} .\n", header_term(v)));
     }
     out.push_str("TX .\n");
     for (name, ns) in prefix_changes {
@@ -635,24 +947,14 @@ pub fn render(
             None => out.push_str(&format!("PD \"{name}\" .\n")),
         }
     }
-    for (target, from, to) in mappings {
-        let from_set = from
-            .as_deref()
-            .map(|g| triples_of(store, g))
-            .unwrap_or_default();
-        let to_set = to
-            .as_deref()
-            .map(|g| triples_of(store, g))
-            .unwrap_or_default();
-        let g = format!("<{}>", escape_sparql_iri(target));
-        let mut dels: Vec<&String> = from_set.difference(&to_set).collect();
-        let mut adds: Vec<&String> = to_set.difference(&from_set).collect();
-        dels.sort();
-        adds.sort();
-        for t in dels {
+    for mut diff in graphs {
+        let g = format!("<{}>", escape_sparql_iri(&diff.target));
+        diff.delete.sort();
+        diff.add.sort();
+        for t in &diff.delete {
             out.push_str(&format!("D {t} {g} .\n"));
         }
-        for t in adds {
+        for t in &diff.add {
             out.push_str(&format!("A {t} {g} .\n"));
         }
     }
@@ -779,6 +1081,9 @@ pub struct Applied {
     pub graphs: Vec<String>,
     /// Its `PA` / `PD` rows, applied to the dataset's prefix table.
     pub prefix_rows: usize,
+    /// The change-log sequence number of the write's last row, when the log
+    /// recorded it.
+    pub seq: Option<i64>,
 }
 
 /// The dataset `dataset_id`, when `user` may write it: 404 when they may not
@@ -828,9 +1133,11 @@ pub(crate) fn patch_text(headers: &HeaderMap, body: &Bytes) -> Result<String, Re
 
 /// Apply `patch` to the dataset's graphs and prefix table, as `user` (who may
 /// write it): every quad in one of its registered graphs (the one it names,
-/// or for a triple the registered graph `default_graph` names), the SHACL
-/// write gates passed, the rows in one store transaction, then the `PA` /
-/// `PD` rows on the prefix table. A refusal changes nothing.
+/// or for a triple the registered graph `default_graph` names), its `H
+/// base-digest` matched (412), the SHACL write gates passed, the rows in one
+/// store transaction through `apply_quad_ops` — recorded in the change log
+/// under one commit — then the `PA` / `PD` rows on the prefix table. A
+/// refusal changes nothing.
 pub(crate) async fn apply_to_dataset(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -870,6 +1177,9 @@ pub(crate) async fn apply_to_dataset(
         if !registered.contains(iri) {
             return Err(not_registered(iri));
         }
+        // System-managed (#533): admins included.
+        crate::provenance::refuse_direct_write(iri)
+            .map_err(|m| refuse(StatusCode::FORBIDDEN, m))?;
         if !graphs.iter().any(|x| x == iri) {
             graphs.push(iri.to_string());
         }
@@ -879,30 +1189,73 @@ pub(crate) async fn apply_to_dataset(
         prefix_rows: patch.prefix_ops.len(),
         ..Applied::default()
     };
+    let expected = match patch.base_digest() {
+        Some(d) => Some(
+            crate::store::set_hash::SetHash::from_hex(d)
+                .ok_or_else(|| bad("H base-digest must be a 64-digit hex set hash".to_string()))?,
+        ),
+        None => None,
+    };
     if !ops.is_empty() {
+        // The rows the write leaves in the change log carry this commit, so
+        // the derived indexes and the commit record can read them back.
+        let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+        let ctx = crate::server::write_effects::context(
+            state,
+            Some(user),
+            crate::commit_log::CommitKind::Sparql,
+            &stamp,
+        );
         let st = state.clone();
         let gs = graphs.clone();
         let writer = user.clone();
-        let (added, removed) =
-            tokio::task::spawn_blocking(move || -> Result<(usize, usize), Refused> {
+        let stamped = stamp.clone();
+        let (added, removed, written) = tokio::task::spawn_blocking(
+            move || -> Result<(usize, usize, crate::server::write_effects::Written), Refused> {
                 use crate::server::error::AppError;
+                if let Some(expected) = expected {
+                    let actual = crate::store::set_hash::SetHash::of_graphs(&st.store, &gs);
+                    if actual != expected {
+                        return Err(refuse(
+                            StatusCode::PRECONDITION_FAILED,
+                            format!(
+                                "H base-digest does not match: the graphs are now {}",
+                                actual.to_hex()
+                            ),
+                        ));
+                    }
+                }
                 check_gates(&st, &writer, &ops, &gs).map_err(AppError::ValidationFailed)?;
-                let before = crate::ldes::capture::before(&st, &gs);
-                let counts = st.store.apply_quad_ops(&ops).map_err(AppError::from)?;
-                crate::ldes::capture::after(&st, before);
-                crate::entailment::after_write(&st, &gs);
-                Ok(counts)
-            })
-            .await
-            .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+                let ldes = crate::ldes::capture::Capture::begin(&st, &gs);
+                let claim = st.store.claim_search_index();
+                let (inserted, deleted) = {
+                    let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+                    claim
+                        .run(|| st.store.apply_quad_ops(&ops))
+                        .map_err(AppError::from)?
+                };
+                let written = crate::server::write_effects::Written::read(&st, &stamped);
+                ldes.finish(&st, &written.rows);
+                written.entailment(&st, &gs);
+                // The exact quads when the change log has them, else what the
+                // apply returned: the same net effect.
+                if !written.sync_text_index(&st, &gs) {
+                    #[cfg(feature = "text-search")]
+                    st.text_index_apply_delta(&inserted, &deleted, &gs);
+                }
+                claim.handled();
+                Ok((inserted.len(), deleted.len(), written))
+            },
+        )
+        .await
+        .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
         applied.added = added;
         applied.removed = removed;
-        for g in &graphs {
-            crate::server::routes::sync_text_index_after_graph_write(state, Some(g.clone())).await;
-        }
-        crate::commit_log::record(
+        applied.seq = written.rows.iter().filter_map(|r| r.seq).max();
+        crate::commit_log::record_stamped(
             &state.store,
             &state.base_url,
+            &stamp,
             crate::commit_log::CommitKind::Sparql,
             format!(
                 "RDF Patch {}: +{added} −{removed}",
@@ -982,6 +1335,7 @@ pub(crate) fn applied_json(patch: &Patch, id: &str, applied: &Applied) -> serde_
         "added": applied.added,
         "removed": applied.removed,
         "graphs": applied.graphs,
+        "seq": applied.seq,
     });
     if !changes {
         out["reason"] = serde_json::json!(if patch.aborted > 0 {
@@ -1131,10 +1485,8 @@ mod tests {
         store
             .update("INSERT DATA { GRAPH <urn:target> { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 } }")
             .unwrap();
-        assert_eq!(
-            store.apply_quad_ops(&p.quad_ops(None).unwrap()).unwrap(),
-            (1, 1)
-        );
+        let (inserted, deleted) = store.apply_quad_ops(&p.quad_ops(None).unwrap()).unwrap();
+        assert_eq!((inserted.len(), deleted.len()), (1, 1));
         let ask = |q: &str| {
             matches!(
                 store.query(q),
@@ -1143,5 +1495,145 @@ mod tests {
         };
         assert!(ask("ASK { GRAPH <urn:target> { <urn:c> <urn:p> 3 } }"));
         assert!(!ask("ASK { GRAPH <urn:target> { <urn:b> <urn:p> 2 } }"));
+    }
+
+    #[test]
+    #[cfg(feature = "rdf-12")]
+    fn triple_terms_tokenize_and_round_trip() {
+        let p = parse(
+            "TX .\nA <urn:r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <urn:s> <urn:p> \"a >> b\" )>> <urn:g> .\nTC .\n",
+        )
+        .unwrap();
+        let q = add(&p, 0);
+        assert!(matches!(q.object, Term::Triple(_)));
+        assert_eq!(q.object.to_string(), "<<( <urn:s> <urn:p> \"a >> b\" )>>");
+        // Back through the writer and the parser: the same row.
+        let again = parse(&p.to_text()).unwrap();
+        assert_eq!(add(&again, 0), q);
+        // Nested, prefixed, and ending its row without a space.
+        let nested = parse(
+            "PA ex: <http://example.org/> .\nTX .\nA ex:r ex:p <<( ex:s ex:p <<( ex:a ex:b ex:c )>> )>>.\nTC .\n",
+        )
+        .unwrap();
+        assert!(add(&nested, 0)
+            .object
+            .to_string()
+            .contains("<<( <http://example.org/a>"));
+        // A triple term is only ever an object.
+        assert!(
+            parse("TX .\nA <<( <urn:s> <urn:p> <urn:o> )>> <urn:p> <urn:o> <urn:g> .\nTC .\n")
+                .unwrap_err()
+                .contains("only be an object")
+        );
+        assert!(parse("TX .\nA <urn:s> <urn:p> <<( <urn:s> <urn:p> .\nTC .\n").is_err());
+        assert!(parse("TX .\nA <urn:s> <urn:p> <<( <urn:s> <urn:p> )>> .\nTC .\n").is_err());
+    }
+
+    /// The rows apply in order: the last row on a quad decides whether it
+    /// ends up present, and the net effect is what the store reports.
+    #[test]
+    fn the_last_row_on_a_quad_decides_its_net_effect() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update("INSERT DATA { GRAPH <urn:g> { <urn:c> <urn:p> <urn:o> } }")
+            .unwrap();
+        let p = parse(
+            "TX .\n\
+             A <urn:a> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:a> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:b> <urn:p> <urn:o> <urn:g> .\n\
+             A <urn:b> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:c> <urn:p> <urn:o> <urn:g> .\n\
+             TC .\n",
+        )
+        .unwrap();
+        let (inserted, deleted) = store.apply_quad_ops(&p.quad_ops(None).unwrap()).unwrap();
+        let s = |qs: &[Quad]| -> Vec<String> { qs.iter().map(|q| q.subject.to_string()).collect() };
+        assert_eq!(s(&inserted), vec!["<urn:b>"]);
+        assert_eq!(s(&deleted), vec!["<urn:c>"]);
+    }
+
+    #[test]
+    fn an_inverse_swaps_and_reverses_and_names_its_forward_patch() {
+        let p = parse(
+            "H id <urn:uuid:1> .\nH base-digest \"00\" .\nTX .\nD <urn:a> <urn:p> <urn:o> <urn:g> .\nA <urn:b> <urn:p> <urn:o> <urn:g> .\nTC .\n",
+        )
+        .unwrap();
+        assert_eq!(p.base_digest(), Some("00"));
+        let inv = p.inverse();
+        assert_ne!(inv.id(), Some("urn:uuid:1"));
+        assert_eq!(inv.header_values("prev").next(), Some("urn:uuid:1"));
+        assert_eq!(
+            inv.base_digest(),
+            None,
+            "the forward base is not the inverse's"
+        );
+        match (&inv.ops[0], &inv.ops[1]) {
+            (Op::Delete(d), Op::Add(a)) => {
+                assert_eq!(d.subject.to_string(), "<urn:b>");
+                assert_eq!(a.subject.to_string(), "<urn:a>");
+            }
+            other => panic!("{other:?}"),
+        }
+        let text = inv.to_text();
+        assert!(text.contains("H prev <urn:uuid:1> .\n"), "{text}");
+        assert_eq!(parse(&text).unwrap().ops, inv.ops);
+    }
+
+    #[test]
+    fn a_change_row_is_a_patch_with_its_place_in_the_log() {
+        use crate::store::changes::{ChangeRow, Extent, State};
+        let row = ChangeRow {
+            row: 1,
+            seq: Some(42),
+            epoch: "ep".into(),
+            txn: "t".into(),
+            scope: "graph".into(),
+            graph_iri: Some("urn:g".into()),
+            origin: "update".into(),
+            kind: Some("sparql".into()),
+            commit_iri: Some("http://x/commit/c1".into()),
+            actor_iri: None,
+            extent: Extent::Full,
+            added: Some("<urn:b> <urn:p> _:x1 <urn:g> .\n".into()),
+            removed: Some("<urn:a> <urn:p> <urn:o> <urn:g> .\n".into()),
+            added_n: 1,
+            removed_n: 1,
+            post_count: Some(1),
+            has_bnode: true,
+            state: State::Committed,
+            created_at: "now".into(),
+        };
+        let p = change_patch(&row, Some("http://x/dataset/d")).unwrap();
+        assert_eq!(p.id(), Some("urn:ots:change:ep:42"));
+        let text = p.to_text();
+        for h in [
+            "H seq \"42\" .",
+            "H epoch \"ep\" .",
+            "H dataset <http://x/dataset/d> .",
+            "H commit <http://x/commit/c1> .",
+        ] {
+            assert!(text.contains(h), "{h} in {text}");
+        }
+        assert!(
+            text.contains(
+                "D <urn:a> <urn:p> <urn:o> <urn:g> .\nA <urn:b> <urn:p> _:x1 <urn:g> .\n"
+            ),
+            "{text}"
+        );
+        let inv = change_inverse_patch(&row, None).unwrap();
+        assert_eq!(inv.id(), Some("urn:ots:change:ep:42:inverse"));
+        let back = parse(&inv.to_text()).unwrap();
+        match (&back.ops[0], &back.ops[1]) {
+            (Op::Delete(d), Op::Add(a)) => {
+                assert_eq!(d.subject.to_string(), "<urn:b>");
+                assert_eq!(a.subject.to_string(), "<urn:a>");
+            }
+            other => panic!("{other:?}"),
+        }
+        // No quads, no patch.
+        let mut counts = row.clone();
+        counts.extent = Extent::Counts;
+        assert!(change_patch(&counts, None).is_none());
     }
 }

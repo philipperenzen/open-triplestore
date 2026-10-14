@@ -1,0 +1,21 @@
+# Open Triplestore — the release image built from this checkout by
+# scripts/bench-compare/Dockerfile.ots (tag set by campaign.py: ots-bench:<commit>).
+name: benchcmp
+services:
+  ots:
+    image: ${OTS_IMAGE:?set OTS_IMAGE to the ots-bench image}
+    environment:
+      OTS_JWT_SECRET: ${OTS_JWT_SECRET:?}
+      OTS_RATE_LIMIT_ENABLED: "false" # measure the engine, not the per-IP limiter
+      OTS_QUERY_CACHE_ENABLED: "off"          # no result cache: every query is evaluated
+      OTS_SEED_STANDARDS_DEMO_ENABLED: "false"    # no demo data next to the benchmark data
+      OTS_SEED_STANDARD_VOCABS_ENABLED: "false"
+      OTS_MAX_UPLOAD_BYTES: "1GiB"
+      OTS_OFFLINE: "true"                 # no download at boot (no network during the run)
+    volumes: [db:/data, "${BENCH_DATA:?}:/bench:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:7878"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

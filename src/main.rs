@@ -18,6 +18,9 @@ mod config;
 mod conformance;
 mod containers;
 mod data_models;
+mod dataset_changes;
+mod dataset_rules;
+mod dataset_settings;
 mod dataset_versions;
 mod dcat;
 mod docs;
@@ -65,6 +68,7 @@ mod shex;
 mod sources;
 mod sparql;
 mod spec_import;
+mod statement_provenance;
 mod storage;
 mod store;
 mod svc_registry;
@@ -300,6 +304,22 @@ async fn main() -> anyhow::Result<()> {
             manifest.id, manifest.rdf_quad_count
         );
         return Ok(());
+    }
+
+    // A restore an admin staged in the UI (POST /api/admin/backup/:id/restore)
+    // runs now, like --restore, before the identity DB and the store open.
+    // Not for --promote-super-admin, which must work beside a live server.
+    if cli.promote_super_admin.is_none() {
+        let target_sqlite = config::AUTH_DB_PATH
+            .get()
+            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
+        backup::apply_pending_restore(
+            &backup_dir,
+            &cli.data_dir,
+            &target_sqlite,
+            identity.as_deref(),
+        );
     }
 
     // Initialize the auth database (SQLite) — needed by --promote-super-admin and the server.

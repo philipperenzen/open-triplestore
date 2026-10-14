@@ -325,7 +325,7 @@ start on any problem, listing every one**:
 - **Empty means unset.** `NAME=` (what compose passes for `${NAME:-}`) gives
   the default.
 - **Renamed or removed names stop the start** with the name to use instead
-  (for example `SECURE_COOKIES` → `OTS_SECURE_COOKIES_ENABLED`, or
+  (for example `OTS_SECURE_COOKIES_ENABLED` → `OTS_SECURE_COOKIES_ENABLED`, or
   `RATE_LIMIT_DISABLED` → `OTS_RATE_LIMIT_ENABLED` with the opposite sense),
   so an old `.env` can never be silently ignored. The full list is in the
   changelog. An `OTS_*` variable no setting reads is
@@ -414,7 +414,7 @@ as a reference shows the reference.
 | `OTS_OIDC_PROVIDER_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
 | `OTS_SECURE_COOKIES_ENABLED` | on when `OTS_BASE_URL` is https or `OTS_ENV=production`, else off | Issue auth cookies with the `Secure` attribute (HTTPS only). Production refuses `false`; set `false` only for plain-HTTP local development behind an https `OTS_BASE_URL`. |
 | `OTS_FRONTEND_ENABLED` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
-| `OTS_SEED_STANDARDS_DEMO_ENABLED` | `true` (`false` in production) | On first start, seed the public *Open Triplestore* demo organisation: one dataset per standards category with saved queries, plus a 3D demo that downloads openly licensed IFC and STL sample files from public URLs (`OTS_SEED_IFC_URL=` set to empty skips those downloads; see [operations.md](operations.md)). `false` skips the seed. It runs once: the seed is skipped while the organisation exists, and turning it off later does not remove it. |
+| `OTS_SEED_STANDARDS_DEMO_ENABLED` | `true` (`false` in production) | On first start, seed the public *Open Triplestore* demo organisation: one dataset per standards category with saved queries, plus a 3D demo that downloads openly licensed IFC and STL sample files from public URLs (`OTS_OFFLINE=true` skips those downloads; see [operations.md](operations.md)). `false` skips the seed. It runs once: the seed is skipped while the organisation exists, and turning it off later does not remove it. |
 | `OTS_CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
 | `OTS_EMBED_FRAME_ANCESTORS` | `*` (`'none'` in production) | CSP `frame-ancestors` source list for the `/embed/*` pages, used verbatim: `https://intranet.example https://*.example.org` restricts embedding to those sites, and `'none'` disables it. Other pages are never frameable from another site. See [embedding.md](embedding.md#restricting-who-may-embed). |
 | `OTS_TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` is believed, e.g. `10.0.0.0/8,172.16.0.0/12`. The client IP derived this way keys the per-IP rate limits and the guest AI budget and is the IP recorded in the audit log. From any other peer the headers are ignored and the TCP peer address is the client. Leave empty when not behind a proxy; behind one, set it, or every client appears as the proxy. |
@@ -465,6 +465,14 @@ as a reference shows the reference.
 | `OTS_CHANGE_CAPTURE_ENABLED` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`): one row per graph per write with the net delta, exact counts or an honest `unknown`, a sequence number in commit order, and a cursor per consumer. It is what a replication follower tails and what the dataset history and audits read — **turn it on when something reads it**. It is off by default because it is not free and the cost is uneven: a ground `INSERT DATA`/`DELETE DATA` pays 4–13 %, but an `INSERT … WHERE` pays **×2.5** and a `DELETE … WHERE` **×3–4**. A `WHERE` update names its target by pattern, so the only way to know what it changed is to read the target graph before the update, read it again through the transaction, and subtract — a cost proportional to the *graph*, not to the size of the change, so a small `DELETE WHERE` against a large graph is the worst case. A replication leader or cluster member records regardless (its followers tail this log); a follower does not unless set to `on`, since its own log would be partial. Measured table and row format: [versioning.md](versioning.md#what-it-costs). |
 | `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. Lower it to bound what capture can cost a single write, at the price of less precise rows. |
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
+| `OTS_CHECKPOINT_EVERY` | `100` | With change capture on, a version is a delta on the newest checkpoint; once this many deltas chain from one checkpoint, the next cut is a checkpoint (a copy) again, to keep chains short. See [versioning.md](versioning.md#delta-versions). |
+| `OTS_CHECKPOINT_FRACTION` | `0.25` | …and once the changes since the checkpoint exceed this fraction of its size (and 1 000 quads), likewise. |
+| `OTS_MATERIALISATION_MAX_QUADS` | `2000000` | A delta version's graphs are built on first read; a build that would hold more quads than this is refused with `507`. |
+| `OTS_MATERIALISATION_TTL_SECS` | `3600` | A built delta unused this long is dropped again (rebuilt on the next read). |
+| `OTS_APPLY_DELTA_TX_MAX_QUADS` | `50000` | Quads one transaction applies: a version restore whose inverse fits applies in one transaction across all its graphs (tier 1); a larger one copies the version back (tier 2). Builds split above it. |
+| `OTS_LDES_BNODE_DEPTH` | `8` | With change capture on, LDES finds the entity a changed blank-node subtree belongs to by walking up at most this many levels. |
+| `OTS_LDES_BNODE_SUBJECTS_MAX` | `10000` | …and republishes a graph whole instead when one write changed more blank-node subjects than this. |
+| `OTS_STUDIO_INCREMENTAL_MAX` | `10000` | A write-triggered validation pipeline revalidates only the nodes a write touched, up to this many; above it, in full. |
 | `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |
 | `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
 | `OTS_REPLICATION_ROLE` | `none` | `leader` records every write in the change log and serves followers; `follower` keeps this store read-only and tails a leader. See [operations.md](operations.md#replication). |
@@ -488,9 +496,10 @@ as a reference shows the reference.
 | `OTS_QUERY_CACHE_ENTRIES` | `1024` | Maximum cached query results (`0` or invalid: the default). |
 | `OTS_QUERY_CACHE_MAX_ROWS` | `10000` | Results with more rows than this are not cached. |
 | `OTS_PARALLEL_QUERY_ENABLED` | `on` | The in-memory query mirror (subject-hash shards, a full copy and the columnar copy). `off` answers every query from the persistent store. |
-| `OTS_PARALLEL_QUERY_MAX_TRIPLES` | *(derived from RAM)* | Store size above which the mirror stays off. The default is a quarter of the detected memory limit (the cgroup limit in a container) at about 1 KiB per triple, never below 2 M or above 24 M; 2 M where no limit can be detected. |
+| `OTS_PARALLEL_QUERY_MAX_TRIPLES` | *(derived from RAM)* | Store size above which the mirror stays off. The default is a quarter of the detected memory limit (the cgroup limit in a container) at about 1 KiB per triple — 1 M triples in 4 GiB — never below 100 k or above 24 M; 2 M where no limit can be detected. On Linux a build also waits until the process's resident memory plus the projected copies fit in 80 % of the limit; otherwise the mirror stays off until the next write. |
 | `OTS_PARALLEL_QUERY_SHARDS` | *(CPU cores)* | Number of subject-hash shards, 1–16 (another value stops the start). |
 | `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS` | `500` | After a write, the mirror is rebuilt only once writes have been quiet this long; queries in the meantime are answered by the persistent store. `0` rebuilds eagerly. |
+| `OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS` | `5000` | The same after a burst of writes (two or more since the mirror was last fresh) to a store over 50 k triples, whose rebuild runs in the background: a bulk load's chunks arrive with sub-second gaps, and a build started in one would run next to the next chunk. A build is also abandoned as soon as a write starts. |
 | `OTS_SHACL_RUN_INDEX_MIN_PROBES` | `20000` | A SHACL validation run builds an in-memory index of the predicates its shapes traverse only when it will make at least this many lookups. |
 | `OTS_SHACL_RUN_INDEX_MAX_QUADS` | *(derived from RAM)* | The most quads that run index may hold. The default is derived from the memory limit, 1 M where none can be detected, and is never below 250 k or above 8 M. Beyond the cap, lookups go to the store. |
 | `OTS_S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
@@ -504,11 +513,11 @@ as a reference shows the reference.
 | `OTS_BACKUP_SCHEDULE_SECS` | `86400` | Seconds between scheduled backups (at least 60) |
 | `OTS_BACKUP_ENCRYPTION_ENABLED` | `false` | Encrypt backups with `age` X25519 (requires the `backup-encrypt` build feature) |
 | `OTS_BACKUP_ENCRYPTION_KEY_PATH` | `<data-dir>/backup_key.age` | File holding the `age` X25519 **recipient** (public `age1…` line). Operator-supplied — the server refuses to start if `OTS_BACKUP_ENCRYPTION_ENABLED=true` and this is absent. |
-| `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only by `--restore` to decrypt an encrypted backup. Never needed by the running server. |
+| `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only to decrypt an encrypted backup on restore (`--restore`, or a restore staged from the admin page and applied at the next start). |
 | `OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `OTS_TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
-| `OTS_SMTP_HOST` / `OTS_SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
-| `OTS_ALERT_WEBHOOK_URL` / `OTS_ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature); without `OTS_ALERT_SMTP_HOST` the SMTP channel uses the `OTS_SMTP_*` relay — see [Alerting](#alerting) |
+| `OTS_SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
+| `OTS_ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature); without `OTS_ALERT_SMTP_HOST` the SMTP channel uses the `SMTP_*` relay — see [Alerting](#alerting) |
 
 ### Outbound requests
 
@@ -660,23 +669,41 @@ The backup subsystem produces a snapshot every `OTS_BACKUP_SCHEDULE_SECS` second
 | `OTS_BACKUP_SCHEDULE_SECS` | `86400` | Interval |
 | `OTS_BACKUP_ENCRYPTION_ENABLED` | `false` | Enable `age` X25519 encryption (requires `--features backup-encrypt`) |
 | `OTS_BACKUP_ENCRYPTION_KEY_PATH` | `<data-dir>/backup_key.age` | File containing one X25519 recipient. Required when `OTS_BACKUP_ENCRYPTION_ENABLED=true` — never auto-generated |
-| `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` | — | Identity file for `--restore` of an encrypted backup |
-| `OTS_BACKUP_S3_ENABLED` | `false` | Mirror each snapshot to the configured ObjectStore |
+| `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` | — | Identity file for restoring an encrypted backup (`--restore`, or a restore staged from the admin page) |
+| `OTS_BACKUP_S3_ENABLED` | `false` | Copy each snapshot (scheduled or taken from the admin page) to the configured ObjectStore |
 
-**Admin endpoints** (`super_admin` only):
-- `POST /api/admin/backup` — trigger immediately
+**Admin page and endpoints** (`super_admin` only). **Admin → Backups & index**
+shows the configuration, the S3 copy, every backup, and any staged or last
+restore; it drives these endpoints:
+- `GET /api/admin/backup/status` — configured or not, directory, retention,
+  encryption, schedule, the S3 copy (`enabled`, `object_store_configured`,
+  `last_upload`), `pending_restore` and `last_restore`
+- `POST /api/admin/backup` — take a backup now; with `OTS_BACKUP_S3_ENABLED=true`
+  it is copied to S3 like a scheduled one (`s3: {uploaded, error?}` in the answer)
 - `GET /api/admin/backup` — list manifests
 - `POST /api/admin/backup/{id}/verify` — recompute and compare checksums
+- `POST /api/admin/backup/{id}/restore` — stage a restore for the next start
+- `DELETE /api/admin/backup/restore` — withdraw the staged restore
 
-Restore is **out of scope for the API** — it is destructive and replaces the
-identity DB file, so it runs offline through the CLI with the server stopped:
+A restore is destructive and replaces the identity DB file the running server
+holds open, so it never runs while the server serves. Staging one (in the page,
+after typing the backup's id in the confirmation dialog) verifies the
+checksums at once — and refuses an encrypted backup when
+`OTS_BACKUP_DECRYPTION_IDENTITY_PATH` is not set — then writes
+`<OTS_BACKUP_DIR>/restore-pending.json`. The next start applies it before the store
+and the identity DB are opened, exactly as the CLI does, and records the
+outcome in `restore-last.json`, which the page shows. A staged backup is kept
+from retention until it is applied or withdrawn. Restart the server to apply it.
+
+The CLI does the same offline, with the server stopped:
 
 ```bash
 open-triplestore --restore <backup-id> --data-dir ./data
 ```
 
-Checksums are verified before anything is touched, so a corrupt backup aborts
-without destroying the live store.
+Checksums are verified (and an encrypted backup decrypted) before anything is
+touched, so a corrupt backup or a wrong key aborts without destroying the live
+store.
 
 #### Encrypted backups
 

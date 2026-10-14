@@ -484,6 +484,27 @@ settings! {
     PARALLEL_QUERY_REBUILD_QUIET: Duration = Spec::new("OTS_PARALLEL_QUERY_REBUILD_QUIET_MS", at_least(0), "query")
         .default("500")
         .doc("Quiet period after a write before the accelerator rebuilds; 0 rebuilds eagerly.");
+    PARALLEL_QUERY_BACKGROUND_QUIET: Duration = Spec::new("OTS_PARALLEL_QUERY_BACKGROUND_QUIET_MS", at_least(0), "query")
+        .default("5000")
+        .doc("Quiet period after a write before a large store's accelerator rebuilds in the background.");
+    APPLY_DELTA_TX_MAX_QUADS: usize = Spec::new("OTS_APPLY_DELTA_TX_MAX_QUADS", at_least(1), "query")
+        .default("50000")
+        .doc("Quads one transaction of a non-atomic delta apply (a materialisation build) writes.");
+    CHECKPOINT_EVERY: usize = Spec::new("OTS_CHECKPOINT_EVERY", at_least(1), "query")
+        .default("100")
+        .doc("A dataset version is cut as a full checkpoint after this many delta versions.");
+    CHECKPOINT_FRACTION: f64 = Spec::new("OTS_CHECKPOINT_FRACTION", Kind::Ratio { min: 0.0, max: 1.0 }, "query")
+        .default("0.25")
+        .doc("A version whose changes exceed this fraction of its base is cut as a checkpoint.");
+    MATERIALISATION_MAX_QUADS: u64 = Spec::new("OTS_MATERIALISATION_MAX_QUADS", at_least(1), "query")
+        .default("2000000")
+        .doc("Largest version materialisation built on request.");
+    MATERIALISATION_TTL: Duration = Spec::new("OTS_MATERIALISATION_TTL_SECS", at_least(0), "query")
+        .default("3600")
+        .doc("How long a materialised version is kept after its last use.");
+    STUDIO_INCREMENTAL_MAX: usize = Spec::new("OTS_STUDIO_INCREMENTAL_MAX", at_least(0), "shacl")
+        .default("10000")
+        .doc("Changed focus nodes a write-triggered pipeline validates incrementally; above it the run is full.");
     COLUMNAR_QUERY_ENABLED: bool = Spec::new("OTS_COLUMNAR_QUERY_ENABLED", Kind::Bool, "query")
         .default("true")
         .doc("The columnar aggregate engine.");
@@ -567,6 +588,12 @@ settings! {
     LDES_SWEEP_INTERVAL: Duration = Spec::new("OTS_LDES_SWEEP_INTERVAL_SECS", at_least(0), "ldes")
         .default("60")
         .doc("A dataset's member log is pruned at most this often from the write path.");
+    LDES_BNODE_DEPTH: usize = Spec::new("OTS_LDES_BNODE_DEPTH", at_least(0), "ldes")
+        .default("8")
+        .doc("How far up a blank-node tree the owner of a changed blank node is looked for.");
+    LDES_BNODE_SUBJECTS_MAX: usize = Spec::new("OTS_LDES_BNODE_SUBJECTS_MAX", at_least(0), "ldes")
+        .default("10000")
+        .doc("Above this many changed blank-node subjects in one graph, the graph is republished whole.");
     LDES_MAX_IN_FLIGHT: usize = Spec::new("OTS_LDES_MAX_IN_FLIGHT", at_least(1), "ldes")
         .default("64")
         .doc("LDES page builds running at once.");

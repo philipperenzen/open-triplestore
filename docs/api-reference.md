@@ -102,7 +102,10 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
 | `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |
 | `POST` | `/api/reasoning/check` | **token** | OWL 2 DL consistency, entailment, satisfiability or profile check over graphs the caller may read, or over Turtle in the body; `?async=true` queues it as a job. |
+| `GET` | `/api/reasoning/jobs` | **token** | The caller's background reasoning jobs, newest first (an admin sees everyone's); `?dataset=` narrows them to one dataset. |
 | `GET` | `/api/reasoning/jobs/{job_id}` | **token** | A background reasoning job, to the user who started it and admins (`404` to anyone else). |
+| `GET` | `/api/datasets/{dataset_id}/rules` | **none** | A dataset's stored SWRL rules, to whoever may read the dataset; a private rule graph only to its writers. |
+| `POST` | `/api/datasets/{dataset_id}/rules` | **token** | Store a rule set with the dataset (its writers); the rules run at once. `PUT` / `DELETE …/rules/{set_id}` replace or remove one, `POST …/rules/run` runs them again. |
 | `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
@@ -118,6 +121,15 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/admin/changes/status` | **admin** | Capture state, epoch, cursors, caps. |
 | `PUT` | `/api/admin/changes/cursors/{name}` | **admin** | Move a consumer's bookmark. |
 | `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
+| `GET` | `/api/admin/changes/stats` | **admin** | Change-log size per dataset, pins, cursors, delta-version builds. |
+| `POST` | `/api/admin/versions/sweep` | **admin** | Purges versions of deleted datasets, unreferenced version graphs, stale pins, expired builds. |
+| `GET` | `/api/datasets/{id}/changes` | **none** | The dataset's change feed: rows of the graphs the caller may read, without quads. |
+| `GET` | `/api/datasets/{id}/changes/{seq}` | **none** | One change as an RDF Patch (`…/inverse` undoes it), if its graph is readable. |
+| `PUT` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | A reader's position in the feed; pins retention; its owner or an admin moves or drops it. |
+| `DELETE` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | Drop a cursor (its owner or an admin). |
+| `GET` | `/api/datasets/{id}/settings` | **none** | The dataset's Skolem and statement-provenance opt-ins, to its readers. |
+| `PUT` | `/api/datasets/{id}/settings` | **token** | Change them; dataset writers only (`403` otherwise). |
+| `POST` | `/api/datasets/{id}/patch` | **token** | Apply an RDF Patch; dataset writers only. |
 | `GET` | `/api/admin/users` | **admin** | The account directory. |
 | `GET` | `/api/admin/audit` | **admin** | The audit trail. |
 | `GET` | `/api/admin/config` | **admin** | Every setting with its effective value, default and source; secrets redacted. |
@@ -296,6 +308,57 @@ retention and the caps.
 
 A cursor is a consumer's bookmark: retention never deletes rows above the
 lowest live one, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30) is dropped.
+`GET /api/admin/changes/stats` returns `{ "enabled", "readable", "epoch",
+"size_bytes", "rows", "max_deleted_seq", "first_seq_commit", "datasets":
+{ <id>: { "rows", "payload_bytes", "materialised_quads", "materialisations",
+"checkpoints", "deltas" } }, "unregistered_graphs", "store_scoped_rows",
+"pins", "cursors" }`.
+
+A dataset's readers have their own view of the log:
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/api/datasets/<id>/changes?since=<seq>&limit=<n>&wait_ms=<ms>` | `{ "dataset_id", "enabled", "epoch", "rows", "next" }` — rows of the dataset's graphs the caller may read (plus store-scoped rows) above `since`, in commit order, without `added`/`removed` (`limit` 1–5000, default 500; `wait_ms` long-polls up to 30 000) |
+| `GET` | `/api/datasets/<id>/changes/<seq>` | the change as `application/rdf-patch` (`H id <urn:ots:change:<epoch>:<seq>>`, `H seq`, `H epoch`, `H dataset`, `H commit`); `404` when the change is not the dataset's or not readable, `410` when retention removed it, `409` (with `extent`, `added_n`, `removed_n`) when the row carries no quads |
+| `GET` | `/api/datasets/<id>/changes/<seq>/inverse` | the patch that undoes it (`H prev` names the forward patch) |
+| `PUT` | `/api/datasets/<id>/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor (`name`, `seq`, `owner`, `expires_at`); `403` for someone else's cursor, `400` for a bad name or `seq`, `409` while capture is off |
+| `DELETE` | `/api/datasets/<id>/changes/cursors/<name>` | `204`; `403` unless the owner or an admin; `404` |
+
+A commit on `GET /api/datasets/<id>/commits` gains `seq_from`, `seq_to`,
+`net_added` and `net_removed` when the change log recorded its write.
+
+## Dataset versions — checkpoints and deltas
+
+With change capture on, a version may be a *delta* rather than a copy (see
+`docs/versioning.md`, "Delta versions"). The routes are unchanged; additions:
+
+- `POST /api/datasets/<id>/versions` takes an optional `"checkpoint": true`,
+  and its `201` body adds `checkpoint_reason` when the version is a
+  checkpoint.
+- A version record adds `kind` (`checkpoint` | `delta`), `base_version`,
+  `patch_range` (`epoch`, `from_seq`, `to_seq`), `anchor` (`epoch`, `seq`),
+  `content_hash`, `quad_count`, `change_count`, `chain_broken` and
+  `materialised`; each `source_map` entry adds its graph's `content_hash`
+  and `quad_count`. A delta's `snapshot_graphs` name the graphs it builds
+  into.
+- A read of a delta's data (`…/versions/<ver>/data`, a `versions=` pin, a
+  dataset service's `?version=`, a saved query) builds it first: `503` with
+  `Retry-After` for an anonymous caller until it is built, `503` when the
+  build outlasts the write timeout, `507` over
+  `OTS_MATERIALISATION_MAX_QUADS`, `410` when its chain is broken.
+- `…/diff/<other>` adds `"source": "chain" | "materialised"`.
+- `…/restore` adds `"tier": 1 | 2`.
+- `DELETE …/versions/<ver>` answers `409` with `dependants` for a checkpoint
+  a delta chains from; `…/versions/gc` adds `kept_as_base`.
+- `POST …/publish` of a delta answers `409` when the build does not match
+  its content hash (the chain is then marked broken).
+
+`POST /api/datasets/<id>/patch` answers with `seq` (the write's last
+change-log sequence number) beside its net `added` / `removed`; `H
+base-digest` makes it conditional (`412` when the graphs no longer hash to
+it); RDF 1.2 triple terms are accepted as objects; anonymous is `401`.
+Graph Store `GET` of a graph holding RDF 1.2 triple terms as JSON-LD answers
+`406` before any byte is sent.
 
 ## Replication — `/api/replication/*` and a follower's `503`
 

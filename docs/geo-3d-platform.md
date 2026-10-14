@@ -50,6 +50,10 @@ NAP), `CRS84`/`CRS84h`, Web Mercator; the kernel is pure-Rust (the exact
 `POST /api/datasets/:id/ingest/cityjson` (multipart `file`, optional
 `target_graph`/`public`; `?preview=true` dry-runs). `.city.json`/`.cityjson`
 files dropped into `POST /api/import/bulk` are converted the same way.
+In the web UI, the dataset page's **Exchange** section has a CityJSON panel:
+pick a file, **Preview** (counts and the first N-Triples, nothing written) or
+**Import** with upload progress, and see the objects, geometries and triples it
+produced, the reference system, and the graph it wrote.
 
 The converter dequantises the shared vertex array, mints stable IRIs
 (`{base}/dataset/{id}/bag/{identificatie}`, geometry `…/geom/lod{lod}`), emits BOT

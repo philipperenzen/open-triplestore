@@ -1,0 +1,30 @@
+# QLever (Apache-2.0), commit caba7eb. Index built offline by qlever-index,
+# then served by qlever-server.
+name: benchcmp
+x-image: &image adfreiburg/qlever:commit-caba7eb0d1@sha256:64ad83b43341548f7e8bedaadeb09ef4f2aa50acc7686778e1e9bb830ae1e0ab
+services:
+  qlever:
+    image: *image
+    user: "0:0"
+    entrypoint: ["bash", "-c"]
+    # -m: memory for query processing and cache; -c 0: no query-result cache,
+    # so every query is evaluated; -j 4: four simultaneous queries (= CPU limit);
+    # WARN: no per-query log lines with the full query text.
+    command: ["cd /db && exec /qlever/qlever-server -i bsbm -p 7001 -m 3GB -c 0GB -j 4 -s 300s --log-level WARN"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:7001"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+  load:
+    profiles: [load]
+    image: *image
+    user: "0:0"
+    entrypoint: ["bash", "-c"]
+    command: ["cd /db && echo '{\"ascii-prefixes-only\": false, \"num-triples-per-batch\": 1000000}' > bsbm.settings.json && exec /qlever/qlever-index -i bsbm -s bsbm.settings.json -F nt -f /bench/dataset.nt -m 1GB -j 4"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

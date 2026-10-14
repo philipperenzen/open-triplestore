@@ -30,9 +30,13 @@ is asserted.
   `RdfSerializer`, as the server does, and parsed back; the result must be
   isomorphic to the expected document read by the same processor, both read
   with the entry's `rdfDirection` option. This compares RDF, not JSON-LD
-  object equality: the serialiser writes every quad as it is, where the
-  expected outputs are expanded and fold lists into `@list`, JSON literals
-  into `@json` and direction encodings into `@direction`.
+  object equality: the serialiser streams, so it may write one subject in
+  more than one node object, and it writes `@direction` encodings as the
+  quads they are, where the expected outputs are expanded. Since 2026-10-06
+  it folds well-formed lists into `@list` and `rdf:JSON` literals into
+  `@json` as the algorithm does; the `jsonld::` unit tests in
+  `src/jsonld/mod.rs` pin that JSON form. A negative fromRdf test passes when
+  the serialisation fails.
 - **Skipped by design** (counted by the runner, never silently): JSON-LD
   1.0-only entries (`specVersion` or `processingMode` `json-ld-1.0`),
   generalized RDF, `expandContext`, and the `useNativeTypes` /
@@ -43,29 +47,36 @@ is asserted.
 
 ## Known gaps
 
-The runner's `KNOWN_FAILURES` list is the authority. It holds three `fromRdf`
-entries, all where the JSON-LD 1.1 "Serialize RDF as JSON-LD" algorithm
-would lose or refuse data the store holds, and the serialiser keeps every
-quad as it is instead:
+None: the runner's `KNOWN_FAILURES` list is empty since 2026-10-06, and every
+evaluated `toRdf` and `fromRdf` entry passes. The three `fromRdf` entries
+that used to fail on purpose now pass because the serialiser and the store
+follow the specification:
 
 - **`0016`** — a list whose nodes also carry `rdf:type rdf:List`. The
-  algorithm folds the list into `@list` and drops those `rdf:type` quads;
-  the serialiser writes the list nodes as nodes, so the download reads back
-  as the stored graph, type quads included, not as the expected output.
+  serialiser runs the algorithm's list conversion (JSON-LD 1.1 API §8.4.2
+  step 6.4): a well-formed list becomes `@list` at its head, and its nodes
+  go, with the `rdf:type rdf:List` quads the algorithm allows on them and
+  drops. Those quads are entailed by the RDF Schema axiom
+  `rdf:first rdfs:domain rdf:List`; a list node with any *other* property,
+  used more than once, or used in two graphs is not well-formed and stays a
+  node object with every quad, as the algorithm leaves it. The stream holds
+  back only the quads a list can involve (those of blank nodes, and
+  `rdf:nil` objects) until the end.
 - **`js08`, `js09`** — an `rdf:JSON` literal whose lexical form is not JSON
-  (`"bareword"`, `"[{]"`). The algorithm aborts the serialisation (`invalid
-  JSON literal`); the serialiser writes it as a typed literal
-  (`{"@value": "bareword", "@type": "…#JSON"}`), which reads back as the
-  same literal. The store accepts such a literal like any other ill-typed
-  one ([datatypes.md](../datatypes.md#other--custom-datatypes)), and
-  refusing it would fail the JSON-LD download of the whole graph.
+  (`"bareword"`, `"[{]"`). The serialiser aborts with `invalid JSON
+  literal`, as the algorithm says (§8.5.2 step 2.4). Such a literal never
+  reaches it from the store: it is ill-typed, and every write path refuses
+  it with a 400 ([datatypes.md](../datatypes.md#other--custom-datatypes)).
+  A valid `rdf:JSON` literal is written as its JSON value with
+  `"@type": "@json"` when its text is the canonical form `@json` reads back
+  as, and typed `rdf:JSON` with its text otherwise, so a JSON-LD download
+  reads back as exactly the stored literal.
 
-Passing either would mean a JSON-LD download that differs from the Turtle or
-N-Quads download of the same graph, so JSON-LD 1.1 stays graded *Partial*
-([standards.md](../standards.md), footnote 13).
+JSON-LD 1.1 is graded *Full* ([standards.md](../standards.md), footnote 13).
 
-Fixed in the vendored processor on 2026-10-03, one commit and one upstream
-draft each (`vendor/oxjsonld/UPSTREAM-PR-*.md`, not posted):
+Fixed in the vendored processor, one commit and one upstream draft each
+(`vendor/oxjsonld/UPSTREAM-PR-*.md`, not posted); the first four on
+2026-10-03, the last two on 2026-10-06:
 
 - IRI resolution removes the dot segments of the whole target path, those of
   a base IRI and of a network-path reference included (RFC 3986 §5.2.2;
@@ -78,6 +89,10 @@ draft each (`vendor/oxjsonld/UPSTREAM-PR-*.md`, not posted):
 - The `rdfDirection` option: `null`, `i18n-datatype` and `compound-literal`
   (`di02`, `di04`–`di06`, and the non-normative `di09`–`di12` and `fromRdf`
   `di05`–`di12`, which the runner used to skip).
+- `rdf:JSON` literals are serialised as `@json` values, and one that is not
+  JSON fails the serialisation (`fromRdf` `js08`, `js09`).
+- Well-formed RDF collections are serialised as `@list`, without the
+  `rdf:type rdf:List` quads of their nodes (`fromRdf` `0016`).
 
 ## `@direction` in the server
 

@@ -34,6 +34,22 @@ pub enum AppError {
     /// signals orchestration/clients that the request was aborted to protect the runtime,
     /// not that the input was malformed.
     ServiceUnavailable(String),
+    /// 503 Service Unavailable with a `Retry-After` hint — the resource exists
+    /// but cannot be served right now (a delta version an anonymous caller
+    /// asked for before anyone materialised it).
+    RetryLater {
+        retry_after_secs: u64,
+        message: String,
+    },
+    /// 406 Not Acceptable — the content cannot be written in the format asked
+    /// for (JSON-LD of a graph holding RDF 1.2 triple terms).
+    NotAcceptable(String),
+    /// 410 Gone — the resource existed and was removed for good (a change the
+    /// log's retention removed).
+    Gone(String),
+    /// 507 Insufficient Storage — building the resource would exceed a disk
+    /// budget (a version materialisation over `OTS_MATERIALISATION_MAX_QUADS`).
+    InsufficientStorage(String),
     /// Any other status with a JSON body that says what happened (a reasoning
     /// backend that is down, timed out or got too much input).
     Status(StatusCode, serde_json::Value),
@@ -49,11 +65,16 @@ impl AppError {
             | AppError::NotFound(m)
             | AppError::UnsupportedMediaType(m)
             | AppError::Internal(m)
-            | AppError::ServiceUnavailable(m) => m.clone(),
+            | AppError::ServiceUnavailable(m)
+            | AppError::NotAcceptable(m)
+            | AppError::Gone(m)
+            | AppError::InsufficientStorage(m) => m.clone(),
             AppError::Conflict(v) | AppError::Unprocessable(v) | AppError::Status(_, v) => {
                 v.to_string()
             }
-            AppError::RateLimited { message, .. } => message.clone(),
+            AppError::RateLimited { message, .. } | AppError::RetryLater { message, .. } => {
+                message.clone()
+            }
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
         }
     }
@@ -117,6 +138,18 @@ impl IntoResponse for AppError {
                 message,
             )
                 .into_response(),
+            AppError::RetryLater {
+                retry_after_secs,
+                message,
+            } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs.to_string(),
+                )],
+                message,
+            )
+                .into_response(),
             other => {
                 let (status, message) = match other {
                     AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
@@ -137,11 +170,15 @@ impl IntoResponse for AppError {
                         tracing::error!("Service unavailable: {}", msg);
                         (StatusCode::SERVICE_UNAVAILABLE, msg)
                     }
+                    AppError::NotAcceptable(msg) => (StatusCode::NOT_ACCEPTABLE, msg),
+                    AppError::Gone(msg) => (StatusCode::GONE, msg),
+                    AppError::InsufficientStorage(msg) => (StatusCode::INSUFFICIENT_STORAGE, msg),
                     AppError::ValidationFailed(_)
                     | AppError::Conflict(_)
                     | AppError::Unprocessable(_)
                     | AppError::Status(..)
-                    | AppError::RateLimited { .. } => unreachable!(),
+                    | AppError::RateLimited { .. }
+                    | AppError::RetryLater { .. } => unreachable!(),
                 };
                 (status, message).into_response()
             }
@@ -166,6 +203,10 @@ impl AppError {
             AppError::UnsupportedMediaType(m) => plain(StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
             AppError::ServiceUnavailable(m) => plain(StatusCode::SERVICE_UNAVAILABLE, m),
             AppError::RateLimited { message, .. } => plain(StatusCode::TOO_MANY_REQUESTS, message),
+            AppError::RetryLater { message, .. } => plain(StatusCode::SERVICE_UNAVAILABLE, message),
+            AppError::NotAcceptable(m) => plain(StatusCode::NOT_ACCEPTABLE, m),
+            AppError::Gone(m) => plain(StatusCode::GONE, m),
+            AppError::InsufficientStorage(m) => plain(StatusCode::INSUFFICIENT_STORAGE, m),
             AppError::ValidationFailed(_) => plain(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "SHACL validation failed".to_string(),
@@ -184,7 +225,8 @@ impl AppError {
 impl From<crate::store::engine::StoreError> for AppError {
     fn from(err: crate::store::engine::StoreError) -> Self {
         match err {
-            crate::store::engine::StoreError::Parse(msg) => AppError::BadRequest(msg),
+            crate::store::engine::StoreError::Parse(msg)
+            | crate::store::engine::StoreError::IllTypedLiteral(msg) => AppError::BadRequest(msg),
             crate::store::engine::StoreError::UnsupportedFormat(msg) => {
                 AppError::UnsupportedMediaType(msg)
             }

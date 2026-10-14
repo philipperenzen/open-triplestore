@@ -4,6 +4,7 @@ use super::view::{DataView, GraphSel};
 use oxigraph::model::{Literal, Term};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
@@ -1698,14 +1699,15 @@ fn eval_path_native(
     }
 }
 
-/// Transitive closure of `inner` starting at `from` (BFS with a visited set);
-/// `include_start` distinguishes `*` from `+`.
+/// Transitive closure of `inner` starting at `from`; `include_start`
+/// distinguishes `*` from `+`.
 ///
-/// Emission is tracked apart from termination: for `+` the start node is not
-/// emitted up front, but it *is* emitted once when a cycle leads back to it —
-/// `<s> <p>+ ?v` in SPARQL yields `s` for `s p a . a p s`. The old walk marked
-/// the start visited before the search and only emitted on first visit, so a
-/// focus node on a cycle never counted among its own `+` values.
+/// The `+` reach set (every node one or more steps away) is what is computed
+/// and memoised per run ([`super::view::ClosureMemo`]); `*` adds the start.
+/// A cycle back to the start makes it part of its own `+` set — `<s> <p>+ ?v`
+/// in SPARQL yields `s` for `s p a . a p s` — and `*` lists it once. The
+/// values come back sorted by their N-Triples form, so the order of a report
+/// does not depend on which closures other rayon workers memoised first.
 fn closure(
     view: &DataView<'_>,
     from: &Term,
@@ -1713,26 +1715,64 @@ fn closure(
     include_start: bool,
     sel: GraphSel,
 ) -> Vec<Term> {
-    let mut visited: HashSet<Term> = HashSet::new();
-    let mut emitted: HashSet<Term> = HashSet::new();
-    let mut out = Vec::new();
-    let mut queue = std::collections::VecDeque::new();
-    visited.insert(from.clone());
-    if include_start {
-        emitted.insert(from.clone());
-        out.push(from.clone());
-    }
-    queue.push_back(from.clone());
-    while let Some(node) = queue.pop_front() {
-        for next in eval_path_native(view, &node, inner, sel) {
-            if emitted.insert(next.clone()) {
-                out.push(next.clone());
+    let memo = view.closure_memo();
+    let path = memo.path_id(inner);
+    let reach = match path.and_then(|p| memo.get(p, sel, from)) {
+        Some(reach) => reach,
+        None => {
+            let reach: Arc<[Term]> = reach_one_or_more(view, from, inner, sel, path).into();
+            if let Some(p) = path {
+                memo.insert(p, sel, from.clone(), reach.clone());
             }
-            if visited.insert(next.clone()) {
+            reach
+        }
+    };
+    let mut out = Vec::with_capacity(reach.len() + usize::from(include_start));
+    if include_start {
+        out.push(from.clone());
+        out.extend(reach.iter().filter(|t| *t != from).cloned());
+    } else {
+        out.extend(reach.iter().cloned());
+    }
+    out
+}
+
+/// The nodes reachable from `from` in one or more `inner` steps, breadth
+/// first, sorted by N-Triples form. A reached node whose own reach set the run
+/// memoised contributes that set and is not walked: the set is closed under
+/// `inner`, so nothing past it is missed.
+fn reach_one_or_more(
+    view: &DataView<'_>,
+    from: &Term,
+    inner: &PropertyPath,
+    sel: GraphSel,
+    path: Option<usize>,
+) -> Vec<Term> {
+    let memo = view.closure_memo();
+    let mut reached: HashSet<Term> = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    for next in eval_path_native(view, from, inner, sel) {
+        if reached.insert(next.clone()) {
+            queue.push_back(next);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        if let Some(known) = path.and_then(|p| memo.get(p, sel, &node)) {
+            for t in known.iter() {
+                if !reached.contains(t) {
+                    reached.insert(t.clone());
+                }
+            }
+            continue;
+        }
+        for next in eval_path_native(view, &node, inner, sel) {
+            if reached.insert(next.clone()) {
                 queue.push_back(next);
             }
         }
     }
+    let mut out: Vec<Term> = reached.into_iter().collect();
+    out.sort_by_cached_key(|t| t.to_string());
     out
 }
 
@@ -1758,9 +1798,120 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
     {
         return hit.map(|re| re.is_match(value));
     }
+    let built = compile_pattern(pattern, flags).map(Arc::new);
+    REGEXES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 1024 {
+            c.clear();
+        }
+        c.entry(pattern.to_string())
+            .or_default()
+            .insert(flags.to_string(), built.clone());
+    });
+    built.map(|re| re.is_match(value))
+}
+
+/// An XPath regular expression (the SPARQL `REGEX` syntax `sh:pattern`
+/// uses: XML Schema 1.0 regular expressions with XPath's anchors, reluctant
+/// quantifiers and back-references) in the `regex` crate's syntax. XML
+/// Schema 1.0 has `{` and `}` as ordinary characters wherever they do not
+/// make a quantifier `{n}`, `{n,}` or `{n,m}`, so `({)(.*)(})` matches a
+/// braced string; the `regex` crate needs those escaped.
+pub(crate) fn xpath_regex(pattern: &str) -> std::borrow::Cow<'_, str> {
+    if !pattern.contains(['{', '}']) {
+        return pattern.into();
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let (mut i, mut class_depth) = (0usize, 0usize);
+    // Whether the previous token can take a quantifier.
+    let mut quantifiable = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                out.push(c);
+                // `\p{…}` / `\P{…}`: the braces belong to the escape.
+                if let Some(&n) = chars.get(i + 1) {
+                    out.push(n);
+                    i += 1;
+                    if matches!(n, 'p' | 'P') && chars.get(i + 1) == Some(&'{') {
+                        while i + 1 < chars.len() {
+                            i += 1;
+                            out.push(chars[i]);
+                            if chars[i] == '}' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                quantifiable = true;
+            }
+            '[' => {
+                class_depth += 1;
+                out.push(c);
+            }
+            ']' if class_depth > 0 => {
+                class_depth -= 1;
+                out.push(c);
+                quantifiable = class_depth == 0;
+            }
+            _ if class_depth > 0 => out.push(c),
+            '{' => {
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&x| x == '}')
+                    .map(|p| i + 1 + p);
+                let quantity = end.is_some_and(|e| {
+                    let body: String = chars[i + 1..e].iter().collect();
+                    let mut parts = body.splitn(2, ',');
+                    let lo = parts.next().unwrap_or("");
+                    let hi = parts.next();
+                    !lo.is_empty()
+                        && lo.bytes().all(|b| b.is_ascii_digit())
+                        && hi.is_none_or(|h| h.bytes().all(|b| b.is_ascii_digit()))
+                });
+                if quantity && quantifiable {
+                    let e = end.expect("a quantity has an end");
+                    out.extend(&chars[i..=e]);
+                    i = e;
+                    // A reluctant `?` may follow; another quantifier may not.
+                    quantifiable = false;
+                } else {
+                    out.push_str("\\{");
+                    quantifiable = true;
+                }
+            }
+            '}' => {
+                out.push_str("\\}");
+                quantifiable = true;
+            }
+            '(' | '|' => {
+                out.push(c);
+                quantifiable = false;
+            }
+            '*' | '+' | '?' => {
+                out.push(c);
+                quantifiable = false;
+            }
+            _ => {
+                out.push(c);
+                quantifiable = !matches!(c, '^');
+            }
+        }
+        i += 1;
+    }
+    out.into()
+}
+
+/// `pattern` with SPARQL `REGEX` `flags` compiled, or `None` when the flags
+/// are not REGEX flags or the pattern is not a regular expression this
+/// processor evaluates.
+pub(crate) fn compile_pattern(pattern: &str, flags: &str) -> Option<regex::Regex> {
     let mut literal = false;
     let mut ok = true;
-    let mut b = regex::RegexBuilder::new(pattern);
+    let translated = xpath_regex(pattern);
+    let mut b = regex::RegexBuilder::new(&translated);
     for f in flags.chars() {
         match f {
             'i' => {
@@ -1779,7 +1930,7 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
             _ => ok = false,
         }
     }
-    let built = if !ok {
+    if !ok {
         None
     } else if literal {
         regex::RegexBuilder::new(&regex::escape(pattern))
@@ -1790,17 +1941,6 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
     } else {
         b.size_limit(1 << 20).build().ok()
     }
-    .map(Arc::new);
-    REGEXES.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 1024 {
-            c.clear();
-        }
-        c.entry(pattern.to_string())
-            .or_default()
-            .insert(flags.to_string(), built.clone());
-    });
-    built.map(|re| re.is_match(value))
 }
 
 fn string_repr(term: &Term) -> Option<String> {
@@ -2053,5 +2193,35 @@ pub(crate) fn xsd_lexical_valid(lit: &Literal) -> bool {
             .is_some()
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::{compile_pattern, xpath_regex};
+
+    /// XML Schema 1.0 regular expressions take `{` and `}` as ordinary
+    /// characters outside a quantifier (the OGC GeoSPARQL validator's S18
+    /// shape matches a GeoJSON object with `^\s*({)(.*)(})\s*$`).
+    #[test]
+    fn braces_outside_a_quantifier_are_ordinary_characters() {
+        assert_eq!(xpath_regex("a{2}"), "a{2}");
+        assert_eq!(xpath_regex("a{2,}b{1,3}?"), "a{2,}b{1,3}?");
+        assert_eq!(xpath_regex("({)(.*)(})"), "(\\{)(.*)(\\})");
+        assert_eq!(xpath_regex("{a}"), "\\{a\\}");
+        assert_eq!(xpath_regex("x{y"), "x\\{y");
+        assert_eq!(xpath_regex("[{}]"), "[{}]");
+        assert_eq!(xpath_regex("\\{"), "\\{");
+        assert_eq!(xpath_regex("\\p{Lu}{2}"), "\\p{Lu}{2}");
+        let re = compile_pattern("^\\s*$|^\\s*({)(.*)(})\\s*$", "s").unwrap();
+        assert!(re.is_match("  {\"type\": \"Point\"}\n"));
+        assert!(!re.is_match("<gml:Point/>"));
+        assert!(compile_pattern("a{2}", "").unwrap().is_match("aa"));
+    }
+
+    #[test]
+    fn what_cannot_be_evaluated_does_not_compile() {
+        assert!(compile_pattern("(", "").is_none());
+        assert!(compile_pattern("a", "z").is_none());
     }
 }
