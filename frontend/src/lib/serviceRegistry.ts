@@ -15,7 +15,7 @@
 //                             that point at an external backend.
 //   2. runtime config       — /config.json's "services" map, applied WITHOUT a rebuild (see
 //                             runtimeConfig.ts); set via setRuntimeServiceOverrides.
-//   3. /registry discovery  — live, opt-in (LD_DISCOVERY) cross-app SSE resolution.
+//   3. /registry discovery  — live, opt-in (OTS_DISCOVERY_ENABLED) cross-app SSE resolution.
 //   4. DEFAULTS             — localhost dev ports.
 
 import { withBase } from './basePath';
@@ -121,7 +121,7 @@ function broadcast(): void {
 
 /**
  * Initialise discovery: a one-shot resolve plus a live SSE subscription. Safe to call once at
- * boot. Opt-in — a no-op unless LD_DISCOVERY is set (Vite injects `__LD_DISCOVERY__`); this keeps
+ * boot. Opt-in — a no-op unless OTS_DISCOVERY_ENABLED is set (Vite injects `__LD_DISCOVERY__`); this keeps
  * the app from contacting a registry that isn't running. All failures are swallowed — the app
  * keeps the seeded DEFAULTS (fail-soft).
  */

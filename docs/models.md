@@ -29,7 +29,7 @@ Queries over the vocabulary graphs (`/sparql`, the ontology browser) return trip
 - **Nothing is deleted.** The hand-authored IMBOR "excerpt" that 0.4.0 to 0.6.0 seeded, with terms modelled in CROW's namespace that CROW never published, is kept, deprecated, and served to no one who may not write the entry. If the `imbor` entry's latest published version is not the checked copy, the pointer moves back to `2025`, but only when `2025` is published and checked; the other version is kept. A vocabulary an install from before 0.4.0 holds at the placeholder version `1.0.0` keeps that version (deprecated, with a licence record that says what it is) next to its real versions.
 - The seeder adds any missing licence record to its own versions, and rewords version notes that still read exactly as an earlier seeder wrote them, for example "Schema.org 29.0", which now reads "Schema.org subset, adapted from release 30.0". Notes you edited keep your wording. A licence record is only replaced if it still reads as it did when the check began, so a label a concurrent edit set is never overwritten.
 
-A start with nothing to repair costs one hash of each bundled file and three registry reads per vocabulary, plus one read of the IMBOR graph. With `SEED_STANDARD_VOCABS=false` nothing new is seeded and the other bundled vocabularies are left as they are, but a copy the seeder already made of a vocabulary whose licence allows no altered copies (IMBOR) is still checked and repaired on every start. A node whose store is read-only (a replica, or a cluster member that does not lead) runs none of this; the leader does, and its writes replicate.
+A start with nothing to repair costs one hash of each bundled file and three registry reads per vocabulary, plus one read of the IMBOR graph. With `OTS_SEED_STANDARD_VOCABS_ENABLED=false` nothing new is seeded and the other bundled vocabularies are left as they are, but a copy the seeder already made of a vocabulary whose licence allows no altered copies (IMBOR) is still checked and repaired on every start. A node whose store is read-only (a replica, or a cluster member that does not lead) runs none of this; the leader does, and its writes replicate.
 
 The Schema.org entry keeps the version label `29.0` it first shipped with, because the label is part of the version's graph IRI. Its content is a 27-term subset of release 30.0 (2026-03-19), and the notes and licence record say so.
 
@@ -86,7 +86,7 @@ published version 1.0.0 (forced)") and in the audit log (`graph_deleted`, action
 *Delete anyway* only when `force` would succeed.
 
 A version of a bundled vocabulary that the seeder owns is seeded again at the next start
-while `SEED_STANDARD_VOCABS` is on.
+while `OTS_SEED_STANDARD_VOCABS_ENABLED` is on.
 
 ## Storage
 

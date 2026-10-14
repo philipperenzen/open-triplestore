@@ -4,7 +4,7 @@
 //! per the W3C SPARQL 1.1 Service Description specification.
 //!
 //! `sd:BasicFederatedQuery` is advertised only when federation is actually
-//! available — i.e. an `OTS_REMOTE_ALLOWLIST` is configured (see
+//! available — i.e. an `OTS_SERVICE_ALLOWLIST` is configured (see
 //! `crate::remote`). Without one, `SERVICE` errors rather than reaching the
 //! network, and a federating client that planned calls against this endpoint
 //! would fail on every one of them. The description says what works.

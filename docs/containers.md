@@ -25,7 +25,7 @@ curl -X POST 'http://localhost:7878/api/datasets/<id>/containers/import?strict=t
 curl -OJ 'http://localhost:7878/api/datasets/<id>/containers/export?profile=icdd'
 ```
 
-The archive body may be up to `OTS_MAX_UPLOAD_MB` (default 512 MB); it unpacks
+The archive body may be up to `OTS_MAX_UPLOAD_BYTES` (default 512 MiB); it unpacks
 to at most 10 000 entries, 512 MB per entry and 2 GB in total.
 
 In the web UI, the dataset page's **Exchange** section does the same: pick an

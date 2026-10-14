@@ -1104,9 +1104,9 @@ async fn security_acl_lookup_failure_fails_closed() {
     );
 }
 
-// ─── LDP_ROOT_ACL=owners ───────────────────────────────────────────────────────
+// ─── OTS_LDP_ROOT_ACL=owners ───────────────────────────────────────────────────────
 
-/// The `owners` seed (`LDP_ROOT_ACL=owners`) starts a fresh install closed:
+/// The `owners` seed (`OTS_LDP_ROOT_ACL=owners`) starts a fresh install closed:
 /// users reach only what they create or are granted; admins everything. The
 /// policy is applied through the seed function rather than the environment
 /// variable, which is process-wide and would race other tests.

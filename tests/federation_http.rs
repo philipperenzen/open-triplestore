@@ -1,7 +1,7 @@
 //! SPARQL federation behind an allowlist (6.4). `SERVICE` used to error
 //! unconditionally (oxigraph built without its HTTP client, as an SSRF
 //! mitigation). It now reaches endpoints whose prefix is in
-//! `OTS_REMOTE_ALLOWLIST`, with a timeout, a row cap and a byte cap (both a
+//! `OTS_SERVICE_ALLOWLIST`, with a timeout, a row cap and a byte cap (both a
 //! failed invocation when exceeded, never a truncation), and nothing else.
 //!
 //! The "remote" is a second instance of this server on a local listener,
@@ -123,10 +123,10 @@ async fn service_is_allowlisted_timed_and_capped() {
     let q = format!("SELECT ?s WHERE {{ SERVICE <{endpoint}> {{ ?s <urn:fed:p> ?o }} }}");
 
     // 1. No allowlist: SERVICE errors, and SERVICE SILENT yields nothing.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", "");
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", "");
     let err = count(&local, &q).expect_err("federation is off without an allowlist");
     assert!(
-        err.contains("OTS_REMOTE_ALLOWLIST") || err.to_lowercase().contains("not allowed"),
+        err.contains("OTS_SERVICE_ALLOWLIST") || err.to_lowercase().contains("not allowed"),
         "the error names the knob: {err}"
     );
     let silent =
@@ -137,8 +137,28 @@ async fn service_is_allowlisted_timed_and_capped() {
         "SERVICE SILENT swallows the refusal"
     );
 
+    // 1b. Each outbound purpose has its own list, with no shared fallback:
+    // allowlisting the host for LDES sync, datasources and JSON-LD contexts
+    // does not make it a SERVICE target for query users.
+    for other in [
+        "OTS_LDES_ALLOWLIST",
+        "OTS_SOURCES_ALLOWLIST",
+        "OTS_JSONLD_CONTEXT_ALLOWLIST",
+    ] {
+        std::env::set_var(other, format!("{origin}/"));
+    }
+    let err = count(&local, &q).expect_err("only OTS_SERVICE_ALLOWLIST admits SERVICE");
+    assert!(err.contains("OTS_SERVICE_ALLOWLIST"), "{err}");
+    for other in [
+        "OTS_LDES_ALLOWLIST",
+        "OTS_SOURCES_ALLOWLIST",
+        "OTS_JSONLD_CONTEXT_ALLOWLIST",
+    ] {
+        std::env::remove_var(other);
+    }
+
     // 2. Allowlisted: the remote rows come back and join locally.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", format!("{origin}/"));
     assert_eq!(count(&local, &q).unwrap(), 3, "three remote rows");
     local
         .store
@@ -158,7 +178,7 @@ async fn service_is_allowlisted_timed_and_capped() {
     );
 
     // 3. A prefix that does not match is still refused.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", "https://sparql.example.org/");
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", "https://sparql.example.org/");
     assert!(
         count(&local, &q).is_err(),
         "an endpoint outside the allowlist is refused"
@@ -166,7 +186,7 @@ async fn service_is_allowlisted_timed_and_capped() {
 
     // 4. A result over the row cap is a failed invocation, not a truncated
     //    answer: an error naming the knob, and Ω0 under SERVICE SILENT.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", format!("{origin}/"));
     std::env::set_var("OTS_SERVICE_MAX_ROWS", "2");
     let err = count(&local, &q).expect_err("three rows exceed a cap of two");
     assert!(
@@ -221,7 +241,7 @@ async fn service_is_allowlisted_timed_and_capped() {
             .contains("BasicFederatedQuery"),
         "advertised while allowlisted"
     );
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", "");
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", "");
     assert!(
         !describe(app.clone(), &token)
             .await
@@ -235,7 +255,7 @@ async fn service_is_allowlisted_timed_and_capped() {
     let endpoint_b = format!("{origin_b}/sparql");
     let slow_endpoint = format!("{}/sparql", slow());
     std::env::set_var(
-        "OTS_REMOTE_ALLOWLIST",
+        "OTS_SERVICE_ALLOWLIST",
         format!("{origin}/,{origin_b}/,{slow_endpoint}"),
     );
     local
@@ -387,7 +407,9 @@ async fn service_is_allowlisted_timed_and_capped() {
     // 10. A variable naming `urn:source:<id>` is resolved for the caller like
     //     a written-out `SERVICE <urn:source:id>`: a caller who may not use the
     //     source's account finds it exactly as if it were not registered.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", format!("{origin}/"));
+    // A resolved source is reached through the datasource allowlist.
+    std::env::set_var("OTS_SOURCES_ALLOWLIST", format!("{origin}/"));
     local
         .auth_db
         .create_dataset(
@@ -469,4 +491,5 @@ async fn service_is_allowlisted_timed_and_capped() {
         count(&local, via_source).is_err(),
         "evaluation without a caller resolves no source"
     );
+    std::env::remove_var("OTS_SOURCES_ALLOWLIST");
 }

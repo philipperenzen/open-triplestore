@@ -71,8 +71,8 @@ controller** for everything you run on it. You are responsible for, among other
 things:
 
 - securing your deployment (see [SECURITY.md](SECURITY.md) and the security
-  guidance in [docs/gdpr.md](docs/gdpr.md)) — setting a strong `JWT_SECRET`,
-  enabling `SECURE_COOKIES` behind HTTPS, configuring a reverse proxy/TLS,
+  guidance in [docs/gdpr.md](docs/gdpr.md)) — setting a strong `OTS_JWT_SECRET`,
+  enabling `OTS_SECURE_COOKIES_ENABLED` behind HTTPS, configuring a reverse proxy/TLS,
   restricting bind addresses, and applying updates;
 - the lawfulness of the data you load and process, and compliance with privacy
   and other laws (see [PRIVACY.md](PRIVACY.md) and [docs/gdpr.md](docs/gdpr.md));

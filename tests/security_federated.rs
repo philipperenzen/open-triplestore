@@ -12,7 +12,7 @@
 //!    returning the existing linked user (and refresh its identity record)
 //!    instead of swallowing/aborting on the housekeeping upsert.
 //!  * The login page only offers providers a sign-in can start from: the
-//!    synthetic `env-oidc` row that `OIDC_ISSUER` creates (no client_id) stays
+//!    synthetic `env-oidc` row that `OTS_OIDC_ISSUER` creates (no client_id) stays
 //!    off it, through admin edits, while bearer tokens from that IdP keep
 //!    verifying and JIT-provisioning against the row.
 //!  * SAML 2.0 (`saml` feature), against a fake IdP in this process: sign-in
@@ -243,7 +243,7 @@ async fn authorize_status(app: &axum::Router, slug: &str) -> StatusCode {
 
 /// An OIDC row without a client_id cannot start a browser login (the flow bails
 /// on the missing client_id), so the login page must not render it as a button:
-/// that covers the synthetic `env-oidc` row `OIDC_ISSUER` creates and an OIDC
+/// that covers the synthetic `env-oidc` row `OTS_OIDC_ISSUER` creates and an OIDC
 /// row an admin saved without one. SAML rows carry no client_id by design; one
 /// with an SSO URL is listed when the build supports SAML.
 #[tokio::test]
@@ -309,7 +309,7 @@ async fn edited_env_oidc_row_stays_off_the_login_page_and_keeps_serving_bearer_t
             });
     });
 
-    // The resource server, configured as OIDC_ISSUER=<idp> OIDC_AUDIENCE=ots-api.
+    // The resource server, configured as OTS_OIDC_ISSUER=<idp> OTS_OIDC_AUDIENCE=ots-api.
     let (mut rs, admin_token) = admin_state();
     let mut ext = AuthExt::disabled();
     ext.oidc = Some(OidcVerifier::new(issuer.clone(), Some("ots-api".into())));
@@ -1232,7 +1232,7 @@ mod saml {
     // ── Transport ────────────────────────────────────────────────────────────
 
     /// Over https the binding cookie is `SameSite=None; Secure` (the IdP posts
-    /// back cross-site), whatever SECURE_COOKIES says; a plain-http BASE_URL
+    /// back cross-site), whatever OTS_SECURE_COOKIES_ENABLED says; a plain-http OTS_BASE_URL
     /// other than localhost refuses to start a sign-in.
     #[tokio::test]
     async fn saml_needs_https_outside_localhost() {

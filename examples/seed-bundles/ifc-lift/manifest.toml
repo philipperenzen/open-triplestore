@@ -19,7 +19,7 @@
 # lift-namespace term the importer emits is declared here.
 
 id = "ifc-lift"
-opt_out_env = "SEED_IFC_LIFT"
+opt_out_env = "OTS_SEED_IFC_LIFT_ENABLED"
 
 [organisation]
 slug = "ifc-lift"

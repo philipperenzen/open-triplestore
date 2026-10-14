@@ -361,7 +361,7 @@ perf:
     - |
       bench() {
         git checkout --detach "$1"
-        OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- "$3"
+        OTS_QUERY_CACHE_ENABLED=off cargo bench --bench performance --features full -- "$3"
         rm -rf "target/criterion-$2"
         mv target/criterion "target/criterion-$2"
       }
@@ -415,10 +415,10 @@ perf-baseline:
     # Full suite, then a second pass over exactly the subset the gate runs, so the
     # gated benchmarks are baselined under gate conditions rather than full-suite
     # ones (see the same two steps in .github/workflows/perf-baseline.yml for why).
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
+    - OTS_QUERY_CACHE_ENABLED=off cargo bench --bench performance --features full
+    - OTS_QUERY_CACHE_ENABLED=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - cp -r target/criterion target/criterion-pass1
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
+    - OTS_QUERY_CACHE_ENABLED=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - python3 scripts/perf_regression.py update --criterion-dir target/criterion-pass1 --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
   artifacts:
     paths:
@@ -516,7 +516,7 @@ image-build:
         CARGO_PROFILE: release-dev
   script:
     - docker build --build-arg CARGO_PROFILE="$CARGO_PROFILE" -t open-triplestore:ci .
-    - docker run -d --name ots -e SEED_STANDARDS_DEMO=false -e SEED_IFC_URL= open-triplestore:ci
+    - docker run -d --name ots -e OTS_SEED_STANDARDS_DEMO_ENABLED=false -e OTS_OFFLINE=true open-triplestore:ci
     # The runtime image ships curl (its HEALTHCHECK uses it); the docker:27
     # image does not, so the probe runs inside the container.
     - |
@@ -542,8 +542,8 @@ e2e:
   allow_failure: true
   variables:
     CI: "true"
-    JWT_SECRET: "e2e_jwt_secret_must_be_32_chars_xx"
-    RATE_LIMIT_DISABLED: "1"
+    OTS_JWT_SECRET: "e2e_jwt_secret_must_be_32_chars_xx"
+    OTS_RATE_LIMIT_ENABLED: "false"
     OTS_BACKEND_CMD: "../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn"
   before_script:
     - apt-get update -qq

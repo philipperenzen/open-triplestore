@@ -131,7 +131,7 @@ fn rate_limit_response(err: GovernorError) -> axum::response::Response {
 
 /// Build a CORS layer from a comma-separated list of allowed origins.
 ///
-/// Three modes, selected by the `CORS_ORIGINS` value:
+/// Three modes, selected by the `OTS_CORS_ORIGINS` value:
 /// * empty — same-origin only (no `Access-Control-Allow-Origin` is emitted).
 /// * an explicit comma-separated list — only those origins are reflected, with
 ///   credentials. The tightest option; prefer it in production.
@@ -190,7 +190,7 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
     // safety rationale on this fn's doc comment.
     if origins.contains(&"*") {
         tracing::warn!(
-            "CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
+            "OTS_CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
              (mirror mode). Safe only while both session cookies stay SameSite=Strict (the \
              browser then withholds them cross-site, leaving the unforgeable Authorization \
              bearer token as the only cross-origin credential). For a tighter posture in \
@@ -213,7 +213,7 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
             .collect();
         if allowed.is_empty() {
             tracing::error!(
-                "CORS_ORIGINS set but no valid origins parsed; allowing same-origin only."
+                "OTS_CORS_ORIGINS set but no valid origins parsed; allowing same-origin only."
             );
             return layer;
         }
@@ -275,11 +275,11 @@ pub struct AppState {
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
     /// Whether the bundled web UI is served (`--serve-frontend` /
-    /// `SERVE_FRONTEND`, as clap parsed it). The routes that share a path with
+    /// `OTS_FRONTEND_ENABLED`, as clap parsed it). The routes that share a path with
     /// a client-side route (`/`, `/sparql`) read this rather than the
     /// environment, so the flag and the variable cannot disagree.
     pub serve_frontend: bool,
-    /// Reverse proxies whose `X-Forwarded-For` is believed (`TRUSTED_PROXY_CIDRS`).
+    /// Reverse proxies whose `X-Forwarded-For` is believed (`OTS_TRUSTED_PROXY_CIDRS`).
     /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
     /// limiter, the audit log and the LLM guard all derive the client IP alike.
     pub trusted_proxies: client_ip::TrustedProxies,
@@ -317,6 +317,9 @@ pub struct AppState {
     pub vocab_engine: Option<Arc<crate::vocab_search::index::VocabSearchEngine>>,
     /// The OWL 2 DL backend configuration (`OTS_DL_BACKEND`, …).
     pub dl: Arc<crate::reasoning::dl_config::DlConfig>,
+    /// Every setting, validated at startup ([`crate::config`]). The server's
+    /// is the snapshot `main` installed; a test state's is the live view.
+    pub config: Arc<crate::config::Config>,
 }
 
 /// Construct a minimal `AppState` for tests (unit and integration).
@@ -368,6 +371,7 @@ impl AppState {
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
             dl: Default::default(),
+            config: crate::config::current().clone(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -824,18 +828,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // replenish *period* to n seconds (one token every n seconds), NOT n tokens per
     // second. So `per_second(6)` means one request per 6s, i.e. 10/min sustained.
     //
-    // Per-IP rate limiting can be relaxed by setting `RATE_LIMIT_DISABLED=1` (or
-    // `=true`). This is for trusted/internal deployments and the e2e/CI harness,
-    // which drives many requests from a single IP and would otherwise trip the
-    // brute-force and runaway-query limiters. SECURE BY DEFAULT: when the var is
-    // unset the production quotas below apply unchanged; when set, every tier gets
-    // an effectively-unlimited burst so legitimate automation is never throttled.
-    let disable_rate_limit = std::env::var("RATE_LIMIT_DISABLED")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    // Per-IP rate limiting can be relaxed with `OTS_RATE_LIMIT_ENABLED=false`
+    // (refused under OTS_ENV=production). This is for trusted/internal
+    // deployments and the e2e/CI harness, which drives many requests from a
+    // single IP and would otherwise trip the brute-force and runaway-query
+    // limiters. SECURE BY DEFAULT: unset, the production quotas below apply
+    // unchanged; off, every tier gets an effectively-unlimited burst so
+    // legitimate automation is never throttled.
+    let disable_rate_limit = !state.config.get(&crate::config::RATE_LIMIT_ENABLED);
     if disable_rate_limit {
         tracing::warn!(
-            "RATE_LIMIT_DISABLED is set — per-IP rate limiting is effectively OFF. \
+            "OTS_RATE_LIMIT_ENABLED is false — per-IP rate limiting is effectively OFF. \
              Intended for trusted/internal or test deployments only; never enable on a public server."
         );
     }
@@ -1082,6 +1085,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(llm_guard::admin_list_llm_requests),
         )
         .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
+        .route(
+            "/api/admin/config",
+            get(crate::config::admin::admin_get_config),
+        )
+        .route(
+            "/api/admin/settings",
+            get(crate::config::admin::admin_list_settings),
+        )
+        .route(
+            "/api/admin/settings/{name}",
+            put(crate::config::admin::admin_set_setting),
+        )
         .route(
             "/api/admin/settings/guest-registration",
             get(handlers::admin_get_guest_registration).put(handlers::admin_set_guest_registration),
@@ -1735,7 +1750,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
 
     // Linked-document containers: import into a dataset, and validate without
     // storing anything. Archives carry documents, so the body limit is the
-    // RDF-upload one (OTS_MAX_UPLOAD_MB), not the 8 MB default; the unpacker
+    // RDF-upload one (OTS_MAX_UPLOAD_BYTES), not the 8 MB default; the unpacker
     // caps entries and the unpacked total on its own.
     let container_routes = Router::new()
         .route(
@@ -2441,9 +2456,9 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
 /// their security-header layers, and the static SPA fallback):
 ///
 ///  - `/embed/*` pages exist to be iframed by third-party sites, so they get
-///    `Content-Security-Policy: frame-ancestors <EMBED_FRAME_ANCESTORS>`
+///    `Content-Security-Policy: frame-ancestors <OTS_EMBED_FRAME_ANCESTORS>`
 ///    (default `*`) and no `X-Frame-Options`. Operators can restrict embedding
-///    to specific hosts (`EMBED_FRAME_ANCESTORS="https://example.com"`) or
+///    to specific hosts (`OTS_EMBED_FRAME_ANCESTORS="https://example.com"`) or
 ///    disable it (`"'none'"`).
 ///  - Every other response that carries NO CSP — which is exactly the static
 ///    SPA files, since they are served by the fallback service that the
@@ -2454,21 +2469,23 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
 /// API responses already carry the strict CSP from [`build_router`]; those are
 /// left untouched (except under `/embed`, a path no API route uses).
 async fn frame_policy_headers(
+    axum::extract::State(db): axum::extract::State<Arc<AuthDb>>,
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    static EMBED_ANCESTORS: std::sync::OnceLock<Option<HeaderValue>> = std::sync::OnceLock::new();
-    let ancestors = EMBED_ANCESTORS.get_or_init(|| {
-        let v = std::env::var("EMBED_FRAME_ANCESTORS").unwrap_or_else(|_| "*".to_string());
-        let v = v.trim().to_string();
-        if v.is_empty() || v == "'none'" || v == "none" {
-            None // embedding disabled — /embed falls through to the default policy
-        } else {
-            HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
-        }
-    });
-
     let is_embed = req.uri().path().starts_with("/embed");
+    // A runtime setting (an admin can change it without a restart), so it is
+    // read per /embed request; other paths never need it.
+    let ancestors = is_embed
+        .then(|| {
+            let v = crate::config::runtime::get(&db, &crate::config::EMBED_FRAME_ANCESTORS);
+            if v == "'none'" {
+                None // embedding disabled — /embed falls through to the default policy
+            } else {
+                HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
+            }
+        })
+        .flatten();
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
     // The SPA document can also leave through content-negotiating API routes
@@ -2480,10 +2497,7 @@ async fn frame_policy_headers(
     let spa_shell = headers.remove("x-ots-spa-shell").is_some();
     match ancestors {
         Some(allow) if is_embed => {
-            headers.insert(
-                HeaderName::from_static("content-security-policy"),
-                allow.clone(),
-            );
+            headers.insert(HeaderName::from_static("content-security-policy"), allow);
             headers.remove("x-frame-options");
         }
         _ => {
@@ -2514,40 +2528,21 @@ pub async fn run(
     auth_db: Arc<AuthDb>,
     jwt_config: Arc<JwtConfig>,
     object_store: Arc<ObjectStore>,
-    base_url: &str,
-    // Whether `base_url` was configured (`--base-url` / `BASE_URL`) rather than
-    // the built-in default. Federated identity assertions are audience-checked
-    // against it only then, and refused otherwise.
-    base_url_configured: bool,
+    // Every setting, validated by `main` (the same snapshot it installed).
+    config: Arc<crate::config::Config>,
     addr: &str,
-    cors_origins: &str,
-    trusted_cidrs: Vec<IpNet>,
-    query_timeout_secs: u64,
-    write_timeout_secs: u64,
-    secure_cookies: bool,
-    serve_frontend: bool,
-    seed_dir: Option<std::path::PathBuf>,
-    // Opt-in fallback to any free port when `addr`'s port is already in use
-    // (--port-fallback / PORT_FALLBACK, default off — see the listener bind
-    // below). Upstream behavior when this is `false` is unchanged: a busy
-    // port still refuses to start.
-    port_fallback: bool,
-    // Cross-app service-registry self-registration (--discovery /
-    // LD_DISCOVERY), applied AFTER the listener is bound so a port_fallback
-    // rewrite of the advertised URL is reflected in what gets registered.
-    discovery: bool,
-    registry_url: String,
+    // The service-registry bearer, resolved through the secrets module.
     registry_token: String,
     // Data directory — vocab corpus cache + term index live under it.
     data_dir: std::path::PathBuf,
     // The identity DB file main.rs actually opened (`--db-path`, else
     // `<data-dir>/auth.db`). The backup subsystem must copy THIS file: it used
-    // to re-derive the path from AUTH_DB_PATH with a different default
+    // to re-derive the path from OTS_AUTH_DB_PATH with a different default
     // (`data/auth.sqlite`), so on any install that did not set that variable the
     // scheduled backup opened a file that does not exist and failed — after
     // writing the RDF dump, leaving no manifest and only a warn! line.
     db_path: std::path::PathBuf,
-    // Where backups go (`BACKUP_DIR`, else `<data-dir>/backups`), resolved once
+    // Where backups go (`OTS_BACKUP_DIR`, else `<data-dir>/backups`), resolved once
     // by main.rs with [`default_backup_dir`] so restore, store recovery and the
     // scheduled backups cannot disagree.
     backup_dir: std::path::PathBuf,
@@ -2556,30 +2551,48 @@ pub async fn run(
         Arc<crate::vocab_search::index::VocabSearchEngine>,
     >,
 ) -> anyhow::Result<()> {
-    // The federation deadline defaults to the query timeout.
-    crate::remote::set_query_timeout_secs(query_timeout_secs);
+    use crate::config as c;
+    let base_url_owned = config.get(&c::BASE_URL);
+    let base_url = base_url_owned.as_str();
+    // Whether the operator set the base URL, as opposed to the built-in
+    // default: federated identity assertions are only audience-checked
+    // against a base URL somebody configured.
+    let base_url_configured = config.entry(c::BASE_URL.name()).source != c::Source::Default;
+    let cors_origins = config.get(&c::CORS_ORIGINS).join(",");
+    let cors_origins = cors_origins.as_str();
+    // Every entry parsed when the registry validated it.
+    let trusted_cidrs: Vec<IpNet> = config
+        .get(&c::TRUSTED_PROXY_CIDRS)
+        .iter()
+        .filter_map(|s| s.parse::<IpNet>().ok())
+        .collect();
+    if !trusted_cidrs.is_empty() {
+        info!("Trusting XFF headers from {} CIDR(s)", trusted_cidrs.len());
+    }
+    let query_timeout_secs = config.get(&c::SPARQL_QUERY_TIMEOUT).as_secs();
+    let write_timeout_secs = config.get(&c::WRITE_TIMEOUT).as_secs();
+    let secure_cookies = config.get(&c::SECURE_COOKIES_ENABLED);
+    let serve_frontend = config.get(&c::FRONTEND_ENABLED);
+    let seed_dir = config.get(&c::SEED_DIR);
+    let port_fallback = config.get(&c::PORT_FALLBACK_ENABLED);
+    let discovery = config.get(&c::DISCOVERY_ENABLED);
+    let registry_url = config.get(&c::REGISTRY_URL);
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
         let dir = backup_dir;
         let sqlite = db_path.clone();
-        let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7);
-        let encrypt = std::env::var("BACKUP_ENCRYPT")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let retention: usize = config.get(&crate::config::BACKUP_RETENTION_COUNT);
+        let encrypt = config.get(&crate::config::BACKUP_ENCRYPTION_ENABLED);
 
         // Resolve the operator-supplied age recipient. A failure here is FATAL:
         // continuing with `encrypt = true` and no key produced a manager whose
         // every run failed inside maybe_encrypt, so "encrypted backups are on"
         // and "no backup has ever succeeded" looked identical from the outside.
         let key_path = if encrypt {
-            let key_file = std::env::var("BACKUP_ENCRYPT_KEY_PATH")
-                .ok()
-                .map(std::path::PathBuf::from)
+            let key_file = config
+                .get(&crate::config::BACKUP_ENCRYPTION_KEY_PATH)
                 .unwrap_or_else(|| data_dir.join("backup_key.age"));
             crate::backup::init_backup_encryption(&key_file)?
         } else {
@@ -2588,7 +2601,7 @@ pub async fn run(
 
         if !encrypt && std::path::Path::new(&dir).starts_with("data") {
             tracing::warn!(
-                "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set BACKUP_ENCRYPT=true"
+                "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set OTS_BACKUP_ENCRYPTION_ENABLED=true"
             );
         }
         if !sqlite.exists() {
@@ -2616,7 +2629,7 @@ pub async fn run(
         }
     };
 
-    // OIDC resource-server config from the environment (disabled unless OIDC_ISSUER set).
+    // OIDC resource-server config from the environment (disabled unless OTS_OIDC_ISSUER set).
     let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env_with_base_url(
         base_url_configured.then_some(base_url),
     ));
@@ -2636,7 +2649,7 @@ pub async fn run(
     }
 
     // Transactional account email (verification, password reset). Logs-only
-    // until SMTP_HOST is configured; links default to the public base URL.
+    // until OTS_SMTP_HOST is configured; links default to the public base URL.
     let mailer = Arc::new(crate::email::Mailer::from_env(
         base_url.trim_end_matches('/'),
     ));
@@ -2644,13 +2657,13 @@ pub async fn run(
         tracing::info!("email: SMTP relay configured — account emails will be delivered");
     } else {
         tracing::info!(
-            "email: SMTP not configured (set SMTP_HOST) — account emails are written to the log"
+            "email: SMTP not configured (set OTS_SMTP_HOST) — account emails are written to the log"
         );
     }
 
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
     // A client secret goes through the secrets module: a raw one is refused
-    // under OTS_ENV=production, like JWT_SECRET, and stops the start.
+    // under OTS_ENV=production, like OTS_JWT_SECRET, and stops the start.
     crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret)?;
 
     let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
@@ -2714,6 +2727,7 @@ pub async fn run(
         vocab_registry_dirty: Arc::new(AtomicBool::new(true)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
         dl: Arc::new(dl_config),
+        config: config.clone(),
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
@@ -2808,8 +2822,11 @@ pub async fn run(
 
     // Backup scheduler.
     if let Some(ref mgr) = backup {
-        let hours = crate::backup::schedule_hours();
-        crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
+        crate::backup::spawn_scheduler(
+            mgr.clone(),
+            config.get(&crate::config::BACKUP_SCHEDULE),
+            Some(state.object_store.clone()),
+        );
     }
 
     // Boot-time migration + seeding + the SHACL pipeline scheduler.
@@ -2925,18 +2942,16 @@ pub async fn run(
 
     // GDPR/AVG: pseudonymise old audit rows daily.
     {
-        let days: u64 = std::env::var("AUDIT_PSEUDONYMISE_AFTER_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(365);
+        let days: u64 = config.get(&crate::config::AUDIT_PSEUDONYMISE_AFTER_DAYS);
         crate::auth::audit::spawn_pseudonymisation_task(state.audit.clone(), days);
     }
 
     // Build router — auth endpoint rate limiting is applied inside build_router.
+    let frame_db = state.auth_db.clone();
     let app = build_router(state, cors_origins, trusted_cidrs);
 
     // Serve frontend SPA from frontend/dist. Gated by --serve-frontend /
-    // SERVE_FRONTEND (default on); disable for an API-only server. SPARQL, Graph
+    // OTS_FRONTEND_ENABLED (default on); disable for an API-only server. SPARQL, Graph
     // Store and REST endpoints are unaffected.
     //
     // Use `.fallback` (NOT `.not_found_service`) for the index.html catch-all:
@@ -2951,25 +2966,28 @@ pub async fn run(
         );
         info!("Web UI served at http://{}/", addr);
     } else if !serve_frontend {
-        info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
+        info!("Web UI disabled (OTS_FRONTEND_ENABLED=false); serving API only");
     }
     // Outermost, path-aware framing policy: /embed/* is iframable (that is its
     // purpose), everything else that carries no CSP (the static SPA) gets the
     // anti-clickjacking headers. See `frame_policy_headers`.
-    let app = app.layer(middleware::from_fn(frame_policy_headers));
+    let app = app.layer(middleware::from_fn_with_state(
+        frame_db,
+        frame_policy_headers,
+    ));
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
     let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
     let bind_host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
-        // Opt-in fallback (--port-fallback / PORT_FALLBACK, default off): bind any
+        // Opt-in fallback (--port-fallback / OTS_PORT_FALLBACK_ENABLED, default off): bind any
         // free port instead of refusing to start. Checked ONLY on AddrInUse, so a
         // permission error or an invalid bind address still surfaces immediately
         // below rather than silently wandering off to an unrelated port.
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && port_fallback => {
             tracing::warn!(
-                "PORT_FALLBACK: {addr} is already in use — falling back to any free port on {bind_host}"
+                "OTS_PORT_FALLBACK_ENABLED: {addr} is already in use — falling back to any free port on {bind_host}"
             );
             crate::netutil::bind_free_port(bind_host)
                 .await
@@ -2991,7 +3009,7 @@ pub async fn run(
                  most likely another open-triplestore — holds it. NOT killing it: doing so and \
                  reopening the same data dir can corrupt RocksDB (\"SST ahead of WALs\"). Stop the \
                  other instance first (find it with `lsof -ti :{port_str}`), start this one on a \
-                 different --port and/or --data-dir, or pass --port-fallback / set PORT_FALLBACK=1 \
+                 different --port and/or --data-dir, or pass --port-fallback / set OTS_PORT_FALLBACK_ENABLED=1 \
                  to bind any free port automatically."
             );
         }
@@ -3004,7 +3022,7 @@ pub async fn run(
     let port_changed = requested_port.is_some_and(|p| p != bound_addr.port());
     if port_changed {
         tracing::warn!(
-            "PORT_FALLBACK: bound port {} instead of the requested {} — the advertised base URL \
+            "OTS_PORT_FALLBACK_ENABLED: bound port {} instead of the requested {} — the advertised base URL \
              is rewritten to match for service-registry self-registration, where it references \
              the requested port",
             bound_addr.port(),
@@ -3013,7 +3031,7 @@ pub async fn run(
     }
     info!("Listening on {}", bound_addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY). Self-registration is done HERE
+    // Cross-app service discovery is opt-in (OTS_DISCOVERY_ENABLED). Self-registration is done HERE
     // (after the real bind, not in main.rs before it) so the advertised self_url reflects any
     // --port-fallback rewrite rather than the originally requested port.
     if discovery {
@@ -3147,19 +3165,17 @@ mod panic_safety_net_tests {
     }
 }
 
-/// Where backups go: `BACKUP_DIR`, else `<data-dir>/backups`. The default used
+/// Where backups go: `OTS_BACKUP_DIR`, else `<data-dir>/backups`. The default used
 /// to be the *relative* `data/backups`, resolved against the working directory
 /// — in the Docker image that is `/app`, root-owned and read-only for the
 /// service user, so unattended backups were silently disabled on every
 /// default deployment ("backup: disabled — init failed: create backup dir").
 ///
-/// The one place `BACKUP_DIR` is read (main.rs passes the result on): an
+/// The one place `OTS_BACKUP_DIR` is read (main.rs passes the result on): an
 /// empty or blank value counts as unset everywhere.
 pub fn default_backup_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
-    std::env::var("BACKUP_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(std::path::PathBuf::from)
+    crate::config::BACKUP_DIR
+        .get()
         .unwrap_or_else(|| data_dir.join("backups"))
 }
 
@@ -3168,10 +3184,10 @@ mod backup_dir_tests {
     #[test]
     fn backup_dir_defaults_under_the_data_dir() {
         use std::path::{Path, PathBuf};
-        std::env::remove_var("BACKUP_DIR");
+        std::env::remove_var("OTS_BACKUP_DIR");
         let d = super::default_backup_dir(Path::new("/data"));
         assert_eq!(d, PathBuf::from("/data/backups"));
-        std::env::set_var("BACKUP_DIR", "/mnt/backups");
+        std::env::set_var("OTS_BACKUP_DIR", "/mnt/backups");
         assert_eq!(
             super::default_backup_dir(Path::new("/data")),
             PathBuf::from("/mnt/backups")
@@ -3179,28 +3195,26 @@ mod backup_dir_tests {
         // Empty and blank mean unset, for every reader (they used to be the
         // working directory for restore and store recovery).
         for blank in ["", "  "] {
-            std::env::set_var("BACKUP_DIR", blank);
+            std::env::set_var("OTS_BACKUP_DIR", blank);
             assert_eq!(
                 super::default_backup_dir(Path::new("/data")),
                 PathBuf::from("/data/backups")
             );
         }
-        std::env::remove_var("BACKUP_DIR");
+        std::env::remove_var("OTS_BACKUP_DIR");
     }
 }
 
 /// Request-body limit for RDF uploads (Graph Store writes, bulk imports):
-/// `OTS_MAX_UPLOAD_MB` when set, else `default_mb`. Uploads are buffered and
+/// `OTS_MAX_UPLOAD_BYTES` when set, else `default_mb` MiB. Uploads are buffered and
 /// parsed into a temporary store before they replace anything, so the limit
 /// bounds memory as well as wire size; the 50 MB the Graph Store routes used
 /// to have rejected a 226 MB dataset that loaded fine in five appends.
 fn upload_limit_bytes(default_mb: usize) -> usize {
-    let mb = std::env::var("OTS_MAX_UPLOAD_MB")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(default_mb);
-    mb.saturating_mul(1024 * 1024)
+    match crate::config::MAX_UPLOAD_BYTES.get() {
+        Some(bytes) => usize::try_from(bytes).unwrap_or(usize::MAX),
+        None => default_mb.saturating_mul(1024 * 1024),
+    }
 }
 
 /// What the boot seed did, so the caller and its tests can tell the difference
@@ -3247,7 +3261,7 @@ pub fn run_boot_seed(
     }
     let store = &seed_state.store;
     let auth = &seed_state.auth_db;
-    // 0. The LDP root ACL, once (`LDP_ROOT_ACL`): today's behaviour written
+    // 0. The LDP root ACL, once (`OTS_LDP_ROOT_ACL`): today's behaviour written
     // where an admin can change it (`docs/ldp.md`, "Access control"). The
     // first LDP request seeds it too, should it arrive before this runs.
     #[cfg(feature = "ldp")]
@@ -3261,7 +3275,15 @@ pub fn run_boot_seed(
             Ok(None) => {}
             Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
         }
-        if wac::root_acl_is_open(store, base).unwrap_or(false) {
+        let open = wac::root_acl_is_open(store, base).unwrap_or(false);
+        if open && crate::config::LDP_ROOT_ACL.get() == "owners" {
+            // The root ACL is seeded once; the setting does not rewrite it.
+            tracing::warn!(
+                "ldp: OTS_LDP_ROOT_ACL=owners, but the root ACL seeded on an earlier start is open: \
+                 every signed-in user may write under /ldp/. Tighten it with PUT \
+                 {base}/ldp/.acl (see docs/ldp.md)"
+            );
+        } else if open {
             tracing::info!(
                 "ldp: the root ACL is open: every signed-in user may read, write and append \
                  under /ldp/; tighten it with PUT {base}/ldp/.acl (see docs/ldp.md)"
@@ -3301,7 +3323,7 @@ pub fn run_boot_seed(
     //    Idempotent and self-healing: back-fills any registered-but-empty
     //    public demo graph left behind by an earlier interrupted seed.
     crate::saved_queries::seed::seed_open_triplestore(seed_state);
-    // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
+    // 3b. Operator-supplied seed bundles (--seed-dir / OTS_SEED_DIR), if any —
     //     same idempotent/fail-soft engine as the reference bundle above.
     //     Sequenced here (not a separate spawn) for the same reason the
     //     demo seed is: concurrent writers to the same SQLite identity DB

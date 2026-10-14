@@ -75,7 +75,7 @@
 //! (the latest-version labels match what shipped previously, so existing
 //! entries gain their historical versions without duplication). Best-effort —
 //! a failure on one entry is logged and skipped. Opt out with
-//! `SEED_STANDARD_VOCABS=false`: that stops seeding and the checks of the
+//! `OTS_SEED_STANDARD_VOCABS_ENABLED=false`: that stops seeding and the checks of the
 //! other vocabularies, but not the per-start check and repair of a copy the
 //! seeder already made of a vocabulary whose licence allows no altered copies.
 //! The seeder does nothing on a node whose store is read-only (a replica, or a
@@ -1216,7 +1216,7 @@ fn fault(step: &'static str) -> anyhow::Result<()> {
 enum Mode {
     /// Seed missing versions and check every seeded copy.
     Seed,
-    /// `SEED_STANDARD_VOCABS=false`: seed nothing, and only check (and
+    /// `OTS_SEED_STANDARD_VOCABS_ENABLED=false`: seed nothing, and only check (and
     /// repair) the copies of vocabularies whose licence allows no altered
     /// copies.
     VerifyOnly,
@@ -1225,23 +1225,15 @@ enum Mode {
 /// Seed every standard vocabulary version that isn't already in the registry,
 /// and check the copies seeded earlier. Returns the number of newly-seeded
 /// *versions* (0 once everything is present — the idempotent steady state).
-/// With `SEED_STANDARD_VOCABS=false` nothing is seeded, but copies the seeder
+/// With `OTS_SEED_STANDARD_VOCABS_ENABLED=false` nothing is seeded, but copies the seeder
 /// made earlier of a vocabulary whose licence allows no altered copies are
 /// still checked and repaired.
 pub fn seed_standard_vocabularies(state: &AppState) -> usize {
-    let disabled = std::env::var("SEED_STANDARD_VOCABS")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    seed_standard_vocabularies_with(state, !disabled)
+    seed_standard_vocabularies_with(state, crate::config::SEED_STANDARD_VOCABS_ENABLED.get())
 }
 
 /// [`seed_standard_vocabularies`], with the opt-out given (`seeding: false`
-/// is `SEED_STANDARD_VOCABS=false`).
+/// is `OTS_SEED_STANDARD_VOCABS_ENABLED=false`).
 pub(crate) fn seed_standard_vocabularies_with(state: &AppState, seeding: bool) -> usize {
     // A replica, or a cluster member that does not lead, refuses every write:
     // the leader seeds and checks, and its writes replicate here.
@@ -1263,7 +1255,7 @@ pub(crate) fn seed_standard_vocabularies_with(state: &AppState, seeding: bool) -
         }
         if repaired > 0 {
             tracing::info!(
-                "SEED_STANDARD_VOCABS=false: nothing seeded; {repaired} record(s) of previously \
+                "OTS_SEED_STANDARD_VOCABS_ENABLED=false: nothing seeded; {repaired} record(s) of previously \
                  seeded vocabularies whose licence allows no altered copies checked and updated"
             );
         }
@@ -3272,7 +3264,7 @@ mod tests {
 
     /// IMBOR's copy is re-verified on every start: a write outside the
     /// registry (here a raw SPARQL Update) is kept aside and undone on the
-    /// next boot, even with `SEED_STANDARD_VOCABS=false`, which seeds nothing
+    /// next boot, even with `OTS_SEED_STANDARD_VOCABS_ENABLED=false`, which seeds nothing
     /// and leaves the other vocabularies' copies alone.
     #[test]
     fn a_raw_write_into_imbor_is_kept_aside_and_undone_even_with_seeding_off() {

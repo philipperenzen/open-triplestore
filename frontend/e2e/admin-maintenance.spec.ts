@@ -4,7 +4,7 @@ import { test, expect, request as pwRequest, type APIRequestContext, type Page }
 // it, stage a restore through the app's confirmation dialog (typing the
 // backup's id) and cancel it again; rebuild the full-text index; and add an
 // LDES sync job that mirrors one of this server's own streams (the e2e
-// backend allow-lists itself in OTS_REMOTE_ALLOWLIST), run it, and forget it.
+// backend allow-lists itself in OTS_LDES_ALLOWLIST), run it, and forget it.
 
 const BACKEND = process.env.OTS_BACKEND_URL ?? 'http://localhost:7878';
 const ADMIN = { username: 'e2e-admin', password: 'e2e-password-123' };

@@ -108,6 +108,6 @@ download writes such a literal back with `@language` and `@direction`.
 The suite's remote contexts come from the test loader. In the server, every
 JSON-LD parse resolves a context named by IRI through the document loader in
 `src/jsonld/mod.rs`: bundled W3C contexts offline, otherwise only URLs in
-`OTS_REMOTE_ALLOWLIST`, with redirects and `Link` alternates followed inside
+`OTS_JSONLD_CONTEXT_ALLOWLIST`, with redirects and `Link` alternates followed inside
 the allowlist, a size cap and a cache ([formats.md](../formats.md#json-ld-remote-contexts)).
 `tests/jsonld_document_loader_http.rs` pins that behaviour.

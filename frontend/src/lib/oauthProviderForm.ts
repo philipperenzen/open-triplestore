@@ -137,7 +137,7 @@ export interface ProviderForm {
   saml: SamlForm;
 }
 
-/** Slug of the provider row the server creates for `OIDC_ISSUER`. The server
+/** Slug of the provider row the server creates for `OTS_OIDC_ISSUER`. The server
  *  finds that row by slug, so the form does not let it be renamed. */
 export const ENV_OIDC_SLUG = 'env-oidc';
 

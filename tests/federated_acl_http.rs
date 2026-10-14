@@ -128,7 +128,7 @@ async fn identity_assertions_cross_instances_and_authorise_locally() {
     b.auth_ext = Arc::new(ext);
     let b_app = test_app(b.clone());
     start(listener_b, b.clone());
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin_b}/"));
+    std::env::set_var("OTS_SERVICE_ALLOWLIST", format!("{origin_b}/"));
     open_triplestore::federation::init(
         a.oidc_provider
             .clone()

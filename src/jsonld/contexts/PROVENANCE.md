@@ -20,7 +20,7 @@ Why these four: the server ships the ODRL and CSVW vocabularies
 (`frontend/public/vocab/`), implements LDP, and its LDES tombstones use the
 ActivityStreams vocabulary. The Schema.org context is not bundled (it is
 licensed CC BY-SA 3.0); an operator who wants it adds `https://schema.org/` to
-`OTS_REMOTE_ALLOWLIST`.
+`OTS_JSONLD_CONTEXT_ALLOWLIST`.
 
 ## Licence
 

@@ -222,7 +222,7 @@ an altered one.
 
 **Vocabularies we may not redistribute install as private.** The image's
 corpus holds only redistributable vocabularies, but an operator who mounts
-the full dump (`VOCAB_CORPUS_PATH`, see *The LOV corpus*) can install any of
+the full dump (`OTS_VOCAB_CORPUS_PATH`, see *The LOV corpus*) can install any of
 them, including NonCommercial, GPL and unlicensed ones. A public entry would
 re-serve such a vocabulary to anyone. So a vocabulary we may not
 redistribute (`redistributable: false`: `restricted`, `unrecognised`,
@@ -300,7 +300,7 @@ other models and are not checked.
 Resolution order everywhere (including SPARQL auto-prefixing): **administrator
 overrides** → vocabularies registered on this instance → prefixes declared by
 installed seed bundles → bundled snapshot → previously confirmed cache. Live
-prefix.cc is only contacted when the operator sets `PREFIX_CC_FALLBACK=true`.
+prefix.cc is only contacted when the operator sets `OTS_PREFIX_CC_FALLBACK_ENABLED=true`.
 
 ### Where the bundled prefixes come from
 
@@ -413,7 +413,7 @@ travel with copies are in `LICENSES/`.
 
 **Using the full dump.** An operator may fetch the complete dump from LOV's
 public archive for their own instance. The server uses the first corpus it
-finds — `VOCAB_CORPUS_PATH`, then `{data_dir}/vocab/lov.nq.gz`, then the
+finds — `OTS_VOCAB_CORPUS_PATH`, then `{data_dir}/vocab/lov.nq.gz`, then the
 image's filtered copy — and without any it downloads the pinned full dump
 once at boot (sha256-verified) into `{data_dir}/vocab/`. With the Docker image,
 put the full dump in the data volume and restart:
@@ -435,11 +435,11 @@ catalog vocabularies the corpus in use holds) and, in `engine`,
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VOCAB_CORPUS_PATH` | unset | Explicit path to a `lov.nq.gz` file |
-| `VOCAB_CORPUS_URL` | pinned archive snapshot | Download URL; `""` disables the download |
-| `VOCAB_CORPUS_SHA256` | pinned digest | Expected checksum for a custom URL |
-| `VOCAB_LOCAL_METRICS` | on | `off` skips the local-usage ranking signal |
-| `PREFIX_CC_FALLBACK` | off | `true` re-enables live prefix.cc fallback |
+| `OTS_VOCAB_CORPUS_PATH` | unset | Explicit path to a `lov.nq.gz` file |
+| `OTS_VOCAB_CORPUS_URL` | pinned archive snapshot | Download URL; `OTS_OFFLINE=true` turns the download off |
+| `OTS_VOCAB_CORPUS_SHA256` | pinned digest | Expected checksum for a custom URL |
+| `OTS_VOCAB_LOCAL_METRICS_ENABLED` | on | `off` skips the local-usage ranking signal |
+| `OTS_PREFIX_CC_FALLBACK_ENABLED` | off | `true` re-enables live prefix.cc fallback |
 
 Without the corpus the service degrades gracefully: vocabulary/prefix search
 and the catalog stay fully functional; term search covers the vocabularies

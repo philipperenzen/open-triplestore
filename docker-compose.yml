@@ -17,8 +17,8 @@ services:
     # Every setting in .env reaches the server, not only the ones listed under
     # `environment:` below (those add defaults and compose-only wiring, and win
     # over .env only where they name a fixed value). Without this, documented
-    # settings such as SECURE_COOKIES, TRUSTED_PROXY_CIDRS or
-    # OTS_REMOTE_ALLOWLIST were silently dropped. `required: false` (Compose
+    # settings such as OTS_SECURE_COOKIES_ENABLED, OTS_TRUSTED_PROXY_CIDRS or
+    # OTS_SERVICE_ALLOWLIST were silently dropped. `required: false` (Compose
     # 2.24+) keeps `docker compose up` working without a .env file.
     # scripts/check_compose_env.py (CI) keeps the two in step.
     env_file:
@@ -26,117 +26,123 @@ services:
         required: false
     environment:
       - RUST_LOG=${RUST_LOG:-info}
-      # Deployment posture (empty = development). `production` refuses a raw
-      # secret value at startup, and this file passes JWT_SECRET and
-      # S3_SECRET_KEY raw: give each a reference that resolves inside the
-      # container (e.g. file: on a mounted secret, via an override file) first.
+      # Deployment profile (empty = development). `production` refuses a raw
+      # secret value at startup and hardens the defaults (docs/administration.md,
+      # "Production profile"). OTS_JWT_SECRET then needs a reference that resolves
+      # inside the container (file: on a mounted secret, via an override file);
+      # OTS_S3_SECRET_KEY below already is one.
       - OTS_ENV=${OTS_ENV:-}
-      # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
+      # Serve the bundled web UI at /. Set OTS_FRONTEND_ENABLED=false in .env for an
       # API-only container (SPARQL / Graph Store / REST are unaffected).
-      - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
+      - OTS_FRONTEND_ENABLED=${OTS_FRONTEND_ENABLED:-true}
       # No default: a public default secret makes every session token forgeable. Set it in .env
       # (see .env.example); `openssl rand -hex 32`. The server also refuses weak secrets under TLS.
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
-      - AUTH_DB_PATH=/data/auth.db
-      - BACKUP_DIR=/data/backups
-      - BACKUP_RETENTION_COUNT=${BACKUP_RETENTION_COUNT:-7}
-      - BACKUP_SCHEDULE_HOURS=${BACKUP_SCHEDULE_HOURS:-24}
-      - S3_ENDPOINT=http://minio:9000
-      - S3_BUCKET=${S3_BUCKET:-triplestore-assets}
-      - S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
-      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
-      - S3_REGION=${S3_REGION:-us-east-1}
-      # OIDC resource server (optional). Set OIDC_ISSUER to
+      - OTS_JWT_SECRET=${OTS_JWT_SECRET:?OTS_JWT_SECRET must be set (no default) — see .env.example}
+      - OTS_AUTH_DB_PATH=/data/auth.db
+      - OTS_BACKUP_DIR=/data/backups
+      - OTS_BACKUP_RETENTION_COUNT=${OTS_BACKUP_RETENTION_COUNT:-7}
+      - OTS_BACKUP_SCHEDULE_SECS=${OTS_BACKUP_SCHEDULE_SECS:-86400}
+      - OTS_S3_ENDPOINT=http://minio:9000
+      - OTS_S3_BUCKET=${OTS_S3_BUCKET:-triplestore-assets}
+      - OTS_S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
+      # A reference to the MinIO password forwarded on the next line, so the
+      # production profile (which refuses raw secrets) works with this file.
+      - OTS_S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
+      - OTS_S3_REGION=${OTS_S3_REGION:-us-east-1}
+      # OIDC resource server (optional). Set OTS_OIDC_ISSUER to
       # enable verifying IdP-issued access tokens; leave blank to keep password/PAT only.
-      - OIDC_ISSUER=${OIDC_ISSUER:-}
-      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
-      - OIDC_DEFAULT_ROLE=${OIDC_DEFAULT_ROLE:-user}
-      - ACCEPT_LEGACY_TOKENS=${ACCEPT_LEGACY_TOKENS:-true}
+      - OTS_OIDC_ISSUER=${OTS_OIDC_ISSUER:-}
+      - OTS_OIDC_AUDIENCE=${OTS_OIDC_AUDIENCE:-}
+      - OTS_OIDC_DEFAULT_ROLE=${OTS_OIDC_DEFAULT_ROLE:-user}
+      - OTS_SESSION_AND_API_TOKENS_ENABLED=${OTS_SESSION_AND_API_TOKENS_ENABLED:-true}
       # What an IdP token may do (session | scoped | full; default session:
       # read and write, but no API-token minting) — see .env.example.
       - OTS_OIDC_IDP_TOKEN_POLICY=${OTS_OIDC_IDP_TOKEN_POLICY:-}
       - OTS_OIDC_IDP_WRITE_SCOPES=${OTS_OIDC_IDP_WRITE_SCOPES:-}
       # Claims-driven roles & org membership (all optional):
-      #   OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"admin|user|guest|publisher"}' (super_admin is capped at admin)
-      #   OIDC_ROLE_CLAIMS:    comma-sep claim names (default roles,realm_access.roles,groups)
-      #   OIDC_GROUPS_CLAIM:   claim holding org groups (default groups)
-      #   OIDC_ORG_GROUP_PREFIX: marks an org-membership group, e.g. org: → org:gis-team
-      - OIDC_ROLE_CLAIM_MAP=${OIDC_ROLE_CLAIM_MAP:-}
-      - OIDC_ROLE_CLAIMS=${OIDC_ROLE_CLAIMS:-}
-      - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
-      - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
+      #   OTS_OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"admin|user|guest|publisher"}' (super_admin is capped at admin)
+      #   OTS_OIDC_ROLE_CLAIMS:    comma-sep claim names (default roles,realm_access.roles,groups)
+      #   OTS_OIDC_GROUPS_CLAIM:   claim holding org groups (default groups)
+      #   OTS_OIDC_ORG_GROUP_PREFIX: marks an org-membership group, e.g. org: → org:gis-team
+      - OTS_OIDC_ROLE_CLAIM_MAP=${OTS_OIDC_ROLE_CLAIM_MAP:-}
+      - OTS_OIDC_ROLE_CLAIMS=${OTS_OIDC_ROLE_CLAIMS:-}
+      - OTS_OIDC_GROUPS_CLAIM=${OTS_OIDC_GROUPS_CLAIM:-}
+      - OTS_OIDC_ORG_GROUP_PREFIX=${OTS_OIDC_ORG_GROUP_PREFIX:-}
       # What an access token this store issues as an OIDC provider may do
       # (session | scoped | full), and what guests may do beyond reading — see .env.example.
-      - OTS_OIDC_SESSION_POLICY=${OTS_OIDC_SESSION_POLICY:-}
-      - OTS_OIDC_WRITE_SCOPES=${OTS_OIDC_WRITE_SCOPES:-}
+      - OTS_OIDC_PROVIDER_TOKEN_POLICY=${OTS_OIDC_PROVIDER_TOKEN_POLICY:-}
+      - OTS_OIDC_PROVIDER_WRITE_SCOPES=${OTS_OIDC_PROVIDER_WRITE_SCOPES:-}
       - OTS_GUEST_CAPABILITIES=${OTS_GUEST_CAPABILITIES:-}
       # Outbound account email (verification, password reset, reminders). With
-      # SMTP_HOST unset every message — including its action link — goes to the
+      # OTS_SMTP_HOST unset every message — including its action link — goes to the
       # server log instead (fine for dev). For real delivery either enable the
-      # bundled relay below (`--profile mail`, then SMTP_HOST=mail + SMTP_TLS=none)
+      # bundled relay below (`--profile mail`, then OTS_SMTP_HOST=mail + OTS_SMTP_TLS=none)
       # or point these at an external SMTP provider. See .env.example / docs/auth.md.
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-}
-      - SMTP_USERNAME=${SMTP_USERNAME:-}
-      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - OTS_SMTP_HOST=${OTS_SMTP_HOST:-}
+      - OTS_SMTP_PORT=${OTS_SMTP_PORT:-}
+      - OTS_SMTP_USERNAME=${OTS_SMTP_USERNAME:-}
+      - OTS_SMTP_PASSWORD=${OTS_SMTP_PASSWORD:-}
       # none | starttls | implicit (default: implicit TLS on 465, else STARTTLS).
       # `none` is ONLY for a relay on the private compose network, like `mail` below.
-      - SMTP_TLS=${SMTP_TLS:-}
-      - SMTP_STARTTLS=${SMTP_STARTTLS:-}
-      - SMTP_FROM=${SMTP_FROM:-}
+      - OTS_SMTP_TLS=${OTS_SMTP_TLS:-}
+      - OTS_SMTP_FROM=${OTS_SMTP_FROM:-}
       # Public base URL of the deployment (linked-data IRIs, WebAuthn/passkey
       # relying party, default base for emailed links). Set it to the
       # browser-facing origin whenever the store is served via a proxy / real
       # hostname, e.g. https://data.example.org. Must never be empty.
-      - BASE_URL=${BASE_URL:-http://localhost:7878}
+      - OTS_BASE_URL=${OTS_BASE_URL:-http://localhost:7878}
       # Overrides the base URL for emailed action links only (rarely needed —
       # e.g. UI on a different origin than the API).
-      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - OTS_PUBLIC_BASE_URL=${OTS_PUBLIC_BASE_URL:-}
       # 1 ⇒ password login requires a verified email address (only sensible once
       # delivery works; a fresh verification link is auto-sent on blocked logins).
-      - OTS_REQUIRE_VERIFIED_EMAIL=${OTS_REQUIRE_VERIFIED_EMAIL:-}
+      - OTS_LOGIN_EMAIL_VERIFICATION_ENABLED=${OTS_LOGIN_EMAIL_VERIFICATION_ENABLED:-}
       # CORS allowlist for trusted frontend origin(s), comma-separated (dev + prod).
       # "*" reflects any origin with credentials (mirror mode) — lets a browser client
       # on an arbitrary host connect. Prefer an explicit list in prod.
-      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - OTS_CORS_ORIGINS=${OTS_CORS_ORIGINS:-}
       # Who may frame the /embed/* pages (CSP frame-ancestors). Keep the "*" fallback:
       # an EMPTY value disables embedding.
-      - EMBED_FRAME_ANCESTORS=${EMBED_FRAME_ANCESTORS:-*}
+      - OTS_EMBED_FRAME_ANCESTORS=${OTS_EMBED_FRAME_ANCESTORS:-*}
       # External validation service base URL, used by /api/datasets/validate-and-commit.
-      - VALIDATION_API_URL=${VALIDATION_API_URL:-}
-      # Cross-app service discovery (opt-in, off by default). Set LD_DISCOVERY=true to self-register
+      - OTS_VALIDATION_API_URL=${OTS_VALIDATION_API_URL:-}
+      # Cross-app service discovery (opt-in, off by default). Set OTS_DISCOVERY_ENABLED=true to self-register
       # as "triplestore" so siblings/the browser resolve this store instead of hardcoding :7878.
       # A missing registry is fail-soft either way; this just makes discovery an explicit choice.
-      - LD_DISCOVERY=${LD_DISCOVERY:-false}
-      # Registry location + token, used only when LD_DISCOVERY=true. Points at the host-run
+      - OTS_DISCOVERY_ENABLED=${OTS_DISCOVERY_ENABLED:-false}
+      # Registry location + token, used only when OTS_DISCOVERY_ENABLED=true. Points at the host-run
       # registry; fail-soft if absent.
-      - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
-      - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
+      - OTS_REGISTRY_URL=${OTS_REGISTRY_URL:-http://host.docker.internal:8500}
+      - OTS_REGISTRY_TOKEN=${OTS_REGISTRY_TOKEN:-}
       # LLM / AI features (NL→SPARQL, SHACL assist, knowledge-graph chat). Defaults
       # to the bundled `ollama` service below — start it with `--profile llm` (and
       # the GPU override on an NVIDIA host: see docker-compose.gpu.yml). Prefer an
-      # external OpenAI-compatible API? Set LLM_GATEWAY_URL + LLM_API_KEY in .env and
-      # don't enable the `llm` profile. Unreachable endpoint = AI features just hide.
-      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
-      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      # Per-task model overrides; empty falls back to LLM_MODEL.
-      - LLM_SPARQL_MODEL=${LLM_SPARQL_MODEL:-}
-      - LLM_SHACL_MODEL=${LLM_SHACL_MODEL:-}
-      - LLM_CHAT_MODEL=${LLM_CHAT_MODEL:-}
+      # external OpenAI-compatible API? Set OTS_LLM_GATEWAY_URL + OTS_LLM_API_KEY in .env and
+      # don't enable the `llm` profile. Without the profile the default endpoint does
+      # not exist, and /api/llm/health says so: configured, unreachable, and why.
+      # `OTS_LLM_GATEWAY_URL=` (empty) in .env turns the AI features off instead; the
+      # default below applies only when the variable is not set at all.
+      - OTS_LLM_GATEWAY_URL=${OTS_LLM_GATEWAY_URL-http://ollama:11434}
+      - OTS_LLM_MODEL=${OTS_LLM_MODEL:-qwen2.5:7b}
+      - OTS_LLM_API_KEY=${OTS_LLM_API_KEY:-}
+      # Per-task model overrides; empty falls back to OTS_LLM_MODEL.
+      - OTS_LLM_SPARQL_MODEL=${OTS_LLM_SPARQL_MODEL:-}
+      - OTS_LLM_SHACL_MODEL=${OTS_LLM_SHACL_MODEL:-}
+      - OTS_LLM_CHAT_MODEL=${OTS_LLM_CHAT_MODEL:-}
       # LLM guard, rate limits and request log; empty keeps each default
       # (see .env.example).
-      - LLM_RATE_LIMIT_PER_MIN=${LLM_RATE_LIMIT_PER_MIN:-}
-      - LLM_RATE_LIMIT_ANON_PER_MIN=${LLM_RATE_LIMIT_ANON_PER_MIN:-}
-      - LLM_GUARD_INJECTION_ACTION=${LLM_GUARD_INJECTION_ACTION:-}
-      - LLM_GUARD_BLOCKLIST=${LLM_GUARD_BLOCKLIST:-}
-      - LLM_GUARD_MAX_MESSAGE_CHARS=${LLM_GUARD_MAX_MESSAGE_CHARS:-}
-      - LLM_GUARD_MAX_MESSAGES=${LLM_GUARD_MAX_MESSAGES:-}
-      - LLM_GUARD_MAX_TOTAL_CHARS=${LLM_GUARD_MAX_TOTAL_CHARS:-}
-      - LLM_LOG_PREVIEW_DISABLED=${LLM_LOG_PREVIEW_DISABLED:-}
-      - LLM_LOG_RETENTION_DAYS=${LLM_LOG_RETENTION_DAYS:-}
+      - OTS_LLM_RATE_LIMIT_PER_MIN=${OTS_LLM_RATE_LIMIT_PER_MIN:-}
+      - OTS_LLM_RATE_LIMIT_ANON_PER_MIN=${OTS_LLM_RATE_LIMIT_ANON_PER_MIN:-}
+      - OTS_LLM_GUARD_INJECTION_ACTION=${OTS_LLM_GUARD_INJECTION_ACTION:-}
+      - OTS_LLM_GUARD_BLOCKLIST=${OTS_LLM_GUARD_BLOCKLIST:-}
+      - OTS_LLM_GUARD_MAX_MESSAGE_CHARS=${OTS_LLM_GUARD_MAX_MESSAGE_CHARS:-}
+      - OTS_LLM_GUARD_MAX_MESSAGES=${OTS_LLM_GUARD_MAX_MESSAGES:-}
+      - OTS_LLM_GUARD_MAX_TOTAL_CHARS=${OTS_LLM_GUARD_MAX_TOTAL_CHARS:-}
+      - OTS_LLM_LOG_PREVIEW_ENABLED=${OTS_LLM_LOG_PREVIEW_ENABLED:-}
+      - OTS_LLM_LOG_RETENTION_DAYS=${OTS_LLM_LOG_RETENTION_DAYS:-}
       # ClamAV daemon (host:port) for upload scanning; empty disables it.
-      - CLAMAV_ADDR=${CLAMAV_ADDR:-}
+      - OTS_CLAMAV_ADDR=${OTS_CLAMAV_ADDR:-}
       # In-memory query accelerator cap. Above this triple count the store keeps
       # TWO full RAM copies OFF and answers from RocksDB (correct, just slower for
       # large joins). By default the cap auto-sizes to mem_limit below; set this
@@ -154,7 +160,7 @@ services:
       - OTS_REASONER_TIMEOUT_SECS=${OTS_REASONER_TIMEOUT_SECS:-}
       - OTS_REASONER_MAX_TRIPLES=${OTS_REASONER_MAX_TRIPLES:-}
       - OTS_DL_DEBOUNCE_MS=${OTS_DL_DEBOUNCE_MS:-}
-    # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
+    # Make `host.docker.internal` (used by OTS_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
     extra_hosts:
@@ -241,8 +247,8 @@ services:
   # A send-only Postfix relay so account email (verification links, password
   # resets) actually leaves the stack. Enable with `--profile mail` (or
   # COMPOSE_PROFILES=mail in .env) and point the triplestore at it:
-  #   SMTP_HOST=mail
-  #   SMTP_TLS=none          # the hop to the relay stays on the compose network
+  #   OTS_SMTP_HOST=mail
+  #   OTS_SMTP_TLS=none          # the hop to the relay stays on the compose network
   # The SMTP port is reachable ONLY from other containers — nothing is published
   # on the host, so the relay cannot be abused as an open relay from outside.
   #
@@ -263,7 +269,7 @@ services:
       # whose A record matches this host's reverse DNS.
       - HOSTNAME=${MAIL_HOSTNAME:-mail.localhost}
       # Envelope-sender domain(s) the relay accepts, space-separated. Must cover
-      # the domain used in SMTP_FROM (the app default is @localhost).
+      # the domain used in OTS_SMTP_FROM (the app default is @localhost).
       - ALLOWED_SENDER_DOMAINS=${MAIL_SENDER_DOMAINS:-localhost}
       # Optional upstream smarthost, e.g. [smtp.eu.mailgun.org]:587 — the
       # brackets skip the MX lookup. Empty ⇒ deliver directly to recipient MXes.
@@ -289,7 +295,7 @@ services:
   # A local OpenAI-compatible model server for the platform's AI features. Enable
   # with `--profile llm`; on an NVIDIA host add `-f docker-compose.gpu.yml` to use
   # the GPU. Prefer a hosted model? Skip this profile and point the triplestore's
-  # LLM_GATEWAY_URL / LLM_API_KEY at your endpoint instead.
+  # OTS_LLM_GATEWAY_URL / OTS_LLM_API_KEY at your endpoint instead.
   ollama:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     profiles: ["llm"]
@@ -303,8 +309,8 @@ services:
       # Listen on all interfaces inside the container (also the official image default).
       - OLLAMA_HOST=0.0.0.0:11434
       # Browser CORS allowlist for direct ollama calls. Follows the triplestore's
-      # CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
-      - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${CORS_ORIGINS:-}}
+      # OTS_CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
+      - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${OTS_CORS_ORIGINS:-}}
       # ── Time-to-first-token tuning ──
       # Keep the model resident between chats: the default 5m unload means the
       # next question pays the full model load (tens of seconds on CPU) before
@@ -343,7 +349,7 @@ services:
         condition: service_healthy
     environment:
       - OLLAMA_HOST=http://ollama:11434
-    command: ["pull", "${LLM_MODEL:-qwen2.5:7b}"]
+    command: ["pull", "${OTS_LLM_MODEL:-qwen2.5:7b}"]
     restart: "no"
 
   # ── vLLM (optional, profile: llm-vllm — NVIDIA GPU required) ───────────────
@@ -351,8 +357,8 @@ services:
   # chat's large shared system prompt is computed once and reused across turns
   # and users, which cuts time-to-first-token dramatically under load. Enable
   # with `--profile llm-vllm` and point the triplestore at it in .env:
-  #   LLM_GATEWAY_URL=http://vllm:8000
-  #   LLM_MODEL=${VLLM_MODEL}   (the served model name below)
+  #   OTS_LLM_GATEWAY_URL=http://vllm:8000
+  #   OTS_LLM_MODEL=${VLLM_MODEL}   (the served model name below)
   # The model downloads from Hugging Face into the hf_cache volume on first start
   # (several GB — AWQ 7B ≈ 5.6 GB). Gated models need HUGGING_FACE_HUB_TOKEN.
   vllm:

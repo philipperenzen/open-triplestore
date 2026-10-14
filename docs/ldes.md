@@ -290,8 +290,8 @@ starting point), because members created between the two may never reach this
 mirror.
 
 Outbound requests are subject to the remote allowlist: the stream's origin
-must be listed in `OTS_REMOTE_ALLOWLIST`, a redirect is followed only to a URL
-the allowlist covers too (§3.3: "A client MUST follow redirects"; the URL after
+must be listed in `OTS_LDES_ALLOWLIST`, a redirect is followed only to a URL
+that list covers too (§3.3: "A client MUST follow redirects"; the URL after
 the redirects is the page's base IRI), and each fetch has the usual timeout and
 body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 

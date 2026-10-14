@@ -6,16 +6,32 @@ use sha2::{Digest, Sha256};
 #[derive(Clone)]
 pub struct JwtConfig {
     pub secret: String,
-    pub access_expiry_minutes: u64,
+    /// Access-token lifetime (`OTS_ACCESS_TOKEN_EXPIRY_SECS`).
+    pub access_expiry_secs: u64,
     pub refresh_expiry_days: u64,
 }
 
 impl JwtConfig {
+    /// `access_expiry_minutes` and `refresh_expiry_days`, as tests write them.
     pub fn new(secret: String, access_expiry_minutes: u64, refresh_expiry_days: u64) -> Self {
         Self {
             secret,
-            access_expiry_minutes,
+            access_expiry_secs: access_expiry_minutes * 60,
             refresh_expiry_days,
+        }
+    }
+
+    /// The lifetimes the configuration gives (`OTS_ACCESS_TOKEN_EXPIRY_SECS`,
+    /// `OTS_REFRESH_TOKEN_EXPIRY_DAYS`).
+    pub fn with_expiry(
+        secret: String,
+        access: std::time::Duration,
+        refresh: std::time::Duration,
+    ) -> Self {
+        Self {
+            secret,
+            access_expiry_secs: access.as_secs(),
+            refresh_expiry_days: (refresh.as_secs() / 86_400).max(1),
         }
     }
 }
@@ -58,7 +74,7 @@ pub fn issue_access_token(
         role: role.to_string(),
         token_type: "access".to_string(),
         iat: now,
-        exp: now + config.access_expiry_minutes * 60,
+        exp: now + config.access_expiry_secs,
         jti: Some(uuid::Uuid::new_v4().to_string()),
     };
 
@@ -156,7 +172,7 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// The configured JWT signing secret (`JWT_SECRET` / `--jwt-secret`), routed
+/// The configured JWT signing secret (`OTS_JWT_SECRET` / `--jwt-secret`), routed
 /// through the secrets module like every other credential: a reference
 /// (`env:NAME`, `file:/path`, `vault:…`) resolves to its value; a raw value is
 /// accepted in the development posture with a one-time warning and refused
@@ -164,8 +180,8 @@ pub fn hash_token(token: &str) -> String {
 /// secret pasted into its environment. The error names the setting, never
 /// the value.
 pub fn configured_jwt_secret(value: &str) -> anyhow::Result<String> {
-    let secret = crate::secrets::resolve_configured("JWT_SECRET", value.trim())
-        .map_err(|e| anyhow::anyhow!("JWT_SECRET: {e}"))?;
+    let secret = crate::secrets::resolve_configured("OTS_JWT_SECRET", value.trim())
+        .map_err(|e| anyhow::anyhow!("OTS_JWT_SECRET: {e}"))?;
     Ok(secret.expose().to_string())
 }
 

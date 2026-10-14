@@ -1,6 +1,6 @@
 //! The JSON-LD document loader behind every JSON-LD parse: bundled W3C
 //! contexts resolve offline, any other remote `@context` is refused unless
-//! `OTS_REMOTE_ALLOWLIST` covers it, and an allowlisted context is fetched
+//! `OTS_JSONLD_CONTEXT_ALLOWLIST` covers it, and an allowlisted context is fetched
 //! (redirects and `Link: rel="alternate"` followed within the allowlist),
 //! size-capped and cached.
 //!
@@ -110,7 +110,7 @@ async fn remote_contexts_are_bundled_refused_or_fetched_from_the_allowlist() {
     let (state, token) = admin_state();
     let app = test_app(state.clone());
     let ask = |q: &str| matches!(state.store.query(q), Ok(QueryResults::Boolean(true)));
-    std::env::remove_var("OTS_REMOTE_ALLOWLIST");
+    std::env::remove_var("OTS_JSONLD_CONTEXT_ALLOWLIST");
     std::env::remove_var("OTS_JSONLD_CONTEXT_MAX_BYTES");
 
     // 1. A bundled context parses with no allowlist at all.
@@ -143,7 +143,7 @@ async fn remote_contexts_are_bundled_refused_or_fetched_from_the_allowlist() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.contains("OTS_REMOTE_ALLOWLIST"), "{body}");
+    assert!(body.contains("OTS_JSONLD_CONTEXT_ALLOWLIST"), "{body}");
     assert_eq!(
         hits.load(Ordering::SeqCst),
         0,
@@ -151,7 +151,7 @@ async fn remote_contexts_are_bundled_refused_or_fetched_from_the_allowlist() {
     );
 
     // 3. Allowlisted: fetched once, then served from the cache.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_JSONLD_CONTEXT_ALLOWLIST", format!("{origin}/"));
     let name = |g: &str| {
         format!("ASK {{ GRAPH <{g}> {{ <https://example.org/p/1> <http://schema.org/name> \"Ada\" }} }}")
     };
@@ -192,5 +192,5 @@ async fn remote_contexts_are_bundled_refused_or_fetched_from_the_allowlist() {
     assert!(body.contains("larger than 1024 bytes"), "{body}");
 
     std::env::remove_var("OTS_JSONLD_CONTEXT_MAX_BYTES");
-    std::env::remove_var("OTS_REMOTE_ALLOWLIST");
+    std::env::remove_var("OTS_JSONLD_CONTEXT_ALLOWLIST");
 }

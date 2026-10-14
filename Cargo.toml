@@ -133,7 +133,7 @@ default         = ["full"]
 ## docs/build-features.md.
 ##
 ## `backup-encrypt` and `alerting` are included: docs/administration.md
-## documents BACKUP_ENCRYPT and ALERT_WEBHOOK_URL / ALERT_SMTP_* as ordinary
+## documents OTS_BACKUP_ENCRYPTION_ENABLED and OTS_ALERT_WEBHOOK_URL / OTS_ALERT_SMTP_* as ordinary
 ## operational knobs, but the Dockerfile and the release workflow both build
 ## `--features full`, so leaving them out meant every published image silently
 ## ignored those variables. Neither pulls a native dependency (`age` is pure

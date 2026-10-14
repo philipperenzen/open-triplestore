@@ -128,7 +128,7 @@ Every header is derived from the data and the rules: the same dataset state
 and rule set give byte-identical patch text, and the id is a content hash.
 `base-commit` is the newest commit touching the dataset's graphs;
 `base-sequence` / `base-epoch` the change log's position when change capture
-is on (`OTS_CHANGE_CAPTURE=on`). `#` lines name the rule and trigger behind
+is on (`OTS_CHANGE_CAPTURE_ENABLED=on`). `#` lines name the rule and trigger behind
 each line and are ignored by every RDF Patch reader. Placeholder values
 ("nulls") are IRIs under `{base}/.well-known/genid/`, derived from the rule
 and the focus node, so a second run mints the same IRI and never a second
@@ -264,7 +264,7 @@ computed over:
 | Option | |
 |---|---|
 | `?if-base-commit=<iri>` or `If-Match: "<iri>"` | `409` unless `<iri>` (or the bare commit id) is still the newest commit touching one of the dataset's graphs. An empty value means no commit has touched them yet. |
-| `?if-base-sequence=<n>&if-base-epoch=<e>` | `409` if a change-log row after `n` touches one of the dataset's graphs. This also sees writes that record no commit. Needs `OTS_CHANGE_CAPTURE=on` (`400` without). |
+| `?if-base-sequence=<n>&if-base-epoch=<e>` | `409` if a change-log row after `n` touches one of the dataset's graphs. This also sees writes that record no commit. Needs `OTS_CHANGE_CAPTURE_ENABLED=on` (`400` without). |
 
 A `409` body is `{"error": "stale_base", "message", "precondition",
 "current"}`, where `current` is the newest commit or the log's sequence and

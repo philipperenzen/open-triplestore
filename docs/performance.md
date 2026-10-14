@@ -336,9 +336,9 @@ provisional 1.5 tolerance (see above) until their noise is measured.
 
 Every `query/*`, `path/*` and `geosparql/*` benchmark repeats one query on a store
 that nothing writes to between iterations. `TripleStore` keeps a result cache
-(`OTS_QUERY_CACHE`, on by default, generation-keyed), so with the cache on every
+(`OTS_QUERY_CACHE_ENABLED`, on by default, generation-keyed), so with the cache on every
 iteration after the first is a hit: an audit on 2026-09-08 (same binary, cache on
-vs `OTS_QUERY_CACHE=off`) found **63 of the 68** read benchmarks measuring the
+vs `OTS_QUERY_CACHE_ENABLED=off`) found **63 of the 68** read benchmarks measuring the
 cache — `query_group_by/10000` at 1.8 µs against 8.6 ms of evaluation,
 `geosparql_sf_contains/50` at 75 ns against 135 µs, `path_zero_or_more/200` at
 4.6 µs against 6 ms. Only the five whose results are not cacheable (CONSTRUCT, or
@@ -348,7 +348,7 @@ cache landed (2026-06).
 Since then the bench file builds every store with the result cache **disabled**
 (`fresh_store()` → `with_query_cache(false, …)`), so the numbers are evaluation
 by construction, and every runner (perf.yml, perf-baseline.yml, GitLab, the
-Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE=off`, which
+Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE_ENABLED=off`, which
 keeps the merge-base side honest while the base commit still has the old bench
 file. One benchmark measures the cached path on purpose — `query/cache_hit`, a
 small query with the cache explicitly enabled — because that path has its own
@@ -676,7 +676,7 @@ The tiers above measure generic shapes. This tier measures what an object-type
 library deployment does: `N` assets typed against 40 object types with six
 typed properties, a part-of link and a location — ~9 quads per asset — in one
 named graph on the persistent store; six query shapes with the **result cache
-off** (`OTS_QUERY_CACHE=false`, so every number is an evaluation); SHACL over
+off** (`OTS_QUERY_CACHE_ENABLED=false`, so every number is an evaluation); SHACL over
 every asset against six property shapes (datatype, minCount, class, pattern,
 `sh:in`, bounds); and a 20-second phase of 4 writers inserting 500-quad
 batches next to 4 readers doing lookups. Harness:
@@ -739,7 +739,7 @@ and 20 s of 4 writers (`INSERT DATA`, 500 quads per request) next to 4
 readers (single-asset lookups). Fuseki is Apache Jena Fuseki 6.2 "main" (the
 no-UI jar, TDB2, `-Xmx4g`, started by
 [`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) with
-`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE=false`.
+`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE_ENABLED=false`.
 Same machine, same file, one server at a time. SHACL is Jena's `shacl validate`
 command line against the same shapes and data (split out of the dump by
 [`scripts/scale_split_dump.py`](../scripts/scale_split_dump.py), since that
@@ -896,8 +896,8 @@ on separate graphs, if that is a concern.
 | 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
 | same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
 
-² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
-512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_BYTES` (default
+512 MiB); the 226 MB file was appended in five 45 MB chunks (`POST`,
 incremental index maintenance), which is also how a client would stream a
 large import. Both tables were taken after a settle (60 s and 150 s) so the
 in-memory query accelerator had been rebuilt — a background tick does that
@@ -994,7 +994,7 @@ is the **median of 9 warm runs** returning ≤10 rows, so the timing reflects en
 work, not result transfer. Open Triplestore is queried through a dataset's SPARQL
 **service endpoint** (so the ACL layer scopes to that one graph, like Fuseki's
 `/ds` and QLever's single dataset); the per-IP rate limiter is disabled for the
-run (`RATE_LIMIT_DISABLED=1`) so it measures the engine, not the limiter.
+run (`OTS_RATE_LIMIT_ENABLED=false`) so it measures the engine, not the limiter.
 
 | Query (~501k triples, over HTTP) | Open&nbsp;Triplestore | Fuseki&nbsp;(TDB2) | QLever |
 |---|--:|--:|--:|
@@ -1038,7 +1038,7 @@ join/`GROUP BY` numbers dropped from hundreds-of-ms / multi-second to single-dig
 ~150 ms.
 
 **The numbers above are cold (cache-off) engine compute.** On top of the engine,
-`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE`, on by default): a
+`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE_ENABLED`, on by default): a
 repeated *deterministic* query — the bulk of real traffic — collapses from full
 evaluation to a µs-scale LRU lookup, so a re-run of *any* row of the table collapses
 to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 17 ms
@@ -1223,7 +1223,7 @@ named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP 
 `DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
 The mirror is a derived index: rebuilt lazily after writes and **bounded by a
 triple-count cap** (a quarter of the memory limit at ~1 KiB a triple — 1M in a 4 GiB
-container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY*`-tunable; the two
+container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY_*`-tunable; the two
 engine copies cost ~2× the dataset in RAM, the columnar copy about 48 bytes a quad on
 top) so it never mirrors a store larger than RAM — above the cap the copies stay off and
 the persistent store answers, leaving the 1–100M disk tiers (data > RAM) unaffected. A
@@ -1304,7 +1304,7 @@ language tags, the date/time family, blank nodes, aggregates over erroring
 expressions, `GRAPH ?g` used against itself — and allows a query only two
 outcomes: declined, or equal to the engine. Thirty-four of those corners diverged
 when they were first run; the table above is the result.
-`OTS_COLUMNAR_QUERY=off` switches the copy off entirely.
+`OTS_COLUMNAR_QUERY_ENABLED=off` switches the copy off entirely.
 
 **Before and after** — the `query/*` and `path/*` groups of
 `benches/performance.rs` on the reference system, the same builder image, back to
@@ -1658,7 +1658,7 @@ make the recount grow with the sample count.
 
 ### Change capture and the update benchmarks
 
-The per-quad change log (`OTS_CHANGE_CAPTURE`) records one row per graph per
+The per-quad change log (`OTS_CHANGE_CAPTURE_ENABLED`) records one row per graph per
 write. It is **off by default**, and these benchmarks are why.
 
 With it off — the shipped default — the three update groups above and the two

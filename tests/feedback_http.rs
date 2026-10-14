@@ -40,7 +40,7 @@ async fn call(
 
 /// `(app, admin, alice, bob)` tokens.
 fn setup() -> (Router, String, String, String) {
-    std::env::set_var("RATE_LIMIT_DISABLED", "1");
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
     let (state, admin) = admin_state();
     for (id, name) in [("alice", "alice"), ("bob", "bob")] {
         state

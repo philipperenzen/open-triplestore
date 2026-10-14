@@ -132,6 +132,9 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{id}/patch` | **token** | Apply an RDF Patch; dataset writers only. |
 | `GET` | `/api/admin/users` | **admin** | The account directory. |
 | `GET` | `/api/admin/audit` | **admin** | The audit trail. |
+| `GET` | `/api/admin/config` | **admin** | Every setting with its effective value, default and source; secrets redacted. |
+| `GET` | `/api/admin/settings` | **admin** | The runtime settings an admin can change without a restart. |
+| `PUT` | `/api/admin/settings/{name}` | **admin** | Override a runtime setting, or reset it with `{"value": null}`; audit-logged. |
 | `GET` | `/api/replication/status` | **none** | This node's role and lag; a health signal, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | **admin** | What a follower needs to bootstrap. |
 | `GET` | `/api/replication/identity` | **admin** | The identity database, whole. |
@@ -226,7 +229,7 @@ stream). Streams without a policy never answer 410. Full fragments also carry
 event stream, its root node, a redirect to either, or a page with exactly one
 `tree:view`. Anything else (several views, none at all) is a **`502`** whose
 body names §3.1; it used to crawl whatever links it found. Redirects are
-followed within `OTS_REMOTE_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
+followed within `OTS_LDES_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
 with back-off, and any other error status is a `502`. The report gains
 `stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
 `nodes_skipped_immutable`, `nodes_pruned`, `retries` and
@@ -292,7 +295,7 @@ scope.
 Every write records one row per graph it touched — the net delta as
 N-Quads when it fits, exact counts otherwise, or an honest `unknown` — with
 a dense sequence number in commit order. Capture is **off by default**
-(`OTS_CHANGE_CAPTURE=on` turns it on, and a replication leader keeps it on
+(`OTS_CHANGE_CAPTURE_ENABLED=on` turns it on, and a replication leader keeps it on
 regardless); with it off, `status` says so and the rows are empty. Admin-only, since rows carry quads from every tenant. See `docs/versioning.md` "Change log" for the row format,
 retention and the caps.
 

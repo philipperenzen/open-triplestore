@@ -556,7 +556,7 @@ pub async fn list_profiles() -> Json<serde_json::Value> {
         .map(|p| {
             let mut j = serde_json::json!({ "id": p.id(), "label": p.label() });
             if p.id() == "icdd" {
-                let set = std::env::var(icdd::ONTOLOGY_DIR_ENV).is_ok_and(|v| !v.trim().is_empty());
+                let set = crate::config::ICDD_ONTOLOGY_DIR.get().is_some();
                 let (files, _) = icdd::operator_ontologies();
                 let missing: Vec<&str> = icdd::PART1_ONTOLOGIES
                     .iter()
@@ -746,7 +746,7 @@ pub async fn import_container(
     if carries_files && !state.object_store.is_configured() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "the container carries documents but no object storage is configured (S3_* or a local store)".to_string(),
+            "the container carries documents but no object storage is configured (OTS_S3_* or a local store)".to_string(),
         ));
     }
     let _ = state.auth_db.create_asset_folder(&dataset_id, &folder);

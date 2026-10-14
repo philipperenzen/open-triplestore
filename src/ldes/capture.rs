@@ -294,20 +294,14 @@ impl Capture {
 /// `OTS_LDES_BNODE_DEPTH` (default 8): how far up a blank-node tree the
 /// owner of a changed blank-node subject is looked for.
 fn bnode_depth() -> usize {
-    std::env::var("OTS_LDES_BNODE_DEPTH")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(8)
+    crate::config::LDES_BNODE_DEPTH.get()
 }
 
 /// `OTS_LDES_BNODE_SUBJECTS_MAX` (default 10 000): above this many
 /// blank-node subjects in one graph's rows the graph is republished whole
 /// instead of walking each one up to its owner.
 fn bnode_subjects_max() -> usize {
-    std::env::var("OTS_LDES_BNODE_SUBJECTS_MAX")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(10_000)
+    crate::config::LDES_BNODE_SUBJECTS_MAX.get()
 }
 
 /// The IRI entity a blank node hangs from in `graph`: up the tree through

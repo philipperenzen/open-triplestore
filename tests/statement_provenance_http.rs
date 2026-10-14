@@ -552,7 +552,7 @@ fn stub_validator() {
             });
         });
         let addr = rx.recv().unwrap();
-        std::env::set_var("VALIDATION_API_URL", format!("http://{addr}"));
+        std::env::set_var("OTS_VALIDATION_API_URL", format!("http://{addr}"));
     });
 }
 

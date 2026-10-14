@@ -583,7 +583,7 @@ async fn private_graphs_are_never_published_to_the_stream() {
 
 /// A second instance on a local listener publishes; this instance syncs.
 /// The publisher's base URL is the listener's origin, as a deployment's
-/// BASE_URL is its public origin — the stream's node IRIs are built from it.
+/// OTS_BASE_URL is its public origin — the stream's node IRIs are built from it.
 fn publisher() -> (AppState, String, String) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -607,7 +607,7 @@ fn publisher() -> (AppState, String, String) {
 #[tokio::test]
 async fn sync_mirrors_a_remote_stream_and_its_increments() {
     let (remote_state, remote_token, origin) = publisher();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let remote_app = test_app(remote_state.clone());
 
     let (local, token) = admin_state();
@@ -833,7 +833,7 @@ async fn sync_mirrors_a_remote_stream_and_its_increments() {
     );
 
     // Not allowlisted: refused before any request.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", "");
+    std::env::set_var("OTS_LDES_ALLOWLIST", "");
     let (st, _, _) = req(
         &app,
         Method::POST,

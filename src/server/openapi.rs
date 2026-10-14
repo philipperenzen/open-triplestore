@@ -1099,7 +1099,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     }
     mount(paths, "/api/datasets/:dataset_id/containers/import", vec![
         (M::Post, ob("Import", "Import a linked-document container",
-            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_MB` (512 MB). See docs/containers.md.",
+            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_BYTES` (512 MiB). See docs/containers.md.",
             vec![qp("profile", false, "Container profile; `icdd` (default: detected)"),
                  qp("strict", false, "`true`: refuse (422) a container the validator finds a violation in; nothing is stored")],
             zip_body(),
@@ -2585,7 +2585,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Datasets",
                 "Sync a remote event stream",
-                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_REMOTE_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_LDES_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
                 vec![],
                 json_body(
                     ObjectBuilder::new()
@@ -4327,7 +4327,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Install vocabulary",
-                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
+                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with OTS_VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
                 vec![],
                 vec![
                     ("200", "Install outcome"),
@@ -6872,7 +6872,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "Create backup",
-                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `BACKUP_ENCRYPT=true`). With `BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
+                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `OTS_BACKUP_ENCRYPTION_ENABLED=true`). With `OTS_BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
                     vec![],
                     vec![("200", "The new backup's manifest and `s3`"), ("403", "super_admin role required"), ("500", "The backup failed"), ("503", "Backups are not configured")],
                     true,
@@ -6907,7 +6907,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Backup status",
-                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_hours, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
+                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_secs, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
                 vec![],
                 vec![("200", "Backup status"), ("403", "super_admin role required")],
                 true,
@@ -6922,7 +6922,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Stage a restore",
-                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `BACKUP_DECRYPT_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
+                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
                 vec![],
                 vec![
                     ("200", "`{id, requested_by, requested_at}`"),
@@ -7128,6 +7128,24 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![qp("since", false, "Only usage after this timestamp"), qp("limit", false, "Max rows")],
             vec![("200", "Array of usage rows"), ("401", "Authentication required"), ("403", "super_admin required")], true)),
     ]);
+    mount(paths, "/api/admin/config", vec![
+        (M::Get, o("Admin", "Effective configuration",
+            "Every setting the server reads, with its effective value, its default, its kind and where the value came from (`cli`, `env`, `file`, `profile` or `default`). Secret values are redacted; a secret given as a reference (`env:`, `file:`, `vault:`) shows the reference.",
+            vec![], vec![("200", "The profile and every setting"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings", vec![
+        (M::Get, o("Admin", "Runtime settings",
+            "The settings an administrator can change without a restart (self-registration, guest capabilities, embed framing, AI budgets, OIDC token policies), each with its effective value, the configured value it overrides (environment, profile or default) and whether an override is set.",
+            vec![], vec![("200", "The runtime settings"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings/:name", vec![
+        (M::Put, ob("Admin", "Change a runtime setting",
+            "Override a runtime setting, validated exactly as its environment variable would be, or remove the override with `{\"value\": null}` so the configured value applies again. Audit-logged as `setting_changed`.",
+            vec![pp("name")], json_body(ObjectBuilder::new()
+                .property("value", ObjectBuilder::new().schema_type(Type::String).description(Some("The new value; null removes the override."))),
+                json!({"value": "false"})),
+            vec![("200", "The setting after the change"), ("400", "The value does not validate"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No runtime setting of that name")], true)),
+    ]);
     mount(paths, "/api/admin/settings/guest-registration", vec![
         (M::Get, o("Admin", "Guest registration setting",
             "Whether guest self-registration is on, with the current guest counts.",
@@ -7217,9 +7235,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured, and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
+                "Reachability of the LLM gateway, whether OTS_LLM_GATEWAY_URL is configured (unset: the AI features are off and nothing is probed), why an unreachable gateway failed, whether this caller may use AI at all, the request budgets (0 = refused, null = unlimited), and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
-                vec![("200", "{ gateway, configured, reachable, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
+                vec![("200", "{ gateway, configured, reachable, unreachable_reason, available_to_caller, rate_limit_per_min, rate_limit_anon_per_min, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,
             ),
         )],

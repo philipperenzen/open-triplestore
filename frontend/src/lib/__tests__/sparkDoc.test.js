@@ -39,7 +39,7 @@ describe('docs/spark.md', () => {
   });
 
   it('documents the LLM configuration variables', () => {
-    for (const v of ['LLM_GATEWAY_URL', 'LLM_MODEL', 'LLM_API_KEY']) {
+    for (const v of ['OTS_LLM_GATEWAY_URL', 'OTS_LLM_MODEL', 'OTS_LLM_API_KEY']) {
       expect(html).toContain(v);
     }
   });

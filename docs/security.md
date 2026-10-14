@@ -25,7 +25,7 @@ Rules apply across the API — `/sparql`, `/store`, `/api/**` and the rest — n
 
 The default is a rule away from closed: matching rules are taken in priority order and the first decides, so a `deny` for `public` on `/**` at priority `0` — and one for `role` = `user` if signed-in non-admins should be denied by default too — closes everything, and `allow` rules at any higher priority open exactly the routes you list above it. Admins are bound by the same rules, so leave `/api/admin/**` allowed for `role` = `admin`.
 
-`ENDPOINT_ACL_ENFORCE=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
+`OTS_ENDPOINT_ACL_ENABLED=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
 
 ## Named-Graph ACL
 
@@ -33,7 +33,7 @@ Grant a principal access to a specific named graph at one of three levels: `read
 
 ## LDP Web Access Control
 
-Resources under `/ldp/` have a per-resource access control list in the Solid **Web Access Control** model: `R.acl` holds `acl:Authorization` nodes granting `acl:Read` / `acl:Write` / `acl:Append` / `acl:Control` to a user (`urn:ots:user:…`), an organisation or group (`acl:agentGroup`), a role, any signed-in user (`acl:AuthenticatedAgent`) or everyone (`foaf:Agent`); resources without an ACL inherit through `acl:default` from their containers, up to `/ldp/`. Creators own what they create; admins pass. The root ACL is seeded once (`LDP_ROOT_ACL=open|owners`). `PATCH`, `PUT` and `POST` bodies are confined to the target resource. Authorizations live in `urn:system:ldp-acl`, unreachable over `/sparql` and `/store`. Details, the agent IRIs and how to tighten the root ACL: [ldp.md](ldp.md#access-control).
+Resources under `/ldp/` have a per-resource access control list in the Solid **Web Access Control** model: `R.acl` holds `acl:Authorization` nodes granting `acl:Read` / `acl:Write` / `acl:Append` / `acl:Control` to a user (`urn:ots:user:…`), an organisation or group (`acl:agentGroup`), a role, any signed-in user (`acl:AuthenticatedAgent`) or everyone (`foaf:Agent`); resources without an ACL inherit through `acl:default` from their containers, up to `/ldp/`. Creators own what they create; admins pass. The root ACL is seeded once (`OTS_LDP_ROOT_ACL=open|owners`). `PATCH`, `PUT` and `POST` bodies are confined to the target resource. Authorizations live in `urn:system:ldp-acl`, unreachable over `/sparql` and `/store`. Details, the agent IRIs and how to tighten the root ACL: [ldp.md](ldp.md#access-control).
 
 ## Triple Security Labels
 
@@ -47,4 +47,4 @@ An append-only audit log records security-relevant events — logins, user and t
 
 ## Asset Malware Scanning
 
-Uploaded assets can be scanned for malware by a [ClamAV](https://www.clamav.net/) daemon before they are stored. Set `CLAMAV_ADDR=host:port` to point at the daemon's INSTREAM endpoint (e.g. `127.0.0.1:3310`); leaving it unset disables scanning. Only an explicit virus hit rejects the upload (HTTP 422); a scanner outage or error fails open so a ClamAV hiccup cannot take uploads down. Requires the `asset-clamav` build feature, which is included in the `full` feature shipped in release/Docker builds.
+Uploaded assets can be scanned for malware by a [ClamAV](https://www.clamav.net/) daemon before they are stored. Set `OTS_CLAMAV_ADDR=host:port` to point at the daemon's INSTREAM endpoint (e.g. `127.0.0.1:3310`); leaving it unset disables scanning. Only an explicit virus hit rejects the upload (HTTP 422); a scanner outage or error fails open so a ClamAV hiccup cannot take uploads down. Requires the `asset-clamav` build feature, which is included in the `full` feature shipped in release/Docker builds.

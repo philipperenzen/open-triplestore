@@ -31,12 +31,12 @@
 //!
 //! Signing out ends the refresh-token family the SAML sign-in issued.
 //! Access tokens already issued stay valid until they expire
-//! (`ACCESS_TOKEN_EXPIRY_MINUTES`): they are stateless JWTs.
+//! (`OTS_ACCESS_TOKEN_EXPIRY_SECS`): they are stateless JWTs.
 //!
 //! ## Transport
 //! The IdP returns the browser to the ACS with a cross-site POST, which only a
 //! `SameSite=None; Secure` cookie survives, so SAML needs an `https`
-//! `BASE_URL`. Plain `http` works for a loopback `BASE_URL` only (local
+//! `OTS_BASE_URL`. Plain `http` works for a loopback `OTS_BASE_URL` only (local
 //! development with an IdP on the same site).
 
 use std::sync::{Arc, LazyLock};
@@ -147,8 +147,8 @@ pub fn check_transport(base_url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "SAML sign-in needs an https BASE_URL (plain http only on localhost); \
-         BASE_URL is {base_url}"
+        "SAML sign-in needs an https OTS_BASE_URL (plain http only on localhost); \
+         OTS_BASE_URL is {base_url}"
     )
 }
 

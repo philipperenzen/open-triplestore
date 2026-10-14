@@ -378,19 +378,14 @@ enum CountChange {
     To(Option<String>, usize),
 }
 
-/// Quads a write's transaction applies once the store default is in effect:
-/// above this a materialisation build commits in several transactions (it
-/// writes graphs nobody reads until it is done); an apply that must be
-/// atomic stays one transaction regardless (delta note §3.4).
-pub const DEFAULT_APPLY_DELTA_TX_MAX_QUADS: usize = 50_000;
+// Quads a write's transaction applies once the store default is in effect:
+// above this a materialisation build commits in several transactions (it
+// writes graphs nobody reads until it is done); an apply that must be
+// atomic stays one transaction regardless (delta note §3.4). (`OTS_APPLY_DELTA_TX_MAX_QUADS`, default 50 000).
 
 /// `OTS_APPLY_DELTA_TX_MAX_QUADS`, or the default.
 pub fn apply_delta_tx_max_quads() -> usize {
-    std::env::var("OTS_APPLY_DELTA_TX_MAX_QUADS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n: &usize| *n > 0)
-        .unwrap_or(DEFAULT_APPLY_DELTA_TX_MAX_QUADS)
+    crate::config::APPLY_DELTA_TX_MAX_QUADS.get()
 }
 
 /// Per-graph tracking of the quads a streamed load makes new, so its rows can
@@ -571,7 +566,7 @@ pub struct TripleStore {
     /// store. Shared by clones. See [`super::search_journal`].
     search_journal: Arc<SearchJournal>,
     /// The GeoSPARQL Query Rewrite Extension ([`crate::geo::query_rewrite`]):
-    /// on unless `OTS_GEOSPARQL_QUERY_REWRITE=off`.
+    /// on unless `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off`.
     geo_query_rewrite: bool,
 }
 
@@ -800,7 +795,7 @@ impl TripleStore {
     }
 
     /// Turn the GeoSPARQL Query Rewrite Extension on or off for this store
-    /// (builder style; the default comes from `OTS_GEOSPARQL_QUERY_REWRITE`).
+    /// (builder style; the default comes from `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED`).
     pub fn with_geosparql_query_rewrite(mut self, enabled: bool) -> Self {
         self.geo_query_rewrite = enabled;
         self
@@ -829,7 +824,7 @@ impl TripleStore {
 
     /// Change capture on, with these caps (builder style; tests): the
     /// before-image scan cap and the payload cap, in quads. The log becomes
-    /// an in-memory one, on regardless of `OTS_CHANGE_CAPTURE`.
+    /// an in-memory one, on regardless of `OTS_CHANGE_CAPTURE_ENABLED`.
     pub fn with_change_capture(mut self, max_scan: usize, max_payload: usize) -> Self {
         self.changes = Arc::new(
             ChangeLog::in_memory()

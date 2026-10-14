@@ -24,14 +24,14 @@ initTheme();
 initIriDisplay();
 
 // Discover sibling-service addresses from the registry and re-broadcast changes as
-// 'ldapps-service-change'. Opt-in: a no-op unless LD_DISCOVERY is set (see vite.config.js). This
+// 'ldapps-service-change'. Opt-in: a no-op unless OTS_DISCOVERY_ENABLED is set (see vite.config.js). This
 // app reaches its own backend same-origin (Vite proxy), so the client mainly powers cross-links +
 // the change event. Fail-soft: localhost defaults stand.
 initServiceRegistry();
 
 // Runtime config (/config.json) — an operator's zero-rebuild way to point this
 // deployment at different backends and apply branding. Unconditional (not
-// gated by LD_DISCOVERY): fetched once, applied as soon as it resolves, and a
+// gated by OTS_DISCOVERY_ENABLED): fetched once, applied as soon as it resolves, and a
 // complete no-op when no config.json is present. See runtimeConfig.ts.
 loadRuntimeConfig();
 

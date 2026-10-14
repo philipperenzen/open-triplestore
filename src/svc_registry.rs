@@ -83,7 +83,7 @@ fn report(url: &str, prev: Option<&Outcome>, now: &Outcome) {
         }
         Outcome::Rejected(status) if warn_on(prev, now) => {
             let hint = if *status == 401 || *status == 403 {
-                " — check LD_REGISTRY_TOKEN"
+                " — check OTS_REGISTRY_TOKEN"
             } else {
                 ""
             };

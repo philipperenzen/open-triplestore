@@ -2497,7 +2497,7 @@ fn prefers_html(headers: &HeaderMap) -> bool {
 /// do not send `Accept: text/html`) fall through to the API behaviour.
 ///
 /// The gate is the server's own (`state.serve_frontend`, from
-/// `--serve-frontend` / `SERVE_FRONTEND`), so the root route serves the SPA
+/// `--serve-frontend` / `OTS_FRONTEND_ENABLED`), so the root route serves the SPA
 /// shell exactly when the web UI is being served.
 fn spa_shell_response(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     if state.serve_frontend && prefers_html(headers) {
@@ -2615,7 +2615,7 @@ fn service_description_response(
         default_graph_count,
         &named_graph_counts,
         &dataset_descs,
-        crate::remote::enabled(),
+        crate::remote::enabled(crate::remote::Purpose::Service),
     );
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
@@ -7613,7 +7613,7 @@ pub async fn upload_asset(
 
     if let Some((file_name, declared_type, data)) = file_part {
         // Malware scan (ClamAV INSTREAM) on the fully-buffered bytes, BEFORE anything
-        // is persisted. Disabled unless `CLAMAV_ADDR` is set, in which case an empty
+        // is persisted. Disabled unless `OTS_CLAMAV_ADDR` is set, in which case an empty
         // address ⇒ `Skipped`. Only an explicit `Infected` verdict blocks the upload
         // (422); Skipped/Clean/Error fall through (fail-open on a scanner outage, by
         // design — see `ScanVerdict::allows_storage`). Entirely cfg-gated so non-clamav

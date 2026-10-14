@@ -229,7 +229,7 @@
 
   $: localResourcePath = (() => {
     if (typeof window === 'undefined') return null;
-    // Local IRIs are minted under BASE_URL, which carries the sub-path prefix.
+    // Local IRIs are minted under the base URL, which carries the sub-path prefix.
     const prefix = window.location.origin + withBase('/resource/');
     return iri.startsWith(prefix) ? iri.slice(prefix.length) : null;
   })();
