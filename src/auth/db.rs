@@ -773,6 +773,16 @@ impl AuthDb {
                 last_timestamp TEXT,
                 members_applied INTEGER NOT NULL DEFAULT 0,
                 synced_at TEXT,
+                bookmark_members TEXT,
+                -- The sync job as the admin UI lists it: the graph it writes,
+                -- who added it, and the outcome of its latest run (a failed
+                -- run keeps the previous bookmark, so it resumes from there).
+                graph_iri TEXT,
+                created_by TEXT,
+                last_run_at TEXT,
+                last_status TEXT,
+                last_error TEXT,
+                last_report TEXT,
                 PRIMARY KEY (dataset_id, source_url)
             );
             -- LDES client state per page of a synced stream (LDES 1.0 §3.2):
@@ -1561,6 +1571,13 @@ impl AuthDb {
             // timestamp (JSON array) — a later member may share it (LDES 1.0
             // §3.2), so "not after the bookmark" alone would drop it.
             "ALTER TABLE ldes_sync_state ADD COLUMN bookmark_members TEXT",
+            // LDES client: the sync job's graph, owner and latest run outcome.
+            "ALTER TABLE ldes_sync_state ADD COLUMN graph_iri TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN created_by TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN last_run_at TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN last_status TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN last_error TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN last_report TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors

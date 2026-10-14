@@ -1394,9 +1394,76 @@ pub async fn sync_handler(
         r
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The job's latest outcome, for the admin's list of syncs: a failure is
+    // recorded as well as answered, so a run nobody watched still shows it.
+    let recorded: Result<serde_json::Value, String> = match &report {
+        Ok(r) => serde_json::to_value(r).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = super::store::record_sync_outcome(
+        &state.auth_db,
+        &body.dataset_id,
+        &body.url,
+        &body.graph_iri,
+        &user.user_id,
+        recorded.as_ref().map_err(String::as_str),
+    ) {
+        tracing::warn!("ldes sync: recording the run's outcome failed: {e}");
+    }
+    let report = report.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(report))
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncJobView {
+    #[serde(flatten)]
+    pub job: super::store::SyncJob,
+    /// The dataset's name, when it still exists.
+    pub dataset_name: Option<String>,
+}
+
+/// GET /api/admin/ldes/syncs — every sync job with its latest outcome.
+/// Admin only (the admin router's guard).
+pub async fn admin_list_syncs(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let jobs = super::store::sync_jobs(&state.auth_db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let views: Vec<SyncJobView> = jobs
+        .into_iter()
+        .map(|job| SyncJobView {
+            dataset_name: state
+                .auth_db
+                .get_dataset(&job.dataset_id)
+                .ok()
+                .flatten()
+                .map(|d| d.name),
+            job,
+        })
+        .collect();
+    Ok(Json(views))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgetQuery {
+    pub dataset_id: String,
+    pub url: String,
+}
+
+/// DELETE /api/admin/ldes/syncs?dataset_id=…&url=… — forget a sync job and
+/// its client state. The mirrored graph stays; the next sync from that source
+/// reads the whole stream again.
+pub async fn admin_forget_sync(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ForgetQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let removed = super::store::forget_sync(&state.auth_db, &q.dataset_id, &q.url)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !removed {
+        return Err((StatusCode::NOT_FOUND, "No such sync job".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

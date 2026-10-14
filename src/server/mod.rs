@@ -1060,6 +1060,23 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             post(crate::backup::admin_verify_backup),
         )
         .route(
+            "/api/admin/backup/status",
+            get(crate::backup::admin_backup_status),
+        )
+        .route(
+            "/api/admin/backup/{id}/restore",
+            post(crate::backup::admin_stage_restore),
+        )
+        .route(
+            "/api/admin/backup/restore",
+            delete(crate::backup::admin_cancel_restore),
+        )
+        .route(
+            "/api/admin/ldes/syncs",
+            get(crate::ldes::client::admin_list_syncs)
+                .delete(crate::ldes::client::admin_forget_sync),
+        )
+        .route(
             "/api/admin/llm/requests",
             get(llm_guard::admin_list_llm_requests),
         )
@@ -1226,6 +1243,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/{dataset_id}/ldes",
             get(crate::ldes::publish::get_stream).put(crate::ldes::publish::put_stream),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/ldes/config",
+            get(crate::ldes::publish::get_config),
         )
         .route(
             "/api/datasets/{dataset_id}/ldes/nodes/{n}",
@@ -1718,6 +1739,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/containers/validate",
             post(crate::containers::validate_container),
+        )
+        .route(
+            "/api/containers/profiles",
+            get(crate::containers::list_profiles),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2750,10 +2775,7 @@ pub async fn run(
 
     // Backup scheduler.
     if let Some(ref mgr) = backup {
-        let hours: u64 = std::env::var("BACKUP_SCHEDULE_HOURS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(24);
+        let hours = crate::backup::schedule_hours();
         crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
     }
 

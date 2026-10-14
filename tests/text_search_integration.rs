@@ -705,3 +705,60 @@ async fn materialised_entailments_are_searchable() {
         "re-materialised entailments must be searchable: {hits:?}"
     );
 }
+
+/// The admin status of the index: how many literals it holds, whether
+/// writes wait for it, and the last rebuild — recorded by the reindex route.
+/// Non-admins see neither the status nor the rebuild.
+#[tokio::test]
+async fn the_index_status_reports_its_size_freshness_and_last_rebuild() {
+    let (state, token, _dir) = admin_with_index().await;
+    seed_literals(&state, 25);
+
+    let (st, body) = call(&state, "GET", "/api/text-search/status", &token, None, "").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["available"], true, "{body}");
+    assert_eq!(
+        v["stale"], true,
+        "the seeded writes wait for the index: {body}"
+    );
+    assert_eq!(v["reindexing"], false, "{body}");
+    assert!(v["last_reindex"].is_null(), "{body}");
+
+    let (st, body) = call(&state, "POST", "/api/text-search/reindex", &token, None, "").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let indexed = serde_json::from_str::<serde_json::Value>(&body).unwrap()["indexed"]
+        .as_u64()
+        .unwrap();
+    assert!(indexed >= 25, "{body}");
+
+    let (_, body) = call(&state, "GET", "/api/text-search/status", &token, None, "").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["stale"], false, "{body}");
+    assert_eq!(
+        v["last_reindex"]["indexed"].as_u64(),
+        Some(indexed),
+        "{body}"
+    );
+    assert_eq!(v["last_reindex"]["by"], "adm", "{body}");
+    assert!(v["last_reindex"]["error"].is_null(), "{body}");
+
+    let user = mint_token("adm", "admin", "user");
+    state
+        .auth_db
+        .update_user_role("adm", SystemRole::User)
+        .unwrap();
+    let (st, _) = call(&state, "GET", "/api/text-search/status", &user, None, "").await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+/// Without an index the status says so, rather than failing.
+#[tokio::test]
+async fn the_index_status_says_when_there_is_no_index() {
+    let (state, token) = common::admin_state();
+    let (st, body) = call(&state, "GET", "/api/text-search/status", &token, None, "").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["available"], false, "{body}");
+    assert!(v["reason"].as_str().is_some(), "{body}");
+}

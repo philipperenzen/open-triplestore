@@ -2051,6 +2051,202 @@ export const setIdentityPolicy = (scope: IdentityScope, id: string, policy: Iden
 export const clearIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
   request('DELETE', identityPath(scope, id));
 
+
+// ─── Uploads with progress ───────────────────────────────────────────────────
+// XMLHttpRequest, not fetch, because only XHR reports upload progress. Same
+// auth as uploadAsset (the HttpOnly cookie, plus the in-memory bearer token
+// when there is one). A non-2xx answer rejects with an ApiError carrying the
+// parsed JSON body, so a caller can show a refusal's report (a strict
+// container import's `validation`, say) and not just its sentence.
+export function xhrSend(
+  method: string,
+  path: string,
+  body: XMLHttpRequestBodyInit,
+  opts: { contentType?: string; onProgress?: (fraction: number) => void } = {},
+): Promise<any> {
+  const token = getAccessToken();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, withBase(path));
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
+    if (opts.onProgress) {
+      const report = opts.onProgress;
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && e.total > 0) report(e.loaded / e.total);
+      });
+    }
+    xhr.onload = () => {
+      let parsed: any = null;
+      try { parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed ?? xhr.responseText);
+        return;
+      }
+      const msg = (parsed && (parsed.message || parsed.error || parsed.detail))
+        || xhr.responseText?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        || xhr.statusText
+        || 'Request failed';
+      const err = new ApiError(msg);
+      err.status = xhr.status;
+      err.body = parsed;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.send(body);
+  });
+}
+
+// ─── Linked Data Event Streams ───────────────────────────────────────────────
+export interface LdesRetention {
+  full_log_duration?: string;
+  version_amount?: number;
+  version_duration?: string;
+  version_delete_duration?: string;
+  starting_from?: string;
+}
+export interface LdesConfig {
+  dataset_id: string;
+  enabled: boolean;
+  configured: boolean;
+  page_size: number;
+  polling_interval: number;
+  retention: LdesRetention | null;
+  members: number;
+  sealed_nodes: number;
+  created_at: string | null;
+  stream: string;
+  can_write: boolean;
+}
+export const getLdesConfig = (datasetId: string): Promise<LdesConfig> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/ldes/config`);
+/** Enable or disable the stream; `retention: {}` clears the policy, absent leaves it. */
+export const putLdesStream = (datasetId: string, body: {
+  enabled: boolean; page_size?: number; polling_interval?: number; retention?: LdesRetention;
+}) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/ldes`, body);
+/** Run a sync now (adds the job when it is new). Answers the run's report. */
+export const runLdesSync = (body: { url: string; dataset_id: string; graph_iri: string }) =>
+  request('POST', '/api/ldes/sync', body);
+export interface LdesSyncJob {
+  dataset_id: string;
+  dataset_name: string | null;
+  source_url: string;
+  graph_iri: string | null;
+  created_by: string | null;
+  last_timestamp: string | null;
+  members_applied: number;
+  synced_at: string | null;
+  last_run_at: string | null;
+  last_status: 'ok' | 'error' | null;
+  last_error: string | null;
+  last_report: Record<string, any> | null;
+}
+export const adminListLdesSyncs = (): Promise<LdesSyncJob[]> => request('GET', '/api/admin/ldes/syncs');
+export const adminForgetLdesSync = (datasetId: string, url: string) =>
+  request('DELETE', `/api/admin/ldes/syncs?dataset_id=${encodeURIComponent(datasetId)}&url=${encodeURIComponent(url)}`);
+
+// ─── Linked-document containers (ICDD) ───────────────────────────────────────
+export const listContainerProfiles = () => request('GET', '/api/containers/profiles');
+/** Import a container archive into a dataset; `strict` refuses (422 + `validation`) a non-conformant one. */
+export const importContainer = (
+  datasetId: string, file: Blob, opts: { strict?: boolean; profile?: string } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const q = new URLSearchParams();
+  if (opts.profile) q.set('profile', opts.profile);
+  if (opts.strict) q.set('strict', 'true');
+  const qs = q.toString();
+  return xhrSend('POST', `/api/datasets/${encodeURIComponent(datasetId)}/containers/import${qs ? `?${qs}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+};
+/** Validate a container without storing anything: `{profile, conforms, violations, warnings, findings}`. */
+export const validateContainer = (file: Blob, onProgress?: (f: number) => void, profile?: string) =>
+  xhrSend('POST', `/api/containers/validate${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+/**
+ * Export a dataset as a container. The archive comes back with the export's
+ * own validation in headers (X-Container-Conforms / -Validation / -Findings),
+ * which a plain download link would hide, so it is fetched here and the
+ * caller saves the blob.
+ */
+export async function exportContainer(datasetId: string, profile = 'icdd'): Promise<{
+  blob: Blob; filename: string; headers: { conforms: string | null; validation: string | null; findings: string | null };
+}> {
+  const res = await fetchRetry429(
+    withBase(`/api/datasets/${encodeURIComponent(datasetId)}/containers/export?profile=${encodeURIComponent(profile)}`),
+    { credentials: 'include' },
+  );
+  if (!res.ok) {
+    const { message, body } = await extractError(res);
+    const err = new ApiError(message);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  const cd = res.headers.get('content-disposition') || '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return {
+    blob: await res.blob(),
+    filename: m ? m[1] : `${datasetId}.icdd`,
+    headers: {
+      conforms: res.headers.get('x-container-conforms'),
+      validation: res.headers.get('x-container-validation'),
+      findings: res.headers.get('x-container-findings'),
+    },
+  };
+}
+
+// ─── CityJSON ingest ─────────────────────────────────────────────────────────
+/** Convert (and with `preview`, only convert) a CityJSON file into a dataset graph. */
+export const ingestCityJson = (
+  datasetId: string, file: File,
+  opts: { targetGraph?: string; publicAsset?: boolean; preview?: boolean } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (opts.targetGraph) fd.append('target_graph', opts.targetGraph);
+  if (opts.publicAsset) fd.append('public', 'true');
+  return xhrSend('POST',
+    `/api/datasets/${encodeURIComponent(datasetId)}/ingest/cityjson${opts.preview ? '?preview=true' : ''}`,
+    fd, { onProgress });
+};
+
+// ─── Constraint specifications (IDS) ─────────────────────────────────────────
+export const listSpecImporters = () => request('GET', '/api/shacl/importers');
+export const listSpecExporters = () => request('GET', '/api/shacl/exporters');
+/**
+ * Import a specification document (IDS XML) as SHACL. A refused document
+ * rejects with `err.body = {error, stage, problems}` — the audit report.
+ */
+export const importSpec = (
+  format: string, xml: string,
+  opts: { create?: boolean; name?: string; visibility?: string } = {},
+) => {
+  const q = new URLSearchParams();
+  if (opts.create) q.set('create', 'true');
+  if (opts.name) q.set('name', opts.name);
+  if (opts.visibility) q.set('visibility', opts.visibility);
+  const qs = q.toString();
+  return requestRaw('POST', `/api/shacl/import/${encodeURIComponent(format)}${qs ? `?${qs}` : ''}`, xml, 'application/xml');
+};
+/** Export Turtle shapes: `{format, document, specification_count, verbatim_specifications, losses}`. */
+export const exportSpec = (format: string, turtle: string, title?: string) =>
+  requestRaw('POST', `/api/shacl/export/${encodeURIComponent(format)}${title ? `?title=${encodeURIComponent(title)}` : ''}`,
+    turtle, 'text/turtle');
+
+// ─── Admin: backups and the text index ───────────────────────────────────────
+export const adminBackupStatus = () => request('GET', '/api/admin/backup/status');
+export const adminListBackups = () => request('GET', '/api/admin/backup');
+export const adminCreateBackup = () => request('POST', '/api/admin/backup', {});
+export const adminVerifyBackup = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/verify`, {});
+export const adminStageRestore = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/restore`, {});
+export const adminCancelRestore = () => request('DELETE', '/api/admin/backup/restore');
+export const textSearchStatus = () => request('GET', '/api/text-search/status');
+export const textSearchReindex = () => request('POST', '/api/text-search/reindex', {});
 // ─── Dataset reasoning — docs/reasoning.md, docs/owl2-dl.md ─────────────────────
 
 export type EntailmentRegime = 'rdfs' | 'owl2-rl' | 'owl2-el' | 'owl2-ql' | 'owl2-dl' | 'skos';
