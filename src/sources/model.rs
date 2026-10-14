@@ -128,7 +128,6 @@ impl SqlSource {
 
 /// What a caller sends to register or update a datasource.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SourceRequest {
     pub id: Option<String>,
     pub name: Option<String>,
@@ -159,7 +158,6 @@ fn default_true() -> bool {
 
 /// The API view of a datasource: the credential **reference**, never a value.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SourceResponse {
     pub id: String,
     pub iri: String,
@@ -310,7 +308,6 @@ impl MappingRecord {
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MappingRequest {
     pub id: Option<String>,
     pub title: Option<String>,
@@ -332,7 +329,6 @@ pub struct MappingRequest {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MappingResponse {
     pub id: String,
     pub iri: String,
@@ -416,7 +412,6 @@ impl RunMode {
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     /// Mapping id, or its IRI. Required unless `mode` is `snapshot`.
     pub mapping: Option<String>,
@@ -460,7 +455,7 @@ pub struct RunRecord {
     /// Entities the run published to the dataset's LDES stream, when one is
     /// enabled.
     pub ldes_members: u64,
-    /// Rows a run with `onDataError: "skip"` left terms out of, and the
+    /// Rows a run with `on_data_error: "skip"` left terms out of, and the
     /// first of them.
     pub data_errors: crate::rml::checks::DataErrors,
 }
@@ -474,7 +469,6 @@ impl RunRecord {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct RunResponse {
     pub id: String,
     pub activity: String,
@@ -489,7 +483,7 @@ pub struct RunResponse {
     pub mapping: Option<MappingRef>,
     pub rows_extracted: u64,
     pub triples_produced: u64,
-    /// Triples the run's graph holds *now*. Differs from `triplesProduced`
+    /// Triples the run's graph holds *now*. Differs from `triples_produced`
     /// once a graph has been deleted, and is how a caller tells a kept
     /// candidate from a collected one without dataset-scoped SPARQL.
     pub graph_triples: u64,
@@ -507,20 +501,18 @@ pub struct RunResponse {
     pub watermark: Option<String>,
     pub ldes_members: u64,
     /// Rows the run skipped terms from because their values could not become
-    /// those terms (`onDataError: "skip"`). Absent when there were none.
+    /// those terms (`on_data_error: "skip"`). Absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MappingJoin {
     pub child: String,
     pub parent: String,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MappingRef {
     pub id: String,
     pub version: u32,
@@ -528,7 +520,6 @@ pub struct MappingRef {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ShaclSummary {
     pub conforms: bool,
     pub violations: u64,

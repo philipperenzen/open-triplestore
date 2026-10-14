@@ -195,6 +195,14 @@ point in the regime's graph; without one, the rules run alone into
 `urn:entailment:swrl:<dataset>`. `GET /api/datasets/{id}/entailment` reports the inference
 graph and the last run of the rules (see [OWL Reasoning](/docs/reasoning#rules-stored-with-a-dataset)).
 
+`/api/datasets/{id}/rules` manages them: a rule set written in any of the syntaxes above
+is checked, stored in the SWRL RDF syntax in the dataset's managed rules graph
+`urn:ots:rules:<id>` with its source, and run at once; it can be replaced or removed,
+and the rules run again on request. In the web UI, the dataset's **Reasoning** page lists,
+adds, edits and removes them, and runs rules once with a regime, showing the report
+(`rounds`, `regime_triples`, and the message naming any refused built-in). The
+**Reasoning** page in the sidebar runs rules over the default graph.
+
 ## Semantics
 
 - **Sound.** A rule derives its head only for bindings that satisfy every body atom; an

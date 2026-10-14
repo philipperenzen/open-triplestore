@@ -1278,3 +1278,83 @@ async fn l_official_run_persists_rdf_report_and_test_run_does_not_count() {
         "non-conforming official run must persist its report as queryable RDF"
     );
 }
+
+/// P2-9: the write gates of one Graph Store write run in one pass, in a
+/// defined order — validation-layer bindings before the dataset's own
+/// `shacl_on_write` shapes — the 422 carries the first failing gate's report,
+/// the write lands only when every gate passes, and each run of the dataset
+/// gate is kept as an `on-write` report.
+#[tokio::test]
+async fn m_write_gates_run_in_one_pass_in_a_defined_order() {
+    let (state, token) = admin_state();
+    mk_dataset(&state, "dsm", "adm", Visibility::Private);
+    let name_shapes = "urn:test:m:name-shapes";
+    let email_shapes = "urn:test:m:email-shapes";
+    let data_graph = "urn:test:m:data";
+    load_graph(&state, LENIENT_NAME_SHAPES_TTL, name_shapes);
+    load_graph(&state, STRICT_EMAIL_SHAPES_TTL, email_shapes);
+    state.auth_db.add_dataset_graph("dsm", data_graph).unwrap();
+    // Gate 2: a binding on the graph (needs ex:name). Gate 3: the dataset's
+    // own flag (needs ex:email).
+    open_triplestore::shacl_studio::bindings::add_binding(&state.store, data_graph, name_shapes)
+        .unwrap();
+    state
+        .auth_db
+        .update_dataset_shacl("dsm", true, Some(email_shapes))
+        .unwrap();
+    let put = |ttl: &str| {
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/store?graph={}", url_encode(data_graph)))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "text/turtle")
+            .body(Body::from(format!(
+                "@prefix ex: <http://example.org/people#> . {ttl}"
+            )))
+            .unwrap()
+    };
+    let on_write = |state: &AppState| {
+        state
+            .auth_db
+            .list_validation_reports("dsm")
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.source == "on-write")
+            .map(|r| r.conforms)
+            .collect::<Vec<_>>()
+    };
+
+    // Fails both: the binding refuses first, so the dataset gate never runs.
+    let (status, body) = send(&state, put("ex:p a ex:Person .")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.contains("people#name>"), "{body}");
+    assert!(
+        !body.contains("people#email>"),
+        "first failing gate only: {body}"
+    );
+    assert!(on_write(&state).is_empty());
+    assert_eq!(count(&state, data_graph), 0);
+
+    // Passes the binding, fails the dataset gate: its report, and recorded.
+    let (status, body) = send(&state, put("ex:p a ex:Person ; ex:name \"P\" .")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.contains("people#email>"), "{body}");
+    assert!(
+        body.contains("\"source_shape\""),
+        "snake_case report keys: {body}"
+    );
+    assert_eq!(on_write(&state), vec![false]);
+    assert_eq!(count(&state, data_graph), 0);
+
+    // Passes every gate: lands, and the dataset gate's run is recorded once.
+    let (status, body) = send(
+        &state,
+        put("ex:p a ex:Person ; ex:name \"P\" ; ex:email \"p@example.org\" ."),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut runs = on_write(&state);
+    runs.sort();
+    assert_eq!(runs, vec![false, true]);
+    assert!(count(&state, data_graph) > 0);
+}

@@ -25,6 +25,12 @@ under control:
 | `DELETE /api/datasets/:id/versions/:ver` | Removes the version, its snapshot graphs and its version-scoped validation graph. A **published** version answers 409 — deprecate it first — unless `?force=true`. |
 | `POST /api/datasets/:id/versions/gc` with `{"keep": N}` | Deletes all but the newest `N` non-published versions. Published versions are never collected. |
 
+In the web UI, the dataset page's version list has **Compare** and a **Diff** per
+version (from that version to the live graphs, or between two versions): the
+per-graph counts, the changes row by row from the RDF Patch, and the patch to
+download. **Clean up** asks how many unpublished versions to keep, shows which
+versions would go, and deletes them after the app's confirmation dialog.
+
 Restore is atomic per graph: the snapshot is copied into a staging graph and
 swapped into place with one `MOVE`, so readers never see a live graph empty or
 half-written, and the full-text index is refreshed for the restored graphs.
@@ -169,6 +175,13 @@ the one its `H prev` names.
 | `GET /api/datasets/{id}/log/current` | The latest patch |
 | `GET /api/datasets/{id}/log/patch/{version}` | A patch by log version (all digits) |
 | `GET /api/datasets/{id}/log/patch/{id}` | A patch by id: the full IRI, or the UUID of a `uuid:` / `urn:uuid:` id |
+
+The dataset's **RDF Patch** page (`/datasets/{id}/patch`) applies a patch, pasted or
+from a file, either straight to the dataset (`POST …/patch`) or recorded in the log
+(`POST …/log`, adding the `H id` and the `H prev` naming the log's latest entry when
+the patch has none), with a graph for its triples; a SHACL write gate's refusal shows
+its report. Below it the log lists every entry, shows any patch, and downloads it,
+version 0 and the latest patch.
 
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<id>/log \
