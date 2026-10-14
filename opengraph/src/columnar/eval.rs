@@ -1640,6 +1640,7 @@ fn aggregate(
             name,
             expr,
             distinct,
+            ..
         } => {
             // The values of the expression over the group. An error in any
             // member makes the whole aggregate unbound — the engine's rule for

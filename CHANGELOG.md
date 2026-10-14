@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geof:aggConcaveHull(?geom, targetPercent)`** (GeoSPARQL 1.1 §10.10): the
+  aggregate takes its target, a constant or an expression of the group key,
+  from 0 (the most concave hull) to 1 (the convex hull); 0.5 without it, as
+  before. A group whose solutions disagree on the target, or a target outside
+  0..1, is unbound (#525). This needs custom aggregate calls with several
+  arguments, which the vendored SPARQL crates now parse, optimise and evaluate
+  (`vendor/README.md`, changes 11–13; `AggregateFunctionAccumulator` gains
+  `accumulate_arguments`). The other five GeoSPARQL aggregates take one
+  argument; a second makes their result unbound.
 - **D-entailment by value under every regime, and `rdfD1` on request.**
   Under `?entailment=` (and `entailment_dataset=` with a regime) a literal
   constant in a triple pattern matches every literal of the same value:

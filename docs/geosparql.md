@@ -135,9 +135,9 @@ The six GeoSPARQL 1.1 spatial aggregates are SPARQL aggregates, with or without 
 | `geof:aggBoundingCircle(?g)` | Their minimum bounding circle, as `geof:boundingCircle` |
 | `geof:aggCentroid(?g)` | The centroid of the group as one collection: a geometry the group holds twice counts twice, and only the highest dimension counts |
 | `geof:aggConvexHull(?g)` | The convex hull |
-| `geof:aggConcaveHull(?g)` | The concave hull at the **default target 0.5**, as `geof:concaveHull` without a target |
+| `geof:aggConcaveHull(?g, targetPercent)` | The concave hull at `targetPercent`, from 0 (the most concave) to 1 (the convex hull), as `geof:concaveHull`; the **default target is 0.5** when it is left out |
 
-`geof:aggConcaveHull` takes one argument. GeoSPARQL 1.1 gives it a second, `targetPercent`, but the SPARQL parser this store uses allows one expression in a custom aggregate call ([#525](https://github.com/philipperenzen/open-triplestore/issues/525) tracks adding it). For another target, use `geof:concaveHull(geof:aggUnion(?g), 0.2)`.
+`targetPercent` is evaluated per solution, like every argument of an aggregate, so it may be a constant (`geof:aggConcaveHull(?g, 0.2)`) or an expression of the group key (`geof:aggConcaveHull(?g, IF(?region = ex:coast, 0.1, 0.5))`). A group whose solutions disagree on it, or a target outside 0..1, has an unbound result, as a non-geometry value does; so does any of the other five aggregates called with a second argument. `DISTINCT` de-duplicates the (geometry, target) pairs. Since 2026-10 ([#525](https://github.com/philipperenzen/open-triplestore/issues/525)); before, the parser took one expression per custom aggregate and the target was always 0.5.
 
 ```sparql
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>

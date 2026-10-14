@@ -1000,6 +1000,13 @@ pub(super) fn concave_hull(geom: &impl Geom, ratio: f64) -> Option<GeosGeometry>
     geom.concave_hull(ratio, false).ok()
 }
 
+/// A `targetPercent` argument of `geof:concaveHull` / `geof:aggConcaveHull`:
+/// a number from 0 (the most concave hull) to 1 (the convex hull); anything
+/// else is `None`.
+pub(crate) fn concave_hull_ratio(term: &Term) -> Option<f64> {
+    radius_arg(Some(term)).filter(|r| (0.0..=1.0).contains(r))
+}
+
 /// `geof:concaveHull(geom, targetPercent)` — a concave hull enclosing the
 /// geometry. `targetPercent` is a number from 0 (the most concave hull, every
 /// edge as short as it can be) to 1 (the convex hull), as in PostGIS 3.3+ and
@@ -1008,7 +1015,7 @@ pub(super) fn concave_hull(geom: &impl Geom, ratio: f64) -> Option<GeosGeometry>
 fn fn_concave_hull(args: &[Term]) -> Option<Term> {
     let ratio = match args.get(1) {
         None => DEFAULT_CONCAVE_HULL_RATIO,
-        Some(t) => radius_arg(Some(t)).filter(|r| (0.0..=1.0).contains(r))?,
+        Some(t) => concave_hull_ratio(t)?,
     };
     let hull = concave_hull(&parse_one_geom(args)?, ratio)?;
     geometry_to_literal_like(&hull, args.first()?)

@@ -299,8 +299,14 @@ impl Rewriter {
             } => {
                 self.pattern(inner);
                 for (_, a) in aggregates {
-                    if let AggregateExpression::FunctionCall { expr, .. } = a {
+                    if let AggregateExpression::FunctionCall {
+                        expr, extra_args, ..
+                    } = a
+                    {
                         self.expression(expr);
+                        for arg in extra_args {
+                            self.expression(arg);
+                        }
                     }
                 }
             }
