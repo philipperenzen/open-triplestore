@@ -3076,11 +3076,16 @@ pub async fn serve_on(
     app: Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    use axum::serve::ListenerExt as _;
+    let listener = listener.tap_io(|tcp| {
+        if let Err(e) = tcp.set_nodelay(true) {
+            tracing::debug!("TCP_NODELAY not set on an accepted connection: {e}");
+        }
+    });
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .tcp_nodelay(true)
     .with_graceful_shutdown(shutdown)
     .await
 }
