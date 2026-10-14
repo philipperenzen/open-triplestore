@@ -21,7 +21,7 @@
 //! directly, which keeps `/api/auth/me` working for provider-issued tokens.
 //!
 //! Clients live in the `oauth_clients` table (admin CRUD) and can be seeded
-//! declaratively from `OAUTH_CLIENTS_JSON` for infra-as-code deployments.
+//! declaratively from `OTS_OAUTH_CLIENTS_JSON` for infra-as-code deployments.
 //! There is deliberately no implicit/hybrid flow, no plain PKCE method, and
 //! no wildcard redirect matching.
 
@@ -173,14 +173,25 @@ impl ProviderKeys {
     }
 }
 
-/// Seed clients from `OAUTH_CLIENTS_JSON` (infra-as-code): a JSON array of
+/// Seed clients from `OTS_OAUTH_CLIENTS_JSON` (infra-as-code): a JSON array of
 /// `{client_id, name, redirect_uris: [..], public?, secret?}`. Secrets are
 /// stored encrypted; entries upsert (existing secrets survive omission).
-pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) {
-    let raw = match std::env::var("OAUTH_CLIENTS_JSON") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return,
-    };
+///
+/// A `secret` goes through the secrets module like every other credential: a
+/// reference (`env:NAME`, `file:/path`, `vault:…`) is resolved here, at boot,
+/// and its value stored; a raw value is accepted in the development posture
+/// with a one-time warning and refused under `OTS_ENV=production`. A refused
+/// or unresolvable secret is a startup error, and nothing is seeded until
+/// every entry's secret has resolved. Invalid JSON is still only a warning.
+pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) -> anyhow::Result<()> {
+    match crate::config::OAUTH_CLIENTS_JSON.get() {
+        Some(v) => seed_clients_from_json(db, jwt_secret, &v),
+        None => Ok(()),
+    }
+}
+
+/// [`seed_clients_from_env`] over the variable's value.
+pub fn seed_clients_from_json(db: &AuthDb, jwt_secret: &str, raw: &str) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct SeedClient {
         client_id: String,
@@ -193,16 +204,31 @@ pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) {
     fn default_true() -> bool {
         true
     }
-    let parsed: Vec<SeedClient> = match serde_json::from_str(&raw) {
+    let parsed: Vec<SeedClient> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("OAUTH_CLIENTS_JSON is not valid JSON ({e}); skipping client seed");
-            return;
+            tracing::warn!("OTS_OAUTH_CLIENTS_JSON is not valid JSON ({e}); skipping client seed");
+            return Ok(());
         }
     };
+    // Resolve every secret before anything is written, so a refused one
+    // leaves the table as it was.
+    let mut resolved = Vec::with_capacity(parsed.len());
     for c in parsed {
-        let secret_enc = c.secret.as_deref().and_then(|s| {
-            secret::encrypt_secret(s, jwt_secret)
+        let secret = match c.secret.as_deref() {
+            Some(v) => {
+                let setting = format!("OTS_OAUTH_CLIENTS_JSON client '{}' secret", c.client_id);
+                let secret = crate::secrets::resolve_configured(&setting, v.trim())
+                    .map_err(|e| anyhow::anyhow!("{setting}: {e}"))?;
+                Some(secret)
+            }
+            None => None,
+        };
+        resolved.push((c, secret));
+    }
+    for (c, secret) in resolved {
+        let secret_enc = secret.as_ref().and_then(|s| {
+            secret::encrypt_secret(s.expose(), jwt_secret)
                 .map_err(|e| tracing::warn!("client {} secret not stored: {e}", c.client_id))
                 .ok()
         });
@@ -217,6 +243,7 @@ pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) {
             Err(e) => tracing::warn!("OIDC client '{}' seed failed: {e}", c.client_id),
         }
     }
+    Ok(())
 }
 
 // ─── Admin client CRUD ────────────────────────────────────────────────────────
@@ -447,7 +474,10 @@ pub async fn end_session(
         None => format!("{base}/login"),
     };
 
-    let mut out = super::handlers::clear_auth_cookie_headers(cookie_config.secure);
+    let mut out = super::handlers::clear_auth_cookie_headers(
+        cookie_config.secure,
+        &super::handlers::forwarded_prefix(&headers),
+    );
     match axum::http::HeaderValue::from_str(&location) {
         Ok(v) => {
             out.insert(LOCATION, v);

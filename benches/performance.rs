@@ -53,7 +53,7 @@ use oxigraph::sparql::QueryResults;
 fn fresh_store() -> TripleStore {
     // Result cache OFF: a benchmark that repeats one query on an unchanged store
     // must measure evaluation, not a cache hit (see the module docs). The
-    // runners also export OTS_QUERY_CACHE=off, but the bench must not depend on
+    // runners also export OTS_QUERY_CACHE_ENABLED=off, but the bench must not depend on
     // the environment.
     TripleStore::in_memory()
         .unwrap()
@@ -975,6 +975,154 @@ fn bench_query_not_exists(c: &mut Criterion) {
     group.finish();
 }
 
+/// A correlated `FILTER NOT EXISTS` whose pattern joins two triple patterns
+/// through the outer variable — the shape of the store comparison's F10
+/// (issue #471): offers whose product has no review rated 9 or more.
+///
+/// Evaluated once per outer row, the pattern's two parts were a cartesian
+/// product and read every rating for each offer (4.4 s at BSBM 1k, a timeout at
+/// 10k). The optimizer now orders it from the bound `?product`, and the
+/// evaluator answers it as a hash anti-join once the outer rows outnumber what
+/// a single evaluation of the pattern costs.
+fn bench_query_not_exists_correlated(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query/not_exists_correlated");
+    group.sample_size(20);
+
+    for &offers in &[2_000_usize, 20_000] {
+        let products = offers / 20;
+        let reviews = offers / 2;
+        let mut ttl = String::from("@prefix ex: <http://example.org/> .\n");
+        for i in 0..offers {
+            ttl.push_str(&format!(
+                "ex:offer{i} ex:product ex:product{} .\n",
+                (i * 7) % products
+            ));
+        }
+        for i in 0..reviews {
+            ttl.push_str(&format!(
+                "ex:review{i} ex:reviewFor ex:product{} ; ex:rating {} .\n",
+                (i * 13) % products,
+                1 + (i * 31) % 10
+            ));
+        }
+        let store = fresh_store();
+        store.load_str(&ttl, RdfFormat::Turtle, None).unwrap();
+
+        group.throughput(Throughput::Elements(offers as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(offers), &store, |b, s| {
+            b.iter(|| {
+                consume_solutions(
+                    s.query(
+                        "PREFIX ex: <http://example.org/> \
+                         SELECT ?offer WHERE { \
+                           ?offer ex:product ?product \
+                           FILTER NOT EXISTS { ?review ex:reviewFor ?product ; ex:rating ?r FILTER (?r >= 9) } \
+                         }",
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+/// The query pipeline on a store over the in-memory accelerator's cap, where
+/// every query is answered by the engine over the persistent store (issue
+/// #468: BSBM at 3.5M triples in a 4 GiB container). What is measured is the
+/// layer around the evaluator — the classifier and the accelerator's routing,
+/// which must decline without parsing again — on a point lookup and a
+/// DESCRIBE, the two shapes where that layer is most of the cost.
+fn bench_query_over_cap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query/over_cap");
+    let store = TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(true, 2, 1_000);
+    store
+        .load_str(&gen_persons_ttl(10_000), RdfFormat::Turtle, None)
+        .unwrap();
+    for (id, q) in [
+        (
+            "lookup",
+            "SELECT ?name WHERE { <http://example.org/p4242> <http://example.org/name> ?name }",
+        ),
+        ("describe", "DESCRIBE <http://example.org/p4242>"),
+    ] {
+        // The first query settles the accelerator's "over the cap" verdict.
+        consume_solutions(store.query(q).unwrap());
+        group.bench_function(id, |b| {
+            b.iter(|| consume_solutions(store.query(q).unwrap()))
+        });
+    }
+    group.finish();
+}
+
+/// One HTTP round trip for a streamed response, served the way the server
+/// serves (`open_triplestore::server::serve_on`) over a kept-alive loopback
+/// connection: the head is written as soon as the handler returns, the body a
+/// moment later, as every SPARQL result is. With Nagle's algorithm on, that
+/// body can wait for the client's delayed ACK of the head (up to 40 ms on
+/// Linux); `serve_on` sets `TCP_NODELAY`, and a regression shows here as a
+/// jump from tens of microseconds to tens of milliseconds.
+fn bench_query_http_stream(c: &mut Criterion) {
+    use std::io::{Read, Write};
+    let mut group = c.benchmark_group("query/http_stream");
+    group.sample_size(50);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/sparql",
+        axum::routing::get(|| async {
+            // The body's first poll is Pending, so the head goes out alone.
+            let body = futures::stream::once(async {
+                tokio::task::yield_now().await;
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                    b"<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+                ))
+            });
+            axum::response::Response::builder()
+                .header("content-type", "application/n-triples")
+                .body(axum::body::Body::from_stream(body))
+                .unwrap()
+        }),
+    );
+    rt.spawn(open_triplestore::server::serve_on(
+        listener,
+        app,
+        std::future::pending(),
+    ));
+
+    let mut conn = std::net::TcpStream::connect(addr).unwrap();
+    let request = format!("GET /sparql HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+    let mut buf = vec![0_u8; 4096];
+    let mut round_trip = |conn: &mut std::net::TcpStream| {
+        conn.write_all(request.as_bytes()).unwrap();
+        // A chunked body ends with the zero-length chunk.
+        let mut got = Vec::new();
+        while !got.ends_with(b"0\r\n\r\n") {
+            let n = conn.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed");
+            got.extend_from_slice(&buf[..n]);
+        }
+    };
+    for _ in 0..20 {
+        round_trip(&mut conn);
+    }
+    group.bench_function("describe_round_trip", |b| {
+        b.iter(|| round_trip(&mut conn));
+    });
+    group.finish();
+}
+
 /// Measure CONSTRUCT query — builds an RDF graph from matched patterns.
 ///
 /// CONSTRUCT materialises triples into a new graph; this adds serialisation
@@ -1404,24 +1552,35 @@ fn bench_shacl_validate_multigraph(c: &mut Criterion) {
             sh:property [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:class ex:Asset ] .
     "#;
 
-    // (id, number of instance graphs, names in their own graph)
+    // (id, number of instance graphs, names in their own graph). `single/1`
+    // keeps everything — the subclass axiom included — in ONE data graph: the
+    // single-graph fast path, without the merged-graph walk of decision D7, so
+    // the cost of D7 itself stays visible next to `within/1` (issue #467).
     for &(label, graphs, names_apart) in &[
-        ("within", 1_usize, false),
+        ("single", 1_usize, false),
+        ("within", 1, false),
         ("within", 4, false),
         ("crossing", 4, true),
     ] {
+        let single = label == "single";
         let store = fresh_store();
         store
             .load_str(shapes, RdfFormat::Turtle, Some(shapes_graph))
             .unwrap();
-        // The subclass axiom, alone, in the model graph.
+        // The subclass axiom, alone, in the model graph (`single`: in the one
+        // instance graph).
+        let axiom_graph = if single {
+            instance_graph(0)
+        } else {
+            model_graph.to_string()
+        };
         store
             .load_str(
                 "<http://example.org/mg#Bridge> \
                  <http://www.w3.org/2000/01/rdf-schema#subClassOf> \
                  <http://example.org/mg#Asset> .",
                 RdfFormat::Turtle,
-                Some(model_graph),
+                Some(&axiom_graph),
             )
             .unwrap();
 
@@ -1449,7 +1608,9 @@ fn bench_shacl_validate_multigraph(c: &mut Criterion) {
         }
 
         let mut data_graphs: Vec<String> = (0..graphs).map(instance_graph).collect();
-        data_graphs.push(model_graph.to_string());
+        if !single {
+            data_graphs.push(model_graph.to_string());
+        }
         if names_apart {
             data_graphs.push(name_graph.to_string());
         }
@@ -1555,12 +1716,12 @@ fn bench_shacl_validate_snapshot(c: &mut Criterion) {
     // The accelerator would publish a RAM mirror after the first queries and
     // move the run onto the mirror source; it reads its switch at open time,
     // so turn it off for this store only and put the environment back.
-    let prev = std::env::var_os("OTS_PARALLEL_QUERY");
-    std::env::set_var("OTS_PARALLEL_QUERY", "off");
+    let prev = std::env::var_os("OTS_PARALLEL_QUERY_ENABLED");
+    std::env::set_var("OTS_PARALLEL_QUERY_ENABLED", "off");
     let store = TripleStore::open(dir.path()).unwrap();
     match prev {
-        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY", v),
-        None => std::env::remove_var("OTS_PARALLEL_QUERY"),
+        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY_ENABLED", v),
+        None => std::env::remove_var("OTS_PARALLEL_QUERY_ENABLED"),
     }
     let n = 5_000_usize;
     store
@@ -1827,6 +1988,9 @@ criterion_group!(
         bench_query_bind,
         bench_query_minus,
         bench_query_not_exists,
+        bench_query_not_exists_correlated,
+        bench_query_over_cap,
+        bench_query_http_stream,
         bench_query_construct,
         bench_query_named_graph
 );

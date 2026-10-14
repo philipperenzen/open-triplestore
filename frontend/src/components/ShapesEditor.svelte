@@ -1,4 +1,5 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
   import { tick, onMount, createEventDispatcher } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { getShapes, putShapes, inferDataset, getShapeGraphTurtle, putShapeGraphTurtle, getModelContext } from '../lib/api.js';
@@ -10,6 +11,7 @@
   import { parseShapesGraph } from '../lib/shaclModel.ts';
   import { emptyShapesTemplate } from '../lib/turtle-mode.ts';
   import AiAssistPanel from './AiAssistPanel.svelte';
+  import PartialRunNote from './PartialRunNote.svelte';
   import ShapeBuilder from './ShapeBuilder.svelte';
 
   /**
@@ -156,6 +158,8 @@
     saveShapes();
   }
 
+  // Set while a confirmed click is replayed, so the guard lets that one through.
+  let leaveConfirmed = false;
   function onDocumentClick(e) {
     if (!dirty || e.defaultPrevented || e.button !== 0) return;
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -171,9 +175,21 @@
     }
     // Only guard navigation that actually leaves this page.
     if (dest.origin !== window.location.origin || dest.pathname === window.location.pathname) return;
-    if (confirm($t('pages.shaclShapes.discardUnsaved'))) return;
+    if (leaveConfirmed) { leaveConfirmed = false; return; }
     e.preventDefault();
     e.stopPropagation();
+    // The app's own dialog is asynchronous, so hold the click and replay it on
+    // the same link once the user agrees to drop the unsaved edits.
+    askConfirm({
+      title: $t('system.areYouSure'),
+      message: $t('pages.shaclShapes.discardUnsaved'),
+      confirmLabel: $t('system.discard'),
+      variant: 'warning',
+    }).then((ok) => {
+      if (!ok) return;
+      leaveConfirmed = true;
+      anchor.click();
+    });
   }
 
   onMount(() => {
@@ -297,6 +313,7 @@
   </div>
 
   {#if error}<p class="error">{error}</p>{/if}
+  {#if inferResult?.partial}<PartialRunNote kind="infer" />{/if}
 
   <div class="editor-grid" class:has-ai={aiOpen}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->

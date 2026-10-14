@@ -56,6 +56,31 @@ pub trait PluginAuth: Send + Sync {
     fn llm_stats_json(&self, admin_bearer: &str) -> Result<String, String>;
 }
 
+/// Secret-resolution capability: the host's secrets module, so a plugin's
+/// credentials follow the same rules as the server's own. A setting holds a
+/// secret **reference** (`env:NAME`, `file:/path`, `vault:…`) that the host
+/// resolves at the moment of use; a raw value is accepted in the development
+/// posture with a one-time warning and refused under `OTS_ENV=production`.
+pub trait PluginSecrets: Send + Sync {
+    /// The secret an environment variable configures: `Ok(None)` when the
+    /// variable is unset or empty, `Ok(Some(value))` when it holds a
+    /// reference that resolves (or, in development, a raw value), `Err` with
+    /// a message safe to log — never the value — when it holds a raw value in
+    /// production or a reference that does not resolve. A plugin that gets
+    /// `Err` proceeds without the credential; it never falls back to reading
+    /// the variable itself.
+    fn env_secret(&self, setting: &str) -> Result<Option<String>, String>;
+}
+
+/// A [`PluginSecrets`] that resolves nothing — for plugin unit tests.
+pub struct NoSecrets;
+
+impl PluginSecrets for NoSecrets {
+    fn env_secret(&self, _setting: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
 /// Everything a plugin needs from the running instance. Cheap to clone (every
 /// field is `Arc`-backed) — used directly as the Axum state for plugin routes.
 #[derive(Clone)]
@@ -67,6 +92,8 @@ pub struct PluginContext {
     pub store: Arc<dyn PluginStore>,
     /// Account/identity capability (introspection + admin-gated overviews).
     pub auth: Arc<dyn PluginAuth>,
+    /// Secret resolution through the host's secrets module.
+    pub secrets: Arc<dyn PluginSecrets>,
 }
 
 /// A [`PluginAuth`] that rejects everything — for plugin unit tests that don't
@@ -157,6 +184,7 @@ mod tests {
             base_url: Arc::new("http://localhost".to_string()),
             store: Arc::new(NullStore),
             auth: Arc::new(NoAuth),
+            secrets: Arc::new(NoSecrets),
         };
         // Defaults must not panic and must produce an empty router.
         p.on_boot(&ctx);

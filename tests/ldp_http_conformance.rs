@@ -145,6 +145,39 @@ async fn ldp_post_creates_member_with_location() {
     );
 }
 
+// DELETE removes the member from the container it was POSTed into. A container
+// created by POSTing to `/ldp/c1` (no trailing slash) is `…/ldp/c1`, while the
+// handler derived the parent of `/ldp/c1/x` as `…/ldp/c1/`, so the
+// `ldp:contains` triple survived and the container kept listing the member.
+#[tokio::test]
+async fn ldp_delete_removes_member_from_slashless_container() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let (st, hdrs) = post_member(&app, &token, "gone").await;
+    assert_eq!(st, StatusCode::CREATED);
+    let member = hdrs
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("Location")
+        .to_string();
+    assert!(member.ends_with("/ldp/c1/gone"), "{member}");
+
+    let (st, _, body) = send(&app, Method::DELETE, "/ldp/c1/gone", Some(&token), &[], "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+
+    let (st, _, listing) = send(&app, Method::GET, "/ldp/c1", Some(&token), &[], "").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        !listing.contains(&member),
+        "the container must no longer list the deleted member: {listing}"
+    );
+    let (_, _, body) = send(&app, Method::GET, "/ldp/c1/gone", Some(&token), &[], "").await;
+    assert!(
+        body.trim().is_empty(),
+        "the deleted member must have no triples left: {body}"
+    );
+}
+
 // OPTIONS on an LDP resource advertises Allow + Accept-Post + Accept-Patch.
 //
 // NOTE: this drives the LDP router directly. In the full application the global
@@ -579,4 +612,50 @@ async fn ldp_direct_container_without_membership_config_is_rejected() {
         body.contains("membershipResource") && body.contains("constraints"),
         "the error names the missing property and the constraints doc: {body}"
     );
+}
+
+/// An `rdf:JSON` literal that is not JSON is ill-typed: LDP refuses it with a
+/// 400 on POST, PUT and PATCH, as every write path does.
+#[tokio::test]
+async fn ldp_refuses_an_ill_typed_json_literal() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let bad = "<http://example.org/x> <http://example.org/p> \
+               \"bareword\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> .";
+    let (st, _, text) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        Some(&token),
+        &[("Content-Type", "text/turtle"), ("Slug", "j")],
+        bad,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "POST: {text}");
+    assert!(text.contains("ill-typed"), "{text}");
+    let (st, _, text) = send(
+        &app,
+        Method::PUT,
+        "/ldp/json1",
+        Some(&token),
+        &[("Content-Type", "text/turtle")],
+        bad,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "PUT: {text}");
+
+    let (st, _) = post_member(&app, &token, "m").await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (st, _, text) = send(
+        &app,
+        Method::PATCH,
+        "/ldp/c1/m",
+        Some(&token),
+        &[("Content-Type", "application/sparql-update")],
+        "INSERT DATA { <http://example.org/x> <http://example.org/q> \
+         \"[{]\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> }",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "PATCH: {text}");
+    assert!(text.contains("ill-typed"), "{text}");
 }

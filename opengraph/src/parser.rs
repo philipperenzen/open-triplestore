@@ -21,6 +21,12 @@ use spargebra::SparqlParser;
 
 static CUSTOM_AGGREGATES: RwLock<Vec<NamedNode>> = RwLock::new(Vec::new());
 
+/// The parser [`sparql_parser`] hands out clones of, rebuilt on every
+/// registration. Building it per call allocated and hashed every registered
+/// IRI for every query (six GeoSPARQL aggregates: about 0.2 µs, issue #527);
+/// a clone shares the aggregate set.
+static PARSER: RwLock<Option<SparqlParser>> = RwLock::new(None);
+
 /// Declare a custom aggregate function to every parser built from now on.
 /// Registering the same IRI twice is a no-op.
 pub fn register_custom_aggregate(name: NamedNode) {
@@ -29,6 +35,15 @@ pub fn register_custom_aggregate(name: NamedNode) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !names.contains(&name) {
         names.push(name);
+        let parser = names
+            .iter()
+            .cloned()
+            .fold(SparqlParser::new(), |parser, name| {
+                parser.with_custom_aggregate_function(name)
+            });
+        *PARSER
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(parser);
     }
 }
 
@@ -42,14 +57,11 @@ pub fn custom_aggregates() -> Vec<NamedNode> {
 
 /// A SPARQL parser that knows every registered custom aggregate.
 pub fn sparql_parser() -> SparqlParser {
-    CUSTOM_AGGREGATES
+    PARSER
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .cloned()
-        .fold(SparqlParser::new(), |parser, name| {
-            parser.with_custom_aggregate_function(name)
-        })
+        .clone()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

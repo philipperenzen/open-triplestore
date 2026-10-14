@@ -17,9 +17,16 @@
 //! - `owl2-rl`         — enables `owl2_rl`  (implies `rdfs-entailment`)
 //! - `owl2-el`         — enables `owl2_el`  (implies `rdfs-entailment`)
 //! - `owl2-ql`         — enables `owl2_ql`  (implies `rdfs-entailment`)
-//! - `owl2-dl`         — enables `owl2_dl`  (implies `owl2-rl`)
+//! - `owl2-dl`         — enables `owl2_dl`, the OWL 2 DL backends
+//!   (`dl_backend`, `konclude_bridge`, `dl_sidecar`) and the RDF ↔ OWL
+//!   structural layer (`owl_model`, `owl_mapping`, `owl_fs`, `owl_profile`)
+//!   (implies `owl2-rl`)
 
 pub mod common;
+
+/// Which OWL 2 DL backend serves the `owl2-dl` regime (configuration only, so
+/// it compiles without the `owl2-dl` feature).
+pub mod dl_config;
 
 /// Identity policy: what materialisation does with `owl:sameAs`.
 pub mod identity;
@@ -27,11 +34,30 @@ pub mod identity;
 #[cfg(feature = "rdfs-entailment")]
 pub mod rdfs;
 
+/// D-entailment at query time: literal constants matched by value.
+#[cfg(feature = "rdfs-entailment")]
+pub mod value_match;
+
 #[cfg(feature = "owl2-rl")]
 pub mod owl2_rl;
 
+/// SKOS-aware inferencing: OWL 2 RL over the bundled SKOS schema.
+#[cfg(feature = "owl2-rl")]
+pub mod skos;
+
 #[cfg(feature = "owl2-el")]
 pub mod owl2_el;
+
+/// The OWL 2 datatype maps (the EL/QL map and the RL map): value spaces,
+/// value equality, value order and datatype-restriction facets. RDFS uses
+/// it for its recognized datatypes.
+#[cfg(any(
+    feature = "owl2-ql",
+    feature = "owl2-el",
+    feature = "owl2-rl",
+    feature = "rdfs-entailment"
+))]
+pub(crate) mod datatypes;
 
 #[cfg(feature = "owl2-ql")]
 pub mod owl2_ql;
@@ -42,4 +68,22 @@ pub mod owl2_dl;
 #[cfg(feature = "owl2-dl")]
 pub mod konclude_bridge;
 
-pub use common::ReasoningReport;
+#[cfg(feature = "owl2-dl")]
+pub mod dl_backend;
+
+#[cfg(feature = "owl2-dl")]
+pub mod dl_sidecar;
+
+#[cfg(feature = "owl2-dl")]
+pub mod owl_model;
+
+#[cfg(feature = "owl2-dl")]
+pub mod owl_mapping;
+
+#[cfg(feature = "owl2-dl")]
+pub mod owl_fs;
+
+#[cfg(feature = "owl2-dl")]
+pub mod owl_profile;
+
+pub use common::{ReasoningError, ReasoningReport};

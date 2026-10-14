@@ -4,13 +4,14 @@ Beyond dataset visibility and API token scopes, administrators get fine-grained 
 
 ## Single Sign-On (OIDC / Azure AD / SAML)
 
-Register external identity providers so users can sign in with corporate credentials. Three provider types are supported:
+Register external identity providers so users can sign in with corporate credentials. Two provider types are supported:
 
-- **Generic OIDC** — Any OpenID Connect provider. Supply a discovery URL (or explicit authorization, token, and userinfo endpoints), client ID, client secret, and requested scopes.
-- **Azure AD / Entra ID** — Microsoft Entra tenants, configured like OIDC with tenant-specific endpoints.
-- **SAML 2.0** — Enterprise SAML identity providers for browser-based SSO.
+- **OIDC** — Any OpenID Connect provider, Azure AD / Entra ID included. Supply the discovery URL (for Entra, the tenant's `…/v2.0/.well-known/openid-configuration`), client ID, client secret, and requested scopes.
+- **SAML 2.0** — Enterprise SAML identity providers for browser-based SSO. Import the IdP's metadata (URL or pasted XML), or supply its entity ID, SSO URL and signing certificates. Sign-in started at the IdP is off by default; encrypted assertions, signed requests and Single Logout are supported. See [auth.md](auth.md#saml-20).
 
-A provider can **auto-provision** accounts on first login and map an incoming claim to a system role: `role_claim` names the claim (e.g. a group attribute), `role_claim_map` maps each claim value to `user`, `admin`, or `super_admin`, and `default_role` applies when nothing matches. Providers can be disabled without deleting them; enabled ones appear automatically on the login page. Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
+The client secret and the SAML certificates are never shown again once saved; leave them blank when editing a provider to keep the stored values. A SAML provider's own key pairs (for signing and decryption) are stored like the client secret and managed under the provider's *This store as service provider* panel.
+
+A provider can **auto-provision** accounts on first login and map incoming group or role claims to a grant: `role_claim_map` is a JSON object mapping each value of the token's `groups` or `roles` claim (for SAML, the groups attribute) to `user`, `admin`, or `publisher` (which grants publishing without changing the role), and `default_role` applies when nothing matches. Sign-in through a provider never grants `super_admin`; a mapping to it is capped at `admin`. The mapping sets the role of a new account; later sign-ins keep the account's role, and the `publisher` grant is only ever added. Providers can be disabled without deleting them; enabled ones appear automatically on the login page once a sign-in can start from them (an OIDC provider needs a client ID, a SAML provider an SSO URL and a build with the `saml` feature). Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
 
 ## Endpoint ACL
 
@@ -24,11 +25,15 @@ Rules apply across the API — `/sparql`, `/store`, `/api/**` and the rest — n
 
 The default is a rule away from closed: matching rules are taken in priority order and the first decides, so a `deny` for `public` on `/**` at priority `0` — and one for `role` = `user` if signed-in non-admins should be denied by default too — closes everything, and `allow` rules at any higher priority open exactly the routes you list above it. Admins are bound by the same rules, so leave `/api/admin/**` allowed for `role` = `admin`.
 
-`ENDPOINT_ACL_ENFORCE=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
+`OTS_ENDPOINT_ACL_ENABLED=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
 
 ## Named-Graph ACL
 
 Grant a principal access to a specific named graph at one of three levels: `read`, `write` (includes read), or `admin` (includes write). The special **public** principal grants unauthenticated read access to a single graph. Grants are additive and apply to both SPARQL queries and the Graph Store Protocol — an explicit write grant is required for `PUT` / `POST` / `DELETE` on `/store` and for any SPARQL Update that targets the graph. Managed at `/api/admin/acl/graphs`.
+
+## LDP Web Access Control
+
+Resources under `/ldp/` have a per-resource access control list in the Solid **Web Access Control** model: `R.acl` holds `acl:Authorization` nodes granting `acl:Read` / `acl:Write` / `acl:Append` / `acl:Control` to a user (`urn:ots:user:…`), an organisation or group (`acl:agentGroup`), a role, any signed-in user (`acl:AuthenticatedAgent`) or everyone (`foaf:Agent`); resources without an ACL inherit through `acl:default` from their containers, up to `/ldp/`. Creators own what they create; admins pass. The root ACL is seeded once (`OTS_LDP_ROOT_ACL=open|owners`). `PATCH`, `PUT` and `POST` bodies are confined to the target resource. Authorizations live in `urn:system:ldp-acl`, unreachable over `/sparql` and `/store`. Details, the agent IRIs and how to tighten the root ACL: [ldp.md](ldp.md#access-control).
 
 ## Triple Security Labels
 
@@ -42,4 +47,4 @@ An append-only audit log records security-relevant events — logins, user and t
 
 ## Asset Malware Scanning
 
-Uploaded assets can be scanned for malware by a [ClamAV](https://www.clamav.net/) daemon before they are stored. Set `CLAMAV_ADDR=host:port` to point at the daemon's INSTREAM endpoint (e.g. `127.0.0.1:3310`); leaving it unset disables scanning. Only an explicit virus hit rejects the upload (HTTP 422); a scanner outage or error fails open so a ClamAV hiccup cannot take uploads down. Requires the `asset-clamav` build feature, which is included in the `full` feature shipped in release/Docker builds.
+Uploaded assets can be scanned for malware by a [ClamAV](https://www.clamav.net/) daemon before they are stored. Set `OTS_CLAMAV_ADDR=host:port` to point at the daemon's INSTREAM endpoint (e.g. `127.0.0.1:3310`); leaving it unset disables scanning. Only an explicit virus hit rejects the upload (HTTP 422); a scanner outage or error fails open so a ClamAV hiccup cannot take uploads down. Requires the `asset-clamav` build feature, which is included in the `full` feature shipped in release/Docker builds.

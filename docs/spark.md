@@ -16,8 +16,8 @@ Spark does not answer about your data from model memory. Each turn:
 
 1. **Platform context** — The server hands the model a snapshot of what *you* may see: your accessible datasets (name, visibility, description, DCAT themes and keywords), the API services runnable against them (with their parameters), the registered data models and vocabularies **with the named graph holding each one's current published definitions**, and the named graphs in your read scope. The model is instructed never to claim something exists that is not in this list. Guests see public data only — sign in to ask about your own datasets.
 2. **Question orientation** — Before the model writes anything, the server grounds the question itself: IRIs you paste are located with indexed lookups (*which readable graphs contain this, and in which triple position*), the question's identifier-like tokens and salient words are run through the [full-text index](/docs/full-text-search) to the subjects and graphs that actually carry them, and the same words are looked up in the installed-vocabulary term index — so a plain word like *beheerobject* comes with candidate standard term IRIs. The findings ride into the prompt as verified facts, and the graphs they point at are sampled for vocabulary first. In-scope **unpublished drafts** of registered models are listed as exactly that, with the instruction to ask you which version to use when it matters.
-3. **Scoped retrieval, two protocols** — When an answer needs the actual triples (counts, specific values, relationships, geometries), the model retrieves them: tool-capable models **call native function tools** (`run_sparql`, `text_search`, `vocab_term_search` — offered on every completion, `LLM_CHAT_TOOLS=off` disables), and models that ignore tools reply with a `SPARQL:` directive — both run through the exact same pipeline and the exact same `scope_query_to_authorized` boundary as a user-typed query, so the assistant can never read a graph you are not authorized to see. A gateway that rejects the `tools` parameter is remembered and never offered them again. Up to 50 result rows are fed back (long cells truncated). A query naming an IRI that occurs nowhere on the platform — checked against the store itself, not a sample — fails fast with the invented IRIs named, so a hallucinated pattern cannot masquerade as an empty result.
-4. **Planned, bounded iteration** — The model may use up to **three retrieval rounds per turn** (`LLM_CHAT_MAX_ROUNDS`). For multi-part questions it first declares a short `PLAN:` (one line per data need) that the server repeats back with every round's results, so long questions are worked through instead of half-answered; the plan itself never reaches your screen. After each round the rows — or the error message, so it can self-repair a broken query — go back into the conversation. A round that returns zero rows feeds the *actual* class and property vocabulary of the graphs it queried back with the error hint, so the repair is grounded in what the graph really contains. After the last round it must answer with what it has.
+3. **Scoped retrieval, two protocols** — When an answer needs the actual triples (counts, specific values, relationships, geometries), the model retrieves them: tool-capable models **call native function tools** (`run_sparql`, `text_search`, `vocab_term_search` — offered on every completion, `OTS_LLM_CHAT_TOOLS=off` disables), and models that ignore tools reply with a `SPARQL:` directive — both run through the exact same pipeline and the exact same `scope_query_to_authorized` boundary as a user-typed query, so the assistant can never read a graph you are not authorized to see. A gateway that rejects the `tools` parameter is remembered and never offered them again. Up to 50 result rows are fed back (long cells truncated). A query naming an IRI that occurs nowhere on the platform — checked against the store itself, not a sample — fails fast with the invented IRIs named, so a hallucinated pattern cannot masquerade as an empty result.
+4. **Planned, bounded iteration** — The model may use up to **three retrieval rounds per turn** (`OTS_LLM_CHAT_MAX_ROUNDS`). For multi-part questions it first declares a short `PLAN:` (one line per data need) that the server repeats back with every round's results, so long questions are worked through instead of half-answered; the plan itself never reaches your screen. After each round the rows — or the error message, so it can self-repair a broken query — go back into the conversation. A round that returns zero rows feeds the *actual* class and property vocabulary of the graphs it queried back with the error hint, so the repair is grounded in what the graph really contains. After the last round it must answer with what it has.
 5. **Mechanical honesty** — Two caveats are appended by the server, not the model: an answer embedding data widgets without any successful retrieval this turn is flagged as unverified, and a turn whose every retrieval came back empty carries *"the data was not found, which is not proof it does not exist"* — because small models reliably upgrade "not found" to "does not exist" regardless of instructions.
 
 The full retrieval trail is shown with each answer: every query of the turn (including failed attempts), its result table, and an **Open in SPARQL workspace** action so you can verify and refine the query yourself. Grounding constrains what Spark can see, not what it concludes — verify important results.
@@ -148,18 +148,19 @@ rather than the per-principal LLM budget below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_RATE_LIMIT_PER_MIN` | `20` | Signed-in per-user request budget per minute, separate from the global rate limiter. `0` disables. |
-| `LLM_RATE_LIMIT_ANON_PER_MIN` | `5` | Guest (per-IP) request budget per minute — deliberately tighter than the signed-in budget. Both limits are surfaced to the UI via `GET /api/llm/health`. `0` disables. |
-| `LLM_GUARD_MAX_MESSAGE_CHARS` | `8000` | Per-message size cap. |
-| `LLM_GUARD_MAX_MESSAGES` / `LLM_GUARD_MAX_TOTAL_CHARS` | `40` / `64000` | Whole-conversation caps — start a new chat past them. |
-| `LLM_GUARD_INJECTION_ACTION` | `block` | What a prompt-injection heuristic hit does: `block`, `flag` (allow but log), or `off`. |
-| `LLM_GUARD_BLOCKLIST` | *(empty)* | Comma-separated phrases that always block. |
+| `OTS_LLM_RATE_LIMIT_PER_MIN` | `20` | Signed-in per-user request budget per minute, separate from the global rate limiter. `0` turns AI off for signed-in users (`403`); `unlimited` lifts the limit. |
+| `OTS_LLM_RATE_LIMIT_ANON_PER_MIN` | `5` | Guest (per-IP) request budget per minute — deliberately tighter than the signed-in budget. `0` turns AI off for anonymous callers; `unlimited` lifts the limit. Both are surfaced to the UI via `GET /api/llm/health` (`0` = off, `null` = unlimited). |
+| `OTS_LLM_ANONYMOUS_ENABLED` | `true` (`false` in production) | Whether anonymous callers may use the AI features at all; off, they get a `403` and the chat says to sign in. |
+| `OTS_LLM_GUARD_MAX_MESSAGE_CHARS` | `8000` | Per-message size cap. |
+| `OTS_LLM_GUARD_MAX_MESSAGES` / `OTS_LLM_GUARD_MAX_TOTAL_CHARS` | `40` / `64000` | Whole-conversation caps — start a new chat past them. |
+| `OTS_LLM_GUARD_INJECTION_ACTION` | `block` | What a prompt-injection heuristic hit does: `block`, `flag` (allow but log), or `off`. |
+| `OTS_LLM_GUARD_BLOCKLIST` | *(empty)* | Comma-separated phrases that always block. |
 
 Final answers are additionally screened for verbatim system-prompt leaks (redacted and flagged), and the system prompt instructs the model to treat retrieved data and memory as data, never as instructions.
 
 ## Admin telemetry
 
-Admins see every LLM request under **Admin → AI Requests** (`/admin/llm`): timestamp, user, endpoint, model, outcome (`ok` / `error` / `blocked` with the guard rule that fired), latency, time-to-first-token, prompt/answer sizes and query rounds. Message *contents* are not logged — only a short question preview (disable even that with `LLM_LOG_PREVIEW_DISABLED=1`). Rows are pruned after `LLM_LOG_RETENTION_DAYS` (default 90).
+Admins see every LLM request under **Admin → AI Requests** (`/admin/llm`): timestamp, user, endpoint, model, outcome (`ok` / `error` / `blocked` with the guard rule that fired), latency, time-to-first-token, prompt/answer sizes and query rounds. Message *contents* are not logged — only a short question preview (disable even that with `OTS_LLM_LOG_PREVIEW_ENABLED=false`). Rows are pruned after `OTS_LLM_LOG_RETENTION_DAYS` (default 90).
 
 ## Configuration
 
@@ -167,15 +168,15 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 
 | Variable | Purpose |
 | --- | --- |
-| `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Defaults to `http://127.0.0.1:8000` when unset or blank. |
-| `LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
-| `LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `LLM_MODEL`. |
-| `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
-| `LLM_TIMEOUT_SECONDS` | Per-completion budget (default `120`). Raise it when a large model is served from local hardware — past this the turn fails outright. |
-| `LLM_CONTEXT_TOKENS` | The serving model's context window, in tokens. When set, Spark budgets its prompt to fit (dropping the oldest conversation turns first, then the graph-vocabulary blocks) instead of letting the runtime truncate silently. **Set this whenever the endpoint is a local runtime** — Ollama, llama.cpp and vLLM cut an over-long prompt from the top, which deletes Spark's execution protocol and turns grounded answers into confident fabrication mid-conversation. Unset, Spark asks the gateway itself, best-effort: a vLLM-style `max_model_len` on `/v1/models`, or an Ollama Modelfile `num_ctx` via `/api/show`. An Ollama model *without* a Modelfile `num_ctx` yields no detection — its true serving context (`OLLAMA_CONTEXT_LENGTH`, default 4096) is invisible over the API, so Spark logs a warning instead of guessing; set this knob to mirror that value. Nothing detectable disables budgeting — fine for large-context hosted APIs. The effective window is reported by `GET /api/llm/health`, and a declared window of `32768`+ also widens the vocabulary sample (20 graphs × 16 classes + 32 predicates instead of 12 × 8 + 20). |
-| `LLM_CHAT_MAX_ROUNDS` | Retrieval rounds per turn (default `3`, clamped 1–8). Three is right for a small local model — more rounds mostly buy more failed repairs — but a capable model answering multi-part questions makes good use of four or five. |
-| `LLM_CHAT_QUERY_MAX_SECS` | Per-round SPARQL cap in seconds (default `30`, clamped 5–600); the effective bound is the smaller of this and the endpoint's own query timeout. Raise it where legitimate analytical questions (property paths over a large ontology) need more. |
-| `LLM_CHAT_TOOLS` | `auto` (default): offer the native function tools on every completion and fall back to the `SPARQL:` directive transparently — a gateway that rejects the `tools` parameter is remembered per model. `off`: directive protocol only. Tool rounds are not token-streamed; with tools active the answer arrives when the turn completes. |
+| `OTS_LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Unset: the AI features are off — nothing is probed, and every AI request answers `503` naming this setting. |
+| `OTS_LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
+| `OTS_LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `OTS_LLM_MODEL`. |
+| `OTS_LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
+| `OTS_LLM_TIMEOUT_SECS` | Per-completion budget in seconds (default `120`). Raise it when a large model is served from local hardware — past this the turn fails outright. |
+| `OTS_LLM_CONTEXT_TOKENS` | The serving model's context window, in tokens. When set, Spark budgets its prompt to fit (dropping the oldest conversation turns first, then the graph-vocabulary blocks) instead of letting the runtime truncate silently. **Set this whenever the endpoint is a local runtime** — Ollama, llama.cpp and vLLM cut an over-long prompt from the top, which deletes Spark's execution protocol and turns grounded answers into confident fabrication mid-conversation. Unset, Spark asks the gateway itself, best-effort: a vLLM-style `max_model_len` on `/v1/models`, or an Ollama Modelfile `num_ctx` via `/api/show`. An Ollama model *without* a Modelfile `num_ctx` yields no detection — its true serving context (`OLLAMA_CONTEXT_LENGTH`, default 4096) is invisible over the API, so Spark logs a warning instead of guessing; set this knob to mirror that value. Nothing detectable disables budgeting — fine for large-context hosted APIs. The effective window is reported by `GET /api/llm/health`, and a declared window of `32768`+ also widens the vocabulary sample (20 graphs × 16 classes + 32 predicates instead of 12 × 8 + 20). |
+| `OTS_LLM_CHAT_MAX_ROUNDS` | Retrieval rounds per turn (default `3`, 1–8; another value stops the start). Three is right for a small local model — more rounds mostly buy more failed repairs — but a capable model answering multi-part questions makes good use of four or five. |
+| `OTS_LLM_CHAT_QUERY_MAX_SECS` | Per-round SPARQL cap in seconds (default `30`, 5–600; another value stops the start); the effective bound is the smaller of this and the endpoint's own query timeout. Raise it where legitimate analytical questions (property paths over a large ontology) need more. |
+| `OTS_LLM_CHAT_TOOLS` | `auto` (default): offer the native function tools on every completion and fall back to the `SPARQL:` directive transparently — a gateway that rejects the `tools` parameter is remembered per model. `off`: directive protocol only. Tool rounds are not token-streamed; with tools active the answer arrives when the turn completes. |
 
 When the gateway is unreachable, or answers with a non-2xx status, the chat
 endpoints return **503 Service Unavailable** with a message naming the endpoint
@@ -194,14 +195,14 @@ larger for local models, and make sure the *server's* context
 server that truncates from the top deletes Spark's execution protocol, and the
 model then answers from its own knowledge while claiming the data said so.
 
-**Why `LLM_CONTEXT_TOKENS` exists next to `OLLAMA_CONTEXT_LENGTH`.** They size two different things in two different processes: `OLLAMA_CONTEXT_LENGTH` (or a Modelfile `num_ctx`) is the *server's* context — how many tokens Ollama actually processes before cutting; `LLM_CONTEXT_TOKENS` is the *client's* budget — what this store assumes while trimming its own prompt. The store cannot read the server's setting over the API, so when both apply they must agree; a compose file can feed both from one shared variable. With vLLM no client knob is needed at all — it advertises `max_model_len` and detection picks it up automatically; the same goes for any gateway whose `/v1/models` carries a `context_window`/`context_length` field.
+**Why `OTS_LLM_CONTEXT_TOKENS` exists next to `OLLAMA_CONTEXT_LENGTH`.** They size two different things in two different processes: `OLLAMA_CONTEXT_LENGTH` (or a Modelfile `num_ctx`) is the *server's* context — how many tokens Ollama actually processes before cutting; `OTS_LLM_CONTEXT_TOKENS` is the *client's* budget — what this store assumes while trimming its own prompt. The store cannot read the server's setting over the API, so when both apply they must agree; a compose file can feed both from one shared variable. With vLLM no client knob is needed at all — it advertises `max_model_len` and detection picks it up automatically; the same goes for any gateway whose `/v1/models` carries a `context_window`/`context_length` field.
 
 **Which model.** Spark is the most demanding task on the platform: a long system
 prompt, a retrieval protocol to follow, and strict-JSON widget specs. A model
 that handles NL→SPARQL fine can still answer Spark's questions straight from
 memory instead of querying, and skip the chart/map/3D widgets entirely. Around
 **7B instruct-tuned is the practical floor**; below that, expect prose-only
-answers. `LLM_CHAT_MODEL` exists so a small local model can keep serving the
+answers. `OTS_LLM_CHAT_MODEL` exists so a small local model can keep serving the
 cheap tasks while chat gets a stronger one.
 
 Two guards make weaker models useful anyway: a reply that writes the query in a
@@ -210,21 +211,27 @@ Two guards make weaker models useful anyway: a reply that writes the query in a
 query at all gets one explicit nudge to query before answering — the model may
 decline, and its original answer is kept when it does.
 
-Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE) so the first tokens appear while the turn is still running; `POST /api/llm/chat` is the buffered fallback.
+Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE), so progress (each query and its result) shows while the turn is still running; `POST /api/llm/chat` is the buffered fallback. Whether the answer text itself streams token by token depends on the protocol: on the directive protocol (`OTS_LLM_CHAT_TOOLS=off`, or a gateway that rejects native tools) the rounds after the first retrieval stream token by token; with native tools active every completion is a single request and the answer arrives when its round completes.
 
 Besides `reachable`, `gateway`, `chat_model` and `context_tokens`, the health
 response carries:
 
-- `configured` — whether `LLM_GATEWAY_URL` is set to a non-blank value.
-  `false` means nobody configured an endpoint (unset or blank) and the server
-  is probing its built-in default, `http://127.0.0.1:8000`. The bundled
-  `docker-compose.yml` always sets it (to the `ollama` service unless `.env`
-  says otherwise), so a compose deployment reports `configured: true` even
-  when the `llm` profile was never started.
+- `configured` — whether `OTS_LLM_GATEWAY_URL` is set. `false` means the AI
+  features are off: `gateway` is `null` and nothing is probed. The bundled
+  `docker-compose.yml` sets it to the `ollama` service unless `.env` says
+  otherwise, so a compose deployment whose `llm` profile was never started
+  reports `configured: true`, `reachable: false` and why.
+- `unreachable_reason` — when the probe failed, the error it got (a refused
+  connection, a host that does not resolve, an HTTP status), naming the URL.
+- `available_to_caller` — `false` when this caller may not use the AI
+  features at all: their budget is `0`, or they are anonymous and
+  `OTS_LLM_ANONYMOUS_ENABLED` is off.
+- `rate_limit_per_min` / `rate_limit_anon_per_min` — the budgets; `0` is off
+  and `null` is unlimited.
 - `services` — always three entries, in this order: `chat` (Spark,
-  `LLM_CHAT_MODEL`), `sparql` (NL→SPARQL and saved-query repair,
-  `LLM_SPARQL_MODEL`) and `shacl` (the SHACL Studio assistant,
-  `LLM_SHACL_MODEL`), each falling back to `LLM_MODEL`. Each has the `model` it
+  `OTS_LLM_CHAT_MODEL`), `sparql` (NL→SPARQL and saved-query repair,
+  `OTS_LLM_SPARQL_MODEL`) and `shacl` (the SHACL Studio assistant,
+  `OTS_LLM_SHACL_MODEL`), each falling back to `OTS_LLM_MODEL`. Each has the `model` it
   sends and `listed`: `true` when the gateway's `/v1/models` list contains that
   model, `false` when a list came back without it, and `null` when there is no
   list to judge by (gateway unreachable, or only its `/health` answered). The
@@ -233,7 +240,7 @@ response carries:
   worth fixing before the first completion fails.
 
 `listed` is read from the response the probe already fetched; the endpoint makes
-no extra request per model and never returns `LLM_API_KEY`. The sidebar's
+no extra request per model and never returns `OTS_LLM_API_KEY`. The sidebar's
 **Service health** popover fetches it when opened (and on its refresh button)
 and lists each service with its model, with a "not listed" note under any
 whose model the gateway does not list. An unreachable gateway shows yellow
@@ -245,17 +252,17 @@ calls the gateway.
 
 ## Performance & serving
 
-Replies stream token-by-token, so perceived latency is dominated by the gateway's **time-to-first-token**. Two bundled serving options:
+Perceived latency is dominated by the gateway: its **time-to-first-token** where the answer streams token by token (the directive protocol), and the full completion time per round where it does not (native tools; see `OTS_LLM_CHAT_TOOLS` above). Two bundled serving options:
 
 - **Ollama** (`--profile llm`, default) — easiest start, CPU or GPU. The compose file keeps the model resident between chats (`OLLAMA_KEEP_ALIVE=1h`, overridable) so warm questions skip the model-load entirely, and serves a couple of requests in parallel (`OLLAMA_NUM_PARALLEL`).
-- **vLLM** (`--profile llm-vllm`, NVIDIA GPU) — higher throughput with **automatic prefix caching**: Spark's large shared system prompt is computed once and reused across turns and users, which makes time-to-first-token nearly independent of the prompt size. Set `LLM_GATEWAY_URL=http://vllm:8000` and `LLM_MODEL` to the served model (default `Qwen/Qwen2.5-7B-Instruct-AWQ`).
+- **vLLM** (`--profile llm-vllm`, NVIDIA GPU) — higher throughput with **automatic prefix caching**: Spark's large shared system prompt is computed once and reused across turns and users, which makes time-to-first-token nearly independent of the prompt size. Set `OTS_LLM_GATEWAY_URL=http://vllm:8000` and `OTS_LLM_MODEL` to the served model (default `Qwen/Qwen2.5-7B-Instruct-AWQ`).
 
 The server keeps a pooled connection to the gateway and builds the prompt deterministically (sorted graph lists, cached vocabulary samples) precisely so gateway-side prompt caches hit.
 
 ## Privacy & scope
 
 - **The model never touches the store.** It sees only the per-user platform context and the capped result rows of queries the server executed under your own read scope. Chat-issued queries are read-only and re-scoped server-side exactly like a hand-typed query.
-- **Conversations go to your gateway.** The chat messages, the platform context (dataset names, descriptions, topics, API-service names, graph IRIs) and query result rows are sent to the endpoint configured in `LLM_GATEWAY_URL`. Point it at a provider you trust — or keep everything on-premises with a local server such as Ollama or vLLM.
+- **Conversations go to your gateway.** The chat messages, the platform context (dataset names, descriptions, topics, API-service names, graph IRIs) and query result rows are sent to the endpoint configured in `OTS_LLM_GATEWAY_URL`. Point it at a provider you trust — or keep everything on-premises with a local server such as Ollama or vLLM.
 - **Chat content can only trigger reads.** The only thing runnable from an answer is a **same-origin `GET /api/…`** call, executed by your own browser session under your own permissions. Other methods and other hosts are never runnable, so an answer cannot mutate data or call out elsewhere.
 - **Feedback is per-message and explicit.** The **Helpful?** buttons send that turn (question, answer, last query) to the gateway's training track — the same feedback loop as the SPARQL editor.
 - **Saved chats belong to your account.** Only the metadata in the admin request log (timing, status, a short question preview) is visible to administrators — never whole conversations. Guests' chats are never stored.

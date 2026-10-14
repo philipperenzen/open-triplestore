@@ -57,7 +57,7 @@ are enumerated in §5, together with instructions for disabling each one.
 
 Open Triplestore stores data **on the infrastructure where you run it** (a local
 SQLite metadata database, the RDF store, and — if configured — an S3-compatible
-object store such as MinIO for uploaded assets). The categories below are what
+object store such as the Versity S3 Gateway the compose stack bundles, for uploaded assets). The categories below are what
 the software is *capable* of storing; what your specific instance actually holds
 depends on how you use it.
 
@@ -86,10 +86,10 @@ fields (display name, bio, website, phone, organisation, avatar reference).
 ### 4.3 Session tokens and API keys
 
 - **Session tokens (JWT).** Browser sessions use short-lived access tokens and
-  longer-lived refresh tokens, signed with your `JWT_SECRET`
+  longer-lived refresh tokens, signed with your `OTS_JWT_SECRET`
   (`src/auth/jwt.rs`). In browsers they are delivered as **`HttpOnly`,
   `SameSite=Strict`** cookies (`access_token`, `refresh_token`); set
-  `SECURE_COOKIES=true` behind HTTPS to add the `Secure` attribute.
+  `OTS_SECURE_COOKIES_ENABLED=true` behind HTTPS to add the `Secure` attribute.
 - **API keys (`ots_…`).** Long-lived programmatic tokens. Only a **SHA-256 hash**
   of each key and a short non-secret prefix are stored — the full key is shown
   once at creation and cannot be recovered. Keys can carry scopes, expiry, and be
@@ -132,14 +132,14 @@ you configure**. None of them send data to the project maintainers.
 
 | Feature | What it contacts | When | How to disable |
 |---|---|---|---|
-| **Prefix resolution** | Nothing, by default: prefixes resolve against a **bundled snapshot** of the prefix.cc + LOV registries (~3.7k prefixes) plus this instance's own vocabularies (`src/prefixes/`). Only with the opt-in `PREFIX_CC_FALLBACK=true` does an unknown label fall through to `https://prefix.cc`, sending the prefix **label** only (e.g. `foaf`), never your data. | Fallback only: when explicitly enabled *and* a query uses a prefix unknown to every local tier. Results are cached locally. | Already off by default — leave `PREFIX_CC_FALLBACK` unset. Lookups fail soft. |
-| **LOV corpus download** | The pinned Linked Open Vocabularies corpus snapshot URL (`VOCAB_CORPUS_URL`, default an Internet Archive snapshot), fetched **once** and sha256-verified, to enable vocabulary term search and offline vocabulary installs. Docker images normally ship the corpus baked in, so no runtime call happens at all. (`src/vocab_search/`) | Only at first boot when the corpus file is not already present on disk. No instance data is sent. | Set `VOCAB_CORPUS_URL=""`. Vocabulary search then covers the vocabularies registered on this instance only. |
-| **AI / LLM assistance** | An **OpenAI-compatible LLM endpoint that you configure** (`LLM_GATEWAY_URL`) — e.g. OpenAI, OpenRouter, Azure, or a local Ollama/vLLM server. Used for natural-language→SPARQL, the SHACL assistant, and the grounded chat; optional "training feedback" signals are forwarded to that same endpoint. (`src/server/llm_sparql.rs`) | Only when a user invokes an AI feature. The prompt/context (which may include schema and query text) is sent to **your** endpoint. | **Leave `LLM_GATEWAY_URL` unset/unreachable** — the AI features then hide in the UI. If you use a hosted LLM, review *that provider's* privacy terms; prefer a local/self-hosted model to keep data on your infrastructure. |
-| **Identity providers (SSO)** | An **OIDC** and/or **SAML** provider that you configure (`src/auth/`, `OIDC_ISSUER`/`OIDC_AUDIENCE`, SAML metadata). | Only when SSO login is configured and used. Standard auth handshakes occur with that provider. | Leave OIDC/SAML unconfigured to use local password + API-key auth only. |
+| **Prefix resolution** | Nothing, by default: prefixes resolve against a **bundled snapshot** of the prefix.cc + LOV registries (~3.7k prefixes) plus this instance's own vocabularies (`src/prefixes/`). Only with the opt-in `OTS_PREFIX_CC_FALLBACK_ENABLED=true` does an unknown label fall through to `https://prefix.cc`, sending the prefix **label** only (e.g. `foaf`), never your data. | Fallback only: when explicitly enabled *and* a query uses a prefix unknown to every local tier. Results are cached locally. | Already off by default — leave `OTS_PREFIX_CC_FALLBACK_ENABLED` unset. Lookups fail soft. |
+| **LOV corpus download** | The pinned Linked Open Vocabularies corpus snapshot URL (`OTS_VOCAB_CORPUS_URL`, default an Internet Archive snapshot), fetched **once** and sha256-verified, to enable vocabulary term search and offline vocabulary installs. Docker images normally ship the corpus baked in, so no runtime call happens at all. (`src/vocab_search/`) | Only at first boot when the corpus file is not already present on disk. No instance data is sent. | Set `OTS_OFFLINE=true`. Vocabulary search then covers the vocabularies registered on this instance only. |
+| **AI / LLM assistance** | An **OpenAI-compatible LLM endpoint that you configure** (`OTS_LLM_GATEWAY_URL`) — e.g. OpenAI, OpenRouter, Azure, or a local Ollama/vLLM server. Used for natural-language→SPARQL, the SHACL assistant, and the grounded chat; optional "training feedback" signals are forwarded to that same endpoint. (`src/server/llm_sparql.rs`) | Only when a user invokes an AI feature. The prompt/context (which may include schema and query text) is sent to **your** endpoint. | **Leave `OTS_LLM_GATEWAY_URL` unset/unreachable** — the AI features then hide in the UI. If you use a hosted LLM, review *that provider's* privacy terms; prefer a local/self-hosted model to keep data on your infrastructure. |
+| **Identity providers (SSO)** | An **OIDC** and/or **SAML** provider that you configure (`src/auth/`, `OTS_OIDC_ISSUER`/`OTS_OIDC_AUDIENCE`, SAML metadata). | Only when SSO login is configured and used. Standard auth handshakes occur with that provider. | Leave OIDC/SAML unconfigured to use local password + API-key auth only. |
 | **OAuth login** | Your configured OAuth provider(s) (`src/auth/oauth.rs`). | Only when configured/used. | Leave unconfigured. |
-| **Operational alerts** | An **HTTP webhook** (`ALERT_WEBHOOK_URL`) and/or an **SMTP server** (`ALERT_SMTP_*`, requires the `alerting` build feature) that you configure. (`src/alerting/`) | Only on operational events when configured. Sends alert text you can scope. | Leave `ALERT_WEBHOOK_URL` and `ALERT_SMTP_*` unset. |
-| **Service registry (companion-app discovery)** | A service registry you run (`LD_REGISTRY_URL`, default `http://localhost:8500`). Advertises this instance's own URL so sibling services can discover it. (`src/svc_registry.rs`) | Best-effort heartbeat at startup and periodically. Fail-soft: the registry being down never affects the store. | Do not run a registry at that address (calls simply fail and are ignored), or point `LD_REGISTRY_URL` at an unused address. No data beyond the instance's own name/URL is sent. |
-| **Validation service** | An external SHACL validation service you configure (`VALIDATION_API_URL`). (`src/dataset_versions/commit.rs`) | Only when the validate-and-commit endpoint is used. Forwards the data to be validated and the caller's bearer token. | Leave `VALIDATION_API_URL` unset; the endpoint then returns a configuration error instead of calling out. |
+| **Operational alerts** | An **HTTP webhook** (`OTS_ALERT_WEBHOOK_URL`) and/or an **SMTP server** (`OTS_ALERT_SMTP_*`, requires the `alerting` build feature) that you configure. (`src/alerting/`) | Only on operational events when configured. Sends alert text you can scope. | Leave `OTS_ALERT_WEBHOOK_URL` and `OTS_ALERT_SMTP_*` unset. |
+| **Service registry (companion-app discovery)** | A service registry you run (`OTS_REGISTRY_URL`, default `http://localhost:8500`). Advertises this instance's own URL so sibling services can discover it. (`src/svc_registry.rs`) | Best-effort heartbeat at startup and periodically. Fail-soft: the registry being down never affects the store. | Do not run a registry at that address (calls simply fail and are ignored), or point `OTS_REGISTRY_URL` at an unused address. No data beyond the instance's own name/URL is sent. |
+| **Validation service** | An external SHACL validation service you configure (`OTS_VALIDATION_API_URL`). (`src/dataset_versions/commit.rs`) | Only when the validate-and-commit endpoint is used. Forwards the data to be validated and the caller's bearer token. | Leave `OTS_VALIDATION_API_URL` unset; the endpoint then returns a configuration error instead of calling out. |
 
 ### 5.1 Third-party requests made by the web frontend (the user's browser)
 
@@ -149,10 +149,23 @@ expose the user's IP address to them:
 
 - **Google Fonts** (`fonts.googleapis.com`, `fonts.gstatic.com`) — web fonts,
   loaded on every page (`frontend/index.html`).
-- **Leaflet map library** (`unpkg.com`) — loaded **only** when a geographic/WKT
-  value is previewed (`frontend/src/components/GeoPreview.svelte`).
-- **OpenStreetMap tiles** (`tile.openstreetmap.org`) — map tiles, fetched **only**
-  when a map is rendered.
+- **OpenFreeMap** (`tiles.openfreemap.org`) — the street basemap's style, vector
+  tiles and label fonts, fetched when a map is rendered (the 2D and 3D viewers
+  and the geometry preview). Every page also opens a connection to this host in
+  advance (`<link rel="preconnect">` in `frontend/index.html`) so maps paint
+  sooner; no request is sent over it until a map renders, but the host sees the
+  connection.
+- **Esri World Imagery** (`ibasemaps-api.arcgis.com`) — satellite tiles, only
+  when the operator has configured an Esri API key (runtime config
+  `basemaps.esriApiKey`, see [docs/plugins.md](docs/plugins.md)) **and** the user
+  switches a map to satellite.
+- **Files linked from the data** — previewing a 3D model or similar file whose
+  IRI points at another host (the 3D chip on a value) makes the browser fetch it
+  from that host, on the user's click.
+
+The map libraries themselves (Leaflet, MapLibre, Cesium and its assets) are
+bundled and served from this instance; 3D tiles of a dataset come from this
+instance's own `/api/datasets/{id}/3dtiles/` endpoint.
 
 Prefix lookups from the browser (SPARQL editor autocomplete, prefix search)
 go to this instance's own `/api/prefixes` service — the UI no longer contacts
@@ -167,7 +180,7 @@ go to this instance's own `/api/prefixes` service — the UI no longer contacts
 
 - **Authentication cookies** (browser login): `access_token` and `refresh_token`
   — **strictly necessary**, `HttpOnly`, `SameSite=Strict`, and `Secure` when
-  `SECURE_COOKIES=true`. They exist to keep a user signed in and are not used for
+  `OTS_SECURE_COOKIES_ENABLED=true`. They exist to keep a user signed in and are not used for
   tracking or advertising.
 - The frontend may also keep non-sensitive UI state (e.g. language preference) in
   the browser.

@@ -2,6 +2,7 @@
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod accounts_introspection_tests;
+pub mod client_ip;
 pub mod content_negotiation;
 pub mod error;
 #[cfg(test)]
@@ -15,6 +16,8 @@ mod oidc_provider_tests;
 pub mod openapi;
 #[cfg(test)]
 mod passkey_tests;
+/// Background reasoning jobs (`?async=true`).
+pub mod reasoning_jobs;
 #[cfg(test)]
 mod role_visibility_tests;
 pub mod routes;
@@ -22,6 +25,7 @@ pub mod routes;
 mod security_regression_tests;
 #[cfg(test)]
 mod security_tests;
+pub(crate) mod write_effects;
 
 #[cfg(feature = "text-search")]
 use crate::text_search::TextIndex;
@@ -44,7 +48,7 @@ use crate::prefixes::PrefixRegistry;
 use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_routes};
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
-use axum::extract::{ConnectInfo, DefaultBodyLimit};
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
@@ -62,63 +66,22 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-/// IP key extractor that checks X-Forwarded-For / X-Real-IP headers first (for reverse proxies
-/// and Docker deployments), then falls back to the TCP peer address.
+/// Rate-limiter key: the client IP from [`client_ip::resolve`].
 ///
 /// H-2: XFF/X-Real-IP headers are only trusted when the TCP peer IP falls within one of the
-/// configured `trusted_cidrs`. This prevents attackers from spoofing their IP by injecting
+/// configured trusted proxies. This prevents attackers from spoofing their IP by injecting
 /// an arbitrary X-Forwarded-For header.
 #[derive(Clone)]
 struct SmartIpExtractor {
-    trusted_cidrs: Vec<IpNet>,
+    trusted: client_ip::TrustedProxies,
 }
 
 impl KeyExtractor for SmartIpExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<IpAddr, GovernorError> {
-        // 3. TCP peer address (available when using into_make_service_with_connect_info)
-        let peer_ip: Option<IpAddr> = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip());
-
-        let peer_is_trusted = peer_ip
-            .map(|ip| self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip)))
-            .unwrap_or(false);
-
-        if peer_is_trusted {
-            // 1. X-Forwarded-For. Walk the chain RIGHT-to-LEFT, skipping trusted
-            //    proxy hops; the first untrusted address is the real client. The
-            //    left-most entry is fully client-controlled, so trusting it would let
-            //    a client behind the proxy forge `X-Forwarded-For: <victim>` to
-            //    attribute their request load to (and rate-limit-lock-out) another IP,
-            //    or rotate forged IPs to evade their own limit.
-            if let Some(xff) = req.headers().get("x-forwarded-for") {
-                if let Ok(val) = xff.to_str() {
-                    for entry in val.rsplit(',') {
-                        if let Ok(ip) = entry.trim().parse::<IpAddr>() {
-                            let entry_trusted =
-                                self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip));
-                            if !entry_trusted {
-                                return Ok(ip);
-                            }
-                        }
-                    }
-                }
-            }
-            // 2. X-Real-IP
-            if let Some(xri) = req.headers().get("x-real-ip") {
-                if let Ok(val) = xri.to_str() {
-                    if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                        return Ok(ip);
-                    }
-                }
-            }
-        }
-
-        // Use TCP peer IP directly (not behind a trusted proxy)
-        if let Some(ip) = peer_ip {
+        let peer = client_ip::peer_ip(req.extensions());
+        if let Some(ip) = client_ip::resolve(req.headers(), peer, &self.trusted) {
             return Ok(ip);
         }
         // Fallback: bucket all unidentifiable clients together rather than hard-erroring.
@@ -126,9 +89,49 @@ impl KeyExtractor for SmartIpExtractor {
     }
 }
 
+/// The rate limiter's error response. We shape the 429 ourselves: tower_governor's
+/// default only sets its own `x-ratelimit-after` header, so standards-compliant
+/// clients (and our frontend's fetchRetry429) never saw a `Retry-After` to honor
+/// and surfaced "Too Many Requests! Wait for 1s" as an error.
+fn rate_limit_response(err: GovernorError) -> axum::response::Response {
+    match err {
+        GovernorError::TooManyRequests { wait_time, headers } => {
+            let mut resp = axum::response::Response::new(axum::body::Body::from(format!(
+                "Rate limit reached — retry in {wait_time}s."
+            )));
+            *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+            if let Some(h) = headers {
+                *resp.headers_mut() = h;
+            }
+            let secs = HeaderValue::from_str(&wait_time.to_string())
+                .unwrap_or(HeaderValue::from_static("1"));
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs);
+            resp
+        }
+        GovernorError::UnableToExtractKey => {
+            let mut resp = axum::response::Response::new(axum::body::Body::from(
+                "Unable to extract rate-limit key".to_string(),
+            ));
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp
+        }
+        GovernorError::Other { code, msg, headers } => {
+            let mut resp = axum::response::Response::new(axum::body::Body::from(
+                msg.unwrap_or_else(|| "rate limiter error".to_string()),
+            ));
+            *resp.status_mut() = code;
+            if let Some(h) = headers {
+                *resp.headers_mut() = h;
+            }
+            resp
+        }
+    }
+}
+
 /// Build a CORS layer from a comma-separated list of allowed origins.
 ///
-/// Three modes, selected by the `CORS_ORIGINS` value:
+/// Three modes, selected by the `OTS_CORS_ORIGINS` value:
 /// * empty — same-origin only (no `Access-Control-Allow-Origin` is emitted).
 /// * an explicit comma-separated list — only those origins are reflected, with
 ///   credentials. The tightest option; prefer it in production.
@@ -143,9 +146,11 @@ impl KeyExtractor for SmartIpExtractor {
 /// **is** a real ambient credential. What keeps mirror mode safe is that both session
 /// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
 /// withholds them on every cross-site request — even a credentialed `fetch` to a
-/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
-/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
-/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// mirrored origin. (Two short-lived sign-in nonces are not `Strict`: `oauth_state`
+/// (`SameSite=Lax`, path `/api/auth/oauth`) and `saml_state` (`SameSite=None; Secure`
+/// over HTTPS, because the IdP returns to the ACS with a cross-site POST; path
+/// `/api/auth/saml`). Each only binds a pending sign-in to the browser that started it,
+/// is consumed once, and confers no access; there is no HTTP Basic auth.) A hostile origin therefore cannot make the browser attach a usable
 /// credential, and cannot forge the bearer header — so it gains nothing it could not
 /// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
 /// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
@@ -185,7 +190,7 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
     // safety rationale on this fn's doc comment.
     if origins.contains(&"*") {
         tracing::warn!(
-            "CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
+            "OTS_CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
              (mirror mode). Safe only while both session cookies stay SameSite=Strict (the \
              browser then withholds them cross-site, leaving the unforgeable Authorization \
              bearer token as the only cross-origin credential). For a tighter posture in \
@@ -208,7 +213,7 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
             .collect();
         if allowed.is_empty() {
             tracing::error!(
-                "CORS_ORIGINS set but no valid origins parsed; allowing same-origin only."
+                "OTS_CORS_ORIGINS set but no valid origins parsed; allowing same-origin only."
             );
             return layer;
         }
@@ -269,6 +274,15 @@ pub struct AppState {
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
+    /// Whether the bundled web UI is served (`--serve-frontend` /
+    /// `OTS_FRONTEND_ENABLED`, as clap parsed it). The routes that share a path with
+    /// a client-side route (`/`, `/sparql`) read this rather than the
+    /// environment, so the flag and the variable cannot disagree.
+    pub serve_frontend: bool,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (`OTS_TRUSTED_PROXY_CIDRS`).
+    /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
+    /// limiter, the audit log and the LLM guard all derive the client IP alike.
+    pub trusted_proxies: client_ip::TrustedProxies,
     /// Bounds concurrent browse query execution so a flood of browse requests
     /// cannot monopolise the `spawn_blocking` thread pool and starve other work.
     pub browse_semaphore: Arc<tokio::sync::Semaphore>,
@@ -301,6 +315,11 @@ pub struct AppState {
     /// Vocabulary term search engine (vocab-search feature).
     #[cfg(feature = "vocab-search")]
     pub vocab_engine: Option<Arc<crate::vocab_search::index::VocabSearchEngine>>,
+    /// The OWL 2 DL backend configuration (`OTS_DL_BACKEND`, …).
+    pub dl: Arc<crate::reasoning::dl_config::DlConfig>,
+    /// Every setting, validated at startup ([`crate::config`]). The server's
+    /// is the snapshot `main` installed; a test state's is the live view.
+    pub config: Arc<crate::config::Config>,
 }
 
 /// Construct a minimal `AppState` for tests (unit and integration).
@@ -336,6 +355,8 @@ impl AppState {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            serve_frontend: true,
+            trusted_proxies: client_ip::TrustedProxies::default(),
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
             #[cfg(feature = "text-search")]
@@ -349,6 +370,8 @@ impl AppState {
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            dl: Default::default(),
+            config: crate::config::current().clone(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -371,6 +394,8 @@ impl AppState {
     #[inline]
     pub fn mark_vocab_registry_dirty(&self) {
         self.vocab_registry_dirty.store(true, Ordering::Relaxed);
+        // The registry's published versions feed the readable-graph set too.
+        self.auth_db.invalidate_accessible_graphs_cache();
     }
 
     /// Rebuild the Tantivy index if it has been marked dirty since the last sync.
@@ -389,7 +414,7 @@ impl AppState {
     /// the async-safe entry point.
     #[cfg(feature = "text-search")]
     pub fn sync_text_index_if_dirty(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
         let Some(ref idx) = self.text_index else {
@@ -399,20 +424,47 @@ impl AppState {
             .text_sync_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
-        // Cleared *before* the rebuild: a write landing mid-rebuild must leave
-        // the index dirty afterwards, not have its mark erased by the rebuild
+        // Both taken *before* the work: a write landing mid-sync must leave
+        // the index stale afterwards, not have its record erased by a sync
         // that could not have seen it.
-        self.text_dirty.store(false, Ordering::Relaxed);
-        match idx.reindex_from_store(&self.store) {
-            Ok(n) => tracing::debug!("Text index auto-synced: {} documents", n),
+        let touched = self.store.search_journal().take();
+        let full = self.text_dirty.swap(false, Ordering::Relaxed) || touched.all;
+        let result = if full {
+            idx.reindex_from_store(&self.store)
+        } else {
+            idx.apply_touched(&self.store, &touched)
+        };
+        match result {
+            Ok(n) => tracing::debug!(
+                "Text index auto-synced ({}): {} documents",
+                if full { "rebuild" } else { "touched graphs" },
+                n
+            ),
             Err(e) => {
                 tracing::warn!("Text index auto-sync failed: {}", e);
                 self.text_dirty.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Whether the text index may lag the store: marked dirty, or a store
+    /// write has been recorded in the store's search journal since the last
+    /// sync (see [`crate::store::search_journal`]). Every store write is
+    /// recorded there — LDP, RDF Patch, RML runs, SHACL rule output,
+    /// entailment, replication, LDES and repair included — so no writer has
+    /// to remember the index. Also switches the journal on: the first look
+    /// at the index starts the recording.
+    #[cfg(feature = "text-search")]
+    pub fn text_index_stale(&self) -> bool {
+        if self.text_index.is_none() {
+            return false;
+        }
+        let journal = self.store.search_journal();
+        journal.enable();
+        self.text_dirty.load(Ordering::Relaxed) || journal.has_pending()
     }
 
     /// Run [`AppState::sync_text_index_if_dirty`] on a detached thread.
@@ -424,7 +476,7 @@ impl AppState {
     /// after a write starts one rebuild thread, not one each.
     #[cfg(feature = "text-search")]
     pub fn spawn_text_index_sync(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) || self.text_index.is_none() {
+        if !self.text_index_stale() {
             return;
         }
         if self
@@ -571,7 +623,7 @@ impl AppState {
         let Some(ref idx) = self.text_index else {
             return sparql.to_string();
         };
-        if self.text_dirty.load(Ordering::Relaxed) {
+        if self.text_index_stale() {
             if sparql_fn::mentions_text_search(sparql) {
                 // `text:search` REQUIRES the index — its expansion IS the result
                 // set — so this query waits for the sync.
@@ -608,6 +660,12 @@ impl axum::extract::FromRef<AppState> for CookieConfig {
         CookieConfig {
             secure: state.secure_cookies,
         }
+    }
+}
+
+impl axum::extract::FromRef<AppState> for client_ip::TrustedProxies {
+    fn from_ref(state: &AppState) -> Self {
+        state.trusted_proxies.clone()
     }
 }
 
@@ -676,14 +734,29 @@ impl axum::extract::FromRef<AppState> for OidcProviderState {
 /// response and fills the headers in when they are missing. A plain (non-preflight)
 /// `OPTIONS` still reaches the handler, which sets them — `accept-post` is then
 /// already present and this is a no-op. The values match `ldp::handler::ldp_options`.
+/// The `Link: rel="acl"` every LDP response carries is filled in the same way.
 async fn ldp_options_capabilities(
+    axum::extract::State(state): axum::extract::State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let is_ldp_options = req.method() == Method::OPTIONS && req.uri().path().starts_with("/ldp/");
+    let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
     if is_ldp_options && !resp.headers().contains_key("accept-post") {
         let headers = resp.headers_mut();
+        #[cfg(feature = "ldp")]
+        if let Some(iri) = crate::ldp::wac::iri_for_request_path(&state.base_url, &path) {
+            let acl = match crate::ldp::wac::governed_resource(&iri) {
+                Some(_) => iri.clone(),
+                None => crate::ldp::wac::acl_iri(&iri),
+            };
+            if let Ok(v) = HeaderValue::from_str(&format!("<{acl}>; rel=\"acl\"")) {
+                headers.insert(HeaderName::from_static("link"), v);
+            }
+        }
+        #[cfg(not(feature = "ldp"))]
+        let _ = (&state, &path);
         headers.insert(
             axum::http::header::ALLOW,
             HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
@@ -721,6 +794,23 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    let mut state = state;
+    let trusted_proxies = client_ip::TrustedProxies::new(trusted_cidrs);
+    state.trusted_proxies = trusted_proxies.clone();
+
+    // The graphs a principal may read include those of the model registry's
+    // published versions (a public entry's to everyone). The registry lives
+    // in the store, which the identity database cannot see, so it is handed
+    // the lookup here, where both are at hand: every read path that scopes
+    // by `get_accessible_graph_iris` (`/sparql`, the Graph Store, the SHACL
+    // Studio, dereferencing) then agrees with the data-model API.
+    {
+        let store = state.store.clone();
+        state.auth_db.set_registry_graph_source(Arc::new(move || {
+            crate::data_models::registry::published_version_graphs(&store)
+        }));
+    }
+
     // What a prefix means on this deployment is configuration, held in the
     // identity database and answered from an in-memory overlay. Load it here,
     // where the routes that answer with it are assembled: a router over an
@@ -738,18 +828,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // replenish *period* to n seconds (one token every n seconds), NOT n tokens per
     // second. So `per_second(6)` means one request per 6s, i.e. 10/min sustained.
     //
-    // Per-IP rate limiting can be relaxed by setting `RATE_LIMIT_DISABLED=1` (or
-    // `=true`). This is for trusted/internal deployments and the e2e/CI harness,
-    // which drives many requests from a single IP and would otherwise trip the
-    // brute-force and runaway-query limiters. SECURE BY DEFAULT: when the var is
-    // unset the production quotas below apply unchanged; when set, every tier gets
-    // an effectively-unlimited burst so legitimate automation is never throttled.
-    let disable_rate_limit = std::env::var("RATE_LIMIT_DISABLED")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    // Per-IP rate limiting can be relaxed with `OTS_RATE_LIMIT_ENABLED=false`
+    // (refused under OTS_ENV=production). This is for trusted/internal
+    // deployments and the e2e/CI harness, which drives many requests from a
+    // single IP and would otherwise trip the brute-force and runaway-query
+    // limiters. SECURE BY DEFAULT: unset, the production quotas below apply
+    // unchanged; off, every tier gets an effectively-unlimited burst so
+    // legitimate automation is never throttled.
+    let disable_rate_limit = !state.config.get(&crate::config::RATE_LIMIT_ENABLED);
     if disable_rate_limit {
         tracing::warn!(
-            "RATE_LIMIT_DISABLED is set — per-IP rate limiting is effectively OFF. \
+            "OTS_RATE_LIMIT_ENABLED is false — per-IP rate limiting is effectively OFF. \
              Intended for trusted/internal or test deployments only; never enable on a public server."
         );
     }
@@ -764,47 +853,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         Arc::new(
             GovernorConfigBuilder::default()
                 .key_extractor(SmartIpExtractor {
-                    trusted_cidrs: trusted_cidrs.clone(),
+                    trusted: trusted_proxies.clone(),
                 })
                 .per_second(period_secs)
                 .burst_size(burst)
-                // Shape the 429 ourselves: tower_governor's default only sets its
-                // own `x-ratelimit-after` header, so standards-compliant clients
-                // (and our frontend's fetchRetry429) never saw a `Retry-After` to
-                // honor and surfaced "Too Many Requests! Wait for 1s" as an error.
-                .error_handler(|err| match err {
-                    GovernorError::TooManyRequests { wait_time, headers } => {
-                        let mut resp = axum::response::Response::new(axum::body::Body::from(
-                            format!("Rate limit reached — retry in {wait_time}s."),
-                        ));
-                        *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-                        if let Some(h) = headers {
-                            *resp.headers_mut() = h;
-                        }
-                        let secs = HeaderValue::from_str(&wait_time.to_string())
-                            .unwrap_or(HeaderValue::from_static("1"));
-                        resp.headers_mut()
-                            .insert(axum::http::header::RETRY_AFTER, secs);
-                        resp
-                    }
-                    GovernorError::UnableToExtractKey => {
-                        let mut resp = axum::response::Response::new(axum::body::Body::from(
-                            "Unable to extract rate-limit key".to_string(),
-                        ));
-                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                        resp
-                    }
-                    GovernorError::Other { code, msg, headers } => {
-                        let mut resp = axum::response::Response::new(axum::body::Body::from(
-                            msg.unwrap_or_else(|| "rate limiter error".to_string()),
-                        ));
-                        *resp.status_mut() = code;
-                        if let Some(h) = headers {
-                            *resp.headers_mut() = h;
-                        }
-                        resp
-                    }
-                })
                 .finish()
                 .unwrap(),
         )
@@ -820,7 +872,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // content-kind checks, ontology loads, graph expansions, previews), and the
     // old 15-burst tripped real users mid-click. A runaway query loop still gets
     // cut off within seconds, and clients are told when to come back via
-    // Retry-After (see make_rate_conf's error_handler).
+    // Retry-After (see rate_limit_response).
     let sparql_rate_conf = make_rate_conf(1, 40);
 
     // Bulk import: a single authenticated upload may legitimately ship many
@@ -829,6 +881,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // refill is deliberately slow, one token every 10s (6/min), because each import
     // is heavy: a bigger burst than SPARQL, but a tighter sustained rate.
     let bulk_import_rate_conf = make_rate_conf(10, 30);
+
+    // Public map / 3D viewer surface (viewer feed, geo stats, asset download,
+    // 3D Tiles): anonymous-capable and expensive per request, so it carries
+    // the SPARQL quota (60/min sustained, burst 40) in its own bucket — one
+    // viewer open fires a handful of these, and browsing a map must not eat
+    // the caller's SPARQL allowance.
+    let viewer_rate_conf = make_rate_conf(1, 40);
+
+    // Feedback reports: one token a minute with a burst of 5 — enough to send a
+    // few reports back to back, too slow to flood the admins' inbox. A per-user
+    // daily cap in the handler backs this up for users on many addresses.
+    let feedback_rate_conf = make_rate_conf(60, 5);
 
     // Public auth routes (no auth required) — rate-limited against brute force
     let auth_public_routes = Router::new()
@@ -855,9 +919,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             post(crate::auth::passkey::login_finish),
         )
         .route("/api/auth/features", get(handlers::auth_features))
-        .route_layer(GovernorLayer {
-            config: auth_rate_conf.clone(),
-        })
+        .route_layer(GovernorLayer::new(auth_rate_conf.clone()).error_handler(rate_limit_response))
         .with_state(state.clone());
 
     // ── This store as an OIDC PROVIDER (Unified Accounts) ────────────────────
@@ -876,9 +938,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/oauth/logout",
             get(crate::auth::oidc_provider::end_session),
         )
-        .route_layer(GovernorLayer {
-            config: auth_rate_conf.clone(),
-        })
+        .route_layer(GovernorLayer::new(auth_rate_conf.clone()).error_handler(rate_limit_response))
         .with_state(state.clone());
     // Code minting happens on the signed-in session (the /oauth/authorize SPA
     // route drives it) — auth required, same strict limiter.
@@ -892,9 +952,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .route_layer(GovernorLayer {
-            config: auth_rate_conf.clone(),
-        })
+        .route_layer(GovernorLayer::new(auth_rate_conf.clone()).error_handler(rate_limit_response))
         .with_state(state.clone());
 
     // Sensitive protected auth routes: require auth AND the brute-force limiter.
@@ -927,7 +985,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             post(crate::auth::passkey::register_finish),
         )
         .route(
-            "/api/auth/passkeys/:credential_id",
+            "/api/auth/passkeys/{credential_id}",
             delete(crate::auth::passkey::delete_passkey),
         )
         .route(
@@ -935,15 +993,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(handlers::list_api_tokens).post(handlers::create_api_token),
         )
         .route(
-            "/api/auth/tokens/:token_id",
+            "/api/auth/tokens/{token_id}",
             delete(handlers::revoke_api_token),
         )
         // Self-service account management (deactivate / permanently delete own account)
         .route("/api/auth/account", delete(handlers::self_deactivate))
         .route("/api/auth/account/purge", post(handlers::self_purge))
-        .route_layer(GovernorLayer {
-            config: auth_rate_conf.clone(),
-        })
+        .route_layer(GovernorLayer::new(auth_rate_conf.clone()).error_handler(rate_limit_response))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -970,21 +1026,21 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(handlers::admin_list_users).post(handlers::admin_create_user),
         )
         .route(
-            "/api/admin/users/:user_id",
+            "/api/admin/users/{user_id}",
             get(handlers::admin_get_user)
                 .put(handlers::admin_update_user)
                 .delete(handlers::admin_delete_user),
         )
         .route(
-            "/api/admin/users/:user_id/identities",
+            "/api/admin/users/{user_id}/identities",
             get(handlers::admin_list_user_identities),
         )
         .route(
-            "/api/admin/users/:user_id/reset-password",
+            "/api/admin/users/{user_id}/reset-password",
             post(handlers::admin_reset_password),
         )
         .route(
-            "/api/admin/users/:user_id/purge",
+            "/api/admin/users/{user_id}/purge",
             post(handlers::admin_purge_user),
         )
         .route(
@@ -1004,14 +1060,43 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::backup::admin_list_backups).post(crate::backup::admin_create_backup),
         )
         .route(
-            "/api/admin/backup/:id/verify",
+            "/api/admin/backup/{id}/verify",
             post(crate::backup::admin_verify_backup),
+        )
+        .route(
+            "/api/admin/backup/status",
+            get(crate::backup::admin_backup_status),
+        )
+        .route(
+            "/api/admin/backup/{id}/restore",
+            post(crate::backup::admin_stage_restore),
+        )
+        .route(
+            "/api/admin/backup/restore",
+            delete(crate::backup::admin_cancel_restore),
+        )
+        .route(
+            "/api/admin/ldes/syncs",
+            get(crate::ldes::client::admin_list_syncs)
+                .delete(crate::ldes::client::admin_forget_sync),
         )
         .route(
             "/api/admin/llm/requests",
             get(llm_guard::admin_list_llm_requests),
         )
         .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
+        .route(
+            "/api/admin/config",
+            get(crate::config::admin::admin_get_config),
+        )
+        .route(
+            "/api/admin/settings",
+            get(crate::config::admin::admin_list_settings),
+        )
+        .route(
+            "/api/admin/settings/{name}",
+            put(crate::config::admin::admin_set_setting),
+        )
         .route(
             "/api/admin/settings/guest-registration",
             get(handlers::admin_get_guest_registration).put(handlers::admin_set_guest_registration),
@@ -1022,7 +1107,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .post(crate::auth::oidc_provider::admin_upsert_client),
         )
         .route(
-            "/api/admin/oauth-clients/:client_id",
+            "/api/admin/oauth-clients/{client_id}",
             delete(crate::auth::oidc_provider::admin_delete_client),
         )
         .route_layer(middleware::from_fn(require_admin))
@@ -1063,7 +1148,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(handlers::list_organisations).post(handlers::create_organisation),
         )
         .route(
-            "/api/organisations/:org_id",
+            "/api/organisations/{org_id}",
             get(handlers::get_organisation)
                 .put(handlers::update_organisation)
                 .delete(handlers::delete_organisation),
@@ -1078,29 +1163,29 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Organisation & Group sub-routes (auth required for all methods)
     let org_routes = Router::new()
         .route(
-            "/api/organisations/:org_id/members",
+            "/api/organisations/{org_id}/members",
             get(handlers::list_org_members).post(handlers::add_org_member),
         )
         .route(
-            "/api/organisations/:org_id/members/:user_id",
+            "/api/organisations/{org_id}/members/{user_id}",
             delete(handlers::remove_org_member).put(handlers::update_org_member_role),
         )
         .route(
-            "/api/organisations/:org_id/groups",
+            "/api/organisations/{org_id}/groups",
             post(handlers::create_group).get(handlers::list_groups),
         )
         .route(
-            "/api/organisations/:org_id/groups/:group_id",
+            "/api/organisations/{org_id}/groups/{group_id}",
             get(handlers::get_group)
                 .put(handlers::update_group)
                 .delete(handlers::delete_group),
         )
         .route(
-            "/api/organisations/:org_id/groups/:group_id/members",
+            "/api/organisations/{org_id}/groups/{group_id}/members",
             get(handlers::list_group_members).post(handlers::add_group_member),
         )
         .route(
-            "/api/organisations/:org_id/groups/:group_id/members/:user_id",
+            "/api/organisations/{org_id}/groups/{group_id}/members/{user_id}",
             delete(handlers::remove_group_member),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1129,7 +1214,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let user_routes = Router::new()
         .route("/api/users", get(handlers::list_users))
         .route(
-            "/api/users/:user_id",
+            "/api/users/{user_id}",
             get(handlers::get_user).delete(handlers::delete_user),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1147,83 +1232,164 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(handlers::list_datasets).post(handlers::create_dataset),
         )
         .route(
-            "/api/datasets/:dataset_id",
+            "/api/datasets/{dataset_id}",
             get(handlers::get_dataset)
                 .put(handlers::update_dataset)
                 .delete(handlers::delete_dataset),
         )
         .route(
-            "/api/datasets/:dataset_id/permissions/me",
+            "/api/datasets/{dataset_id}/permissions/me",
             get(handlers::dataset_permissions_me),
         )
         .route(
-            "/api/datasets/:dataset_id/graphs",
+            "/api/datasets/{dataset_id}/graphs",
             get(handlers::list_dataset_graphs)
                 .post(handlers::add_dataset_graph)
                 .patch(handlers::patch_dataset_graph_role)
                 .delete(handlers::remove_dataset_graph),
         )
         .route(
-            "/api/datasets/:dataset_id/conformance",
+            "/api/datasets/{dataset_id}/conformance",
             get(crate::conformance::get_dataset_conformance),
         )
         .route(
-            "/api/datasets/:dataset_id/provenance",
+            "/api/datasets/{dataset_id}/provenance",
             get(crate::provenance::get_dataset_provenance),
         )
         .route(
-            "/api/datasets/:dataset_id/ldes",
+            "/api/datasets/{dataset_id}/ldes",
             get(crate::ldes::publish::get_stream).put(crate::ldes::publish::put_stream),
         )
         .route(
-            "/api/datasets/:dataset_id/ldes/nodes/:n",
+            "/api/datasets/{dataset_id}/ldes/config",
+            get(crate::ldes::publish::get_config),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/ldes/nodes/{n}",
             get(crate::ldes::publish::get_node),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/ldes/members/{member_id}",
+            get(crate::ldes::publish::get_member),
         )
         .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
         .route(
-            "/api/datasets/:dataset_id/properties/state",
+            "/api/datasets/{dataset_id}/properties",
+            get(crate::property_states::list_properties),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/state",
             post(crate::property_states::set_state),
         )
         .route(
-            "/api/datasets/:dataset_id/properties/history",
+            "/api/datasets/{dataset_id}/properties/delete",
+            post(crate::property_states::delete_property),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/restore",
+            post(crate::property_states::restore_property),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/export",
+            get(crate::property_states::export_states),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/import",
+            post(crate::property_states::import_states),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/validate",
+            get(crate::property_states::validate_states),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/calculations",
+            get(crate::property_states::list_calculations)
+                .post(crate::property_states::create_calculation),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/calculations/{calc}",
+            get(crate::property_states::get_calculation)
+                .post(crate::property_states::post_calculation)
+                .put(crate::property_states::put_calculation)
+                .delete(crate::property_states::delete_calculation),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/calculations/{calc}/outdated",
+            get(crate::property_states::outdated_calculation),
+        )
+        .route(
+            "/api/properties/profile",
+            get(crate::property_states::profile_shapes),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/properties/history",
             get(crate::property_states::history),
         )
         .route(
-            "/api/datasets/:dataset_id/properties/as-of",
+            "/api/datasets/{dataset_id}/properties/as-of",
             get(crate::property_states::as_of),
         )
         .route(
-            "/api/datasets/:dataset_id/patch",
-            post(crate::rdf_patch::apply_patch_handler),
+            "/api/datasets/{dataset_id}/prefixes",
+            get(crate::prefixes::dataset_table::list).put(crate::prefixes::dataset_table::replace),
         )
         .route(
-            "/api/datasets/:dataset_id/entailment",
+            "/api/datasets/{dataset_id}/prefixes/{label}",
+            put(crate::prefixes::dataset_table::put_one)
+                .delete(crate::prefixes::dataset_table::delete_one),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/log",
+            get(crate::rdf_patch_log::describe_log).post(crate::rdf_patch_log::append_patch),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/log/init",
+            get(crate::rdf_patch_log::get_init),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/log/current",
+            get(crate::rdf_patch_log::get_current),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/log/patch/{reference}",
+            get(crate::rdf_patch_log::get_patch),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/entailment",
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
         .route(
-            "/api/datasets/:dataset_id/containers/import",
-            post(crate::containers::import_container),
+            "/api/datasets/{dataset_id}/rules",
+            get(crate::dataset_rules::list_rules).post(crate::dataset_rules::create_rules),
         )
         .route(
-            "/api/datasets/:dataset_id/containers/export",
+            "/api/datasets/{dataset_id}/rules/run",
+            post(crate::dataset_rules::run_rules),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/rules/{set_id}",
+            put(crate::dataset_rules::update_rules).delete(crate::dataset_rules::delete_rules),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/containers/export",
             get(crate::containers::export_container),
         )
         .route(
-            "/api/datasets/:dataset_id/commits",
+            "/api/datasets/{dataset_id}/commits",
             get(handlers::list_dataset_commits),
         )
         .route(
-            "/api/datasets/:dataset_id/services",
+            "/api/datasets/{dataset_id}/services",
             get(handlers::list_services).post(handlers::create_service),
         )
         .route(
-            "/api/datasets/:dataset_id/services/:service_id",
+            "/api/datasets/{dataset_id}/services/{service_id}",
             get(handlers::get_service)
                 .put(handlers::update_service)
                 .delete(handlers::delete_service),
         )
         .route(
-            "/api/datasets/:dataset_id/services/:service_id/graphs",
+            "/api/datasets/{dataset_id}/services/{service_id}/graphs",
             get(handlers::list_service_graphs)
                 .post(handlers::add_service_graph)
                 .delete(handlers::remove_service_graph),
@@ -1237,28 +1403,40 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
 
     // Dataset routes that have no conflicting public variant (auth required for all methods)
     let dataset_protected_routes = Router::new()
+        // RDF Patch apply. It declares an authenticated user, so it lives here:
+        // under optional_auth an anonymous POST reached the handler and failed
+        // its extractor with a 500 instead of a 401.
+        // The repair layer's opt-in `if-base-*` preconditions run after
+        // `require_auth`, so they see the caller.
         .route(
-            "/api/datasets/:dataset_id/shacl",
+            "/api/datasets/{dataset_id}/patch",
+            post(crate::rdf_patch::apply_patch_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::repair::apply::patch_route_layer,
+            )),
+        )
+        .route(
+            "/api/datasets/{dataset_id}/shacl",
             put(handlers::update_dataset_shacl),
         )
         .route(
-            "/api/datasets/:dataset_id/role",
+            "/api/datasets/{dataset_id}/role",
             put(handlers::update_dataset_role),
         )
         .route(
-            "/api/datasets/:dataset_id/access",
+            "/api/datasets/{dataset_id}/access",
             get(handlers::list_access).post(handlers::grant_access),
         )
         .route(
-            "/api/datasets/:dataset_id/access/:user_id",
+            "/api/datasets/{dataset_id}/access/{user_id}",
             delete(handlers::revoke_access),
         )
         .route(
-            "/api/datasets/:dataset_id/grants",
+            "/api/datasets/{dataset_id}/grants",
             get(handlers::list_dataset_grants).put(handlers::set_dataset_grant),
         )
         .route(
-            "/api/datasets/:dataset_id/grants/:principal_type/:principal_id",
+            "/api/datasets/{dataset_id}/grants/{principal_type}/{principal_id}",
             delete(handlers::revoke_dataset_grant),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1275,23 +1453,23 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // headroom for the multipart envelope so a full-size file isn't refused at the transport edge.
     let asset_routes = Router::new()
         .route(
-            "/api/datasets/:dataset_id/assets",
+            "/api/datasets/{dataset_id}/assets",
             get(routes::list_assets).post(routes::upload_asset),
         )
         .route(
-            "/api/datasets/:dataset_id/assets/:asset_id",
+            "/api/datasets/{dataset_id}/assets/{asset_id}",
             get(routes::download_asset)
                 .delete(routes::delete_asset)
                 .patch(routes::patch_asset_metadata),
         )
         .route(
-            "/api/datasets/:dataset_id/assets/:asset_id/visibility",
+            "/api/datasets/{dataset_id}/assets/{asset_id}/visibility",
             put(routes::update_asset_visibility),
         )
         // File-manager folders: listing is read-only (same anonymous reach as the
         // asset list), the rest create / rename-move / delete.
         .route(
-            "/api/datasets/:dataset_id/folders",
+            "/api/datasets/{dataset_id}/folders",
             get(routes::list_asset_folders)
                 .post(routes::create_asset_folder)
                 .patch(routes::rename_asset_folder)
@@ -1315,7 +1493,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // limiter (the global /sparql endpoint already does) to bound query-DoS.
     let dataset_sparql_routes = Router::new()
         .route(
-            "/api/datasets/:dataset_id/services/:service_slug/sparql",
+            "/api/datasets/{dataset_id}/services/{service_slug}/sparql",
             get(routes::dataset_sparql_query).post(routes::dataset_sparql_post),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1323,9 +1501,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .with_state(state.clone());
 
     // User avatar — upload requires auth, download is public
@@ -1339,21 +1517,24 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .with_state(state.clone());
 
     let avatar_get_routes = Router::new()
-        .route("/api/users/:user_id/avatar", get(handlers::get_user_avatar))
+        .route(
+            "/api/users/{user_id}/avatar",
+            get(handlers::get_user_avatar),
+        )
         .with_state(state.clone());
 
     // Org image
     let org_image_routes = Router::new()
         .route(
-            "/api/organisations/:org_id/image",
+            "/api/organisations/{org_id}/image",
             put(handlers::upload_org_image).get(handlers::get_org_image),
         )
         .route(
-            "/api/organisations/:org_id/banner",
+            "/api/organisations/{org_id}/banner",
             put(handlers::upload_org_banner).get(handlers::get_org_banner),
         )
         .route(
-            "/api/organisations/:org_id/banner-preset",
+            "/api/organisations/{org_id}/banner-preset",
             put(handlers::set_org_banner_preset),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1366,36 +1547,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Dataset image
     let dataset_image_routes = Router::new()
         .route(
-            "/api/datasets/:dataset_id/image",
+            "/api/datasets/{dataset_id}/image",
             put(handlers::upload_dataset_image).get(handlers::get_dataset_image),
         )
         .route(
-            "/api/datasets/:dataset_id/banner",
+            "/api/datasets/{dataset_id}/banner",
             put(handlers::upload_dataset_banner).get(handlers::get_dataset_banner),
         )
         .route(
-            "/api/datasets/:dataset_id/banner-preset",
+            "/api/datasets/{dataset_id}/banner-preset",
             put(handlers::set_dataset_banner_preset),
-        )
-        // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
-        // Optional auth so public datasets are viewable anonymously.
-        .route(
-            "/api/datasets/:dataset_id/viewer-feed",
-            get(routes::viewer_feed),
-        )
-        // Geo capability summary (gates the map / 3D-viewer UI affordances).
-        .route(
-            "/api/datasets/:dataset_id/geo-stats",
-            get(routes::geo_stats),
-        )
-        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
-        // one `/geo-stats` request per dataset (the triple browser's Map gate).
-        .route("/api/geo-stats", get(routes::geo_stats_batch))
-        // Anonymous-capable asset download (dataset visibility decides) — the
-        // viewer fetches e.g. the original IFC file through this without auth.
-        .route(
-            "/api/datasets/:dataset_id/assets/:asset_id/download",
-            get(routes::download_asset_public),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1404,22 +1565,54 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
+    // Map / 3D viewer reads, rate-limited (see `viewer_rate_conf`).
+    let viewer_routes = Router::new()
+        // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
+        // Optional auth so public datasets are viewable anonymously.
+        .route(
+            "/api/datasets/{dataset_id}/viewer-feed",
+            get(routes::viewer_feed),
+        )
+        // Geo capability summary (gates the map / 3D-viewer UI affordances).
+        .route(
+            "/api/datasets/{dataset_id}/geo-stats",
+            get(routes::geo_stats),
+        )
+        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
+        // one `/geo-stats` request per dataset (the triple browser's Map gate).
+        .route("/api/geo-stats", get(routes::geo_stats_batch))
+        // Anonymous-capable asset download (dataset visibility decides) — the
+        // viewer fetches e.g. the original IFC file through this without auth.
+        .route(
+            "/api/datasets/{dataset_id}/assets/{asset_id}/download",
+            get(routes::download_asset_public),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .route_layer(
+            GovernorLayer::new(viewer_rate_conf.clone()).error_handler(rate_limit_response),
+        )
+        .with_state(state.clone());
+
     // SHACL validation routes
     let shacl_routes = Router::new()
         .route(
-            "/api/datasets/:dataset_id/validate",
+            "/api/datasets/{dataset_id}/validate",
             post(routes::validate_dataset),
         )
         .route(
-            "/api/datasets/:dataset_id/validation/latest",
+            "/api/datasets/{dataset_id}/validation/latest",
             get(routes::get_latest_validation_run),
         )
         .route(
-            "/api/datasets/:dataset_id/validation/history",
+            "/api/datasets/{dataset_id}/validation/history",
             get(routes::get_validation_history),
         )
         .route(
-            "/api/datasets/:dataset_id/validation/runs/:run_id",
+            "/api/datasets/{dataset_id}/validation/runs/{run_id}",
             get(routes::get_validation_run),
         )
         .route(
@@ -1427,11 +1620,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             post(routes::list_latest_validation_runs),
         )
         .route(
-            "/api/datasets/:dataset_id/shapes",
+            "/api/datasets/{dataset_id}/shapes",
             get(routes::get_shapes).put(routes::put_shapes),
         )
         .route(
-            "/api/datasets/:dataset_id/infer",
+            "/api/datasets/{dataset_id}/infer",
             post(routes::infer_dataset),
         )
         .route("/api/shacl/detect-shapes", get(routes::detect_shapes))
@@ -1458,22 +1651,32 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // Repair proposals (docs/repair.md): beside /validate and /infer, behind
+    // the same token and endpoint-ACL gate.
+    let repair_routes = crate::repair::handlers::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // Internal prefix service (bundled prefix.cc/LOV snapshot + platform
     // registry) — anonymous, in-memory, rate-limited like every public
     // anonymous surface.
     let prefix_service_routes = crate::prefixes::routes::prefix_routes()
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .with_state(state.clone());
 
     // Vocabulary search service (catalog + term search + recommender).
     // optional_auth so owners also see their private registry entries in the
     // catalog; the shared term index and prefix overlay stay public-only.
     let vocab_service_routes = crate::vocab_search::routes::vocab_public_routes()
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1526,11 +1729,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // RML mapping routes (auth required)
     let rml_routes = Router::new()
         .route(
-            "/api/datasets/:dataset_id/mappings",
+            "/api/datasets/{dataset_id}/mappings",
             get(routes::get_rml_mapping).put(routes::put_rml_mapping),
         )
         .route(
-            "/api/datasets/:dataset_id/mappings/execute",
+            "/api/datasets/{dataset_id}/mappings/execute",
             post(routes::execute_rml_mapping),
         )
         // The standalone preview runs a mapping into a throwaway store and
@@ -1543,6 +1746,31 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Linked-document containers: import into a dataset, and validate without
+    // storing anything. Archives carry documents, so the body limit is the
+    // RDF-upload one (OTS_MAX_UPLOAD_BYTES), not the 8 MB default; the unpacker
+    // caps entries and the unpacked total on its own.
+    let container_routes = Router::new()
+        .route(
+            "/api/datasets/{dataset_id}/containers/import",
+            post(crate::containers::import_container),
+        )
+        .route(
+            "/api/containers/validate",
+            post(crate::containers::validate_container),
+        )
+        .route(
+            "/api/containers/profiles",
+            get(crate::containers::list_profiles),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(512)))
         .with_state(state.clone());
 
     // Triple browsing API (optional auth)
@@ -1570,9 +1798,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(llm_sparql::llm_routes())
         .merge(routes::graph_store_read_routes())
         .merge(routes::management_routes())
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1588,9 +1816,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // M-6: Generous 50 MB per-route body limit for RDF file uploads; rate-limited.
     let graph_store_write_routes = Router::new()
         .merge(routes::graph_store_write_routes())
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1603,9 +1831,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // 200 MB body limit (multi-file upload); rate-limited like other write paths.
     let bulk_import_routes = Router::new()
         .merge(crate::imports::routes::bulk_import_routes())
-        .route_layer(GovernorLayer {
-            config: bulk_import_rate_conf,
-        })
+        .route_layer(GovernorLayer::new(bulk_import_rate_conf).error_handler(rate_limit_response))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1618,9 +1844,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // M-6: 10 MB body limit for batch updates; rate-limited.
     let batch_update_routes = Router::new()
         .merge(routes::sparql_batch_routes())
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1632,12 +1858,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Linked data asset endpoint — public IRI, optional auth (public datasets accessible unauthenticated)
     let asset_ld_routes = Router::new()
         .route(
-            "/datasets/:dataset_id/assets/:asset_id",
+            "/datasets/{dataset_id}/assets/{asset_id}",
             axum::routing::get(routes::linked_data_asset),
         )
         // Typed-metadata JSON view — same optional-auth access control as the linked-data endpoint.
         .route(
-            "/api/datasets/:dataset_id/assets/:asset_id/metadata",
+            "/api/datasets/{dataset_id}/assets/{asset_id}/metadata",
             axum::routing::get(routes::asset_metadata),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -1736,9 +1962,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(saved_query_public_routes())
         // Anonymous-reachable parameterised SPARQL (`…/run`, `…/openapi.json`) — throttle like the
         // other expensive SPARQL groups so a single IP can't saturate the blocking pool for free.
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
+        .route_layer(
+            GovernorLayer::new(sparql_rate_conf.clone()).error_handler(rate_limit_response),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1788,7 +2014,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(acl_handlers::list_endpoint_acl_rules).post(acl_handlers::create_endpoint_acl_rule),
         )
         .route(
-            "/api/admin/acl/endpoints/:id",
+            "/api/admin/acl/endpoints/{id}",
             put(acl_handlers::update_endpoint_acl_rule)
                 .delete(acl_handlers::delete_endpoint_acl_rule),
         )
@@ -1797,7 +2023,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(acl_handlers::list_graph_acl_rules).post(acl_handlers::grant_graph_permission),
         )
         .route(
-            "/api/admin/acl/graphs/:id",
+            "/api/admin/acl/graphs/{id}",
             delete(acl_handlers::revoke_graph_permission),
         )
         .route(
@@ -1806,7 +2032,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .post(acl_handlers::create_triple_security_label),
         )
         .route(
-            "/api/admin/acl/triples/:id",
+            "/api/admin/acl/triples/{id}",
             delete(acl_handlers::delete_triple_security_label),
         )
         .route_layer(middleware::from_fn(require_admin))
@@ -1824,10 +2050,34 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::admin_list_providers).post(oauth_handlers::admin_create_provider),
         )
         .route(
-            "/api/admin/oauth/providers/:id",
+            "/api/admin/oauth/providers/{id}",
             get(oauth_handlers::admin_get_provider)
                 .put(oauth_handlers::admin_update_provider)
                 .delete(oauth_handlers::admin_delete_provider),
+        )
+        .route(
+            "/api/admin/oauth/saml-metadata",
+            post(oauth_handlers::admin_read_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/{id}/saml",
+            get(oauth_handlers::admin_saml_overview),
+        )
+        .route(
+            "/api/admin/oauth/providers/{id}/saml/metadata",
+            get(oauth_handlers::admin_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/{id}/saml/keys",
+            post(oauth_handlers::admin_create_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/{id}/saml/keys/{kid}/activate",
+            post(oauth_handlers::admin_activate_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/{id}/saml/keys/{kid}",
+            delete(oauth_handlers::admin_delete_saml_key),
         )
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(
@@ -1844,26 +2094,32 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::list_active_providers),
         )
         .route(
-            "/api/auth/oauth/:slug/authorize",
+            "/api/auth/oauth/{slug}/authorize",
             get(oauth_handlers::oidc_authorize),
         )
         .route(
-            "/api/auth/oauth/:slug/callback",
+            "/api/auth/oauth/{slug}/callback",
             get(oauth_handlers::oidc_callback),
         )
         .route(
-            "/api/auth/saml/:slug/metadata",
+            "/api/auth/saml/{slug}/login",
+            get(oauth_handlers::saml_login),
+        )
+        .route(
+            "/api/auth/saml/{slug}/metadata",
             get(oauth_handlers::saml_metadata),
         )
-        .route("/api/auth/saml/:slug/acs", post(oauth_handlers::saml_acs))
+        .route("/api/auth/saml/{slug}/acs", post(oauth_handlers::saml_acs))
+        .route(
+            "/api/auth/saml/{slug}/slo",
+            get(oauth_handlers::saml_slo_redirect).post(oauth_handlers::saml_slo_post),
+        )
         // Inject the OAuth session store as a layer extension
         .layer(axum::Extension(state.oauth_sessions.clone()))
         // Brute-force / DoS limiter on the unauthenticated SSO surface: `authorize`
         // triggers outbound OIDC discovery + creates server-side PKCE session state,
         // and `acs` parses signed XML — both are cheap-to-spam without a throttle.
-        .route_layer(GovernorLayer {
-            config: auth_rate_conf.clone(),
-        })
+        .route_layer(GovernorLayer::new(auth_rate_conf.clone()).error_handler(rate_limit_response))
         .with_state(state.clone());
 
     // In-app documentation API (optional auth; admin-only docs filtered + admin
@@ -1876,8 +2132,28 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
+    // Feedback: reporters read back their own reports; the admin inbox is
+    // admin-gated in-handler. Submitting has its own rate limit.
+    let feedback_submit_routes = crate::feedback::submit_routes()
+        .route_layer(GovernorLayer::new(feedback_rate_conf).error_handler(rate_limit_response))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+    let feedback_routes = crate::feedback::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     let mut router = Router::new()
         .merge(docs_routes)
+        .merge(feedback_submit_routes)
+        .merge(feedback_routes)
         .merge(auth_public_routes)
         .merge(oidc_provider_public_routes)
         .merge(oidc_provider_authorize_routes)
@@ -1895,14 +2171,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(avatar_get_routes)
         .merge(org_image_routes)
         .merge(dataset_image_routes)
+        .merge(viewer_routes)
         .merge(dataset_mixed_routes)
         .merge(dataset_protected_routes)
         .merge(asset_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
+        .merge(repair_routes)
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
+        .merge(container_routes)
         .merge(source_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
@@ -1948,7 +2227,8 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             .with_state(state.clone()),
     );
 
-    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable, in the
+    // viewer rate-limit bucket.
     #[cfg(feature = "geometry3d")]
     {
         let tiles3d_routes = Router::new()
@@ -1958,6 +2238,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 endpoint_acl_guard,
             ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .route_layer(
+                GovernorLayer::new(viewer_rate_conf.clone()).error_handler(rate_limit_response),
+            )
             .with_state(state.clone());
         router = router.merge(tiles3d_routes);
     }
@@ -1995,12 +2278,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         router = router.merge(swrl_auth_routes);
     }
 
-    // NOTE: only the OpenAPI JSON spec is served — there is no Swagger UI route.
-    // Rendering the UI needs utoipa-swagger-ui, whose axum integration has targeted
-    // axum 0.8 since its 8.x release; an axum 0.8 `Router` is a different type from
-    // ours and cannot be merged in. Serving the UI therefore depends on an axum 0.8
-    // migration, not on a swagger-ui bump. (The frontend ships its own viewer over
-    // this spec via `swagger-ui-dist`, so nothing is lost meanwhile.)
+    // NOTE: only the OpenAPI JSON spec is served — there is no server-side Swagger
+    // UI route. The frontend's API docs page renders this spec with
+    // `swagger-ui-dist`, scoped to the caller, so a utoipa-swagger-ui mount would
+    // only duplicate it.
     // optional_auth so the handler can tailor the spec to the caller: token-required
     // operations are hidden from anonymous callers, and Admin operations from non-admins.
     let openapi_doc_route = Router::new()
@@ -2057,7 +2338,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // Re-attach the LDP capability headers that the CORS preflight short-circuit
         // would otherwise drop. Must sit just outside the CORS layer so it runs on the
         // preflight response CORS produced (see `ldp_options_capabilities`).
-        .layer(middleware::from_fn(ldp_options_capabilities))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            ldp_options_capabilities,
+        ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             csp_value,
@@ -2172,9 +2456,9 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
 /// their security-header layers, and the static SPA fallback):
 ///
 ///  - `/embed/*` pages exist to be iframed by third-party sites, so they get
-///    `Content-Security-Policy: frame-ancestors <EMBED_FRAME_ANCESTORS>`
+///    `Content-Security-Policy: frame-ancestors <OTS_EMBED_FRAME_ANCESTORS>`
 ///    (default `*`) and no `X-Frame-Options`. Operators can restrict embedding
-///    to specific hosts (`EMBED_FRAME_ANCESTORS="https://example.com"`) or
+///    to specific hosts (`OTS_EMBED_FRAME_ANCESTORS="https://example.com"`) or
 ///    disable it (`"'none'"`).
 ///  - Every other response that carries NO CSP — which is exactly the static
 ///    SPA files, since they are served by the fallback service that the
@@ -2185,21 +2469,23 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
 /// API responses already carry the strict CSP from [`build_router`]; those are
 /// left untouched (except under `/embed`, a path no API route uses).
 async fn frame_policy_headers(
+    axum::extract::State(db): axum::extract::State<Arc<AuthDb>>,
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    static EMBED_ANCESTORS: std::sync::OnceLock<Option<HeaderValue>> = std::sync::OnceLock::new();
-    let ancestors = EMBED_ANCESTORS.get_or_init(|| {
-        let v = std::env::var("EMBED_FRAME_ANCESTORS").unwrap_or_else(|_| "*".to_string());
-        let v = v.trim().to_string();
-        if v.is_empty() || v == "'none'" || v == "none" {
-            None // embedding disabled — /embed falls through to the default policy
-        } else {
-            HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
-        }
-    });
-
     let is_embed = req.uri().path().starts_with("/embed");
+    // A runtime setting (an admin can change it without a restart), so it is
+    // read per /embed request; other paths never need it.
+    let ancestors = is_embed
+        .then(|| {
+            let v = crate::config::runtime::get(&db, &crate::config::EMBED_FRAME_ANCESTORS);
+            if v == "'none'" {
+                None // embedding disabled — /embed falls through to the default policy
+            } else {
+                HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
+            }
+        })
+        .flatten();
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
     // The SPA document can also leave through content-negotiating API routes
@@ -2211,10 +2497,7 @@ async fn frame_policy_headers(
     let spa_shell = headers.remove("x-ots-spa-shell").is_some();
     match ancestors {
         Some(allow) if is_embed => {
-            headers.insert(
-                HeaderName::from_static("content-security-policy"),
-                allow.clone(),
-            );
+            headers.insert(HeaderName::from_static("content-security-policy"), allow);
             headers.remove("x-frame-options");
         }
         _ => {
@@ -2245,62 +2528,71 @@ pub async fn run(
     auth_db: Arc<AuthDb>,
     jwt_config: Arc<JwtConfig>,
     object_store: Arc<ObjectStore>,
-    base_url: &str,
+    // Every setting, validated by `main` (the same snapshot it installed).
+    config: Arc<crate::config::Config>,
     addr: &str,
-    cors_origins: &str,
-    trusted_cidrs: Vec<IpNet>,
-    query_timeout_secs: u64,
-    write_timeout_secs: u64,
-    secure_cookies: bool,
-    serve_frontend: bool,
-    seed_dir: Option<std::path::PathBuf>,
-    // Opt-in fallback to any free port when `addr`'s port is already in use
-    // (--port-fallback / PORT_FALLBACK, default off — see the listener bind
-    // below). Upstream behavior when this is `false` is unchanged: a busy
-    // port still refuses to start.
-    port_fallback: bool,
-    // Cross-app service-registry self-registration (--discovery /
-    // LD_DISCOVERY), applied AFTER the listener is bound so a port_fallback
-    // rewrite of the advertised URL is reflected in what gets registered.
-    discovery: bool,
-    registry_url: String,
+    // The service-registry bearer, resolved through the secrets module.
     registry_token: String,
     // Data directory — vocab corpus cache + term index live under it.
     data_dir: std::path::PathBuf,
     // The identity DB file main.rs actually opened (`--db-path`, else
     // `<data-dir>/auth.db`). The backup subsystem must copy THIS file: it used
-    // to re-derive the path from AUTH_DB_PATH with a different default
+    // to re-derive the path from OTS_AUTH_DB_PATH with a different default
     // (`data/auth.sqlite`), so on any install that did not set that variable the
     // scheduled backup opened a file that does not exist and failed — after
     // writing the RDF dump, leaving no manifest and only a warn! line.
     db_path: std::path::PathBuf,
+    // Where backups go (`OTS_BACKUP_DIR`, else `<data-dir>/backups`), resolved once
+    // by main.rs with [`default_backup_dir`] so restore, store recovery and the
+    // scheduled backups cannot disagree.
+    backup_dir: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
     #[cfg(feature = "vocab-search")] vocab_engine: Option<
         Arc<crate::vocab_search::index::VocabSearchEngine>,
     >,
 ) -> anyhow::Result<()> {
+    use crate::config as c;
+    let base_url_owned = config.get(&c::BASE_URL);
+    let base_url = base_url_owned.as_str();
+    // Whether the operator set the base URL, as opposed to the built-in
+    // default: federated identity assertions are only audience-checked
+    // against a base URL somebody configured.
+    let base_url_configured = config.entry(c::BASE_URL.name()).source != c::Source::Default;
+    let cors_origins = config.get(&c::CORS_ORIGINS).join(",");
+    let cors_origins = cors_origins.as_str();
+    // Every entry parsed when the registry validated it.
+    let trusted_cidrs: Vec<IpNet> = config
+        .get(&c::TRUSTED_PROXY_CIDRS)
+        .iter()
+        .filter_map(|s| s.parse::<IpNet>().ok())
+        .collect();
+    if !trusted_cidrs.is_empty() {
+        info!("Trusting XFF headers from {} CIDR(s)", trusted_cidrs.len());
+    }
+    let query_timeout_secs = config.get(&c::SPARQL_QUERY_TIMEOUT).as_secs();
+    let write_timeout_secs = config.get(&c::WRITE_TIMEOUT).as_secs();
+    let secure_cookies = config.get(&c::SECURE_COOKIES_ENABLED);
+    let serve_frontend = config.get(&c::FRONTEND_ENABLED);
+    let seed_dir = config.get(&c::SEED_DIR);
+    let port_fallback = config.get(&c::PORT_FALLBACK_ENABLED);
+    let discovery = config.get(&c::DISCOVERY_ENABLED);
+    let registry_url = config.get(&c::REGISTRY_URL);
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
-        let dir = default_backup_dir(&data_dir);
+        let dir = backup_dir;
         let sqlite = db_path.clone();
-        let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7);
-        let encrypt = std::env::var("BACKUP_ENCRYPT")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let retention: usize = config.get(&crate::config::BACKUP_RETENTION_COUNT);
+        let encrypt = config.get(&crate::config::BACKUP_ENCRYPTION_ENABLED);
 
         // Resolve the operator-supplied age recipient. A failure here is FATAL:
         // continuing with `encrypt = true` and no key produced a manager whose
         // every run failed inside maybe_encrypt, so "encrypted backups are on"
         // and "no backup has ever succeeded" looked identical from the outside.
         let key_path = if encrypt {
-            let key_file = std::env::var("BACKUP_ENCRYPT_KEY_PATH")
-                .ok()
-                .map(std::path::PathBuf::from)
+            let key_file = config
+                .get(&crate::config::BACKUP_ENCRYPTION_KEY_PATH)
                 .unwrap_or_else(|| data_dir.join("backup_key.age"));
             crate::backup::init_backup_encryption(&key_file)?
         } else {
@@ -2309,7 +2601,7 @@ pub async fn run(
 
         if !encrypt && std::path::Path::new(&dir).starts_with("data") {
             tracing::warn!(
-                "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set BACKUP_ENCRYPT=true"
+                "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set OTS_BACKUP_ENCRYPTION_ENABLED=true"
             );
         }
         if !sqlite.exists() {
@@ -2321,7 +2613,7 @@ pub async fn run(
             );
         }
         match crate::backup::BackupManager::new(
-            std::path::PathBuf::from(&dir),
+            dir,
             sqlite,
             store.clone(),
             audit.clone(),
@@ -2337,8 +2629,10 @@ pub async fn run(
         }
     };
 
-    // OIDC resource-server config from the environment (disabled unless OIDC_ISSUER set).
-    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env());
+    // OIDC resource-server config from the environment (disabled unless OTS_OIDC_ISSUER set).
+    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env_with_base_url(
+        base_url_configured.then_some(base_url),
+    ));
     if let Some(verifier) = auth_ext.oidc.as_ref() {
         match crate::auth::oidc_rs::ensure_env_provider(
             &auth_db,
@@ -2355,7 +2649,7 @@ pub async fn run(
     }
 
     // Transactional account email (verification, password reset). Logs-only
-    // until SMTP_HOST is configured; links default to the public base URL.
+    // until OTS_SMTP_HOST is configured; links default to the public base URL.
     let mailer = Arc::new(crate::email::Mailer::from_env(
         base_url.trim_end_matches('/'),
     ));
@@ -2363,12 +2657,22 @@ pub async fn run(
         tracing::info!("email: SMTP relay configured — account emails will be delivered");
     } else {
         tracing::info!(
-            "email: SMTP not configured (set SMTP_HOST) — account emails are written to the log"
+            "email: SMTP not configured (set OTS_SMTP_HOST) — account emails are written to the log"
         );
     }
 
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
-    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
+    // A client secret goes through the secrets module: a raw one is refused
+    // under OTS_ENV=production, like OTS_JWT_SECRET, and stops the start.
+    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret)?;
+
+    let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
+    match dl_config.backend {
+        Some(kind) => tracing::info!("OWL 2 DL: backend `{}`", kind.as_str()),
+        None => tracing::info!(
+            "OWL 2 DL: no backend configured (OTS_DL_BACKEND) — the owl2-dl regime answers 503"
+        ),
+    }
 
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
@@ -2400,6 +2704,8 @@ pub async fn run(
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,
+        serve_frontend,
+        trusted_proxies: client_ip::TrustedProxies::new(trusted_cidrs.clone()),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
         #[cfg(feature = "text-search")]
@@ -2420,9 +2726,13 @@ pub async fn run(
         // finishes its own refresh.
         vocab_registry_dirty: Arc::new(AtomicBool::new(true)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        dl: Arc::new(dl_config),
+        config: config.clone(),
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    // Repair proposals are kept beside the store (docs/repair.md).
+    crate::repair::configure(&state.store, &data_dir);
     if let Some(keys) = state.oidc_provider.clone() {
         crate::federation::init(keys, &state.base_url);
     }
@@ -2438,6 +2748,33 @@ pub async fn run(
                 every.tick().await;
                 let s = st.clone();
                 let _ = tokio::task::spawn_blocking(move || s.store.accelerator_tick()).await;
+            }
+        });
+    }
+    // Delta versions: drop builds unused for their time-to-live (all expired
+    // ones in one store write), and now and then release the change-log pins
+    // of versions the registry no longer holds (delta note §3.3, §2.5).
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(30));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ticks: u64 = 0;
+            loop {
+                every.tick().await;
+                ticks += 1;
+                if !st.store.changes().readable() || st.store.replication().read_only() {
+                    continue;
+                }
+                let s = st.clone();
+                let reconcile = ticks.is_multiple_of(20);
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::dataset_versions::materialise::sweep(&s.store);
+                    if reconcile {
+                        crate::dataset_versions::materialise::reconcile_pins(&s.store);
+                    }
+                })
+                .await;
             }
         });
     }
@@ -2465,6 +2802,8 @@ pub async fn run(
             loop {
                 tokio::time::sleep(interval).await;
                 crate::auth::oauth::prune_sessions(&sessions);
+                // In-flight SAML requests and the assertion replay cache.
+                crate::auth::saml::prune_state();
             }
         });
     }
@@ -2483,11 +2822,11 @@ pub async fn run(
 
     // Backup scheduler.
     if let Some(ref mgr) = backup {
-        let hours: u64 = std::env::var("BACKUP_SCHEDULE_HOURS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(24);
-        crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
+        crate::backup::spawn_scheduler(
+            mgr.clone(),
+            config.get(&crate::config::BACKUP_SCHEDULE),
+            Some(state.object_store.clone()),
+        );
     }
 
     // Boot-time migration + seeding + the SHACL pipeline scheduler.
@@ -2538,6 +2877,27 @@ pub async fn run(
             state.auth_db.clone(),
             state.base_url.to_string(),
         );
+        // Change-log consumers, every few seconds (no-ops while change
+        // capture is off): write-triggered pipelines and statement provenance.
+        {
+            let st = state.clone();
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(std::time::Duration::from_secs(5));
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    every.tick().await;
+                    if !st.store.changes().enabled() || st.store.replication().read_only() {
+                        continue;
+                    }
+                    let s = st.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::shacl_studio::trigger::tick(&s.store, &s.auth_db, &s.base_url);
+                        crate::statement_provenance::tick(&s);
+                    })
+                    .await;
+                }
+            });
+        }
         // A Raft cluster member boots as a follower and skips the boot seed,
         // so the one-time release of dataset claims on model-registry graphs
         // runs here instead, once this member leads (the marker it sets on the
@@ -2582,18 +2942,16 @@ pub async fn run(
 
     // GDPR/AVG: pseudonymise old audit rows daily.
     {
-        let days: u64 = std::env::var("AUDIT_PSEUDONYMISE_AFTER_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(365);
+        let days: u64 = config.get(&crate::config::AUDIT_PSEUDONYMISE_AFTER_DAYS);
         crate::auth::audit::spawn_pseudonymisation_task(state.audit.clone(), days);
     }
 
     // Build router — auth endpoint rate limiting is applied inside build_router.
+    let frame_db = state.auth_db.clone();
     let app = build_router(state, cors_origins, trusted_cidrs);
 
     // Serve frontend SPA from frontend/dist. Gated by --serve-frontend /
-    // SERVE_FRONTEND (default on); disable for an API-only server. SPARQL, Graph
+    // OTS_FRONTEND_ENABLED (default on); disable for an API-only server. SPARQL, Graph
     // Store and REST endpoints are unaffected.
     //
     // Use `.fallback` (NOT `.not_found_service`) for the index.html catch-all:
@@ -2608,25 +2966,28 @@ pub async fn run(
         );
         info!("Web UI served at http://{}/", addr);
     } else if !serve_frontend {
-        info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
+        info!("Web UI disabled (OTS_FRONTEND_ENABLED=false); serving API only");
     }
     // Outermost, path-aware framing policy: /embed/* is iframable (that is its
     // purpose), everything else that carries no CSP (the static SPA) gets the
     // anti-clickjacking headers. See `frame_policy_headers`.
-    let app = app.layer(middleware::from_fn(frame_policy_headers));
+    let app = app.layer(middleware::from_fn_with_state(
+        frame_db,
+        frame_policy_headers,
+    ));
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
     let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
     let bind_host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
-        // Opt-in fallback (--port-fallback / PORT_FALLBACK, default off): bind any
+        // Opt-in fallback (--port-fallback / OTS_PORT_FALLBACK_ENABLED, default off): bind any
         // free port instead of refusing to start. Checked ONLY on AddrInUse, so a
         // permission error or an invalid bind address still surfaces immediately
         // below rather than silently wandering off to an unrelated port.
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && port_fallback => {
             tracing::warn!(
-                "PORT_FALLBACK: {addr} is already in use — falling back to any free port on {bind_host}"
+                "OTS_PORT_FALLBACK_ENABLED: {addr} is already in use — falling back to any free port on {bind_host}"
             );
             crate::netutil::bind_free_port(bind_host)
                 .await
@@ -2648,7 +3009,7 @@ pub async fn run(
                  most likely another open-triplestore — holds it. NOT killing it: doing so and \
                  reopening the same data dir can corrupt RocksDB (\"SST ahead of WALs\"). Stop the \
                  other instance first (find it with `lsof -ti :{port_str}`), start this one on a \
-                 different --port and/or --data-dir, or pass --port-fallback / set PORT_FALLBACK=1 \
+                 different --port and/or --data-dir, or pass --port-fallback / set OTS_PORT_FALLBACK_ENABLED=1 \
                  to bind any free port automatically."
             );
         }
@@ -2661,7 +3022,7 @@ pub async fn run(
     let port_changed = requested_port.is_some_and(|p| p != bound_addr.port());
     if port_changed {
         tracing::warn!(
-            "PORT_FALLBACK: bound port {} instead of the requested {} — the advertised base URL \
+            "OTS_PORT_FALLBACK_ENABLED: bound port {} instead of the requested {} — the advertised base URL \
              is rewritten to match for service-registry self-registration, where it references \
              the requested port",
             bound_addr.port(),
@@ -2670,7 +3031,7 @@ pub async fn run(
     }
     info!("Listening on {}", bound_addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY). Self-registration is done HERE
+    // Cross-app service discovery is opt-in (OTS_DISCOVERY_ENABLED). Self-registration is done HERE
     // (after the real bind, not in main.rs before it) so the advertised self_url reflects any
     // --port-fallback rewrite rather than the originally requested port.
     if discovery {
@@ -2686,12 +3047,7 @@ pub async fn run(
         crate::svc_registry::spawn_registrar(self_url, registry_url, registry_token);
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    serve_on(listener, app, shutdown_signal()).await?;
 
     // The server has stopped accepting connections and drained in-flight requests. Flush RocksDB to
     // disk so the store closes in a consistent state: this triplestore has no other shutdown path,
@@ -2704,6 +3060,34 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Serve `app` on `listener` until `shutdown` resolves, the way the server
+/// does: with the caller's address available to the rate limiter and
+/// `TCP_NODELAY` on every accepted connection.
+///
+/// A streamed response — every SPARQL result: the head goes out once the query
+/// has started, the body as it is serialised — is two or more small writes.
+/// With Nagle's algorithm on, a body written after the head waits for the
+/// client's ACK of the head, which a Linux client may delay by 40 ms. Public so
+/// the benchmarks serve through the same setup.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    use axum::serve::ListenerExt as _;
+    let listener = listener.tap_io(|tcp| {
+        if let Err(e) = tcp.set_nodelay(true) {
+            tracing::debug!("TCP_NODELAY not set on an accepted connection: {e}");
+        }
+    });
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM, so the server can shut down
@@ -2786,46 +3170,56 @@ mod panic_safety_net_tests {
     }
 }
 
-/// Where backups go: `BACKUP_DIR`, else `<data-dir>/backups`. The default used
+/// Where backups go: `OTS_BACKUP_DIR`, else `<data-dir>/backups`. The default used
 /// to be the *relative* `data/backups`, resolved against the working directory
 /// — in the Docker image that is `/app`, root-owned and read-only for the
 /// service user, so unattended backups were silently disabled on every
 /// default deployment ("backup: disabled — init failed: create backup dir").
-pub(crate) fn default_backup_dir(data_dir: &std::path::Path) -> String {
-    std::env::var("BACKUP_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| data_dir.join("backups").to_string_lossy().into_owned())
+///
+/// The one place `OTS_BACKUP_DIR` is read (main.rs passes the result on): an
+/// empty or blank value counts as unset everywhere.
+pub fn default_backup_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    crate::config::BACKUP_DIR
+        .get()
+        .unwrap_or_else(|| data_dir.join("backups"))
 }
 
 #[cfg(test)]
 mod backup_dir_tests {
     #[test]
     fn backup_dir_defaults_under_the_data_dir() {
-        std::env::remove_var("BACKUP_DIR");
-        let d = super::default_backup_dir(std::path::Path::new("/data"));
-        assert_eq!(d, "/data/backups");
-        std::env::set_var("BACKUP_DIR", "/mnt/backups");
+        use std::path::{Path, PathBuf};
+        std::env::remove_var("OTS_BACKUP_DIR");
+        let d = super::default_backup_dir(Path::new("/data"));
+        assert_eq!(d, PathBuf::from("/data/backups"));
+        std::env::set_var("OTS_BACKUP_DIR", "/mnt/backups");
         assert_eq!(
-            super::default_backup_dir(std::path::Path::new("/data")),
-            "/mnt/backups"
+            super::default_backup_dir(Path::new("/data")),
+            PathBuf::from("/mnt/backups")
         );
-        std::env::remove_var("BACKUP_DIR");
+        // Empty and blank mean unset, for every reader (they used to be the
+        // working directory for restore and store recovery).
+        for blank in ["", "  "] {
+            std::env::set_var("OTS_BACKUP_DIR", blank);
+            assert_eq!(
+                super::default_backup_dir(Path::new("/data")),
+                PathBuf::from("/data/backups")
+            );
+        }
+        std::env::remove_var("OTS_BACKUP_DIR");
     }
 }
 
 /// Request-body limit for RDF uploads (Graph Store writes, bulk imports):
-/// `OTS_MAX_UPLOAD_MB` when set, else `default_mb`. Uploads are buffered and
+/// `OTS_MAX_UPLOAD_BYTES` when set, else `default_mb` MiB. Uploads are buffered and
 /// parsed into a temporary store before they replace anything, so the limit
 /// bounds memory as well as wire size; the 50 MB the Graph Store routes used
 /// to have rejected a 226 MB dataset that loaded fine in five appends.
 fn upload_limit_bytes(default_mb: usize) -> usize {
-    let mb = std::env::var("OTS_MAX_UPLOAD_MB")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(default_mb);
-    mb.saturating_mul(1024 * 1024)
+    match crate::config::MAX_UPLOAD_BYTES.get() {
+        Some(bytes) => usize::try_from(bytes).unwrap_or(usize::MAX),
+        None => default_mb.saturating_mul(1024 * 1024),
+    }
 }
 
 /// What the boot seed did, so the caller and its tests can tell the difference
@@ -2872,9 +3266,41 @@ pub fn run_boot_seed(
     }
     let store = &seed_state.store;
     let auth = &seed_state.auth_db;
+    // 0. The LDP root ACL, once (`OTS_LDP_ROOT_ACL`): today's behaviour written
+    // where an admin can change it (`docs/ldp.md`, "Access control"). The
+    // first LDP request seeds it too, should it arrive before this runs.
+    #[cfg(feature = "ldp")]
+    {
+        use crate::ldp::wac;
+        match wac::seed_root_acl_if_missing(store, base) {
+            Ok(Some(policy)) => tracing::info!(
+                policy = policy.label(),
+                "ldp: seeded the root ACL at {base}/ldp/.acl"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
+        }
+        let open = wac::root_acl_is_open(store, base).unwrap_or(false);
+        if open && crate::config::LDP_ROOT_ACL.get() == "owners" {
+            // The root ACL is seeded once; the setting does not rewrite it.
+            tracing::warn!(
+                "ldp: OTS_LDP_ROOT_ACL=owners, but the root ACL seeded on an earlier start is open: \
+                 every signed-in user may write under /ldp/. Tighten it with PUT \
+                 {base}/ldp/.acl (see docs/ldp.md)"
+            );
+        } else if open {
+            tracing::info!(
+                "ldp: the root ACL is open: every signed-in user may read, write and append \
+                 under /ldp/; tighten it with PUT {base}/ldp/.acl (see docs/ldp.md)"
+            );
+        }
+    }
     // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
+    }
+    if let Err(e) = crate::shacl_studio::seed::seed_skos_integrity(store, auth) {
+        tracing::warn!("shacl_studio: SKOS integrity seed failed: {e}");
     }
     // Registrations of model-registry graphs made before the dataset graph
     // gate refused them go first, so the Library adoptions below no longer
@@ -2902,7 +3328,7 @@ pub fn run_boot_seed(
     //    Idempotent and self-healing: back-fills any registered-but-empty
     //    public demo graph left behind by an earlier interrupted seed.
     crate::saved_queries::seed::seed_open_triplestore(seed_state);
-    // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
+    // 3b. Operator-supplied seed bundles (--seed-dir / OTS_SEED_DIR), if any —
     //     same idempotent/fail-soft engine as the reference bundle above.
     //     Sequenced here (not a separate spawn) for the same reason the
     //     demo seed is: concurrent writers to the same SQLite identity DB

@@ -7,7 +7,7 @@
 //! records the request body, so a test can both steer the retrieval loop
 //! (reply with `SPARQL:` directives) and inspect the exact system prompt the
 //! server built. Tests serialise on one lock — the gateway, its script queue,
-//! and the `LLM_GATEWAY_URL` environment variable are process-wide.
+//! and the `OTS_LLM_GATEWAY_URL` environment variable are process-wide.
 
 mod common;
 
@@ -65,7 +65,7 @@ async fn models(State(gw): State<&'static Gateway>) -> axum::response::Response 
 }
 
 /// Start the gateway once for the whole test binary (on its own runtime thread,
-/// so it outlives every per-test tokio runtime) and point `LLM_GATEWAY_URL` at
+/// so it outlives every per-test tokio runtime) and point `OTS_LLM_GATEWAY_URL` at
 /// it before any request is made.
 fn gateway() -> &'static Gateway {
     static GW: OnceLock<&'static Gateway> = OnceLock::new();
@@ -89,7 +89,7 @@ fn gateway() -> &'static Gateway {
             });
         });
         let addr = rx.recv().unwrap();
-        std::env::set_var("LLM_GATEWAY_URL", format!("http://{addr}"));
+        std::env::set_var("OTS_LLM_GATEWAY_URL", format!("http://{addr}"));
         gw
     })
 }
@@ -398,7 +398,7 @@ async fn pasted_iris_are_exempt_from_the_invented_iri_check() {
 }
 
 /// With a context window the gateway itself advertises (vLLM-style
-/// `max_model_len` on `/v1/models`) and no `LLM_CONTEXT_TOKENS` declared, the
+/// `max_model_len` on `/v1/models`) and no `OTS_LLM_CONTEXT_TOKENS` declared, the
 /// server budgets the prompt to it: a window far too small for the vocabulary
 /// section drops that section, while the question-specific orientation
 /// survives. Uses its own model name — detection results are cached per
@@ -435,7 +435,7 @@ async fn advertised_context_window_drives_prompt_budgeting() {
     );
 }
 
-/// `LLM_CHAT_MAX_ROUNDS` caps the retrieval loop: with one round, a model that
+/// `OTS_LLM_CHAT_MAX_ROUNDS` caps the retrieval loop: with one round, a model that
 /// keeps demanding queries gets the deterministic fallback answer built from
 /// what round 1 retrieved, and only one query is recorded.
 #[tokio::test]
@@ -452,9 +452,9 @@ async fn round_budget_knob_caps_the_retrieval_loop() {
     let (state, token) = common::admin_state();
     seed_platform(&state);
 
-    std::env::set_var("LLM_CHAT_MAX_ROUNDS", "1");
+    std::env::set_var("OTS_LLM_CHAT_MAX_ROUNDS", "1");
     let resp = chat_turn(state, &token, "Welke bruggen zijn er?").await;
-    std::env::remove_var("LLM_CHAT_MAX_ROUNDS");
+    std::env::remove_var("OTS_LLM_CHAT_MAX_ROUNDS");
 
     let queries = resp["queries"].as_array().unwrap();
     assert_eq!(queries.len(), 1, "one round allowed: {queries:?}");
@@ -676,7 +676,7 @@ async fn saved_query_repair_refuses_to_persist_unparseable_output() {
     assert_eq!(resp.status(), 200);
     let body = common::body_json(resp.into_body()).await;
     assert_eq!(body["valid"], false, "{body}");
-    assert!(body["parseError"].is_string(), "{body}");
+    assert!(body["parse_error"].is_string(), "{body}");
 
     // A parseable repair with save:true becomes the new head.
     let fixed = "SELECT ?s WHERE { ?s a ?t } LIMIT 5";
@@ -688,7 +688,7 @@ async fn saved_query_repair_refuses_to_persist_unparseable_output() {
     assert_eq!(resp.status(), 200);
     let body = common::body_json(resp.into_body()).await;
     assert_eq!(body["valid"], true, "{body}");
-    assert!(body["savedRevision"].is_number(), "{body}");
+    assert!(body["saved_revision"].is_number(), "{body}");
     assert_eq!(
         head(&state),
         fixed,
@@ -968,7 +968,7 @@ async fn identical_failed_query_is_not_rerun() {
 /// `/api/llm/health` judges each AI feature's model against the gateway's
 /// `/v1/models` list — the payload its probe already fetched. The configured
 /// model names are read back from the response rather than set through
-/// `LLM_*_MODEL`, so this test changes no process environment; and the mock
+/// `OTS_LLM_*_MODEL`, so this test changes no process environment; and the mock
 /// list advertises no context window, so the health call's own window probe
 /// caches the same "nothing detectable" a chat turn would.
 #[tokio::test]

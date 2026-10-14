@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t, locale } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
@@ -473,7 +474,7 @@
                     · {$t('pages.vocabularySearch.licenseNoDerivatives')}
                   {/if}
                   {#if entry.source === 'lov'}
-                    · <a class="vs-card-license-page" href={`/api/vocab/notice?vocab=${encodeURIComponent(entry.prefix)}`}
+                    · <a class="vs-card-license-page" href={withBase(`/api/vocab/notice?vocab=${encodeURIComponent(entry.prefix)}`)}
                          target="_blank" rel="noopener" title={$t('pages.vocabularySearch.licensePageTitle')}
                       >{$t('pages.vocabularySearch.licensePage')}</a>
                   {/if}
@@ -534,7 +535,7 @@
              not a redundant mustache. -->
         <!-- eslint-disable-next-line svelte/no-useless-mustaches -->
         <code>POST /api/vocab/recommend {'{'}"terms": ["bridge", "deck height"]{'}'}</code>
-        <a href="/api-docs" target="_blank" rel="noopener noreferrer">{$t('pages.vocabularySearch.recommendApiDocs')}</a>
+        <a href={withBase('/api-docs')} target="_blank" rel="noopener noreferrer">{$t('pages.vocabularySearch.recommendApiDocs')}</a>
       </p>
       <textarea
         class="vs-rec-input"

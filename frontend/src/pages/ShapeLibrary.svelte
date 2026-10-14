@@ -1,8 +1,11 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
   import { onMount } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { listShapeGraphs, createShapeGraph, deleteShapeGraph, cloneShapeGraph, listOrganisations } from '../lib/api.js';
-  import { FileCode, Plus, Search, X, Copy, Trash2, Lock, Users, Globe, Sparkles, Database, Building2, User as UserIcon, Layers } from 'lucide-svelte';
+  import { FileCode, Plus, Search, X, Copy, Trash2, Lock, Users, Globe, Sparkles, Database, Building2, User as UserIcon, Layers, FileInput, FileOutput } from 'lucide-svelte';
+  import IdsImportDialog from '../components/exchange/IdsImportDialog.svelte';
+  import IdsExportDialog from '../components/exchange/IdsExportDialog.svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import ShapesCatalog from '../components/ShapesCatalog.svelte';
@@ -26,6 +29,15 @@
   let sourceFilter = new Set();   // values: manual | derived | imported | ai
   let visibilityFilter = new Set();
   let ownerFilter = new Set();    // owner_id strings
+
+  // IDS import / export dialogs (buildingSMART IDS ⇄ SHACL).
+  let idsImporting = false;
+  let idsExporting = null;
+  function onIdsCreated(e) {
+    idsImporting = false;
+    toastSuccess($t('components.exchange.idsImport.created', { values: { name: e.detail.name } }));
+    navigate(`/shacl/shapes/${e.detail.id}`);
+  }
 
   // Create-modal state.
   let creating = false;
@@ -161,7 +173,12 @@
   }
 
   async function doDelete(set) {
-    if (!confirm($t('pages.shapeLibrary.confirmDelete', { values: { name: set.name } }))) return;
+    const ok = await askConfirm({
+      title: $t('system.areYouSure'),
+      message: $t('pages.shapeLibrary.confirmDelete', { values: { name: set.name } }),
+      confirmLabel: $t('system.delete'),
+    });
+    if (!ok) return;
     try {
       await deleteShapeGraph(set.id);
       sets = sets.filter((s) => s.id !== set.id);
@@ -196,6 +213,7 @@
     </div>
     <div class="toolbar-actions">
       {#if anyFilter}<button class="btn btn-sm btn-ghost" on:click={clearFilters}><X size={12} /> {$t('pages.shapeLibrary.clearFilters')}</button>{/if}
+      <button class="btn btn-ghost" on:click={() => (idsImporting = true)}><FileInput size={14} /> {$t('components.exchange.idsImport.button')}</button>
       <button class="btn" on:click={() => (creating = true)}><Plus size={14} /> {$t('pages.shapeLibrary.newShapeGraph')}</button>
     </div>
   </div>
@@ -299,6 +317,7 @@
                 {/if}
               </Link>
               <div class="set-actions">
+                <button class="icon-btn" on:click={() => (idsExporting = set)} title={$t('components.exchange.idsExport.button')} aria-label={$t('components.exchange.idsExport.button')}><FileOutput size={13} /></button>
                 <button class="icon-btn" on:click={() => doClone(set)} title={$t('pages.shapeLibrary.cloneTitle')}><Copy size={13} /></button>
                 <button class="icon-btn icon-danger" on:click={() => doDelete(set)} title={$t('system.delete')}><Trash2 size={13} /></button>
               </div>
@@ -309,6 +328,13 @@
       {/if}
     </section>
   </div>
+  {/if}
+
+  {#if idsImporting}
+    <IdsImportDialog on:close={() => (idsImporting = false)} on:created={onIdsCreated} />
+  {/if}
+  {#if idsExporting}
+    <IdsExportDialog shapeGraph={idsExporting} on:close={() => (idsExporting = null)} />
   {/if}
 
   {#if creating}

@@ -28,36 +28,170 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 | `domain-values` | Code lists | SKOS collections / enumerations | ✅ | ✅ | The values an instance property may take (enumerations, code lists, units) — the *domain values* layer of NEN 2660-2, kept apart from the concept vocabulary so it can be versioned and validated separately |
 | `linkset` | Alignments | `owl:sameAs`, `skos:*Match` | ✅ | ✅ | Mappings between this dataset's resources and another dataset or vocabulary; one graph per alignment keeps the mapping's provenance and lifecycle independent of both ends |
 | `provenance` | PROV-O records | `prov:Activity`, `prov:Entity`, `prov:Agent` | ✅ | ✅ | Who produced what, when and from which sources; the commit log (`urn:system:commit-log`) is the platform's own provenance graph |
+| `catalog` | Catalogue records | `dcat:Catalog`, `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | DCAT / VoID descriptions of datasets, distributions and data services that travel with the data (declared, or inferred by the import auto-split from DCAT/VoID-typed records) |
 
 ### Time-evolving properties (OPM profile)
 
 A property whose value changes over time — a load rating, a firmware
 version, a measured weight — can be recorded as a chain of states instead
-of overwritten:
+of overwritten, following the W3C Linked Building Data community group's
+[Ontology for Property Management](https://w3id.org/opm) (OPM, 2018 draft):
 
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<id>/properties/state \
   -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
   -d '{"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating",
-       "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"}'
+       "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed",
+       "documentation": ["https://example.org/docs/inspection-2026"], "note": "inspection"}'
 ```
 
-The data graph (the dataset's instances graph, or `graph`) always holds the
-current value as a plain triple — SPARQL, SHACL and reasoning see nothing
-new — while the dataset's states graph (`urn:ots:property-states:<id>`,
-registered with the `provenance` role on first use) accumulates
-`opm:PropertyState`s with `schema:value`, `ots:validFrom`,
-`prov:generatedAtTime`, `prov:wasAttributedTo`, an optional OPM reliability
-class (`assumed` / `confirmed` / `derived`) and a note; the newest is
+The data graph (the dataset's instances graph, the graph the current value
+is already in, or `graph`) always holds the current value as a plain triple
+— SPARQL, SHACL and reasoning see nothing new — while the dataset's states
+graph (`urn:ots:property-states:<id>`, registered with the `provenance` role
+on first use) accumulates `opm:PropertyState`s with `schema:value`,
+`ots:validFrom`, `prov:generatedAtTime`, `prov:wasAttributedTo`, an optional
+OPM reliability class (`assumed` / `confirmed` / `derived` / `required`),
+`opm:documentation` links and a note; the newest is
 `opm:CurrentPropertyState`, the rest `opm:OutdatedPropertyState`. Values are
 typed from the string (boolean, integer, decimal, else string) unless
-`datatype` (an XSD type or `iri`) or `language` says otherwise. Each state
-is a commit in the dataset's history.
+`datatype` (an XSD type or `iri`) or `language` says otherwise. Each write is
+a commit in the dataset's history.
+
+**Delete and restore.** OPM deletes a property without removing it: a new
+current state typed `opm:Deleted`, with no value, ends the chain and the
+plain triple leaves the data graph. Restore writes a new current state with
+the value, reliability and documentation of the last state before the
+deletion (`prov:wasRevisionOf` it) and puts the plain triple back.
 
 ```
-GET /api/datasets/<id>/properties/history?entity=…&property=…   # newest first
-GET /api/datasets/<id>/properties/as-of?entity=…&property=…&at=2026-03-01
+POST /api/datasets/<id>/properties/delete    {"entity": …, "property": …, "note": …}
+POST /api/datasets/<id>/properties/restore   {"entity": …, "property": …}
 ```
+
+**Reading.** History and as-of report deletions (`deleted: true`,
+`value: null`). The listing covers one item, one property kind, both or the
+whole dataset, with the latest state, every state or the state at a time —
+with `entity` and `at` that is the item's snapshot:
+
+```
+GET /api/datasets/<id>/properties/history?entity=…&property=…        # newest first
+GET /api/datasets/<id>/properties/as-of?entity=…&property=…&at=2026-03-01
+GET /api/datasets/<id>/properties?entity=…&at=2026-03-01              # item snapshot
+GET /api/datasets/<id>/properties?property=…&reliability=confirmed
+GET /api/datasets/<id>/properties?history=full&derived=true
+```
+
+Filters: `reliability`, `deleted` (`false` by default for latest and
+snapshots, `true`, or `any`), `derived` (`opm:Derived` or with an
+expression), `history` (`latest` | `full`), `at`, `limit` / `offset`. A state
+whose value lives in a graph the caller may not read (a private graph, for
+a viewer) is left out of every read and of the export.
+
+**Canonical OPM.** OPM links a property node to its item as
+`<item> <kind> <property>`. The server keeps the plain value under
+`<item> <kind>` instead and links the node with `ots:propertyOf` /
+`ots:propertyPredicate`, because the SPARQL default graph is the union of
+the dataset's graphs: a canonical link stored anywhere would add the node to
+every answer of `<item> <kind> ?v`. Exchange with other OPM tools goes
+through export and import:
+
+```
+GET  /api/datasets/<id>/properties/export        # Accept: text/turtle | application/n-triples | application/ld+json | application/rdf+xml
+POST /api/datasets/<id>/properties/import?graph=… # Content-Type: an RDF format
+```
+
+Export writes canonical OPM (the server's bookkeeping left out, `ots:validFrom`
+kept). Import reads `<item> <kind> <property>` with `opm:hasPropertyState`,
+`schema:value` in either scheme (`opm.ttl` declares `http://schema.org/`; the
+server writes `https://schema.org/`) and the deprecated `opm:valueAtState`.
+States keep their IRIs, a state already present is skipped, and a state
+without `prov:generatedAtTime` — or without a value, unless it is
+`opm:Deleted` — is rejected and listed in the report. Per property the
+newest-recorded state becomes current ("the most recently defined", as OPM
+puts it) and its value the plain triple. Every read above also accepts
+canonical OPM loaded straight into a dataset graph (`canonical: true` on its
+states; without `ots:validFrom` the generation time counts as validity).
+Writes manage only the server's own states: import canonical data to extend
+its chains.
+
+**Calculations.** An `opm:Calculation` infers a property from others: the
+property it infers, the argument paths from a feature of interest (`?foi`)
+to each argument, an expression over the arguments and, optionally, one
+feature of interest (`opm:foiRestriction`) or a pattern every feature must
+match (`opm:pathRestriction`):
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/properties/calculations \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"label": "Window area", "inferred_property": "ex:area",
+       "argument_paths": ["?foi ex:width ?w", "?foi ex:height ?h"],
+       "expression": "?w * ?h", "path_restriction": "?foi a ex:Window",
+       "prefixes": {"ex": "https://example.org/"}}'
+```
+
+As the OPM specification describes, a calculation runs only when asked —
+writes never trigger it:
+
+```
+POST /api/datasets/<id>/properties/calculations/<calc>           # derive for every feature that lacks the property
+PUT  /api/datasets/<id>/properties/calculations/<calc>           # recompute where an argument state was outdated
+GET  /api/datasets/<id>/properties/calculations/<calc>/outdated  # which derived states are stale
+GET  /api/datasets/<id>/properties/calculations[/<calc>]
+DELETE /api/datasets/<id>/properties/calculations/<calc>         # the definition; derived states stay
+```
+
+`<calc>` is the id the definition returned, or a calculation's full IRI
+(percent-encoded). POST skips a feature of interest that already has the
+property (as a state or a plain value); PUT recomputes exactly the derived
+states of the calculation one of whose argument states is no longer
+current. Each derived state is `opm:Derived`, carries the `opm:expression`
+and `prov:wasDerivedFrom` an `rdf:Seq` of the argument states in path order
+(`ots:calculation` names the calculation), and its value becomes the plain
+triple; one run is one commit. A feature whose arguments are missing,
+deleted, not numeric or ambiguous (a path that reaches several values) is
+skipped and reported with the reason.
+
+Rules for paths and expressions:
+
+- An argument path is triple patterns and property paths from `?foi` that
+  bind exactly one other variable, the argument, as the object of a last
+  step with a plain predicate (`?foi ex:partOf/ex:height ?h` is fine; the
+  derivation then points at the state of the part's `ex:height`). The path
+  restriction may use `?foi` and blank nodes only.
+- An expression uses arithmetic, comparisons, `&&` `||` `!`, `IF`,
+  `COALESCE`, `BOUND`, `IN`, `ABS`, `CEIL`, `FLOOR`, `ROUND`, `isNumeric`,
+  `isLiteral`, `STR`, `DATATYPE` and the XSD numeric, boolean and string
+  casts, over the declared arguments only.
+- Arguments must be numeric XSD values (`xsd:integer`, `xsd:decimal`,
+  `xsd:float`, `xsd:double` and the integer subtypes); arithmetic follows
+  SPARQL's numeric promotion (so `xsd:decimal` stays exact).
+- Every path, restriction and expression is parsed and allow-listed —
+  `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, `OPTIONAL`, `UNION`, `VALUES`,
+  `BIND`, subqueries, aggregates and any other function are refused — and
+  stored in canonical form with full IRIs. The queries are built from the
+  parsed form, never from the text: matching runs over the dataset's own
+  data graphs only, capped at `OTS_OPM_CALC_MAX_ROWS` rows (default 10 000;
+  more fails the run instead of deriving part of it) and the query timeout;
+  the expression is evaluated over the matched values in an empty scratch
+  store. A stored calculation is validated again whenever it is loaded, so
+  one written into the states graph by other means is listed as invalid and
+  refused when run.
+
+Calculations live in the states graph, so export and import carry them;
+an imported calculation's prefixed names resolve with the document's own
+prefixes (`?foi props:width ?width`, as OPM's examples write them).
+
+**Profile shapes.** `GET /api/datasets/<id>/properties/validate` checks the
+states graph against the OPM profile: one current state per property,
+current/outdated and assumed/confirmed disjoint, one `prov:generatedAtTime`
+on every state, one value on every state that is not deleted (none on a
+deleted one), a calculated state's expression and `rdf:Seq` of arguments,
+and a calculation's structure. `GET /api/properties/profile` serves the
+shapes as Turtle for use as a dataset shapes graph; the `opm-profile` seed
+bundle (`examples/seed-bundles/opm-profile/`) ships them with a canonical
+sample. The shapes are this project's own; the OPM vocabulary (`opm.ttl`,
+CC BY 1.0) is not bundled.
 
 Domain vocabularies — a material passport, a clinical record — supply the
 property IRIs; the mechanism knows none of them.
@@ -72,9 +206,72 @@ interval, `prov:used`/`prov:generated` graphs and counts, and each version as
 an entity `prov:wasRevisionOf` its predecessor. The same links live in the
 commit graph itself (`urn:system:commit-log`) — every write types its graphs
 as entities generated by the commit — and the DCAT catalogue carries
-`prov:wasAttributedTo` and `prov:wasGeneratedBy` per dataset. Attribution is
-per graph and per transaction; per-triple (RDF-star) qualification needs
-per-write change capture and is roadmap work.
+`prov:wasAttributedTo` and `prov:wasGeneratedBy` per dataset. That
+attribution is per graph and per transaction; per statement, see below.
+
+### Statement provenance (opt-in)
+
+With the [change log](/docs/versioning) on, a dataset can record who changed
+each of its statements and when: `PUT /api/datasets/:id/settings` with
+`{"provenance": "minimal"}` (or `"full"`; `"off"` stops it). A change-log
+consumer then annotates every change to the dataset's statements, in RDF 1.2,
+in the dataset's statement-provenance graph
+`urn:ots:statement-provenance:<id>` (registered with the provenance role):
+
+```turtle
+<…/statement/9f2c…> rdf:reifies <<( ex:pump7 ex:status "in-service" )>> ;
+    ots:graph <https://example.org/assets/instances> ;
+    ots:change <…/statement/9f2c…/412> .
+<…/statement/9f2c…/412> ots:op "add" ; ots:seq 412 ;
+    prov:wasGeneratedBy <…/commit/7d1e…> .   # full adds prov:wasAssociatedWith, prov:atTime
+```
+
+Each statement has one reifier (a 128-bit digest of the statement and its
+graph), each change its own event, so a removal and a re-addition keep both
+histories; a statement in an entailment graph adds `ots:derivedBy` the
+regime. Ask for a statement's history with the triple term — never the
+`<< … >>` shorthand, which mints a fresh blank reifier and matches nothing:
+
+```sparql
+SELECT ?op ?commit ?actor ?time WHERE {
+  GRAPH <urn:ots:statement-provenance:assets> {
+    ?r rdf:reifies <<( ex:pump7 ex:status "in-service" )>> ; ots:change ?e .
+    ?e ots:op ?op ; prov:wasGeneratedBy ?commit .
+    OPTIONAL { ?e prov:wasAssociatedWith ?actor ; prov:atTime ?time }
+  }
+} ORDER BY DESC(?time)
+```
+
+A statement with a blank node is not annotated — a reifier hashed over a
+blank-node label is only stable inside one store — unless the dataset also
+imports with Skolem IRIs (below); every skip, and every change the log could
+not carry, is an `ots:ProvenanceGap` event. Annotations start from the moment
+the dataset opts in. They cost storage: about six quads per changed statement
+(`minimal`), eight (`full`). The graph holds annotations *about* the data, so
+it is no reasoning premise, never gated by SHACL, no LDES member, left out of
+a version's default graphs and of the dataset's browse scope (name it with
+`graph=` to browse it), and served as JSON-LD answers 406 (JSON-LD has no
+triple terms) — ask for Turtle, N-Quads or TriG.
+
+The graph is **system-managed**: the server writes it from the change log,
+and nothing else may. SPARQL Update, the Graph Store, RDF Patch and patch
+logs, imports, validate-and-commit, version restores, RML and LDES targets
+all refuse it with `403` — for the dataset's owners and for admins too — and
+no dataset can register it as one of its graphs. An admin's store-wide
+`DELETE`/`INSERT` through a variable graph passes over it; only `CLEAR ALL`
+or `DROP ALL`, which wipe the store, clear it with everything else. Reading
+it is unaffected. To stop it growing, set `"provenance": "off"`.
+
+### Skolem IRIs on import (opt-in)
+
+`PUT /api/datasets/:id/settings` with `{"skolem": true}` replaces the blank
+nodes of RDF imported into the dataset's graphs — Graph Store PUT/POST, bulk
+import, containers — with IRIs under `<base>/.well-known/genid/`, derived
+from the content. Re-importing the same data then changes nothing (a blank
+node is a fresh node every time otherwise), patches and provenance can name
+every node, and exported data holds no blank nodes. SPARQL `INSERT DATA`
+with `_:` terms still mints blank nodes. `GET …/settings` shows both
+settings to the dataset's readers; changing them needs write access.
 
 ### Commit trail
 
@@ -85,7 +282,6 @@ SPARQL Update (`sparql`), bulk imports (`import`), every version operation —
 cut, publish, deprecate, restore, delete, garbage-collect, branch (`dataset`,
 with the version) — and model/shape editor saves. A backup restore is recorded
 under the subject `urn:ots:store`.
-| `catalog` | DCAT / VoID | `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | Metadata describing datasets and distributions, as served at `/.well-known/void` |
 
 ### The conformance layer (TBox / ABox)
 
@@ -112,6 +308,29 @@ with `"dataset": "bridges"`; `validation_shapes` is what validation applies
 (dataset-level and inherited per-graph bindings). A declared model that cannot
 be resolved is reported in `unresolved_model` rather than silently ignored. The
 layer is domain-neutral: a model is whatever the data-model registry holds.
+
+
+### Following a model update
+
+`conforms_to_version` pins a dataset to one published model version; without it the
+dataset floats with the model's latest published version. A pinned dataset does not
+change when a newer model version is published — but the conformance layer says so:
+
+```json
+GET /api/datasets/:id/conformance
+{ "conforms_to_model": { "id": "bridges", "version": "1.0.0", "status": "deprecated",
+                          "latest_published": "2.0.0", "pinned": true, "update_available": true }, … }
+```
+
+`update_available` is the signal for the data owner's update procedure: re-validate
+the instances against the new version (SHACL), correct what no longer conforms and
+collect what the new version requires, then re-pin (`PUT /api/datasets/:id` with the
+new `conforms_to_version`) and cut + publish the next dataset version. Every dataset
+version records the model version it was pinned to when it was cut
+(`conforms_to_model` / `conforms_to_version` in `GET /api/datasets/:id/versions`), so
+the published history of a dataset reads as "v1.0.0 conforms to bridges@1.0.0, v1.1.0
+conforms to bridges@2.0.0". `GET /api/models/:id/dependents` lists it from the model's
+side (see [models.md](models.md)).
 
 ### Notes on Graph Roles
 
@@ -317,11 +536,23 @@ See [rml.md](rml.md) for full RML documentation.
 
 Datasets support three visibility levels:
 
-| Visibility | Public Access | Registered Users | Owner | Admin |
-|---|---|---|---|---|
-| `public` | Read-only | Read-only | Read + Write | Read + Write |
-| `members` | ✗ | Read-only | Read + Write | Read + Write |
-| `private` | ✗ | ✗ | Read + Write | Read + Write |
+| Visibility | Anonymous | Other signed-in users | Members of the owning org/group | Owner | Admin |
+|---|---|---|---|---|---|
+| `public` | Read-only | Read-only | By membership role | Manage | Manage |
+| `members` | ✗ | ✗ | By membership role | Manage | Manage |
+| `private` | ✗ | ✗ | Org/group admins only | Manage | Manage |
+
+"Other signed-in users" means anyone who is not the owner and not a member of
+the owning organisation or group. A `members` dataset is not readable just
+because you are signed in. Only members of the owning organisation or group,
+and users given an explicit grant (below), can read it. A user-owned `members`
+dataset is therefore readable only by its owner and by grantees.
+
+"By membership role" means the membership's own level: an org/group `viewer`
+reads, a `member` reads and writes, and an `admin` manages. For a
+group-owned dataset, members of the group's parent organisation count too.
+On a `private` dataset, plain members and viewers of the owning org/group get
+nothing unless they are granted access explicitly.
 
 ### Explicit access grants
 
@@ -335,9 +566,11 @@ of three levels:
 | `editor` | Read + write data |
 | `admin` | Manage the dataset, its metadata, and its access grants |
 
-A grant to a group or organisation applies to all of its members. Grants combine
-with membership-derived access, taking the strongest — except that an org/group
-admin can never be demoted below `admin` on resources their org/group owns.
+A grant to a group or organisation applies to all of its members. An explicit
+grant replaces the access a user would get from membership. It can raise that
+access (an org `member` granted `admin` on one dataset) or lower it (a `member`
+limited to `viewer`). The one exception: an org/group admin is never demoted
+below `admin` on resources their org/group owns.
 
 ---
 

@@ -39,13 +39,37 @@ Turtle also has literal **shorthands** so common values need no `^^`:
 | `4.2` | `xsd:decimal` |
 | `4.2e1` | `xsd:double` |
 
-> **Value space vs. stored form.** The store keeps your lexical form **exactly as
-> written**, but the engine (Oxigraph) implements the XSD *value spaces*, so
-> numbers, booleans, dates and durations are compared, ordered and computed
-> **by value**. That means `"01"^^xsd:integer` equals `"1"^^xsd:integer`, and
-> `"1.0E2"^^xsd:double` equals `100.0` in a `FILTER`. Datatypes outside the XSD
-> value space (see [Other & custom datatypes](#other-custom-datatypes)) are kept
-> verbatim and compared by exact match.
+> **Value space vs. stored form.** The store keeps every literal **exactly as
+> written**: its lexical form and its datatype. `"01"^^xsd:integer`,
+> `"1"^^xsd:boolean`, `"5"^^xsd:nonNegativeInteger` and a `+00:00` time zone
+> come back the way you wrote them, from SPARQL, the Graph Store Protocol and
+> every download. Two things follow:
+>
+> - **Expressions compare values.** The engine (Oxigraph) implements the XSD
+>   *value spaces*, so in a `FILTER`, `ORDER BY`, arithmetic or an aggregate,
+>   numbers, booleans, dates and durations are compared and computed **by
+>   value**: `"01"^^xsd:integer = 1`, `"5"^^xsd:int = 5` and
+>   `"1.0E2"^^xsd:double = 100.0` are all true. A computed value is printed in
+>   its canonical form (`?x + 0` gives `1`, not `01`).
+> - **Graph patterns compare terms.** A triple pattern, a join between two
+>   patterns, `DISTINCT`, `GROUP BY`, `sameTerm` and `DELETE DATA` match the
+>   literal as written, as RDF defines it: `{ ?s ex:n 1 }` does not find
+>   `"01"^^xsd:integer` or `"1"^^xsd:int`, `true` does not find
+>   `"1"^^xsd:boolean`, and `SELECT DISTINCT` returns `"5"^^xsd:int` and `5` as
+>   two values. To match by value, bind a variable and filter:
+>   `{ ?s ex:n ?n FILTER(?n = 1) }`.
+>
+> Datatypes outside the XSD value space (see
+> [Other & custom datatypes](#other-custom-datatypes)) compare by exact match
+> in expressions too.
+>
+> Until the store kept lexical forms (see the changelog), it wrote the typed
+> literals of those value spaces in a canonical form: `"01"` as `"1"`,
+> `"1"^^xsd:boolean` as `true`, every type derived from `xsd:integer` as
+> `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime`. Data loaded then still
+> reads that way. Appending the same file again adds the literals as written
+> beside the old ones, so replace a graph (`PUT`) rather than appending to it
+> when you reload such data.
 
 <details>
 <summary>▸ View example — what datatypes are in my data?</summary>
@@ -119,7 +143,14 @@ The derived integer types are also value-typed: `xsd:long`, `xsd:int`,
 `xsd:short`, `xsd:byte`, `xsd:nonNegativeInteger`, `xsd:positiveInteger`,
 `xsd:negativeInteger`, `xsd:nonPositiveInteger`, and the `unsigned*` family. Use
 them when a value is bounded or sign-constrained (e.g. a count is a
-`xsd:nonNegativeInteger`).
+`xsd:nonNegativeInteger`). They compute as integers in expressions, but the
+store keeps the datatype you wrote, so `DATATYPE(?n)` in a query still reports
+`xsd:integer` (the value's type) while SHACL `sh:datatype xsd:nonNegativeInteger`
+and a download see `xsd:nonNegativeInteger`.
+
+> An out-of-range `"300"^^xsd:byte` is stored as written too: SHACL
+> `sh:datatype xsd:byte` reports it, and OWL 2 RL's `dt-not-type` finds it
+> inconsistent.
 
 > Prefer `xsd:decimal` over `xsd:double` for quantities you compare for equality
 > (`xsd:double` is subject to floating-point rounding).
@@ -212,13 +243,17 @@ For real files, prefer the asset/upload pipeline over inline binary literals.
 
 ## Spatial (GeoSPARQL)
 
-Geometry is stored as a **WKT literal** with the datatype `geo:wktLiteral`
-(`http://www.opengis.net/ont/geosparql#wktLiteral`). These literals feed the
-GeoSPARQL functions (`geof:distance`, `geof:sfWithin`, …).
+Geometry is usually stored as a **WKT literal** with the datatype `geo:wktLiteral`
+(`http://www.opengis.net/ont/geosparql#wktLiteral`); GML, GeoJSON and KML
+literals are geometries too. These literals feed the GeoSPARQL functions
+(`geof:distance`, `geof:sfWithin`, …).
 
 | Datatype | Use for | Example literal |
 |---|---|---|
 | `geo:wktLiteral` | a geometry in Well-Known Text | `"POINT(4.4870 51.9094)"^^geo:wktLiteral` |
+| `geo:gmlLiteral` | a GML 3.2 geometry ([supported profile](/docs/geosparql#supported-gml-profile)) | `"<gml:Point srsName='EPSG:28992'><gml:pos>92000 437000</gml:pos></gml:Point>"^^geo:gmlLiteral` |
+| `geo:geoJSONLiteral` | an RFC 7946 geometry object, CRS84 | `'{"type":"Point","coordinates":[4.487,51.909]}'^^geo:geoJSONLiteral` |
+| `geo:kmlLiteral` | a KML 2.2 geometry element, CRS84 | `"<Point><coordinates>4.487,51.909</coordinates></Point>"^^geo:kmlLiteral` |
 
 WKT coordinate order is **`POINT(lon lat)`**. A literal may be prefixed with a
 CRS IRI: `"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(4.49 51.91)"`.
@@ -262,6 +297,19 @@ because it is outside the XSD value space, two such literals are equal only when
 | `rdf:XMLLiteral` | a fragment of XML |
 | `rdf:JSON` | an embedded JSON value |
 | *your own IRI* | a domain-specific lexical format you define and validate |
+
+**`rdf:JSON` must hold JSON.** Its lexical space is the JSON grammar (JSON-LD 1.1
+§10.2, RFC 8259): one JSON value, whitespace around it allowed. A literal whose
+text is not JSON, such as `"bareword"^^rdf:JSON` or `"[{]"^^rdf:JSON`, is
+ill-typed, and the store refuses it with **400** on every write path — uploads
+and imports, SPARQL UPDATE (constants and computed values such as
+`STRDT("…", rdf:JSON)` alike), the Graph Store Protocol, LDP and RDF Patch —
+writing nothing of the request. It is the one datatype checked this way,
+because no JSON-LD download could hold such a literal: the JSON-LD
+serialisation algorithm aborts on it. A JSON-LD download writes an `rdf:JSON`
+literal as its JSON value (`"@type": "@json"`) when the text is in the
+canonical form JSON-LD itself writes, and as the typed text otherwise, so the
+literal reads back exactly as stored.
 
 <details>
 <summary>▸ View example — a custom datatype</summary>
@@ -327,13 +375,17 @@ parameter types are: **IRI**, **string**, **integer**, **decimal**, **boolean**,
 
 ## Notes & limits
 
-- **Quoted triples** (`<< ex:a ex:b ex:c >>`, RDF 1.2 / RDF-star) are a *term
-  kind*, not a literal datatype, but they are supported — see the RDF 1.2 row in
-  [Supported Standards](/docs/standards).
-- **Base-direction strings** (`rdf:dirLangString`) are not currently supported;
-  use `rdf:langString` with a plain language tag.
-- Datatypes outside the XSD value space are never rewritten or canonicalised —
-  they are returned byte-for-byte as you stored them.
+- **Triple terms** (`<<( ex:a ex:b ex:c )>>`, RDF 1.2) are a *term kind*, not a
+  literal datatype, but they are supported — see the RDF 1.2 row in
+  [Supported Standards](/docs/standards). In RDF 1.2, `<< ex:a ex:b ex:c >>` is
+  shorthand for a reifier that points at such a triple term, not a term itself.
+- **Base-direction strings** (`"text"@ar--rtl`, datatype `rdf:dirLangString`)
+  are stored and queried as RDF 1.2 defines them, with `LANGDIR`, `hasLANGDIR`
+  and `STRLANGDIR`. One known gap: the in-memory columnar copy that answers
+  some queries drops the direction.
+- No literal is rewritten or canonicalised in storage: every one is returned
+  byte-for-byte as you stored it. Only values an expression computes are
+  printed in canonical form.
 
 Related: [Linked Data Modelling](/docs/modelling) ·
 [Modelling Styleguide](/docs/linked-data-modelling-styleguide) ·

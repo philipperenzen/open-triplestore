@@ -144,6 +144,7 @@ mod tests {
             base_url: Arc::new("http://localhost:7878".to_string()),
             store: Arc::new(FakeStore),
             auth: Arc::new(ots_plugin_api::NoAuth),
+            secrets: Arc::new(ots_plugin_api::NoSecrets),
         }
     }
 

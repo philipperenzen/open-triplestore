@@ -12,6 +12,8 @@
   import { Link, navigate } from '../lib/router/index.js';
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import IssueResults from '../components/IssueResults.svelte';
+  import PartialRunNote from '../components/PartialRunNote.svelte';
+  import { unwrapValidationRun } from '../lib/validationReport.js';
   import { isAuthenticated, authInitialized, user } from '../lib/stores.js';
   import { t as i18nT } from 'svelte-i18n';
 
@@ -203,9 +205,17 @@
         const run = await runPipeline(t.id);
         pipelineLatest = { ...pipelineLatest, [t.id]: run };
       } else {
-        await validateDataset(t.id);
-        const runs = await listLatestValidationRuns([t.id]);
-        if (runs && runs[0]) datasetLatest = { ...datasetLatest, [t.id]: runs[0] };
+        const run = unwrapValidationRun(await validateDataset(t.id));
+        if (run.test) {
+          // Not recorded: a run that left out graphs the caller may not read
+          // is answered as a test run. Show it as one, rather than reload a
+          // latest run it did not change.
+          selected = { ...t, test: true, partial: run.partial, run: { ran_at: run.ranAt || new Date().toISOString() } };
+          selectedReport = run.report;
+        } else {
+          const runs = await listLatestValidationRuns([t.id]);
+          if (runs && runs[0]) datasetLatest = { ...datasetLatest, [t.id]: runs[0] };
+        }
       }
     } catch (e) {
       runError = e.message || $i18nT('pages.shaclResults.runFailed');
@@ -229,6 +239,7 @@
       } else {
         const res = await validateDataset(t.id, {}, { test: true });
         selectedReport = res.report;
+        selected = { ...selected, partial: res?.partial === true };
       }
     } catch (e) {
       runError = e.message || $i18nT('pages.shaclResults.testRunFailed');
@@ -377,6 +388,7 @@
             {/if}
           </div>
         </header>
+        {#if selected.partial}<PartialRunNote />{/if}
         {#if selectedLoading}
           <div class="placeholder"><Loader2 size={20} class="spin" /></div>
         {:else if selectedReport && selectedReport.conforms}

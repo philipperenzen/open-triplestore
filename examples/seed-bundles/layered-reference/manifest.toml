@@ -10,7 +10,7 @@
 # Loaded by tests/layered_bundle_e2e.rs on every CI run.
 
 id = "layered-reference"
-opt_out_env = "SEED_LAYERED_REFERENCE"
+opt_out_env = "OTS_SEED_LAYERED_REFERENCE_ENABLED"
 
 [organisation]
 slug = "layered-reference"

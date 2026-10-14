@@ -1,11 +1,12 @@
-//! DCAT-AP-NL catalogue (7.2): under `DCAT_PROFILE=dcat-ap-nl` the catalogue
-//! carries the application profile's mandatory properties — proven by
-//! validating the served document against a SHACL shape set that encodes
-//! the DCAT-AP 3 / DCAT-AP-NL 3 mandatory-property tables — is negotiable in
-//! JSON-LD and RDF/XML, advertises LDES streams, counts named-graph data in
-//! its VoID statistics, and cannot be corrupted by hostile metadata.
+//! DCAT-AP-NL catalogue (7.2): under `OTS_DCAT_PROFILE=dcat-ap-nl` the served
+//! catalogue satisfies SEMIC's published DCAT-AP 3.0.1 shapes (validated
+//! through a SHACL Studio pipeline over the served document; the Geonovum
+//! DCAT-AP-NL 3 shapes are checked in `tests/dcat_conformance.rs`), is
+//! negotiable in JSON-LD and RDF/XML, advertises LDES streams, counts
+//! named-graph data in its VoID statistics, and cannot be corrupted by hostile
+//! metadata.
 //!
-//! Own binary: `DCAT_PROFILE` and `CATALOG_*` are process-wide.
+//! Own binary: `OTS_DCAT_PROFILE` and `OTS_CATALOG_*` are process-wide.
 
 mod common;
 
@@ -20,43 +21,31 @@ use oxigraph::sparql::QueryResults;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
-/// The mandatory-property tables of DCAT-AP 3 (Catalogue, Dataset,
-/// Distribution, Agent, Data Service) plus DCAT-AP-NL 3's additions on
-/// Dataset (publisher, identifier, language) and Distribution (format,
-/// media type, licence).
-const AP_NL_SHAPES: &str = r#"
-@prefix sh: <http://www.w3.org/ns/shacl#> .
-@prefix dcat: <http://www.w3.org/ns/dcat#> .
-@prefix dct: <http://purl.org/dc/terms/> .
-@prefix foaf: <http://xmlns.com/foaf/0.1/> .
-@prefix ex: <urn:dcat-ap-nl:> .
-ex:Catalog a sh:NodeShape ; sh:targetClass dcat:Catalog ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dct:description ; sh:minCount 1 ] ,
-              [ sh:path dct:publisher ; sh:minCount 1 ; sh:class foaf:Agent ] ,
-              [ sh:path dcat:dataset ; sh:minCount 1 ] ,
-              [ sh:path dct:language ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:modified ; sh:minCount 1 ] ,
-              [ sh:path foaf:homepage ; sh:minCount 1 ] .
-ex:Dataset a sh:NodeShape ; sh:targetClass dcat:Dataset ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dct:description ; sh:minCount 1 ] ,
-              [ sh:path dct:publisher ; sh:minCount 1 ; sh:class foaf:Agent ] ,
-              [ sh:path dct:identifier ; sh:minCount 1 ] ,
-              [ sh:path dct:language ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:accessRights ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dcat:distribution ; sh:minCount 1 ] .
-ex:Distribution a sh:NodeShape ; sh:targetClass dcat:Distribution ;
-  sh:property [ sh:path dcat:accessURL ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:format ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dcat:mediaType ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:license ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
-ex:Agent a sh:NodeShape ; sh:targetClass foaf:Agent ;
-  sh:property [ sh:path foaf:name ; sh:minCount 1 ] .
-ex:DataService a sh:NodeShape ; sh:targetClass dcat:DataService ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dcat:endpointURL ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
-"#;
+/// SEMIC's published DCAT-AP 3.0.1 shapes (mandatory properties,
+/// cardinalities, node kinds and ranges), vendored unmodified in
+/// `tests/fixtures/semic-dcat-ap-3.0.1/` (CC BY 4.0, see its LICENSE.md).
+fn dcat_ap_shapes() -> String {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/semic-dcat-ap-3.0.1"
+    );
+    let g = "urn:test:shapes";
+    let s = TripleStore::in_memory().unwrap();
+    for f in ["dcat-ap-SHACL.ttl", "ranges.ttl"] {
+        let ttl = std::fs::read_to_string(format!("{dir}/{f}")).unwrap();
+        s.load_str(&ttl, RdfFormat::Turtle, Some(g)).unwrap();
+    }
+    // The two files link five property shapes neither defines (no `sh:path`):
+    // an ill-formed shapes graph the engine refuses whole. Drop those links,
+    // which constrain nothing (see tests/fixtures/semic-dcat-ap-3.0.1/PROVENANCE.md).
+    s.update(&format!(
+        "DELETE {{ GRAPH <{g}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps }} }} \
+         WHERE {{ GRAPH <{g}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps \
+         FILTER NOT EXISTS {{ ?ps <http://www.w3.org/ns/shacl#path> ?p }} }} }}"
+    ))
+    .unwrap();
+    String::from_utf8(s.graph_store_get(Some(g), RdfFormat::Turtle).unwrap()).unwrap()
+}
 
 async fn fetch(
     app: &Router,
@@ -124,11 +113,11 @@ fn ask(s: &TripleStore, q: &str) -> bool {
 
 #[tokio::test]
 async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata() {
-    std::env::set_var("DCAT_PROFILE", "dcat-ap-nl");
-    std::env::set_var("CATALOG_PUBLISHER_NAME", "Gemeente Voorbeeld");
-    std::env::set_var("CATALOG_PUBLISHER_IDENTIFIER", "00000001234567890000");
+    std::env::set_var("OTS_DCAT_PROFILE", "dcat-ap-nl");
+    std::env::set_var("OTS_CATALOG_PUBLISHER_NAME", "Gemeente Voorbeeld");
+    std::env::set_var("OTS_CATALOG_PUBLISHER_IDENTIFIER", "00000001234567890000");
     std::env::set_var(
-        "CATALOG_LICENSE",
+        "OTS_CATALOG_LICENSE",
         "http://creativecommons.org/publicdomain/zero/1.0/",
     );
     let (state, token) = admin_state();
@@ -224,7 +213,7 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
         Method::POST,
         "/api/shacl/shape-graphs",
         &token,
-        json!({ "name": "dcat-ap-nl", "visibility": "private", "turtle": AP_NL_SHAPES }),
+        json!({ "name": "dcat-ap-3.0.1", "visibility": "private", "turtle": dcat_ap_shapes() }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
@@ -243,7 +232,7 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(
         run["conforms"], true,
-        "the catalogue satisfies the DCAT-AP-NL mandatory properties: {txt}"
+        "the served catalogue satisfies the DCAT-AP 3.0.1 shapes: {txt}"
     );
 
     // 3. VoID statistics see the named graph.
@@ -295,4 +284,167 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
         ),
         "the user's dataset is not in the organisation's catalogue"
     );
+}
+
+/// The catalogue's VoID statistics count what the caller may read, and
+/// nothing else: a private dataset's graphs, a public dataset's private graph
+/// and the store's own system graphs stay out of an anonymous caller's
+/// totals, as they do in the service description, and a private graph is not
+/// listed as a public dataset's subset. A caller who may read more sees more;
+/// an administrator sees the whole store.
+#[tokio::test]
+async fn the_aggregate_statistics_count_only_what_the_caller_may_read() {
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_user(
+            "insider",
+            "insider",
+            "insider@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let insider = mint_token("insider", "insider", "user");
+    for (id, visibility, graph, data) in [
+        (
+            "open",
+            Visibility::Public,
+            "https://example.org/open/g",
+            "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 .",
+        ),
+        (
+            "closed",
+            Visibility::Private,
+            "https://example.org/closed/g",
+            "<urn:c> <urn:q> 3 . <urn:d> <urn:q> 4 . <urn:e> <urn:q> 5 .",
+        ),
+    ] {
+        state
+            .auth_db
+            .create_dataset(id, id, None, OwnerType::User, "insider", visibility, None)
+            .unwrap();
+        state.auth_db.add_dataset_graph(id, graph).unwrap();
+        state
+            .store
+            .load_str(data, RdfFormat::Turtle, Some(graph))
+            .unwrap();
+    }
+    // A private graph inside the public dataset: its writers' only.
+    let hidden = "https://example.org/open/private";
+    state.auth_db.add_dataset_graph("open", hidden).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("open", hidden, true)
+        .unwrap();
+    state
+        .store
+        .load_str(
+            "<urn:f> <urn:r> 6 . <urn:g> <urn:r> 7 . <urn:h> <urn:r> 8 . <urn:i> <urn:r> 9 .",
+            RdfFormat::Turtle,
+            Some(hidden),
+        )
+        .unwrap();
+    let app = test_app(state);
+    let stat_of = |cat: &TripleStore, dataset: &str, property: &str| -> u64 {
+        let q = format!(
+            "SELECT ?n WHERE {{ GRAPH <urn:cat> {{ <http://localhost:7878/{dataset}> <http://rdfs.org/ns/void#{property}> ?n }} }}"
+        );
+        match cat.query(&q).unwrap() {
+            QueryResults::Solutions(mut rows) => match rows.next().unwrap().unwrap().get("n") {
+                Some(oxigraph::model::Term::Literal(l)) => l.value().parse().unwrap(),
+                other => panic!("{dataset} {property}: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    };
+    let stat = |cat: &TripleStore, property: &str| stat_of(cat, "dataset", property);
+
+    let (st, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", None).await;
+    assert_eq!(st, StatusCode::OK, "{ttl}");
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert_eq!(stat(&cat, "triples"), 2, "{ttl}");
+    assert_eq!(stat(&cat, "distinctSubjects"), 2, "{ttl}");
+    assert_eq!(stat(&cat, "properties"), 1, "{ttl}");
+    assert_eq!(stat(&cat, "documents"), 1, "{ttl}");
+    // The public dataset's own entry leaves its private graph out too.
+    assert_eq!(stat_of(&cat, "dataset/open", "triples"), 2, "{ttl}");
+    assert!(
+        !ttl.contains(hidden),
+        "a private graph is not listed:\n{ttl}"
+    );
+
+    // The datasets' owner writes both and reads every graph of them.
+    let (_, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", Some(&insider)).await;
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert_eq!(stat(&cat, "triples"), 9, "{ttl}");
+    assert_eq!(stat(&cat, "distinctSubjects"), 9, "{ttl}");
+    assert_eq!(stat(&cat, "properties"), 3, "{ttl}");
+    assert_eq!(stat(&cat, "documents"), 3, "{ttl}");
+    assert_eq!(stat_of(&cat, "dataset/open", "triples"), 6, "{ttl}");
+    assert!(ttl.contains(hidden), "{ttl}");
+
+    let (_, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", Some(&admin)).await;
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert!(stat(&cat, "triples") >= 9, "{ttl}");
+    assert!(stat(&cat, "distinctSubjects") >= 9, "{ttl}");
+}
+
+/// SPARQL 1.1 Service Description §2: `GET /sparql` without a query returns
+/// the service description — the document the catalogue names as the
+/// endpoint's `dcat:endpointDescription`. A browser still gets the web UI.
+#[tokio::test]
+async fn the_sparql_endpoint_describes_itself() {
+    let (state, _) = admin_state();
+    let app = test_app(state);
+    let (st, ct, body) = fetch(&app, "/sparql", "text/turtle", None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(ct.starts_with("text/turtle"), "{ct}");
+    // The description's IRIs are relative to the request (`<>`, `<sparql>`).
+    let sd = TripleStore::in_memory().unwrap();
+    sd.load_str_with_base(
+        &body,
+        RdfFormat::Turtle,
+        "http://localhost:7878/sparql",
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{body}"));
+    assert!(
+        matches!(
+            sd.query("ASK { ?s a <http://www.w3.org/ns/sparql-service-description#Service> ; <http://www.w3.org/ns/sparql-service-description#endpoint> ?e }"),
+            Ok(QueryResults::Boolean(true))
+        ),
+        "{body}"
+    );
+    let (_, _, cat) = fetch(&app, "/.well-known/void", "text/turtle", None).await;
+    let cat = parse(&cat, RdfFormat::Turtle);
+    assert!(ask(&cat, "<http://localhost:7878/sparql> <http://www.w3.org/ns/dcat#endpointDescription> <http://localhost:7878/sparql>"));
+}
+
+/// The catalogue is scoped to its caller, so a signed-in caller's copy is
+/// `Cache-Control: private` — a shared cache must not serve it to anyone else —
+/// while the anonymous one stays `public`.
+#[tokio::test]
+async fn a_signed_in_callers_catalogue_is_not_shared_cacheable() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    for (auth, expected) in [(None, "public"), (Some(token.as_str()), "private")] {
+        let mut b = Request::builder()
+            .method(Method::GET)
+            .uri("/.well-known/void")
+            .header(header::ACCEPT, "text/turtle");
+        if let Some(t) = auth {
+            b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let resp = app
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cc = resp.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(cc.starts_with(expected), "{auth:?}: {cc}");
+        let vary = resp.headers()[header::VARY].to_str().unwrap();
+        assert!(vary.contains("Authorization"), "{vary}");
+    }
 }

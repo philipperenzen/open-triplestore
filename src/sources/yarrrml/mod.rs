@@ -229,6 +229,8 @@ fn translate_mapping(
         subject_mint: false,
         classes,
         poms,
+        // YARRRML means RML: an empty value is a value.
+        nulls: Vec::new(),
     })
 }
 
@@ -606,9 +608,12 @@ mod tests {
         &tm(m, map)
             .predicate_object_maps
             .iter()
-            .find(|p| matches!(&p.predicate_map.kind, TermMapKind::Constant(c) if c == predicate))
+            .find(|p| {
+                matches!(&p.predicate_maps[0].kind,
+                    TermMapKind::Constant(oxigraph::model::Term::NamedNode(c)) if c.as_str() == predicate)
+            })
             .unwrap_or_else(|| panic!("no predicate <{predicate}> on '{map}'"))
-            .object
+            .object_maps[0]
     }
 
     const BASIC: &str = r#"
@@ -745,8 +750,8 @@ mappings:
         };
         assert_eq!(r.parent_triples_map, rml_out::map_iri("supplier"));
         assert_eq!(r.joins.len(), 1);
-        assert_eq!(r.joins[0].child, "supplier_id");
-        assert_eq!(r.joins[0].parent, "supplier_id");
+        assert_eq!(r.joins[0].child.column(), Some("supplier_id"));
+        assert_eq!(r.joins[0].parent.column(), Some("supplier_id"));
     }
 
     #[test]
@@ -829,7 +834,9 @@ mappings:
         let ObjectMap::Term(note) = object(&m, "product", "http://example.org/note") else {
             panic!()
         };
-        assert!(matches!(&note.kind, TermMapKind::Constant(c) if c == "just text"));
+        assert!(matches!(&note.kind,
+            TermMapKind::Constant(oxigraph::model::Term::Literal(c)) if c.value() == "just text"));
+        assert_eq!(note.term_type, crate::rml::model::TermType::Literal);
     }
 
     #[test]

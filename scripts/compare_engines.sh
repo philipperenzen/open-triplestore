@@ -13,10 +13,10 @@
 #
 # Prerequisites: Docker, curl, awk. An Open Triplestore **release** server must be
 # reachable at $OTS_BASE (build it first, e.g.:
-#   docker run -d --name ots -p 7878:7878 -e JWT_SECRET=$(openssl rand -hex 32) \
-#     -e RATE_LIMIT_DISABLED=1 -e OTS_QUERY_CACHE=0 <your open-triplestore image> \
+#   docker run -d --name ots -p 7878:7878 -e OTS_JWT_SECRET=$(openssl rand -hex 32) \
+#     -e OTS_RATE_LIMIT_ENABLED=false -e OTS_QUERY_CACHE_ENABLED=false <your open-triplestore image> \
 #     --data-dir /data --bind 0.0.0.0
-# RATE_LIMIT_DISABLED=1 and OTS_QUERY_CACHE=0 make the numbers reflect cold engine
+# OTS_RATE_LIMIT_ENABLED=false and OTS_QUERY_CACHE_ENABLED=false make the numbers reflect cold engine
 # compute, not the rate limiter or warm cache hits.)
 #
 # Env knobs: OTS_BASE, N_PERSONS (dataset size), RUNS (samples/query), REPORT (path).
@@ -186,7 +186,7 @@ echo
   echo "returning ≤10 rows (so it reflects engine work, not result transfer), HTTP-200 only."
   echo "Open Triplestore is queried through a dataset's SPARQL **service endpoint** (single-graph"
   echo "ACL scope, like Fuseki's \`/ds\` and QLever's single dataset); its per-IP rate limiter and"
-  echo "result cache are disabled (\`RATE_LIMIT_DISABLED=1\`, \`OTS_QUERY_CACHE=0\`) so the figures"
+  echo "result cache are disabled (\`OTS_RATE_LIMIT_ENABLED=false\`, \`OTS_QUERY_CACHE_ENABLED=false\`) so the figures"
   echo "are **cold engine compute**, not warm cache hits."
   echo
   echo "## Environment"
@@ -215,7 +215,7 @@ echo
   echo '# 1. Start an Open Triplestore *release* server with the cache + rate limiter off'
   echo '#    (so the numbers are engine compute, not cache hits):'
   echo 'docker run -d --name ots -p 7878:7878 \'
-  echo '  -e RATE_LIMIT_DISABLED=1 -e OTS_QUERY_CACHE=0 -e JWT_SECRET=$(openssl rand -hex 32) \'
+  echo '  -e OTS_RATE_LIMIT_ENABLED=false -e OTS_QUERY_CACHE_ENABLED=false -e OTS_JWT_SECRET=$(openssl rand -hex 32) \'
   echo '  <open-triplestore-image> --data-dir /data --bind 0.0.0.0'
   echo '# 2. Run this script — it generates the data, loads all three engines, and spins'
   echo '#    up + removes the Fuseki and QLever containers itself:'

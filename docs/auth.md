@@ -5,6 +5,7 @@
 - **Session Token (JWT)** — Issued automatically on login. Used by this browser interface. Valid for the configured session duration. No setup needed.
 - **Bearer API Token** — Created in [Settings → API Tokens](/settings). Use in the `Authorization: Bearer <token>` HTTP header. Suitable for scripts, CI/CD, and integrations. Shown once on creation — store it securely.
 - **OAuth 2.0 / OIDC** — Configured providers appear on the login page. After SSO, the user receives a normal session token. API tokens can then be issued for programmatic access.
+- **IdP access token** — Off by default. With [resource-server mode](#oidc-resource-server-mode-idp-access-tokens) configured, a client that already holds an access token from your identity provider sends it as `Authorization: Bearer <token>`, and the store verifies it against the provider's keys.
 
 ## API token scopes
 
@@ -77,6 +78,7 @@ Full access including user management. **Requires an admin or super_admin accoun
 | `user` | Default for new accounts | Create datasets and organisations, upload data with a write token |
 | `admin` | Assigned by super_admin | All user capabilities + manage users and tokens, and publish models and vocabularies |
 | `super_admin` | System owner (configured at setup) | Full access including assigning admin / super_admin roles |
+| `guest` | Self-registered while [guest registration](#guest-self-registration-admin-toggle) is on | Read-only by default: no writing, dataset creation, API tokens or publishing unless `OTS_GUEST_CAPABILITIES` grants them |
 
 **Publish permission** is an add-on that can be granted to any user (the role stays `user`) by an admin or super-admin. It allows uploading model and vocabulary versions and publishing them. Admins and super-admins always have it implicitly.
 
@@ -99,14 +101,13 @@ Account email (verification, resets, reminders) is sent through SMTP when config
 
 | Variable | Meaning |
 |---|---|
-| `SMTP_HOST` | SMTP relay host (unset → log-only mode) |
-| `SMTP_PORT` | Relay port (default 587) |
-| `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials |
-| `SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
-| `SMTP_STARTTLS` | Legacy switch: force STARTTLS on/off; ignored when `SMTP_TLS` is set |
-| `SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
-| `PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
-| `OTS_REQUIRE_VERIFIED_EMAIL` | `1` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
+| `OTS_SMTP_HOST` | SMTP relay host (unset → log-only mode) |
+| `OTS_SMTP_PORT` | Relay port (default 587) |
+| `OTS_SMTP_USERNAME` / `OTS_SMTP_PASSWORD` | Optional credentials |
+| `OTS_SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
+| `OTS_SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
+| `OTS_PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
+| `OTS_LOGIN_EMAIL_VERIFICATION_ENABLED` | `true` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
 
 All of these are wired through `docker-compose.yml`, so setting them in `.env` is enough.
 
@@ -116,23 +117,21 @@ The compose stack ships a send-only [Postfix relay](https://github.com/bokysan/d
 
 ```bash
 COMPOSE_PROFILES=mail
-SMTP_HOST=mail
-SMTP_TLS=none          # the hop to the relay stays on the private compose network
-SMTP_FROM=Open Triplestore <no-reply@example.org>
+OTS_SMTP_HOST=mail
+OTS_SMTP_TLS=none          # the hop to the relay stays on the private compose network
+OTS_SMTP_FROM=Open Triplestore <no-reply@example.org>
 MAIL_SENDER_DOMAINS=example.org
-BASE_URL=https://data.example.org   # browser-facing origin — the base for emailed links
+OTS_BASE_URL=https://data.example.org   # browser-facing origin — the base for emailed links
 ```
 
 The relay listens only on the compose network (no host port is published, so it cannot be abused as an open relay) and persists its queue, so deferred mail keeps retrying across restarts. By default it delivers straight to each recipient's MX — that only lands when the host can egress port 25 and `MAIL_HOSTNAME` has matching forward/reverse DNS plus an SPF record. From a laptop or an IP without mail reputation, set `MAIL_RELAYHOST` (+ `MAIL_RELAYHOST_USERNAME` / `MAIL_RELAYHOST_PASSWORD`) to route through a provider smarthost instead. See `.env.example` for the full variable list.
 
 ## SSO provider setup (OIDC / SAML)
 
-> **SAML is experimental and not in the default build.** The `saml` feature is
-> excluded from `full` (and therefore from the published image): the ACS handler
-> has never been verified against a real identity provider and carries a known
-> request-ID validation defect, so at present no SAML login can succeed. The
-> provider type is still listed in the admin UI, marked experimental, for builds
-> that enable the feature. Use OIDC, which is complete and tested.
+> **SAML needs the `saml` build feature.** The published Docker image has it
+> (the Dockerfile builds the `image` feature, which includes it). `full`, and so a plain `cargo build`,
+> does not: the feature links libxml2 and libxmlsec1 and needs pkg-config and
+> libclang to build ([build features](build-features.md)).
 
 
 Providers are configured by admins under **Security & Access Control → Identity providers**. Any standards-compliant OIDC or SAML 2.0 IdP works; the callback/redirect URL to register at the IdP is always:
@@ -161,11 +160,309 @@ Sign in with Apple is **not yet supported** by the generic OIDC integration: App
 
 ### Other IdPs (Keycloak, Auth0, Okta, …)
 
-Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (upload the IdP certificate, set the SSO URL, and exchange SP metadata from `/api/auth/saml/<slug>/metadata`).
+Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (see below).
+
+### SAML 2.0
+
+This store acts as the SAML **service provider** (SP) for the web-browser
+sign-in profile (SAML 2.0 Profiles §4.1), following the Kantara saml2int
+deployment profile. In scope: sign-in started here (AuthnRequest over
+HTTP-Redirect, optionally signed; response over HTTP-POST) or at the IdP (off
+by default), signed responses with SHA-256 or stronger, encrypted assertions,
+IdP metadata import with several signing certificates, SP key rollover,
+persistent NameIDs, attribute-to-role mapping and Single Logout started from
+either side. Out of scope: the Artifact binding, ECP, attribute queries,
+NameID management, and federation metadata aggregates or MDQ (paste the one IdP
+you trust instead).
+
+#### Connect an IdP
+
+1. Add a provider with type **SAML**. Under **Import IdP metadata**, give the
+   IdP's metadata URL (fetched over https, redirects not followed) or paste its
+   XML. That fills in the IdP's entity ID, SSO URL (HTTP-Redirect binding),
+   logout URL and every signing certificate. You can also type them:
+   - **Entity ID**: the IdP's entity ID. Responses must carry it as `Issuer`.
+   - **SSO URL**: `https`, or `http` on loopback only.
+   - **IdP signing certificates**: one or more, PEM or bare base64. During an
+     IdP key rollover keep the old and the new one; responses signed with
+     either are accepted. A provider without one never starts a sign-in.
+2. Save, then register the store at the IdP. Either import our SP metadata
+   from `https://<your-host>/api/auth/saml/<slug>/metadata` (served once the
+   provider is active; admins can download it before from
+   `GET /api/admin/oauth/providers/<id>/saml/metadata`), or enter:
+
+   ```
+   Entity ID:  https://<your-host>/api/auth/saml/<slug>/metadata
+   ACS URL:    https://<your-host>/api/auth/saml/<slug>/acs   (HTTP-POST)
+   SLO URL:    https://<your-host>/api/auth/saml/<slug>/slo   (HTTP-Redirect or HTTP-POST)
+   ```
+
+   The provider form shows these, our signing/encryption certificate and the
+   transport check under **This store as service provider**.
+
+#### What the store checks
+
+The login button sends the browser to `/api/auth/saml/<slug>/login`, which
+redirects to the IdP with an AuthnRequest (a 128-bit ID and a NameID policy)
+and binds the attempt to the browser with a short-lived `saml_state` cookie.
+The ACS accepts a response only if:
+
+- it comes back within 10 minutes, from the same browser, answers that
+  AuthnRequest (`InResponseTo`), and only once;
+- the response or the assertion is signed by one of the configured IdP
+  certificates, with RSA or ECDSA and SHA-256, -384 or -512 (SHA-1 is refused);
+- its issuer, audience (our entity ID), destination and recipient (our ACS) are
+  right, and it is inside its validity window (`clock_skew_seconds` tolerance,
+  default 180 s, at most 600 s);
+- the XML has no DOCTYPE and is at most 1 MiB;
+- the NameID is not transient, unless a **subject attribute** identifies the
+  account instead.
+
+A refused response gets a generic `401 {"error":"SAML sign-in failed"}`; the
+reason goes to the audit log (`LoginFailure`, `detail`) and the server log. On
+success the browser lands on `/oauth/callback`, signed in.
+
+**IdP-initiated sign-in** (from the IdP's app portal) is off by default: an
+unsolicited response is not tied to a browser, so it allows login CSRF. Turn
+on *Accept sign-ins started at the IdP* to accept them; each assertion is then
+accepted once (replay cache), and one that carries an `InResponseTo` is refused.
+
+#### Encrypted assertions, signed requests and SP keys
+
+Each provider gets its own SP key pair (RSA-3072, self-signed certificate) the
+first time it is needed. The private key is stored like an OAuth client secret
+(`auth::secret`): encrypted with a key derived from `OTS_JWT_SECRET`, or, for a key
+you import, as a secret reference (`env:`, `file:`, `vault:`). The metadata
+publishes every key with `use="signing"` and with `use="encryption"`.
+
+- **Encrypted assertions** are accepted with AES-128/192/256-GCM or -CBC and
+  RSA-OAEP key transport (`rsa-oaep-mgf1p`, or xmlenc 1.1 `rsa-oaep` with
+  SHA-1/256/384/512). RSA PKCS#1 v1.5 key transport is refused. Either the
+  whole response must be signed or the assertion inside the encryption must
+  be. *Require encrypted assertions* refuses plain ones.
+- **Signed AuthnRequests**: *Sign authentication requests* signs the
+  HTTP-Redirect query with RSA-SHA256 and the metadata says
+  `AuthnRequestsSigned="true"`. Logout messages are always signed.
+- **Key rollover**: add a key (`POST /api/admin/oauth/providers/<id>/saml/keys`,
+  generated, or `{private_key, certificate}`); it is published and decrypts at
+  once. When the IdP has read the new metadata, activate it
+  (`…/keys/<kid>/activate`) so it signs, then delete the old key
+  (`DELETE …/keys/<kid>`; the signing key cannot be deleted).
+
+#### Attributes and roles
+
+Attribute names are matched against `Name` and `FriendlyName`. By default:
+
+| Field | Attributes |
+|---|---|
+| Email | `urn:oid:0.9.2342.19200300.100.1.3`, `…/claims/emailaddress`, `email`, `mail`, `emailAddress` |
+| Display name | `urn:oid:2.16.840.1.113730.3.1.241`, `urn:oid:2.5.4.3`, `…/identity/claims/displayname`, `…/claims/name`, `displayName`, `cn` |
+| Groups | `urn:oid:1.3.6.1.4.1.5923.1.5.1.1` (isMemberOf), `urn:oid:1.3.6.1.4.1.5923.1.1.1.7` (eduPersonEntitlement), `…/claims/groups`, `…/claims/role`, `memberOf`, `groups`, `role`, `Role` |
+
+Each list can be replaced per provider. Group values go through the role claim
+map. As with OIDC, the mapped role is set when the account is created; later
+sign-ins keep the account's role (an admin changes it), the `publisher` grant
+is only ever added, and sign-in never grants `super_admin`.
+
+SAML has no standard `email_verified` assertion, so a SAML sign-in never links
+to an existing local account by email. A new subject gets a new account (with
+auto-provisioning on).
+
+#### Single Logout
+
+Signing out of a SAML session revokes its whole refresh-token family. When the
+provider has an IdP logout URL, `POST /api/auth/logout` answers
+`{"saml_logout_url": …}` and the web UI sends the browser there with a signed
+LogoutRequest naming the NameID and SessionIndex; the IdP's signed
+LogoutResponse brings it back. A signed LogoutRequest from the IdP (redirect
+or POST binding) revokes the sessions it names (by SessionIndex when it lists
+any), is accepted once, and is answered with a signed LogoutResponse.
+
+**Limit:** access tokens are stateless JWTs. One issued before the logout
+stays valid until it expires (`OTS_ACCESS_TOKEN_EXPIRY_SECS`, default 1800); only
+the refresh token is revoked. Shorten the access-token lifetime if that window
+matters.
+
+#### Transport
+
+The IdP returns the browser to the ACS with a cross-site POST, which only a
+`SameSite=None; Secure` cookie survives, so SAML needs an `https` `OTS_BASE_URL`.
+The `saml_state` cookie is `SameSite=None; Secure` whenever `OTS_BASE_URL` is
+https, whatever `OTS_SECURE_COOKIES_ENABLED` says. With a plain-http `OTS_BASE_URL` the login
+route refuses to start, except on `localhost`, where the cookie is
+`SameSite=Lax` and an IdP on the same site works.
+
+#### IdP settings that matter
+
+- Sign the response or the assertion with SHA-256; give the bearer subject
+  confirmation a `NotOnOrAfter`.
+- Release a persistent NameID (or a stable attribute, configured as the
+  subject attribute).
+- For Keycloak: set *Name ID format* to `persistent`; *Client signature
+  required* only if you turn on signed requests; *Encrypt assertions* works
+  with the metadata's encryption key; set the *Logout Service Redirect Binding
+  URL* to our SLO URL.
+- For Microsoft Entra ID: the default NameID is persistent per application;
+  map groups through the `…/claims/groups` claim.
+
+## OIDC resource-server mode (IdP access tokens)
+
+The providers above sign people in through the browser. Resource-server mode
+is a separate path, for a client that already holds an access token from your
+identity provider: for example, a single-page app that signs its users in at
+Keycloak or Entra ID and then calls this store's API directly. The client
+sends the IdP's token as `Authorization: Bearer <token>`. The store checks the
+signature against the IdP's published keys, then links the token's subject to
+a local account, creating one if needed. The mode is configured only through
+environment variables and stays off unless `OTS_OIDC_ISSUER` is set.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTS_OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
+| `OTS_OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OTS_OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
+| `OTS_OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. Any other value (`admin`, `super_admin`, a typo) **stops the start**, because it applies to every account the IdP knows. Grant admin per account, through `OTS_OIDC_ROLE_CLAIM_MAP` or the UI. It is read only once (see [changing settings later](#changing-settings-later)). |
+| `OTS_OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
+| `OTS_OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
+| `OTS_OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
+| `OTS_OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
+| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Any other value stops the start. See [what an IdP token may do](#what-an-idp-token-may-do). |
+| `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
+| `OTS_SESSION_AND_API_TOKENS_ENABLED` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
+
+The Docker Compose file passes all ten through from `.env`.
+
+### What a token must look like
+
+- It is signed with an asymmetric algorithm (RS…, PS…, ES…, EdDSA). HMAC
+  (`HS256` and the other HS variants) is refused.
+- Its header has a `kid` that names a key in the IdP's key set. The store reads
+  `jwks_uri` from `<OTS_OIDC_ISSUER>/.well-known/openid-configuration`
+  (`jwks_uri` must be `https` too) and caches the keys for an hour. An unknown
+  `kid` triggers an immediate re-fetch, so key rotation needs no restart.
+- `iss` equals `OTS_OIDC_ISSUER`, with or without one trailing slash:
+  `https://tenant.example` and `https://tenant.example/` both match, and
+  nothing else does.
+- `aud` contains `OTS_OIDC_AUDIENCE`, `exp` is in the future, and `nbf` (if
+  present) is in the past.
+- `sub` is present. `email`, `email_verified`, `name` and
+  `preferred_username` are read when present.
+
+A bearer token is tried in this order: the store's own session or API token
+(while legacy tokens are accepted), an access token from the store's own
+[OIDC provider](oidc-provider.md), a [federation](federation.md) assertion
+from a trusted peer, and only then the IdP. A token starting with `ots_` never
+reaches the IdP check. A token that fails verification gets
+`401 Invalid or expired token`.
+
+### Accounts
+
+The store keys each IdP account on its subject (`sub`), stored under a
+provider entry named *Environment OIDC* (slug `env-oidc`) that is created at
+startup. The first request with a new subject resolves it as follows:
+
+1. If the token's `email` belongs to an existing local account **and** the
+   token says `email_verified: true`, the subject is linked to that account.
+2. If the email exists but is not asserted as verified, the request is
+   refused (`401`). This prevents account takeover through an IdP that lets
+   anyone claim any address.
+3. Otherwise a new account is created. Its username comes from `name`,
+   `preferred_username`, `email` or `sub` (made unique). It gets the token's
+   email, or a placeholder `…@oauth.local` address when the token has none,
+   and no usable password, so its owner signs in only through the IdP.
+
+Every later request with the same subject reaches the same account. A
+deactivated account is refused.
+
+### Roles, publish permission and organisations
+
+On **every** request, the values of the `OTS_OIDC_ROLE_CLAIMS` claims and of the
+`OTS_OIDC_GROUPS_CLAIM` claim are looked up in `OTS_OIDC_ROLE_CLAIM_MAP`:
+
+- The highest mapped role wins. `super_admin` is capped at `admin`, so a token
+  can never make an account a super admin through the map.
+- When a value maps to a role, that role is written to the account, even if
+  it is lower than the account's current role. The IdP is authoritative: a
+  role an admin set in the UI is overwritten on the next request. When nothing
+  maps, an existing account keeps its role, and a new account gets
+  `OTS_OIDC_DEFAULT_ROLE`.
+- The special value `"publisher"` grants the
+  [publish permission](administration.md#the-can_publish-capability). It is
+  never taken away just because the claim is absent.
+
+Each group value that starts with `OTS_OIDC_ORG_GROUP_PREFIX` names an
+organisation slug. If that organisation exists, the account is added to it as
+a `member`. Organisations are never created this way, and memberships are only
+added: one stays after the group disappears from the token.
+
+### What an IdP token may do
+
+An IdP token is a delegation: any client that holds a user's access token for
+this store's audience can present it. `OTS_OIDC_IDP_TOKEN_POLICY` decides how far it
+reaches:
+
+| Policy | Read | Write | Create API tokens |
+|---|---|---|---|
+| `session` *(default)* | yes | yes | no |
+| `scoped` | yes | only if the token's scopes grant it (see below) | no |
+| `full` (`legacy` is accepted too) | yes | yes | yes |
+
+- Under the default, an IdP token reads and writes wherever the account's
+  dataset and graph permissions allow, whatever scopes it carries, like an
+  interactive session.
+- No policy except `full` lets an IdP token create a long-lived API token:
+  `POST /api/auth/tokens` answers `403`. This keeps a short-lived delegation
+  from becoming a permanent `ots_` token for the account. To create one, sign
+  in to the web UI. Before this setting existed, IdP tokens could always
+  create API tokens; `full` restores that.
+- Under `scoped`, the scopes are read from the `scope` claim (a space-separated
+  string, as Keycloak issues it) and the `scp` claim (a string, as Entra ID
+  issues it, or an array, as Okta does). `write` and `admin` grant writing, as
+  does any value listed in `OTS_OIDC_IDP_WRITE_SCOPES`. A token with only
+  `openid profile email` reads.
+- "Write" means every `POST`, `PUT`, `PATCH` and `DELETE` request, including
+  SPARQL Update. A refused write gets `403 This API token does not have write
+  scope`. A SPARQL *query* sent by `POST` is a read and still works.
+- **Admin and super-admin accounts are exempt from the write check** under
+  every policy.
+- An unknown value logs a warning and falls back to `session`, never to `full`.
+
+This setting is independent of `OTS_OIDC_PROVIDER_TOKEN_POLICY`, which governs only
+the tokens this store issues as an
+[OIDC provider](oidc-provider.md#what-a-provider-token-may-do). The two are
+issued to different clients, so tightening one must not change the other.
+
+Accounts with the `guest` role stay limited by `OTS_GUEST_CAPABILITIES`,
+whichever way they authenticate.
+
+### Turning off the store's own tokens
+
+`OTS_SESSION_AND_API_TOKENS_ENABLED=false` refuses every session token this store issues,
+including the one the bundled web UI receives after a password, passkey or SSO
+sign-in. Every `ots_` API token is refused too, with
+`401 Legacy tokens are disabled`. What still works: IdP tokens, access tokens
+from the store's own OIDC provider, and federation assertions. Use it only for
+an API-only deployment whose clients all hold IdP tokens. The bundled web UI's
+sign-in stops working.
+
+### Changing settings later
+
+The *Environment OIDC* entry is created once, the first time the server starts
+with `OTS_OIDC_ISSUER` set. It records `OTS_OIDC_DEFAULT_ROLE` and has
+auto-provisioning on. Changing `OTS_OIDC_DEFAULT_ROLE` afterwards does not update
+the entry. Edit it under **Security & Access Control → Identity providers**
+(or `PUT /api/admin/oauth/providers/:id`) instead. There you can also turn
+auto-provisioning off, so that only accounts that already exist (linked by
+verified email) can use IdP tokens. The entry's default role is capped at
+`user` like `OTS_OIDC_DEFAULT_ROLE`: an `admin` value set there, or recorded by an
+earlier version, creates `user` accounts. The entry's own role claim map and
+its enabled switch do not affect this path; the environment variables above do.
+
+The entry does not appear on the login page: it has no client ID, and the
+login page lists only providers a browser sign-in can start from.
 
 ## Guest self-registration (admin toggle)
 
-With normal self-registration closed (`OTS_DISABLE_REGISTRATION=1`), an admin
+With normal self-registration closed (`OTS_REGISTRATION_ENABLED=false`), an admin
 can still open a low-privilege path from **Security → Registration**: the
 public register page then creates accounts with the `guest` system role (no
 publish/design/admin rights — client apps decide what guests may fill, e.g.
@@ -181,6 +478,13 @@ guest-open forms). The toggle is runtime-changeable (no restart):
 
 `GET /api/auth/features` exposes the toggle so register UIs adapt their
 wording; sweeps are audit-logged with the affected count.
+
+What a guest may do beyond reading is set by the environment variable
+`OTS_GUEST_CAPABILITIES`, a comma- or space-separated list: `write` (data in
+datasets the guest holds a grant on), `create_datasets`, `api_tokens`,
+`publish`, or `all` (everything a `user` may do). Unset, guests are read-only. The clamp applies on
+every path a guest arrives by — session cookie, API token or OIDC token — and
+an unknown word stops the start rather than being silently dropped.
 
 ## Introspection for resource servers
 

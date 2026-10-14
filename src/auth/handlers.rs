@@ -19,6 +19,7 @@ use super::middleware::AuthenticatedUser;
 use super::models::*;
 use super::password;
 use super::{dataset_graph, secret, totp, user_graph, validate};
+use crate::server::client_ip::ClientIp;
 use crate::server::{AppState, CookieConfig};
 
 /// Runtime admin toggle (app_settings key): allow public self-registration of
@@ -42,7 +43,7 @@ pub enum RegistrationDecision {
     Closed,
 }
 
-/// Pure decision: `disabled` = OTS_DISABLE_REGISTRATION, `existing_users` =
+/// Pure decision: `disabled` = `OTS_REGISTRATION_ENABLED` is off, `existing_users` =
 /// current account count (the first account always registers — bootstrap),
 /// `guest_toggle` = the runtime guest_self_registration setting.
 pub fn decide_registration(
@@ -71,12 +72,10 @@ const RECOVERY_CODE_COUNT: usize = 10;
 const TOTP_ISSUER: &str = "Open Triplestore";
 
 /// True when password logins require a verified email address
-/// (`OTS_REQUIRE_VERIFIED_EMAIL=1`). Off by default so existing deployments
+/// (`OTS_LOGIN_EMAIL_VERIFICATION_ENABLED=1`). Off by default so existing deployments
 /// and local development keep working without an SMTP relay.
 pub(crate) fn require_verified_email() -> bool {
-    std::env::var("OTS_REQUIRE_VERIFIED_EMAIL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::config::LOGIN_EMAIL_VERIFICATION_ENABLED.get()
 }
 
 // ─── Request / Response types ─────────────────────────────────────────────────
@@ -257,7 +256,9 @@ pub struct MfaRequiredResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LogoutRequest {
-    pub refresh_token: String,
+    /// The refresh token to revoke; without it, the `refresh_token` cookie's.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 // ─── API Token request/response types ────────────────────────────────────────
@@ -448,6 +449,14 @@ pub struct UpdateDatasetRequest {
     pub version_notes: Option<String>,
     pub spatial: Option<String>,
     pub landing_page: Option<String>,
+    /// Start of the period the data covers (`dct:temporal`): `YYYY-MM-DD` or an
+    /// RFC 3339 date-time.
+    pub temporal_start: Option<String>,
+    /// End of the period the data covers; same forms, not before the start.
+    pub temporal_end: Option<String>,
+    /// Update frequency (`dct:accrualPeriodicity`): a code of the EU frequency
+    /// table (`ANNUAL`, `MONTHLY`, …) or its IRI. Stored as the IRI.
+    pub accrual_periodicity: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -511,24 +520,80 @@ pub struct UpdateServiceRequest {
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
 
-/// Issue an access + refresh token pair, storing the refresh token hash in DB.
-/// Build `Set-Cookie` headers for access and refresh tokens (M-2: HttpOnly cookies).
+/// The path prefix a reverse proxy serves this instance under, from the
+/// `X-Forwarded-Prefix` request header (Traefik's `StripPrefix` middleware sets
+/// it; nginx needs `proxy_set_header X-Forwarded-Prefix /ots;`), or `""` when
+/// there is none. See docs/operations.md, "Serving under a path prefix".
+///
+/// The browser sees `/ots/api/auth/refresh` where this server sees
+/// `/api/auth/refresh`, so a cookie scoped to `Path=/api/auth` would never be
+/// sent back: the session would end at the first access-token expiry. Only a
+/// plain path is accepted (`/ots`, `/tools/ots`: unreserved characters, no
+/// empty, `.` or `..` segment); anything else counts as no prefix, so the header
+/// can never inject cookie attributes. The value only scopes the requester's
+/// own cookies, so it needs no proxy allowlist.
+pub(crate) fn forwarded_prefix(headers: &HeaderMap) -> String {
+    let Some(raw) = headers
+        .get("x-forwarded-prefix")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return String::new();
+    };
+    let p = raw.split(',').next().unwrap_or("").trim();
+    let p = p.trim_end_matches('/');
+    let plain = p.len() > 1
+        && p.len() <= 256
+        && p.starts_with('/')
+        && p[1..].split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        });
+    if plain {
+        p.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// A cookie `Path` for `path` (an absolute path on this server) under the
+/// proxy prefix: `/` → `/ots`, `/api/auth` → `/ots/api/auth`.
+pub(crate) fn cookie_path(prefix: &str, path: &str) -> String {
+    match (prefix.is_empty(), path) {
+        (true, _) => path.to_string(),
+        (false, "/") => prefix.to_string(),
+        (false, _) => format!("{prefix}{path}"),
+    }
+}
+
+/// Build `Set-Cookie` headers for access and refresh tokens (M-2: HttpOnly
+/// cookies), scoped below `prefix` (see [`forwarded_prefix`]).
 pub(crate) fn auth_cookie_headers(
     access_token: &str,
     refresh_token: &str,
     access_expiry_secs: u64,
     refresh_expiry_secs: u64,
     secure: bool,
+    prefix: &str,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let secure_attr = if secure { "; Secure" } else { "" };
     let access_cookie = format!(
-        "access_token={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
-        access_token, access_expiry_secs, secure_attr
+        "access_token={}; HttpOnly; SameSite=Strict; Path={}; Max-Age={}{}",
+        access_token,
+        cookie_path(prefix, "/"),
+        access_expiry_secs,
+        secure_attr
     );
     let refresh_cookie = format!(
-        "refresh_token={}; HttpOnly; SameSite=Strict; Path=/api/auth; Max-Age={}{}",
-        refresh_token, refresh_expiry_secs, secure_attr
+        "refresh_token={}; HttpOnly; SameSite=Strict; Path={}; Max-Age={}{}",
+        refresh_token,
+        cookie_path(prefix, "/api/auth"),
+        refresh_expiry_secs,
+        secure_attr
     );
     if let (Ok(a), Ok(r)) = (
         axum::http::HeaderValue::from_str(&access_cookie),
@@ -540,14 +605,17 @@ pub(crate) fn auth_cookie_headers(
     headers
 }
 
-/// Build `Set-Cookie` headers that clear access and refresh tokens on logout.
-pub(crate) fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
+/// Build `Set-Cookie` headers that clear access and refresh tokens on logout
+/// (same `Path`s as [`auth_cookie_headers`], or the browser keeps them).
+pub(crate) fn clear_auth_cookie_headers(secure: bool, prefix: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let secure_attr = if secure { "; Secure" } else { "" };
     for (name, path) in &[("access_token", "/"), ("refresh_token", "/api/auth")] {
         let val = format!(
             "{}=; HttpOnly; SameSite=Strict; Path={}; Max-Age=0{}",
-            name, path, secure_attr
+            name,
+            cookie_path(prefix, path),
+            secure_attr
         );
         if let Ok(v) = axum::http::HeaderValue::from_str(&val) {
             headers.append(SET_COOKIE, v);
@@ -590,7 +658,7 @@ pub(crate) fn issue_tokens(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let expires_in = jwt_config.access_expiry_minutes * 60;
+    let expires_in = jwt_config.access_expiry_secs;
     Ok((access_token, refresh_token, expires_in))
 }
 
@@ -648,6 +716,7 @@ pub async fn register(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(state): State<AppState>,
     State(cookie_config): State<CookieConfig>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     validate::validate_username(&req.username)
@@ -657,7 +726,8 @@ pub async fn register(
     let email = req.email.trim().to_string();
     validate::validate_email(&email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Operators can disable open self-registration with OTS_DISABLE_REGISTRATION=1
+    // Operators can close open self-registration with OTS_REGISTRATION_ENABLED=false
+    // (the production default; a runtime setting an admin can change)
     // (provision users out-of-band instead). The very FIRST account is still allowed
     // so a fresh instance can be bootstrapped through the UI; thereafter registration
     // is closed. This prevents an attacker on an exposed fresh deployment from
@@ -667,9 +737,8 @@ pub async fn register(
     // toggle `guest_self_registration` (default OFF) may still open a low-privilege
     // path — public registration then creates `guest` accounts (no publish/design/
     // admin rights; client apps decide what guests may fill).
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let registration_disabled =
+        !crate::config::runtime::get(&db, &crate::config::REGISTRATION_ENABLED);
     let existing_users = db
         .count_users()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -777,6 +846,7 @@ pub async fn register(
         expires_in,
         jwt_config.refresh_expiry_days * 86400,
         cookie_config.secure,
+        &forwarded_prefix(&headers),
     );
 
     Ok((
@@ -846,16 +916,18 @@ fn dummy_password_hash() -> &'static str {
 }
 
 /// POST /api/auth/login
+#[allow(clippy::too_many_arguments)] // axum extractors, one per capability
 pub async fn login(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = audit::client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
 
@@ -921,7 +993,7 @@ pub async fn login(
         return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
 
-    // Optional verified-email gate (OTS_REQUIRE_VERIFIED_EMAIL=1). The caller
+    // Optional verified-email gate (OTS_LOGIN_EMAIL_VERIFICATION_ENABLED=1). The caller
     // has already proven the password, so a specific message is not an
     // enumeration oracle. A fresh link is auto-(re)sent, throttled per account.
     if require_verified_email() && !user.email_verified {
@@ -987,6 +1059,7 @@ pub async fn login(
         expires_in,
         jwt_config.refresh_expiry_days * 86400,
         cookie_config.secure,
+        &forwarded_prefix(&headers),
     );
 
     Ok((
@@ -1010,6 +1083,7 @@ pub async fn verify_2fa(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<MfaVerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1026,7 +1100,7 @@ pub async fn verify_2fa(
         ));
     }
 
-    let ip = audit::client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
 
@@ -1108,7 +1182,7 @@ pub async fn verify_2fa(
         let mut b = AuditEventBuilder::new(AuditEventType::LoginSuccess, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "mfa": mfa_method }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1120,6 +1194,7 @@ pub async fn verify_2fa(
         expires_in,
         jwt_config.refresh_expiry_days * 86400,
         cookie_config.secure,
+        &forwarded_prefix(&headers),
     );
 
     Ok((
@@ -1281,6 +1356,7 @@ pub async fn refresh(
         expires_in,
         jwt_config.refresh_expiry_days * 86400,
         cookie_config.secure,
+        &forwarded_prefix(&headers),
     );
 
     Ok((
@@ -1295,33 +1371,46 @@ pub async fn refresh(
 }
 
 /// POST /api/auth/logout
+///
+/// Revokes the refresh token (from the JSON body's `refresh_token`, else the
+/// HttpOnly cookie) and clears the auth cookies: `204`. For a session that a
+/// SAML sign-in started, the whole refresh-token family is revoked, and when
+/// the IdP has a Single Logout endpoint the answer is `200` with
+/// `{"saml_logout_url": …}`, where the browser goes next to end the IdP
+/// session. Access tokens already issued stay valid until they expire.
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn logout(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
+    State(base_url): State<crate::server::BaseUrl>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let mut logged_actor: Option<String> = None;
-    // Accept refresh token from JSON body OR from HttpOnly cookie (M-2)
-    let refresh_token_str: Option<String> = {
-        if !body.is_empty() {
-            serde_json::from_slice::<LogoutRequest>(&body)
-                .ok()
-                .map(|r| r.refresh_token)
-        } else {
-            headers
-                .get("cookie")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|c| {
-                    c.split(';')
-                        .find_map(|p| p.trim().strip_prefix("refresh_token=").map(str::to_string))
-                })
-        }
-    };
+    // Accept refresh token from JSON body OR from HttpOnly cookie (M-2). A
+    // body without one (the SPA sends `{}` when it holds no token) falls back
+    // to the cookie.
+    let from_body = (!body.is_empty())
+        .then(|| serde_json::from_slice::<LogoutRequest>(&body).ok())
+        .flatten()
+        .and_then(|r| r.refresh_token)
+        .filter(|t| !t.is_empty());
+    let refresh_token_str: Option<String> = from_body.or_else(|| {
+        headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|c| {
+                c.split(';')
+                    .find_map(|p| p.trim().strip_prefix("refresh_token=").map(str::to_string))
+            })
+    });
 
     // Best effort: revoke the refresh token if valid
+    let mut saml_logout_url = None;
+    let mut saml_session = false;
     if let Some(ref tok) = refresh_token_str {
         if let Ok(claims) = jwt::verify_token(&jwt_config, tok) {
             if claims.token_type == "refresh" {
@@ -1329,6 +1418,18 @@ pub async fn logout(
                 let token_hash = hash_token(tok);
                 if let Ok(Some(stored)) = db.get_refresh_token_by_hash(&token_hash) {
                     let _ = db.revoke_refresh_token(&stored.id);
+                    if let Some(family) = stored.family_id.as_deref() {
+                        saml_session = matches!(db.get_saml_session(family), Ok(Some(_)));
+                        match crate::auth::saml::begin_saml_logout(
+                            &db,
+                            family,
+                            &base_url.0,
+                            &jwt_config.secret,
+                        ) {
+                            Ok(url) => saml_logout_url = url,
+                            Err(e) => tracing::warn!("SAML logout could not reach the IdP: {e:#}"),
+                        }
+                    }
                 }
             }
         }
@@ -1337,16 +1438,29 @@ pub async fn logout(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::Logout, AuditOutcome::Success);
         b.actor_id = logged_actor;
-        b.ip_address = audit::client_ip(&headers, None);
+        if saml_session {
+            b = b.details(serde_json::json!({
+                "auth_method": "saml_slo",
+                "initiated_by": "sp",
+                "idp_logout": saml_logout_url.is_some(),
+            }));
+        }
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
     }
 
-    Ok((
-        StatusCode::NO_CONTENT,
-        clear_auth_cookie_headers(cookie_config.secure),
-    ))
+    let cleared = clear_auth_cookie_headers(cookie_config.secure, &forwarded_prefix(&headers));
+    Ok(match saml_logout_url {
+        Some(url) => (
+            StatusCode::OK,
+            cleared,
+            Json(serde_json::json!({ "saml_logout_url": url })),
+        )
+            .into_response(),
+        None => (StatusCode::NO_CONTENT, cleared).into_response(),
+    })
 }
 
 /// GET /api/auth/me
@@ -1389,6 +1503,12 @@ pub async fn me(
             serde_json::Value::Array(organisations),
         );
         obj.insert("groups".into(), serde_json::Value::Array(groups));
+        // The IRI this user has in LDP `.acl` resources (Web Access Control).
+        #[cfg(feature = "ldp")]
+        obj.insert(
+            "agent_iri".into(),
+            serde_json::Value::String(crate::ldp::wac::user_agent_iri(&current_user.user_id)),
+        );
     }
     Ok(Json(body))
 }
@@ -1482,6 +1602,7 @@ pub async fn change_password(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1523,7 +1644,7 @@ pub async fn change_password(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
             .actor(&current_user.user_id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1540,10 +1661,9 @@ pub async fn auth_features(
     State(db): State<Arc<AuthDb>>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-        && db.count_users().unwrap_or(0) > 0;
+    let registration_disabled =
+        !crate::config::runtime::get(&db, &crate::config::REGISTRATION_ENABLED)
+            && db.count_users().unwrap_or(0) > 0;
     Ok(Json(serde_json::json!({
         "email_delivery": state.mailer.smtp_configured(),
         "require_verified_email": require_verified_email(),
@@ -1577,6 +1697,7 @@ pub async fn admin_set_guest_registration(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     Json(req): Json<GuestRegistrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1603,7 +1724,7 @@ pub async fn admin_set_guest_registration(
         .actor_id(&current_user.user_id)
         .resource("setting", GUEST_SELF_REGISTRATION_SETTING)
         .details(serde_json::json!({ "enabled": req.enabled, "guests_swept": swept }));
-    b.ip_address = audit::client_ip(&headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(&headers);
     b.request_id = audit::request_id_from_headers(&headers);
     audit_log.log(b);
@@ -1622,6 +1743,7 @@ pub async fn verify_email(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<VerifyEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1678,7 +1800,7 @@ pub async fn verify_email(
         let mut b = AuditEventBuilder::new(event, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "email": email_now }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1743,6 +1865,7 @@ pub async fn forgot_password(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1773,7 +1896,7 @@ pub async fn forgot_password(
                     )
                     .actor_username(user.username.clone());
                     b.actor_id = Some(user.id.clone());
-                    b.ip_address = audit::client_ip(&headers, None);
+                    b.ip_address = client_ip.as_string();
                     b.user_agent = audit::user_agent(&headers);
                     b.request_id = audit::request_id_from_headers(&headers);
                     audit_log.log(b);
@@ -1792,6 +1915,7 @@ pub async fn forgot_password(
 pub async fn reset_password(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1836,7 +1960,7 @@ pub async fn reset_password(
         let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "via": "reset_token" }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1851,6 +1975,7 @@ pub async fn forgot_username(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ForgotUsernameRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1868,7 +1993,7 @@ pub async fn forgot_username(
                 )
                 .actor_username(user.username.clone());
                 b.actor_id = Some(user.id.clone());
-                b.ip_address = audit::client_ip(&headers, None);
+                b.ip_address = client_ip.as_string();
                 b.user_agent = audit::user_agent(&headers);
                 b.request_id = audit::request_id_from_headers(&headers);
                 audit_log.log(b);
@@ -1890,6 +2015,7 @@ pub async fn change_email(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ChangeEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1950,7 +2076,7 @@ pub async fn change_email(
                 AuditEventBuilder::new(AuditEventType::EmailChangeRequested, AuditOutcome::Success)
                     .actor(&user.id, &user.username, user.role.as_str())
                     .details(serde_json::json!({ "new_email": new_email }));
-            b.ip_address = audit::client_ip(&headers, None);
+            b.ip_address = client_ip.as_string();
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
             audit_log.log(b);
@@ -1977,7 +2103,7 @@ pub async fn change_email(
             let mut b = AuditEventBuilder::new(AuditEventType::EmailChanged, AuditOutcome::Success)
                 .actor(&user.id, &user.username, user.role.as_str())
                 .details(serde_json::json!({ "email": new_email, "direct": true }));
-            b.ip_address = audit::client_ip(&headers, None);
+            b.ip_address = client_ip.as_string();
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
             audit_log.log(b);
@@ -2033,6 +2159,7 @@ pub async fn totp_enable(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<TotpEnableRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2077,7 +2204,7 @@ pub async fn totp_enable(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::TwoFactorEnabled, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2096,6 +2223,7 @@ pub async fn totp_disable(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2157,7 +2285,7 @@ pub async fn totp_disable(
             AuditOutcome::Success,
         )
         .actor(&user.id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2186,6 +2314,7 @@ pub async fn create_api_token(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<CreateApiTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2257,7 +2386,7 @@ pub async fn create_api_token(
             .actor_id(&current_user.user_id)
             .resource("api_token", &token.id)
             .details(serde_json::json!({ "name": token.name, "scopes": token.scopes }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2281,6 +2410,7 @@ pub async fn revoke_api_token(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(token_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2300,7 +2430,7 @@ pub async fn revoke_api_token(
         let mut b = AuditEventBuilder::new(AuditEventType::TokenRevoked, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("api_token", &token_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2342,6 +2472,7 @@ pub async fn admin_create_user(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<AdminCreateUserRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2407,7 +2538,7 @@ pub async fn admin_create_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user.id)
             .details(serde_json::json!({ "username": user.username, "role": role.as_str() }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2451,11 +2582,13 @@ pub async fn admin_list_user_identities(
 }
 
 /// PUT /api/admin/users/:user_id
+#[allow(clippy::too_many_arguments)] // axum extractors, one per capability
 pub async fn admin_update_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(req): Json<AdminUpdateUserRequest>,
@@ -2539,7 +2672,7 @@ pub async fn admin_update_user(
                 "from": target.role.as_str(),
                 "to": new_role.as_str(),
             }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2576,7 +2709,7 @@ pub async fn admin_update_user(
         let mut b = AuditEventBuilder::new(evt, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("user", &user_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2603,6 +2736,7 @@ pub async fn admin_delete_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2639,7 +2773,7 @@ pub async fn admin_delete_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
             .details(serde_json::json!({ "via": "admin_delete_user" }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2653,6 +2787,7 @@ pub async fn admin_reset_password(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(req): Json<AdminResetPasswordRequest>,
@@ -2695,7 +2830,7 @@ pub async fn admin_reset_password(
             AuditEventBuilder::new(AuditEventType::PasswordResetForced, AuditOutcome::Success)
                 .actor_id(&current_user.user_id)
                 .resource("user", &user_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2710,6 +2845,7 @@ pub async fn admin_purge_user(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2745,7 +2881,7 @@ pub async fn admin_purge_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
             .details(serde_json::json!({ "username": target.username }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -3241,6 +3377,7 @@ pub async fn delete_organisation(
             .auth_db
             .delete_dataset(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        purge_dataset_versions(&state, dataset_id).await;
     }
 
     // Capture hierarchy before deletion so we can keep graphs consistent and
@@ -3732,7 +3869,7 @@ pub async fn create_dataset(
     let current_user = require_user(user_opt)?;
     // Guests only create datasets where the deployment has granted it
     // (OTS_GUEST_CAPABILITIES); every other role always may.
-    if !current_user.can_create_datasets() {
+    if !current_user.can_create_datasets(&db) {
         return Err((
             StatusCode::FORBIDDEN,
             "This account is not permitted to create datasets".to_string(),
@@ -4072,6 +4209,16 @@ pub async fn update_dataset(
     validate_metadata_url("spatial", req.spatial.as_deref())?;
     validate_metadata_url("landing_page", req.landing_page.as_deref())?;
     validate_metadata_url("contact_url", req.contact_url.as_deref())?;
+    let coverage = crate::dcat::catalog::check_coverage(
+        req.temporal_start.as_deref(),
+        req.temporal_end.as_deref(),
+        req.accrual_periodicity.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    validate_metadata_url(
+        "accrual_periodicity",
+        coverage.accrual_periodicity.as_deref(),
+    )?;
 
     db.update_dataset(
         &dataset_id,
@@ -4111,6 +4258,13 @@ pub async fn update_dataset(
         req.version_notes.as_deref(),
         req.spatial.as_deref(),
         req.landing_page.as_deref(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.update_dataset_coverage(
+        &dataset_id,
+        coverage.temporal_start.as_deref(),
+        coverage.temporal_end.as_deref(),
+        coverage.accrual_periodicity.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -4220,8 +4374,32 @@ pub async fn delete_dataset(
         .auth_db
         .delete_dataset(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    purge_dataset_versions(&state, &dataset_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deleted dataset's versions go with it: snapshot and built graphs,
+/// validation graphs, registry records, change-log pins. They used to stay
+/// behind — taking disk, holding back the change log's retention, and
+/// showing up for a new dataset that reused the id. Best-effort.
+async fn purge_dataset_versions(state: &AppState, dataset_id: &str) {
+    let version_lock = crate::dataset_versions::lock::dataset(dataset_id);
+    let _held = version_lock.lock().await;
+    let st = state.clone();
+    let id = dataset_id.to_string();
+    match tokio::task::spawn_blocking(move || {
+        crate::dataset_versions::handlers::purge_all_for_dataset(&st, &id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "versions of deleted dataset {dataset_id} not purged: {}",
+            e.message()
+        ),
+        Err(e) => tracing::warn!("versions of deleted dataset {dataset_id} not purged: {e}"),
+    }
 }
 
 // ─── Dataset Graphs handlers ──────────────────────────────────────────────────
@@ -5036,7 +5214,7 @@ fn gate_shapes_graph_link(
              '{dataset_id}'."
         ));
     }
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,
@@ -6332,5 +6510,65 @@ mod metadata_url_security_tests {
                 .expect_err(&format!("should reject {v}"));
             assert_eq!(err.0, StatusCode::BAD_REQUEST);
         }
+    }
+}
+
+#[cfg(test)]
+mod forwarded_prefix_tests {
+    use super::{cookie_path, forwarded_prefix};
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn with(prefix: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-prefix", HeaderValue::from_str(prefix).unwrap());
+        h
+    }
+
+    #[test]
+    fn plain_prefixes_are_taken_without_a_trailing_slash() {
+        assert_eq!(forwarded_prefix(&HeaderMap::new()), "");
+        assert_eq!(forwarded_prefix(&with("/ots")), "/ots");
+        assert_eq!(forwarded_prefix(&with("/ots/")), "/ots");
+        assert_eq!(forwarded_prefix(&with(" /tools/ots ")), "/tools/ots");
+        assert_eq!(forwarded_prefix(&with("/a-b_c.d~e")), "/a-b_c.d~e");
+        // A proxy chain appends; the first value is the outermost one.
+        assert_eq!(forwarded_prefix(&with("/ots, /inner")), "/ots");
+    }
+
+    #[test]
+    fn anything_but_a_plain_path_counts_as_no_prefix() {
+        for bad in [
+            "",
+            "/",
+            "ots",
+            "//evil.example",
+            "/ots; Domain=evil.example",
+            "/ots;Path=/",
+            "/a//b",
+            "/a/../b",
+            "/./a",
+            "/a b",
+            "/a%2Fb",
+            "https://evil.example/ots",
+        ] {
+            assert_eq!(forwarded_prefix(&with(bad)), "", "{bad:?}");
+        }
+        assert_eq!(
+            forwarded_prefix(&with(&format!("/{}", "a".repeat(300)))),
+            ""
+        );
+    }
+
+    #[test]
+    fn cookie_paths_move_below_the_prefix() {
+        assert_eq!(cookie_path("", "/"), "/");
+        assert_eq!(cookie_path("", "/api/auth"), "/api/auth");
+        // `Path=/ots` matches `/ots` and everything under `/ots/` (RFC 6265 §5.1.4).
+        assert_eq!(cookie_path("/ots", "/"), "/ots");
+        assert_eq!(cookie_path("/ots", "/api/auth"), "/ots/api/auth");
+        assert_eq!(
+            cookie_path("/ots", "/api/auth/oauth"),
+            "/ots/api/auth/oauth"
+        );
     }
 }

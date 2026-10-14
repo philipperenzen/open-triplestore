@@ -12,6 +12,7 @@ use super::db::AuthDb;
 use super::jwt::{hash_token, verify_token, JwtConfig};
 use super::models::{AccessLevel, ApiScope, SystemRole};
 use super::oidc_rs::AuthExt;
+use crate::server::client_ip::ClientIp;
 
 /// Authenticated user extracted from JWT token or API token.
 #[derive(Debug, Clone)]
@@ -24,10 +25,10 @@ pub struct AuthenticatedUser {
     /// this is `true` only when the token was issued with `write` or `admin` scope (M-8).
     pub write_access: bool,
     /// True if this principal may exchange itself for a long-lived API token at
-    /// `POST /api/auth/tokens`. False for OIDC access tokens under the default
-    /// policy: a credential delegated to a client (possibly for read-only
-    /// scopes) must not be upgradable into permanent account access. See
-    /// [`crate::auth::policy::OidcSessionPolicy`].
+    /// `POST /api/auth/tokens`. False for OIDC access tokens — ours and the
+    /// external IdP's — under the default policy: a credential delegated to a
+    /// client (possibly for read-only scopes) must not be upgradable into
+    /// permanent account access. See [`crate::auth::policy::OidcSessionPolicy`].
     pub can_mint_api_tokens: bool,
     /// The scopes an API token was issued with. Empty for a session, whose
     /// authority is the user's own; a resource scope (`sources:read`,
@@ -55,8 +56,9 @@ impl AuthenticatedUser {
     ///
     /// Everyone signed in may, except a `Guest` in a deployment that has not
     /// granted `create_datasets` — the default.
-    pub fn can_create_datasets(&self) -> bool {
-        self.role != SystemRole::Guest || crate::auth::policy::guest_capabilities().create_datasets
+    pub fn can_create_datasets(&self, db: &AuthDb) -> bool {
+        self.role != SystemRole::Guest
+            || crate::auth::policy::guest_capabilities(db).create_datasets
     }
 
     /// Clamp a freshly-resolved principal to the capabilities its role is
@@ -66,9 +68,9 @@ impl AuthenticatedUser {
     /// whether they arrive by session cookie, API token or OIDC token. Only
     /// ever removes authority — a role can never gain power here — and roles
     /// other than `Guest` are untouched.
-    fn clamped_to_role_policy(mut self) -> Self {
+    fn clamped_to_role_policy(mut self, db: &AuthDb) -> Self {
         if self.role == SystemRole::Guest {
-            let caps = crate::auth::policy::guest_capabilities();
+            let caps = crate::auth::policy::guest_capabilities(db);
             self.write_access &= caps.write;
             self.can_mint_api_tokens &= caps.api_tokens;
             self.can_publish &= caps.publish;
@@ -175,7 +177,7 @@ fn resolve_token(
             can_mint_api_tokens: false,
             scopes: api_token.scopes.clone(),
         }
-        .clamped_to_role_policy())
+        .clamped_to_role_policy(auth_db))
     } else {
         // JWT token path
         let claims = verify_token(jwt_config, token)
@@ -203,7 +205,7 @@ fn resolve_token(
             can_mint_api_tokens: true, // a first-party interactive session
             scopes: Vec::new(),
         }
-        .clamped_to_role_policy())
+        .clamped_to_role_policy(auth_db))
     }
 }
 
@@ -236,15 +238,22 @@ async fn resolve_oidc_token(
         return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
     }
 
+    // An IdP token is a delegation too: whichever client holds it for this
+    // audience may present it. By default (`OTS_OIDC_IDP_TOKEN_POLICY=session`) it
+    // writes like an interactive session but may not mint a long-lived API
+    // token, which would turn that delegation into permanent account access.
+    // The same rule `OTS_OIDC_PROVIDER_TOKEN_POLICY` sets for our own provider tokens,
+    // configured separately because the two are issued to different clients.
+    let policy = crate::auth::policy::idp_token_policy(auth_db);
     Ok(AuthenticatedUser {
         user_id: user.id,
         role: user.role,
         can_publish: user.can_publish,
-        write_access: true, // interactive (OIDC) sessions always have write access
-        can_mint_api_tokens: true,
+        write_access: policy.allows_idp_write(auth_db, &claims.scope()),
+        can_mint_api_tokens: policy.allows_api_token_minting(),
         scopes: Vec::new(),
     }
-    .clamped_to_role_policy())
+    .clamped_to_role_policy(auth_db))
 }
 
 /// Host part of a peer issuer (`127.0.0.1-8080`, `peer.example.org`), used to
@@ -289,6 +298,7 @@ fn ensure_federated_provider(
         auto_provision: true,
         default_role: Some(SystemRole::User.as_str().to_string()),
         is_active: false,
+        saml_config: None,
     })
 }
 
@@ -364,7 +374,7 @@ async fn resolve_federated_token(
         can_mint_api_tokens: false,
         scopes: Vec::new(),
     }
-    .clamped_to_role_policy())
+    .clamped_to_role_policy(auth_db))
 }
 
 /// Resolve a bearer token to an authenticated user, honoring the legacy-token
@@ -417,16 +427,16 @@ async fn authenticate(
             // default it behaves like an interactive session (may write) but may
             // not mint a long-lived API token, which would turn a delegation the
             // user granted to a client into permanent account access.
-            let policy = crate::auth::policy::oidc_session_policy();
+            let policy = crate::auth::policy::oidc_session_policy(auth_db);
             return Ok(AuthenticatedUser {
                 user_id: user.id,
                 role: user.role,
                 can_publish: user.can_publish,
-                write_access: policy.allows_write(&scope),
+                write_access: policy.allows_write(auth_db, &scope),
                 can_mint_api_tokens: policy.allows_api_token_minting(),
                 scopes: Vec::new(),
             }
-            .clamped_to_role_policy());
+            .clamped_to_role_policy(auth_db));
         }
     }
 
@@ -465,14 +475,14 @@ struct DenialContext {
 }
 
 impl DenialContext {
-    fn capture(req: &Request) -> Self {
+    fn capture(req: &Request, client_ip: ClientIp) -> Self {
         let user = req.extensions().get::<AuthenticatedUser>();
         Self {
             method: req.method().as_str().to_string(),
             path: req.uri().path().to_string(),
             actor_id: user.map(|u| u.user_id.clone()),
             actor_role: user.map(|u| u.role.as_str().to_string()),
-            ip: super::audit::client_ip(req.headers(), None),
+            ip: client_ip.as_string(),
             request_id: req
                 .extensions()
                 .get::<crate::server::RequestId>()
@@ -520,11 +530,30 @@ pub async fn require_auth(
     State(provider): State<crate::server::OidcProviderState>,
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
+    #[cfg(feature = "ldp")] State(app_state): State<crate::server::AppState>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let token = extract_token(&req)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing authorization token").into_response())?;
+    let Some(token) = extract_token(&req) else {
+        // WAC: an LDP resource whose access control list grants `foaf:Agent`
+        // `acl:Read` is readable without a token. The layer stays; only a
+        // `GET`/`HEAD` under `/ldp/` that the ACL opens to everyone passes, with
+        // no principal in the extensions. The handler evaluates the ACL again.
+        #[cfg(feature = "ldp")]
+        if crate::ldp::wac::anonymous_request_allowed(
+            &app_state.store,
+            &app_state.base_url,
+            req.method(),
+            req.uri().path(),
+        ) {
+            let ctx = DenialContext::capture(&req, client_ip);
+            let resp = next.run(req).await;
+            audit_forbidden(&audit, &ctx, &resp);
+            return Ok(resp);
+        }
+        return Err((StatusCode::UNAUTHORIZED, "Missing authorization token").into_response());
+    };
 
     let user = authenticate(
         &jwt_config,
@@ -541,7 +570,7 @@ pub async fn require_auth(
 
     // Capture identity/endpoint context, then audit if the handler (or an inner
     // guard) denies with 403 (see `audit_forbidden`).
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     Ok(resp)
@@ -557,6 +586,7 @@ pub async fn optional_auth(
     State(provider): State<crate::server::OidcProviderState>,
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -582,7 +612,7 @@ pub async fn optional_auth(
 
     // Audit any downstream 403 — including anonymous cross-tenant read probes on
     // visibility-scoped routes that this middleware lets through unauthenticated.
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     resp
@@ -646,20 +676,9 @@ fn enforce_write_scope_for_mutation(
     Ok(())
 }
 
-/// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
-/// turns it off. Read once — this sits on every request.
+/// Whether the endpoint ACL is enforced (`OTS_ENDPOINT_ACL_ENABLED`, default on).
 fn endpoint_acl_enforced() -> bool {
-    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENFORCED.get_or_init(|| {
-        !matches!(
-            std::env::var("ENDPOINT_ACL_ENFORCE")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str(),
-            "false" | "0" | "no" | "off"
-        )
-    })
+    crate::config::ENDPOINT_ACL_ENABLED.get()
 }
 
 /// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
@@ -743,39 +762,48 @@ mod role_policy_tests {
     #[test]
     fn guest_capabilities_clamp_the_resolved_principal() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let db = AuthDb::in_memory().unwrap();
         // Default: a guest reads and nothing else, even arriving on a session
         // that would otherwise carry full authority.
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
-        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        let g = principal(SystemRole::Guest).clamped_to_role_policy(&db);
         assert!(!g.write_access, "guests must not write by default");
         assert!(!g.can_mint_api_tokens, "guests must not mint API tokens");
         assert!(!g.can_publish && !g.is_publisher());
-        assert!(!g.can_create_datasets());
+        assert!(!g.can_create_datasets(&db));
 
         // Opt in to exactly one capability: the others stay denied.
         std::env::set_var("OTS_GUEST_CAPABILITIES", "write");
-        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        let g = principal(SystemRole::Guest).clamped_to_role_policy(&db);
         assert!(g.write_access);
         assert!(!g.can_mint_api_tokens && !g.can_publish);
-        assert!(!g.can_create_datasets());
+        assert!(!g.can_create_datasets(&db));
 
         // The escape hatch restores user-equivalent power.
         std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
-        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        let g = principal(SystemRole::Guest).clamped_to_role_policy(&db);
         assert!(g.write_access && g.can_mint_api_tokens && g.can_publish);
-        assert!(g.can_create_datasets());
+        assert!(g.can_create_datasets(&db));
 
         // Other roles are never touched by the guest policy.
         std::env::set_var("OTS_GUEST_CAPABILITIES", "read");
         for role in [SystemRole::User, SystemRole::Admin, SystemRole::SuperAdmin] {
-            let u = principal(role).clamped_to_role_policy();
+            let u = principal(role).clamped_to_role_policy(&db);
             assert!(u.write_access, "{role:?} must keep write");
             assert!(u.can_mint_api_tokens, "{role:?} must keep token minting");
             assert!(
-                u.can_create_datasets(),
+                u.can_create_datasets(&db),
                 "{role:?} must keep dataset creation"
             );
         }
+        // An administrator's runtime override wins over the environment,
+        // and resetting it hands the decision back.
+        crate::config::runtime::set(&db, "OTS_GUEST_CAPABILITIES", Some("write")).unwrap();
+        let g = principal(SystemRole::Guest).clamped_to_role_policy(&db);
+        assert!(g.write_access, "the override grants write");
+        crate::config::runtime::set(&db, "OTS_GUEST_CAPABILITIES", None).unwrap();
+        let g = principal(SystemRole::Guest).clamped_to_role_policy(&db);
+        assert!(!g.write_access, "reset: the environment's read-only again");
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
     }
 
@@ -788,7 +816,7 @@ mod role_policy_tests {
         let mut p = principal(SystemRole::Guest);
         p.write_access = false;
         p.can_mint_api_tokens = false;
-        let g = p.clamped_to_role_policy();
+        let g = p.clamped_to_role_policy(&AuthDb::in_memory().unwrap());
         assert!(!g.write_access && !g.can_mint_api_tokens);
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
     }

@@ -20,6 +20,7 @@ use super::crs::{reproject_wkt, transform_xy, Crs};
 use super::datatypes::{extract_crs, extract_wkt};
 use super::geojson::geojson_to_wkt;
 use super::gml::{gml_srs_name, gml_to_wkt};
+use super::kml::kml_to_wkt;
 
 /// One element (or root object) in the viewer feed.
 #[derive(Debug, Clone, Serialize, ToSchema, Default)]
@@ -148,7 +149,8 @@ pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStat
     }
 
     let has_coordinates = ask("?s geo:hasGeometry ?g . \
-         { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w } UNION { ?g geo:asGeoJSON ?w }");
+         { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w } UNION { ?g geo:asGeoJSON ?w } \
+         UNION { ?g geo:asKML ?w }");
     let has_models = ask("?el omg:hasGeometry ?g . ?g ?p ?f . \
          FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
          FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))");
@@ -260,7 +262,8 @@ pub fn build_viewer_feed_opts(
         // Only coordinate-bearing features; ?parent stays unbound (the map's
         // located elements are roots/anchors — the tree resolves parents).
         "?el geo:hasGeometry ?gg . \
-         { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 } UNION { ?gg geo:asGeoJSON ?j0 }"
+         { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 } UNION { ?gg geo:asGeoJSON ?j0 } \
+         UNION { ?gg geo:asKML ?k0 }"
             .to_string()
     } else {
         let root_filter = match root {
@@ -286,7 +289,7 @@ pub fn build_viewer_feed_opts(
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?geojson ?fp ?file ?guid ?up ?msize ?mhead
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?geojson ?kml ?fp ?file ?guid ?up ?msize ?mhead
         {from}
         WHERE {{
             {selection}
@@ -295,7 +298,8 @@ pub fn build_viewer_feed_opts(
             OPTIONAL {{ ?el geo:hasGeometry ?g .
                         OPTIONAL {{ ?g geo:asWKT ?wkt }}
                         OPTIONAL {{ ?g geo:asGML ?gml }}
-                        OPTIONAL {{ ?g geo:asGeoJSON ?geojson }} }}
+                        OPTIONAL {{ ?g geo:asGeoJSON ?geojson }}
+                        OPTIONAL {{ ?g geo:asKML ?kml }} }}
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
                         OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
@@ -392,6 +396,11 @@ pub fn build_viewer_feed_opts(
             if entry.wkt4326.is_none() {
                 if let Some(json) = sol.get("geojson").map(term_value) {
                     apply_geojson(entry, &json);
+                }
+            }
+            if entry.wkt4326.is_none() {
+                if let Some(kml) = sol.get("kml").map(term_value) {
+                    apply_kml(entry, &kml);
                 }
             }
         }
@@ -548,6 +557,16 @@ fn apply_geojson(el: &mut ViewerElement, json: &str) {
     el.wkt4326 = reproject_wkt(&wkt_body, Crs::Wgs84, Crs::Wgs84);
 }
 
+/// Fill the geometry fields from a KML literal value — CRS84 by definition,
+/// like GeoJSON.
+fn apply_kml(el: &mut ViewerElement, kml: &str) {
+    let Some(wkt_body) = kml_to_wkt(kml) else {
+        return;
+    };
+    el.source_crs = Some(Crs::Wgs84.to_uri().to_string());
+    el.wkt4326 = reproject_wkt(&wkt_body, Crs::Wgs84, Crs::Wgs84);
+}
+
 /// Fill in each element's administrative place path (country → region → city)
 /// by inferring it from the RDF — see [`super::places`] for the rules.
 ///
@@ -689,7 +708,7 @@ const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
 /// Model file URLs are stored as absolute IRIs (correct linked data — the
 /// importer stamps `base_url` into the RDF at import time). But a *browser*
 /// must not be handed that absolute origin: the value baked in at seed time is
-/// whatever `BASE_URL` was then, so a store seeded with the default
+/// whatever `OTS_BASE_URL` was then, so a store seeded with the default
 /// `http://localhost:7878` serves `http://localhost:7878/api/…/download` to a
 /// phone on the LAN, where `localhost` is the phone. That is the "3D models
 /// fail to load from another device" bug. Two cases are rewritten:
@@ -697,7 +716,7 @@ const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
 ///   1. the URL starts with the configured `base_url` — this deployment,
 ///      whatever host the operator configured; and
 ///   2. its origin is loopback *and* its path is one of our own API routes —
-///      data seeded under an earlier/default `BASE_URL`, which no remote client
+///      data seeded under an earlier/default `OTS_BASE_URL`, which no remote client
 ///      could ever fetch anyway.
 ///
 /// Anything else (a genuinely external `https://raw.githubusercontent.com/…`
@@ -914,6 +933,34 @@ mod tests {
         }
     }
 
+    /// KML feeds the map like GeoJSON, and a 3D GML or KML geometry reaches it
+    /// as its 2D footprint.
+    #[test]
+    fn kml_and_3d_gml_geometries_feed_the_map() {
+        let data = r#"
+            @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+            @prefix ex:  <http://example.org/> .
+            ex:k geo:hasGeometry [ geo:asKML "<LineString><coordinates>4.9,52.37,3 4.91,52.38,4</coordinates></LineString>"^^geo:kmlLiteral ] .
+            ex:g geo:hasGeometry [ geo:asGML "<gml:Point srsDimension='3'><gml:pos>4.9 52.37 7</gml:pos></gml:Point>"^^geo:gmlLiteral ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(data, RdfFormat::Turtle, None).unwrap();
+        assert!(dataset_geo_stats(&store, &[]).has_coordinates);
+        for located in [false, true] {
+            let mut feed = build_viewer_feed_opts(&store, &[], None, located, None);
+            feed.sort_by(|a, b| a.wkt4326.cmp(&b.wkt4326));
+            let wkts: Vec<_> = feed.iter().map(|e| e.wkt4326.as_deref()).collect();
+            assert_eq!(
+                wkts,
+                [
+                    Some("LINESTRING(4.9 52.37,4.91 52.38)"),
+                    Some("POINT(4.9 52.37)")
+                ],
+                "{feed:?}"
+            );
+        }
+    }
+
     #[test]
     fn plain_geosparql_without_bot_appears_as_root() {
         let data = r#"
@@ -1074,7 +1121,7 @@ mod tests {
             Some("/api/datasets/d/assets/a1/download")
         );
         // 2. Loopback origin on our own route (data seeded under a default
-        //    BASE_URL) → relative, even though it doesn't match `base`.
+        //    OTS_BASE_URL) → relative, even though it doesn't match `base`.
         for url in [
             "http://localhost:7878/api/datasets/d/assets/a1/download",
             "http://127.0.0.1:7878/api/datasets/d/assets/a1/download",

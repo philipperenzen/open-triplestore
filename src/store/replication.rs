@@ -143,17 +143,43 @@ pub struct ReplicationConfig {
     pub cluster: Option<ClusterConfig>,
 }
 
+/// A replication setting's validated value (`None`: unset), from the
+/// configuration registry.
 fn env_opt(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    crate::config::current().value(name)
+}
+
+/// `OTS_REPLICATION_TOKEN` through the secrets module: a reference
+/// (`env:`/`file:`/`vault:`) resolves; a raw value is accepted in the
+/// development posture with a one-time warning and refused under
+/// `OTS_ENV=production`, in which case the follower runs without a token and
+/// the log says so (the leader then refuses it, which is the point).
+fn replication_token() -> Option<String> {
+    match crate::secrets::env_secret("OTS_REPLICATION_TOKEN") {
+        Ok(secret) => secret.map(|s| s.expose().to_string()),
+        Err(e) => {
+            tracing::error!("OTS_REPLICATION_TOKEN: {e}; the follower runs without a token");
+            None
+        }
+    }
+}
+
+/// `OTS_REPLICATION_CLUSTER_SECRET` through the secrets module, like the
+/// replication token. An unresolvable one leaves the cluster unconfigured.
+fn cluster_secret() -> Option<String> {
+    match crate::secrets::env_secret("OTS_REPLICATION_CLUSTER_SECRET") {
+        Ok(secret) => secret.map(|s| s.expose().to_string()),
+        Err(e) => {
+            tracing::error!("OTS_REPLICATION_CLUSTER_SECRET: {e}");
+            None
+        }
+    }
 }
 
 /// True when `OTS_REPLICATION_ROLE=leader`: the change log stays on.
 pub fn leader_role_configured() -> bool {
     env_opt("OTS_REPLICATION_ROLE")
-        .map(|r| r.eq_ignore_ascii_case("leader") || r.eq_ignore_ascii_case("primary"))
+        .map(|r| r == "leader")
         .unwrap_or(false)
 }
 
@@ -161,7 +187,7 @@ pub fn leader_role_configured() -> bool {
 /// node may be elected leader at any time).
 pub fn cluster_role_configured() -> bool {
     env_opt("OTS_REPLICATION_ROLE")
-        .map(|r| r.eq_ignore_ascii_case("cluster"))
+        .map(|r| r == "cluster")
         .unwrap_or(false)
 }
 
@@ -209,7 +235,7 @@ impl ReplicationConfig {
             env_opt("OTS_REPLICATION_GRAPHS").as_deref(),
             env_opt("OTS_REPLICATION_DATASETS").as_deref(),
             env_opt("OTS_REPLICATION_LEADER_URL").as_deref(),
-            env_opt("OTS_REPLICATION_TOKEN").as_deref(),
+            replication_token().as_deref(),
             env_opt("OTS_REPLICATION_NODE_ID").as_deref(),
             env_opt("OTS_REPLICATION_POLL_MS").as_deref(),
             env_opt("OTS_REPLICATION_INTERVAL_SECS").as_deref(),
@@ -222,11 +248,13 @@ impl ReplicationConfig {
         {
             c.identity_interval = Duration::from_secs(secs.max(1));
         }
-        if c.role == Role::Cluster {
+        // `parse` knows leaders and followers; a cluster member is set up
+        // here, once its members are known.
+        if cluster_role_configured() {
             match ClusterConfig::parse(
                 env_opt("OTS_REPLICATION_CLUSTER").as_deref(),
                 env_opt("OTS_REPLICATION_CLUSTER_ID").as_deref(),
-                env_opt("OTS_REPLICATION_CLUSTER_SECRET").as_deref(),
+                cluster_secret().as_deref(),
                 env_opt("OTS_REPLICATION_ELECTION_MS").as_deref(),
                 env_opt("OTS_REPLICATION_HEARTBEAT_MS").as_deref(),
             ) {
@@ -337,8 +365,8 @@ impl ReplicationConfig {
         interval_secs: Option<&str>,
     ) -> Self {
         let role = match role.trim().to_ascii_lowercase().as_str() {
-            "leader" | "primary" => Role::Leader,
-            "follower" | "replica" => Role::Follower,
+            "leader" => Role::Leader,
+            "follower" => Role::Follower,
             _ => Role::None,
         };
         let mode = Mode::parse(mode);
@@ -982,7 +1010,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!(
                 "open-triplestore-replica/",
                 env!("CARGO_PKG_VERSION")
@@ -1255,7 +1283,7 @@ impl TripleStore {
         let manifest = source.manifest().map_err(StoreError::Other)?;
         if !manifest.capture_enabled || manifest.epoch.is_empty() {
             return Err(StoreError::Other(
-                "the leader has change capture off (set OTS_REPLICATION_ROLE=leader or OTS_CHANGE_CAPTURE=on there)"
+                "the leader has change capture off (set OTS_REPLICATION_ROLE=leader or OTS_CHANGE_CAPTURE_ENABLED=on there)"
                     .to_string(),
             ));
         }

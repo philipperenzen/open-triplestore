@@ -6,8 +6,8 @@
 //! produced the wrong term for that property — a literal where the shape
 //! wants an IRI, `xsd:string` where it wants `xsd:decimal`. One that fails on
 //! a few subjects is a fact about those rows. The classifier separates the
-//! two by share: a violation hitting at least `systematicShare` of a type's
-//! subjects, over at least `systematicMinSubjects` of them, is a **mapping
+//! two by share: a violation hitting at least `systematic_share` of a type's
+//! subjects, over at least `systematic_min_subjects` of them, is a **mapping
 //! defect**; anything sparser is a **data issue**. Both numbers come from the
 //! mapping gates ([`super::gates`]), so the proposer and the reviewer read
 //! the same rule.
@@ -47,8 +47,6 @@ use super::{connector, mappings, registry, runs};
 
 /// Every scratch graph a dry-run writes starts with this.
 pub const SCRATCH_PREFIX: &str = "urn:dryrun:";
-const TTL_ENV: &str = "OTS_DRYRUN_TTL_SECS";
-const DEFAULT_TTL_SECS: u64 = 15 * 60;
 const DEFAULT_SAMPLE: usize = 20;
 /// Focus nodes listed per finding; the rest are counted.
 const FOCUS_NODES_LISTED: usize = 20;
@@ -56,12 +54,7 @@ const FOCUS_NODES_LISTED: usize = 20;
 const ENTITIES_LISTED: usize = 500;
 
 fn ttl() -> Duration {
-    Duration::from_secs(
-        std::env::var(TTL_ENV)
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DEFAULT_TTL_SECS),
-    )
+    crate::config::DRYRUN_TTL.get()
 }
 
 pub fn scratch_graph_iri(id: &str) -> String {
@@ -128,11 +121,11 @@ pub fn sweep_leftovers(store: &TripleStore) {
 
 // ───────────────────────────── Request ─────────────────────────────
 
-/// What to dry-run. Exactly one of `mapping`, `mappingGraph`, `rml` and
+/// What to dry-run. Exactly one of `mapping`, `mapping_graph`, `rml` and
 /// `yarrrml` names the mapping; the rest narrows the sample and names the
 /// shapes.
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DryRunRequest {
     /// A registered mapping, by id or IRI; its newest version unless
     /// `version` says otherwise.
@@ -144,6 +137,10 @@ pub struct DryRunRequest {
     /// proposal, and what the Studio editor sends between saves.
     pub rml: Option<String>,
     pub yarrrml: Option<String>,
+    /// The term-generation rules an unregistered mapping is previewed under:
+    /// `r2rml` (the default) or `legacy` — what it would be frozen with. A
+    /// registered version always runs under its own.
+    pub semantics: Option<String>,
     /// The shapes to validate against. Explicit, else the registered
     /// mapping's, else the model version's. Only a graph the caller may read
     /// applies (the rule `/sparql` applies, a Library entry they are shown, a
@@ -164,7 +161,6 @@ pub struct DryRunRequest {
 // ───────────────────────────── Response ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ReportSummary {
     pub conforms: bool,
     pub results_count: usize,
@@ -173,7 +169,6 @@ pub struct ReportSummary {
 
 /// One kind of violation, with how much of its type it covers.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub shape: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,7 +186,6 @@ pub struct Finding {
 }
 
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Classification {
     /// The rule applied, from the mapping gates.
     pub systematic_share: f64,
@@ -203,7 +197,6 @@ pub struct Classification {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Entity {
     pub subject: String,
     pub types: Vec<String>,
@@ -213,10 +206,9 @@ pub struct Entity {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DryRunResponse {
     pub id: String,
-    /// The scratch graph, readable until `expiresAt`.
+    /// The scratch graph, readable until `expires_at`.
     pub graph: String,
     pub expires_at: String,
     pub source: String,
@@ -235,6 +227,11 @@ pub struct DryRunResponse {
     pub classification: Classification,
     pub entities: Vec<Entity>,
     pub warnings: Vec<String>,
+    /// Sampled rows whose values cannot become the terms the mapping asks for
+    /// (R2RML §4.3). The sample leaves those terms out; a run over the same
+    /// rows fails unless it runs with `on_data_error: "skip"`. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
 
 // ───────────────────────────── Classification ─────────────────────────────
@@ -429,7 +426,7 @@ fn choose(
     .count();
     if named != 1 {
         return Err(bad(
-            "name the mapping to dry-run in exactly one of 'mapping', 'mappingGraph', 'rml' or \
+            "name the mapping to dry-run in exactly one of 'mapping', 'mapping_graph', 'rml' or \
              'yarrrml'"
                 .to_string(),
         ));
@@ -488,7 +485,10 @@ fn choose(
             .map_err(|e| bad(mappings::MappingError::Yarrrml(e.to_string()).to_string()))?,
         _ => unreachable!("counted above"),
     };
-    let rml = mappings::validate_rml(&turtle, &source.id).map_err(|e| bad(e.to_string()))?;
+    let semantics =
+        mappings::requested_semantics(body.semantics.as_deref()).map_err(|e| bad(e.to_string()))?;
+    let rml = mappings::validate_rml_as(&turtle, &source.id, semantics)
+        .map_err(|e| bad(e.to_string()))?;
     Ok(Chosen {
         rml,
         record: None,
@@ -642,7 +642,7 @@ pub async fn dry_run(
     let shapes_graphs = shapes_for(&state, &user, &body, chosen.record.as_ref(), &mut warnings);
     if shapes_graphs.is_empty() {
         warnings.push(
-            "no shapes graph applies: name one in 'shapesGraph', or register the mapping with a \
+            "no shapes graph applies: name one in 'shapes_graph', or register the mapping with a \
              shapes graph or a model version"
                 .to_string(),
         );
@@ -749,6 +749,7 @@ pub async fn dry_run(
         rows: outcome.rows,
         triples: outcome.triples,
         maps: outcome.maps,
+        data_errors: (!outcome.data_errors.is_empty()).then_some(outcome.data_errors),
         shapes_graphs,
         report: report.map(|r| ReportSummary {
             conforms: r.conforms,
@@ -762,7 +763,7 @@ pub async fn dry_run(
 }
 
 pub fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route("/api/sources/:id/dry-run", axum::routing::post(dry_run))
+    axum::Router::new().route("/api/sources/{id}/dry-run", axum::routing::post(dry_run))
 }
 
 #[cfg(test)]
@@ -778,6 +779,9 @@ mod tests {
             value: None,
             source_shape: shape.to_string(),
             source_constraint: "sh:datatype".to_string(),
+            source_constraint_component: String::new(),
+            annotations: Vec::new(),
+            terms: Default::default(),
             message: "wrong datatype".to_string(),
         }
     }

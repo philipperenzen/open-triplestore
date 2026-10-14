@@ -853,6 +853,331 @@ fn rdf11_typed_literal_values() {
     ));
 }
 
+// ─── Literal term identity (RDF 1.1 Concepts §3.3, §5.1) ─────────────────────
+//
+// A literal is its lexical form plus its datatype IRI. The store keeps both
+// exactly as written (the vendored Oxigraph fork, vendor/README.md): term
+// matching is by term, while SPARQL expressions compare XSD values.
+
+const LEXICAL_FORMS: &str = r#"
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:s ex:v "1"^^xsd:boolean , "05"^^xsd:integer , "+5"^^xsd:integer ,
+          "1.50"^^xsd:decimal , "2020-01-01T00:00:00+00:00"^^xsd:dateTime ,
+          "5"^^xsd:nonNegativeInteger , "7"^^xsd:int , "300"^^xsd:byte ,
+          "2020-01-01T00:00:00Z"^^xsd:dateTimeStamp , "1.0E1"^^xsd:double ,
+          true , 5 , 1.5 , "2020-01-01T00:00:00Z"^^xsd:dateTime .
+"#;
+
+fn objects(s: &open_triplestore::store::TripleStore, q: &str) -> Vec<String> {
+    match s.query(q).unwrap() {
+        QueryResults::Solutions(sols) => {
+            let mut out: Vec<String> = sols
+                .into_iter()
+                .map(|r| r.unwrap().get("o").unwrap().to_string())
+                .collect();
+            out.sort();
+            out
+        }
+        _ => panic!("expected solutions"),
+    }
+}
+
+fn xsd(lexical: &str, datatype: &str) -> String {
+    format!("\"{lexical}\"^^<http://www.w3.org/2001/XMLSchema#{datatype}>")
+}
+
+/// Every typed literal reads back exactly as written: non-canonical lexical
+/// forms, derived integer types and xsd:dateTimeStamp included, through
+/// SPARQL and through the store's own quad API.
+#[test]
+fn rdf11_typed_literals_keep_lexical_form_and_datatype() {
+    let s = ts();
+    load_ok(&s, LEXICAL_FORMS, RdfFormat::Turtle);
+    let mut expected = vec![
+        xsd("1", "boolean"),
+        xsd("05", "integer"),
+        xsd("+5", "integer"),
+        xsd("1.50", "decimal"),
+        xsd("2020-01-01T00:00:00+00:00", "dateTime"),
+        xsd("5", "nonNegativeInteger"),
+        xsd("7", "int"),
+        xsd("300", "byte"),
+        xsd("2020-01-01T00:00:00Z", "dateTimeStamp"),
+        xsd("1.0E1", "double"),
+        xsd("true", "boolean"),
+        xsd("5", "integer"),
+        xsd("1.5", "decimal"),
+        xsd("2020-01-01T00:00:00Z", "dateTime"),
+    ];
+    expected.sort();
+    assert_eq!(
+        objects(&s, "SELECT ?o WHERE { <http://example.org/s> ?p ?o }"),
+        expected
+    );
+    let mut quads: Vec<String> = s
+        .quads_for_graph(oxigraph::model::GraphNameRef::DefaultGraph)
+        .unwrap()
+        .into_iter()
+        .map(|q| q.object.to_string())
+        .collect();
+    quads.sort();
+    assert_eq!(quads, expected, "the quad API returns the same terms");
+}
+
+/// Canonical literals, the only form an older build ever stored, still read
+/// back unchanged (they keep Oxigraph's native value encoding).
+#[test]
+fn rdf11_canonical_literals_read_back_unchanged() {
+    let s = ts();
+    load_ok(
+        &s,
+        "@prefix ex: <http://example.org/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         ex:s ex:v true , false , 0 , -12 , 1.5 , \"1.0E1\"^^xsd:float , \
+         \"2020-01-01\"^^xsd:date , \"P1D\"^^xsd:duration , \"2020\"^^xsd:gYear .",
+        RdfFormat::Turtle,
+    );
+    let mut expected = vec![
+        xsd("true", "boolean"),
+        xsd("false", "boolean"),
+        xsd("0", "integer"),
+        xsd("-12", "integer"),
+        xsd("1.5", "decimal"),
+        xsd("10", "float"),
+        xsd("2020-01-01", "date"),
+        xsd("P1D", "duration"),
+        xsd("2020", "gYear"),
+    ];
+    expected.sort();
+    let mut got = objects(&s, "SELECT ?o WHERE { <http://example.org/s> ?p ?o }");
+    // "1.0E1"^^xsd:float is not the form a float prints in, so it is kept.
+    assert!(got.contains(&xsd("1.0E1", "float")), "{got:?}");
+    got.retain(|o| *o != xsd("1.0E1", "float"));
+    expected.retain(|o| *o != xsd("10", "float"));
+    assert_eq!(got, expected);
+}
+
+/// Graph patterns, joins and DISTINCT compare terms: a lexical variant or a
+/// derived datatype is a different literal, even with the same value.
+#[test]
+fn rdf11_graph_patterns_match_literals_by_term() {
+    let s = ts();
+    load_ok(&s, LEXICAL_FORMS, RdfFormat::Turtle);
+    let has = |o: &str| {
+        ask(
+            &s,
+            &format!("ASK {{ <http://example.org/s> <http://example.org/v> {o} }}"),
+        )
+    };
+    // The exact terms match.
+    for o in [
+        "\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+        "\"05\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        "\"7\"^^<http://www.w3.org/2001/XMLSchema#int>",
+        "\"5\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>",
+        "\"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTimeStamp>",
+    ] {
+        assert!(has(o), "{o} is stored as written");
+    }
+    // Value-equal terms that were never written do not.
+    for o in [
+        "\"7\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        "\"007\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        "\"0\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+        "\"5\"^^<http://www.w3.org/2001/XMLSchema#int>",
+    ] {
+        assert!(!has(o), "{o} was never written");
+    }
+    // A join on a literal is a join on the term: 5 and "5"^^xsd:int differ.
+    load_ok(
+        &s,
+        "@prefix ex: <http://example.org/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         ex:a ex:n \"5\"^^xsd:int . ex:b ex:n 5 . ex:c ex:n 5 .",
+        RdfFormat::Turtle,
+    );
+    let joined = objects(
+        &s,
+        "SELECT ?o WHERE { <http://example.org/b> <http://example.org/n> ?v . \
+         ?x <http://example.org/n> ?v . BIND(STR(?x) AS ?o) }",
+    );
+    assert_eq!(
+        joined,
+        vec!["\"http://example.org/b\"", "\"http://example.org/c\""]
+    );
+    // DISTINCT keeps value-equal literals apart.
+    let distinct = objects(
+        &s,
+        "SELECT DISTINCT ?o WHERE { ?x <http://example.org/n> ?o }",
+    );
+    assert_eq!(distinct, vec![xsd("5", "int"), xsd("5", "integer")]);
+}
+
+/// SPARQL expressions still work on XSD values, across lexical forms and
+/// derived types: FILTER equality and comparison, ORDER BY and arithmetic.
+#[test]
+fn rdf11_expressions_compare_typed_literals_by_value() {
+    let s = ts();
+    load_ok(&s, LEXICAL_FORMS, RdfFormat::Turtle);
+    let fives = objects(
+        &s,
+        "SELECT ?o WHERE { <http://example.org/s> <http://example.org/v> ?o . \
+         FILTER(isNumeric(?o) && ?o = 5) }",
+    );
+    assert_eq!(fives, {
+        let mut v = vec![
+            xsd("05", "integer"),
+            xsd("+5", "integer"),
+            xsd("5", "nonNegativeInteger"),
+            xsd("5", "integer"),
+        ];
+        v.sort();
+        v
+    });
+    assert!(
+        ask(
+            &s,
+            "ASK { <http://example.org/s> <http://example.org/v> ?o . \
+             FILTER(datatype(?o) = <http://www.w3.org/2001/XMLSchema#boolean> \
+                    && ?o = true && !sameTerm(?o, true)) }"
+        ),
+        "\"1\"^^xsd:boolean equals true by value but is a different term"
+    );
+    // The effective boolean value reads the value of a literal kept as
+    // written: "1"^^xsd:boolean and "1.0E1"^^xsd:double are true.
+    assert!(ask(
+        &s,
+        "ASK { FILTER(\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>) }"
+    ));
+    let truthy = objects(
+        &s,
+        "SELECT ?o WHERE { <http://example.org/s> <http://example.org/v> ?o . FILTER(?o) }",
+    );
+    for o in [
+        xsd("1", "boolean"),
+        xsd("1.0E1", "double"),
+        xsd("7", "int"),
+        xsd("05", "integer"),
+    ] {
+        assert!(truthy.contains(&o), "{o} is true: {truthy:?}");
+    }
+    // Two timestamps one written with +00:00, one with Z: the same instant.
+    match s
+        .query(
+            "SELECT (COUNT(*) AS ?c) WHERE { <http://example.org/s> <http://example.org/v> ?o . \
+             FILTER(?o = \"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>) }",
+        )
+        .unwrap()
+    {
+        QueryResults::Solutions(sols) => {
+            let row = sols.into_iter().next().unwrap().unwrap();
+            // dateTime +00:00, dateTime Z and dateTimeStamp Z.
+            assert_eq!(row.get("c").unwrap().to_string(), xsd("3", "integer"));
+        }
+        _ => panic!(),
+    }
+    // ORDER BY sorts by value, not by lexical form ("+5" < "05" < "1.50" as text).
+    let ordered = match s
+        .query(
+            "SELECT ?o WHERE { <http://example.org/s> <http://example.org/v> ?o . \
+             FILTER(isNumeric(?o) && ?o < 10) } ORDER BY ?o",
+        )
+        .unwrap()
+    {
+        QueryResults::Solutions(sols) => sols
+            .into_iter()
+            .map(|r| r.unwrap().get("o").unwrap().to_string())
+            .collect::<Vec<_>>(),
+        _ => panic!(),
+    };
+    let values: Vec<f64> = ordered
+        .iter()
+        .map(|t| t.split('"').nth(1).unwrap().parse::<f64>().unwrap())
+        .collect();
+    assert!(values.windows(2).all(|w| w[0] <= w[1]), "{ordered:?}");
+    assert_eq!(ordered.last(), Some(&xsd("7", "int")));
+}
+
+/// `DELETE DATA` removes the term as written and nothing value-equal beside
+/// it.
+#[test]
+fn rdf11_delete_data_removes_the_exact_term() {
+    let s = ts();
+    load_ok(&s, LEXICAL_FORMS, RdfFormat::Turtle);
+    s.update(
+        "DELETE DATA { <http://example.org/s> <http://example.org/v> \
+         \"05\"^^<http://www.w3.org/2001/XMLSchema#integer> }",
+    )
+    .unwrap();
+    assert!(!ask(
+        &s,
+        "ASK { <http://example.org/s> <http://example.org/v> \"05\"^^<http://www.w3.org/2001/XMLSchema#integer> }"
+    ));
+    assert!(ask(
+        &s,
+        "ASK { <http://example.org/s> <http://example.org/v> 5 }"
+    ));
+    assert!(ask(
+        &s,
+        "ASK { <http://example.org/s> <http://example.org/v> \"+5\"^^<http://www.w3.org/2001/XMLSchema#integer> }"
+    ));
+}
+
+/// A RocksDB store written by the unpatched Oxigraph 0.5.11, which stored
+/// canonical values (tests/fixtures/oxigraph-0.5.11-store/README.md), opens
+/// and reads exactly as it did. Writing a literal in its original lexical
+/// form beside the old canonical copy adds a second, distinct term.
+#[test]
+fn rdf11_a_store_written_before_lexical_forms_reads_as_before() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/oxigraph-0.5.11-store/db");
+    let dir = tempfile::tempdir().unwrap();
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+    }
+    let s = open_triplestore::store::TripleStore::open(dir.path()).unwrap();
+    let mut expected = vec![
+        xsd("true", "boolean"),
+        xsd("true", "boolean"),
+        xsd("5", "integer"),
+        xsd("5", "integer"),
+        xsd("7", "integer"),
+        xsd("3", "integer"),
+        xsd("1.5", "decimal"),
+        xsd("2020-01-01T00:00:00Z", "dateTime"),
+        xsd("2020-01-01T00:00:00Z", "dateTime"),
+        "\"plain\"".to_string(),
+        "\"label\"@en".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(
+        objects(&s, "SELECT ?o WHERE { <http://example.org/s> ?p ?o }"),
+        expected
+    );
+    // Canonical patterns match the old data; the original forms do not.
+    assert!(ask(
+        &s,
+        "ASK { <http://example.org/s> <http://example.org/int> 7 }"
+    ));
+    assert!(!ask(
+        &s,
+        "ASK { <http://example.org/s> <http://example.org/int> \"7\"^^<http://www.w3.org/2001/XMLSchema#int> }"
+    ));
+    // Appending the source again adds the as-written form beside the old one.
+    s.update(
+        "INSERT DATA { <http://example.org/s> <http://example.org/int> \
+         \"7\"^^<http://www.w3.org/2001/XMLSchema#int> }",
+    )
+    .unwrap();
+    assert_eq!(
+        objects(
+            &s,
+            "SELECT ?o WHERE { <http://example.org/s> <http://example.org/int> ?o }"
+        ),
+        vec![xsd("7", "int"), xsd("7", "integer")]
+    );
+}
+
 #[test]
 fn rdf11_rdf_type_shorthand() {
     // 'a' in Turtle = rdf:type IRI

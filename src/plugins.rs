@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use ots_plugin_api::{Plugin, PluginAuth, PluginContext, PluginStore};
+use ots_plugin_api::{Plugin, PluginAuth, PluginContext, PluginSecrets, PluginStore};
 use serde::Serialize;
 
 use crate::auth::handlers::{GUEST_DISABLED_MESSAGE, GUEST_DISABLED_REASON};
@@ -168,12 +168,24 @@ impl PluginAuth for AppState {
     }
 }
 
+impl PluginSecrets for AppState {
+    /// The host's secrets module, so a plugin's credential is a reference
+    /// like the server's own: raw values are refused under
+    /// `OTS_ENV=production`. The error text never carries the value.
+    fn env_secret(&self, setting: &str) -> Result<Option<String>, String> {
+        crate::secrets::env_secret(setting)
+            .map(|s| s.map(|s| s.expose().to_string()))
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Build the [`PluginContext`] handed to every registered plugin.
 pub fn plugin_context(state: &AppState) -> PluginContext {
     PluginContext {
         base_url: state.base_url.clone(),
         store: Arc::new(state.clone()),
         auth: Arc::new(state.clone()),
+        secrets: Arc::new(state.clone()),
     }
 }
 

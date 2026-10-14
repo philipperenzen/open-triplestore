@@ -8,5 +8,12 @@ description = "Open Triplestore plugin: the MySQL / MariaDB datasource connector
 
 [dependencies]
 ots-plugin-api = { path = "../api" }
-mysql = "28"
+# No default features: they carry no TLS backend at all, and the driver then
+# panics as soon as a datasource asks for TLS. rustls over ring, like the
+# PostgreSQL plugin, and the pure-Rust flate2 backend instead of zlib.
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "derive", "buffer-pool", "rustls-tls-ring"] }
+# The ring provider, installed as the process default in connect(): when the
+# SQL Server plugin is in the same build, rustls also has aws-lc-rs and the
+# mysql crate's `ClientConfig::builder()` would panic without a default.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tracing = "0.1"

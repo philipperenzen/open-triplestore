@@ -61,11 +61,7 @@ pub fn hex_upper(bytes: &[u8]) -> String {
 
 /// The configured sources directory, if any.
 pub fn sources_dir() -> Option<PathBuf> {
-    std::env::var(SOURCES_DIR_ENV)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    crate::config::SOURCES_DIR.get()
 }
 
 /// Whether a source's endpoint may be contacted. A file-backed dialect has no
@@ -79,7 +75,7 @@ pub fn egress_allowed(source: &SqlSource) -> bool {
         return true;
     }
     match source.egress_url() {
-        Some(url) => crate::remote::is_allowed(&url),
+        Some(url) => crate::remote::is_allowed(crate::remote::Purpose::Sources, &url),
         // A networked dialect with no host cannot be reached at all.
         None => false,
     }
@@ -110,15 +106,15 @@ pub enum ValidationError {
     Secret(#[from] SecretError),
     #[error(
         "this store only opens datasources read-only; grant the account SELECT and register it \
-         with readOnly true"
+         with read_only true"
     )]
     ReadWrite,
     #[error(
-        "a statement timeout is required in the production posture: set statementTimeoutMs so a \
+        "a statement timeout is required in the production posture: set statement_timeout_ms so a \
          slow query cannot hold a connection open indefinitely"
     )]
     MissingTimeout,
-    #[error("statementTimeoutMs must be between 1 and {max} milliseconds")]
+    #[error("statement_timeout_ms must be between 1 and {max} milliseconds")]
     TimeoutRange { max: u64 },
     #[error(
         "a networked datasource must be on the federation egress allowlist ({env}) in the \
@@ -210,7 +206,7 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
             tracing::warn!(
                 source = %source.id,
                 "datasource host is not on {}; this is a registration error in the production posture",
-                crate::remote::ALLOWLIST_ENV
+                crate::remote::Purpose::Sources.setting()
             );
         }
         return Ok(());
@@ -219,7 +215,7 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
     if connector.is_networked() {
         if !egress_allowed(source) {
             return Err(ValidationError::NotAllowlisted {
-                env: crate::remote::ALLOWLIST_ENV,
+                env: crate::remote::Purpose::Sources.setting(),
             });
         }
     } else if !under_sources_dir(&source.database) {

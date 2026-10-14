@@ -20,6 +20,9 @@ pub enum AppError {
     UnsupportedMediaType(String),
     /// 422 Unprocessable Entity — SHACL validation failed
     ValidationFailed(crate::shacl::report::ValidationReport),
+    /// 422 Unprocessable Entity — the request was well-formed but its data
+    /// cannot be processed (an inconsistent ontology, say); the body says why
+    Unprocessable(serde_json::Value),
     /// 429 Too Many Requests — carries the Retry-After hint in seconds
     RateLimited {
         retry_after_secs: u64,
@@ -31,6 +34,25 @@ pub enum AppError {
     /// signals orchestration/clients that the request was aborted to protect the runtime,
     /// not that the input was malformed.
     ServiceUnavailable(String),
+    /// 503 Service Unavailable with a `Retry-After` hint — the resource exists
+    /// but cannot be served right now (a delta version an anonymous caller
+    /// asked for before anyone materialised it).
+    RetryLater {
+        retry_after_secs: u64,
+        message: String,
+    },
+    /// 406 Not Acceptable — the content cannot be written in the format asked
+    /// for (JSON-LD of a graph holding RDF 1.2 triple terms).
+    NotAcceptable(String),
+    /// 410 Gone — the resource existed and was removed for good (a change the
+    /// log's retention removed).
+    Gone(String),
+    /// 507 Insufficient Storage — building the resource would exceed a disk
+    /// budget (a version materialisation over `OTS_MATERIALISATION_MAX_QUADS`).
+    InsufficientStorage(String),
+    /// Any other status with a JSON body that says what happened (a reasoning
+    /// backend that is down, timed out or got too much input).
+    Status(StatusCode, serde_json::Value),
 }
 
 impl AppError {
@@ -43,10 +65,31 @@ impl AppError {
             | AppError::NotFound(m)
             | AppError::UnsupportedMediaType(m)
             | AppError::Internal(m)
-            | AppError::ServiceUnavailable(m) => m.clone(),
-            AppError::Conflict(v) => v.to_string(),
-            AppError::RateLimited { message, .. } => message.clone(),
+            | AppError::ServiceUnavailable(m)
+            | AppError::NotAcceptable(m)
+            | AppError::Gone(m)
+            | AppError::InsufficientStorage(m) => m.clone(),
+            AppError::Conflict(v) | AppError::Unprocessable(v) | AppError::Status(_, v) => {
+                v.to_string()
+            }
+            AppError::RateLimited { message, .. } | AppError::RetryLater { message, .. } => {
+                message.clone()
+            }
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
+        }
+    }
+
+    /// The message a client may see, for a channel that is not an HTTP error
+    /// response (a server-sent event, a field in a JSON reply). A server fault
+    /// keeps its detail in the log and answers the generic text, as
+    /// `into_response` does; every other error answers its own message.
+    pub fn client_message(&self) -> String {
+        match self {
+            AppError::Internal(m) => {
+                tracing::error!("Internal server error: {}", m);
+                "Internal server error".to_string()
+            }
+            other => other.message(),
         }
     }
 }
@@ -59,25 +102,47 @@ impl IntoResponse for AppError {
                     "error": "SHACL validation failed",
                     "conforms": report.conforms,
                     "results": report.results.iter().map(|r| {
-                        serde_json::json!({
+                        let mut result = serde_json::json!({
                             "severity": format!("{:?}", r.severity),
-                            "focusNode": r.focus_node,
+                            "focus_node": r.focus_node,
                             "path": r.path,
                             "value": r.value,
                             "message": r.message,
-                            "sourceShape": r.source_shape,
-                            "sourceConstraint": r.source_constraint,
-                        })
+                            "source_shape": r.source_shape,
+                            "source_constraint": r.source_constraint,
+                            "source_constraint_component": r.source_constraint_component,
+                        });
+                        // SHACL-AF result annotations, only where declared.
+                        if !r.annotations.is_empty() {
+                            result["annotations"] = serde_json::json!(r.annotations);
+                        }
+                        result
                     }).collect::<Vec<_>>(),
                 });
                 (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
             }
             AppError::Conflict(body) => (StatusCode::CONFLICT, axum::Json(body)).into_response(),
+            AppError::Unprocessable(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
+            }
+            AppError::Status(status, body) => (status, axum::Json(body)).into_response(),
             AppError::RateLimited {
                 retry_after_secs,
                 message,
             } => (
                 StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs.to_string(),
+                )],
+                message,
+            )
+                .into_response(),
+            AppError::RetryLater {
+                retry_after_secs,
+                message,
+            } => (
+                StatusCode::SERVICE_UNAVAILABLE,
                 [(
                     axum::http::header::RETRY_AFTER,
                     retry_after_secs.to_string(),
@@ -105,11 +170,53 @@ impl IntoResponse for AppError {
                         tracing::error!("Service unavailable: {}", msg);
                         (StatusCode::SERVICE_UNAVAILABLE, msg)
                     }
+                    AppError::NotAcceptable(msg) => (StatusCode::NOT_ACCEPTABLE, msg),
+                    AppError::Gone(msg) => (StatusCode::GONE, msg),
+                    AppError::InsufficientStorage(msg) => (StatusCode::INSUFFICIENT_STORAGE, msg),
                     AppError::ValidationFailed(_)
                     | AppError::Conflict(_)
-                    | AppError::RateLimited { .. } => unreachable!(),
+                    | AppError::Unprocessable(_)
+                    | AppError::Status(..)
+                    | AppError::RateLimited { .. }
+                    | AppError::RetryLater { .. } => unreachable!(),
                 };
                 (status, message).into_response()
+            }
+        }
+    }
+}
+
+impl AppError {
+    /// The status and JSON body this error answers with — for a background
+    /// job that stores the response instead of sending it. A server fault
+    /// keeps its message server-side, as over HTTP.
+    pub fn status_and_body(self) -> (StatusCode, serde_json::Value) {
+        let plain = |status: StatusCode, m: String| (status, serde_json::json!({ "error": m }));
+        match self {
+            AppError::Unprocessable(v) => (StatusCode::UNPROCESSABLE_ENTITY, v),
+            AppError::Conflict(v) => (StatusCode::CONFLICT, v),
+            AppError::Status(s, v) => (s, v),
+            AppError::BadRequest(m) => plain(StatusCode::BAD_REQUEST, m),
+            AppError::Unauthorized(m) => plain(StatusCode::UNAUTHORIZED, m),
+            AppError::Forbidden(m) => plain(StatusCode::FORBIDDEN, m),
+            AppError::NotFound(m) => plain(StatusCode::NOT_FOUND, m),
+            AppError::UnsupportedMediaType(m) => plain(StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
+            AppError::ServiceUnavailable(m) => plain(StatusCode::SERVICE_UNAVAILABLE, m),
+            AppError::RateLimited { message, .. } => plain(StatusCode::TOO_MANY_REQUESTS, message),
+            AppError::RetryLater { message, .. } => plain(StatusCode::SERVICE_UNAVAILABLE, message),
+            AppError::NotAcceptable(m) => plain(StatusCode::NOT_ACCEPTABLE, m),
+            AppError::Gone(m) => plain(StatusCode::GONE, m),
+            AppError::InsufficientStorage(m) => plain(StatusCode::INSUFFICIENT_STORAGE, m),
+            AppError::ValidationFailed(_) => plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SHACL validation failed".to_string(),
+            ),
+            AppError::Internal(m) => {
+                tracing::error!("Internal server error: {}", m);
+                plain(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
         }
     }
@@ -118,7 +225,8 @@ impl IntoResponse for AppError {
 impl From<crate::store::engine::StoreError> for AppError {
     fn from(err: crate::store::engine::StoreError) -> Self {
         match err {
-            crate::store::engine::StoreError::Parse(msg) => AppError::BadRequest(msg),
+            crate::store::engine::StoreError::Parse(msg)
+            | crate::store::engine::StoreError::IllTypedLiteral(msg) => AppError::BadRequest(msg),
             crate::store::engine::StoreError::UnsupportedFormat(msg) => {
                 AppError::UnsupportedMediaType(msg)
             }
@@ -138,5 +246,24 @@ impl From<crate::store::engine::StoreError> for AppError {
             }
             other => AppError::Internal(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    /// The message for a channel that is not an HTTP error response (the
+    /// chat's SSE stream) masks a server fault exactly as the response does,
+    /// and passes every client-facing message through.
+    #[test]
+    fn client_message_masks_only_server_faults() {
+        let internal = AppError::Internal("rocksdb: IO error at /data/store/000123.sst".into());
+        assert_eq!(internal.client_message(), "Internal server error");
+        assert!(internal.message().contains("rocksdb"), "the log keeps it");
+        let bad = AppError::BadRequest("SPARQL syntax error: expected '}'".into());
+        assert_eq!(bad.client_message(), bad.message());
+        let down = AppError::ServiceUnavailable("LLM gateway returned 502".into());
+        assert_eq!(down.client_message(), "LLM gateway returned 502");
     }
 }

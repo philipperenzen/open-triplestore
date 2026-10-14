@@ -1,28 +1,34 @@
-# SHACL — results on the W3C SHACL test suite
+# SHACL — results on the W3C SHACL test suite and the SHACL-AF tests
 
 The `core` and `sparql` sections of the W3C Data Shapes Working Group's **SHACL test
 suite** are vendored under
 [`tests/fixtures/w3c-shacl/`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) and run in CI
 via [`tests/w3c_shacl_conformance.rs`](../../tests/w3c_shacl_conformance.rs).
 
-The counts below are development and regression results on those sections, at the
-comparison level described below (not full result-set equality). They are not a claim
-of conformance to the W3C SHACL Recommendation, and W3C has not reviewed or endorsed
-them. The tests are redistributed under the W3C Software and Document License — see
+The counts below are development and regression results on those sections, at full
+report equality (described below). They are not a claim of conformance to the
+W3C SHACL Recommendation, and W3C has not reviewed or endorsed them. The tests are
+redistributed under the W3C Software and Document License — see
 [`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
 
-## Results (2026-09-10)
+## Results (2026-10-03)
 
 | | core | sparql | total |
 |---|---|---|---|
-| **Pass** | **97** | **22** | **119** |
-| Known-fail (ratcheted) | 1 | 1 | 2 |
+| **Pass** (full report equality) | **98** | **22** | **120** |
+| Known-fail (ratcheted) | 0 | 0 | 0 |
+| Optional feature, unsupported (failure reported as the spec requires) | 0 | 1 | 1 |
 | Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
 | Total files | 113 | 23 | 136 |
 
-*(Previous baselines: 2026-06-11, core only: 97 pass / 1 known-fail; 2026-06-10:
-46 pass / 52 known-fail — see "Typed-term engine refactor" below for what closed
-that gap.)*
+*(Until 2026-10-02 the runner compared `sh:conforms` and the focus-node multiset
+only; full report equality, added as a second level, matched it on every case and
+replaced it. Previous baselines: 2026-10-02: 119 pass / 1 known-fail
+(`core/property/uniqueLang-002`, until the store kept literals as written; see
+"Lexical forms" below); 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
+`shapesGraph-001` counted as a failure; 2026-06-11, core only: 97 pass / 1
+known-fail; 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine refactor"
+below for what closed that gap.)*
 
 The `sparql` section (vendored 2026-09-10) covers `sh:sparql` constraints on node
 and property shapes, `sh:prefixes` (including `owl:imports`), custom constraint
@@ -32,31 +38,203 @@ and `pre-binding-006` — expect the validator to *reject* the shapes graph
 (`mf:result sht:Failure`); the runner passes those when validation returns an
 error, and fails them when a report comes back.
 
-**Comparison level:** `sh:conforms` plus the multiset of violation **focus nodes**
-(IRIs/literals by lexical form, blank nodes by count). Full result-set equality
-(constraint-component IRIs, `sh:resultPath`, `sh:value`) is a tracked refinement — the
-engine currently reports the source constraint as a display string, not a component IRI.
+**Comparison.** The runner's test, `w3c_shacl_full_report_equality`, compares
+`sh:conforms` and the multiset of **results**, each on `sh:focusNode`,
+`sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
+`sh:sourceConstraintComponent`, `sh:resultSeverity`, `sh:sourceConstraint` and
+any other property of the result node (since 2026-10-03) — everything except
+`sh:resultMessage`, whose wording the spec leaves to the processor. Our side is the RDF report the engine writes
+  (`src/shacl_studio/report_rdf.rs`), loaded back into the store, so the RDF
+  serialisation is tested as well. Blank nodes of the data graph (focus nodes,
+  values) match any blank node; a blank-node shape or `sh:sparql` node must be the
+  very node of the shapes graph. Literals are compared with their lexical form,
+  datatype and language tag, as the store holds them, which is as written on
+  both sides.
 
-**Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` must pass,
-and every listed test must still fail — silent regressions *and* silent fixes both turn
-CI red, so the list cannot go stale.
+**Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` must
+pass, and every listed test must still fail — silent regressions *and* silent fixes
+both turn CI red, so the list cannot go stale.
+
+**Optional features.** `OPTIONAL_UNSUPPORTED` lists tests of a feature the
+specification makes optional and requires a processor without it to report as a
+failure. Such a test passes when validation fails with that failure, and fails if
+the processor ever produces a report for it instead.
+
+## Optional and unsupported
+
+- **`sparql/pre-binding/shapesGraph-001.ttl`** — the constraint reads the shapes
+  graph through `$shapesGraph` / `$currentShape`. SHACL §5.3.1 makes both
+  variables optional, and a processor that does not support them must report a
+  failure when it meets a constraint that uses them. This processor pre-binds
+  `$this`, `$value`, `$PATH` and the component parameters and evaluates against
+  the data graphs only, so a constraint that uses either variable fails the shapes
+  graph at load, naming the variable. The test's expected report assumes a
+  processor that supports them; [w3c/data-shapes#426](https://github.com/w3c/data-shapes/issues/426)
+  (now closed) asked to drop both variables, and SHACL 1.2 SPARQL Extensions drops
+  them. The runner checks that the failure is reported. Under the Full rubric this
+  is (a), a defect in the test suite: a test of an optional feature that is not
+  marked optional ([#508](https://github.com/philipperenzen/open-triplestore/issues/508)).
 
 ## Remaining known failures
 
-- **`sparql/pre-binding/shapesGraph-001.ttl`** — the constraint reads the shapes
-  graph through `$shapesGraph` / `$currentShape`. SHACL §5.3.1 leaves those two
-  variables to processors that expose the shapes graph to constraint queries;
-  this one pre-binds `$this`, `$value`, `$PATH` and the component parameters and
-  evaluates against the data graphs only, so a constraint that uses them fails
-  the shapes graph (loudly, as a load error) instead of producing the report the
-  test expects.
-- **`core/property/uniqueLang-002.ttl`** — the test asserts that
-  `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the constraint (the spec
-  activates it only for the literal `true`). Oxigraph's storage encodes
-  `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →
-  `"true"`), so the distinction is unrecoverable after loading. This is a storage
-  canonicalisation property, not an engine gap; fixing it would require keeping
-  the original lexical form alongside every stored literal.
+None in either section.
+
+## Lexical forms (2026-10-03)
+
+**`core/property/uniqueLang-002.ttl`** passes since the store keeps every literal
+as written (the vendored Oxigraph, [`vendor/README.md`](../../vendor/README.md)).
+The test asserts that `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the
+constraint: the spec activates it only for the literal `true`. Oxigraph used to
+store `xsd:boolean` as a value and read `"1"` back as `"true"`, so the shapes
+graph the engine loaded said `true`, and the dataset and SHACL Studio shapes
+uploads refused such flags instead. The same change makes `sh:datatype` accept
+valid values of the types derived from `xsd:integer` and of `xsd:dateTimeStamp`,
+which used to read back as `xsd:integer` / `xsd:dateTime` (no suite case covers
+that; `tests/shacl_conformance.rs` does), and `sh:hasValue` / `sh:in` /
+`sh:equals` compare the terms as written, as SHACL's term equality requires
+([shacl.md](../shacl.md#literal-forms)).
+
+## SHACL Advanced Features — TopQuadrant's tests (2026-10-03)
+
+No W3C test suite covers the SHACL Advanced Features Note (2017), so the
+SHACL-AF tests of TopQuadrant's SHACL API are vendored under
+[`tests/fixtures/shacl-af-topquadrant/`](../../tests/fixtures/shacl-af-topquadrant/PROVENANCE.md)
+(Apache-2.0) and run in CI via
+[`tests/shacl_af_corpus.rs`](../../tests/shacl_af_corpus.rs): the
+`expression/`, `function/`, `rules/` and `target/` directories at commit
+`6687b48bd2c81eda369f224598061f87dce0d425`. The counts are development and
+regression results on those files, not a claim of conformance to anything, and
+TopQuadrant has not reviewed them.
+
+| | expression | function | rules | target | total |
+|---|---|---|---|---|---|
+| **Pass** | **1** | **1** | **7** | 0 | **9** |
+| Expects behaviour outside the spec (failure reported as the spec requires) | 0 | 0 | 0 | 1 | 1 |
+| Known-fail (ratcheted) | 0 | 0 | 0 | 0 | 0 |
+| Cases | 1 | 1 | 7 | 1 | 10 |
+
+*(2026-10-02: 9 pass / 1 known failure, validation cases compared on
+`sh:conforms` and focus nodes only, with `sparqlTarget-001` counted as a
+failure.)*
+
+The tests use TopQuadrant's `dash:` test vocabulary, one self-contained file
+per case (data, shapes and expected outcome in one graph, merged with the
+sibling files it `owl:imports`). Comparison levels:
+
+- **`dash:GraphValidationTestCase`** — `sh:conforms` and the full multiset of
+  results, the same comparison as for the W3C suite above
+  (`tests/common/shacl_report.rs`, shared by both runners): every result
+  property except `sh:resultMessage`, our side being the RDF report the engine
+  writes, data blank nodes as wildcards. The expected report is the
+  `dash:expectedResult` node of the test case, in the file's own graph (the W3C
+  files put it under `mf:result` instead). Any result property beyond the
+  standard ones — a result annotation — is compared too;
+- **`dash:InferencingTestCase`** — the exact set of inferred triples (what the
+  rules write, less what the file asserts) against `dash:expectedResult`;
+- **`dash:FunctionTestCase`** — the value of the SPARQL expression in
+  `dash:expression`, evaluated in a run of the file's shapes graph, against
+  `dash:expectedResult` (term equality).
+
+Same two-way ratchet as above, plus no skips allowed and a floor of 9 passes.
+Moving to full report equality found one gap, now fixed: an expression
+constraint's result did not name the node expression as its
+`sh:sourceConstraint`, which SHACL-AF §7 requires (`expression/booleans-001`).
+
+**Expects behaviour outside the spec.** `NON_SPEC_EXPECTATIONS` lists cases
+whose expected outcome rests on TopBraid behaviour the specification does not
+have, where the specification requires a failure. Such a case passes when
+validation fails with that failure, and fails if a report ever comes back.
+
+- **`target/sparqlTarget-001.test.ttl`** — the target's `sh:select` uses the
+  `owl:` prefix, but the ontology its `sh:prefixes` names has no `sh:declare`
+  for it. TopBraid falls back to the Turtle prefixes of the file it loaded.
+  The SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets)
+  has no such fallback: the query does not parse with the declared prefixes,
+  so the shapes graph is ill-formed, and validation fails with "Prefix not found".
+  Under the Full rubric this is (a), a defect in the test suite; what upstream
+  should change is in [#507](https://github.com/philipperenzen/open-triplestore/issues/507).
+
+Every SHACL-AF feature is covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs` as well, including the two these tests do
+not reach: result annotations (§4, `result_annotations_*`) and the `sh:Rules`
+entailment regime (§8.3, below).
+
+## Beyond the suite: fail-open gaps (2026-10-01)
+
+The suite has no case for several places where the engine let data through that
+the shapes forbid. They are covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs` instead:
+
+- **Multi-valued parameters**: only the first value of `sh:not`, `sh:hasValue`,
+  `sh:pattern` and `sh:qualifiedValueShape`, and the first list of `sh:and`,
+  `sh:or` and `sh:xone`, was read. Each value is now its own constraint
+  (SHACL §4).
+- **`sh:deactivated`** was honoured on top-level shapes only. It now applies to
+  property shapes and inline shapes as well, with the spec's meaning (every
+  term conforms, so `sh:not` of a deactivated shape fails).
+- **Ill-formed paths** (a property shape with no `sh:path`, several, or one that
+  is no well-formed path) skipped the property shape with a warning; they now
+  fail the shapes graph like every other load error.
+- **A SPARQL target that errors when it runs** yielded no focus nodes; it now
+  fails the run.
+- **Triple rules with node-expression terms** (`sh:object [ sh:path ex:p ]`)
+  wrote the shapes graph's blank node into the data. They were refused at load
+  on 2026-10-01, and are evaluated as node expressions since 2026-10-02 (see the
+  SHACL-AF section above).
+
+## Beyond the suite: SHACL-SPARQL and multi-graph runs (2026-10-02)
+
+Also covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs`, not by suite cases:
+
+- **Blank-node focus and value nodes** were skipped by `sh:sparql` constraints
+  and constraint-component validators: the pre-bound value was pasted into the
+  query text, and no SPARQL syntax names a stored blank node. `$this`, `$value`
+  and the parameters are now pre-bound as RDF terms the way SHACL Appendix A
+  defines it: every basic graph pattern, path and `GRAPH ?g` block of the query
+  is joined with a one-row table of the values (a `BIND` of a function that
+  returns the term, since `VALUES` cannot hold a blank node), so they reach
+  every scope and the query optimizer still sees them bound.
+- **`?failure`** bound to `true` is a failure (reported, so the node does not
+  conform); `?message` and `{?var}` / `{$var}` message templates are filled from
+  the solution; `?path` is used only when it is an IRI (SHACL §5.3, §5.3.2).
+- **`sh:deactivated`** on a SPARQL-based constraint removes its results; on a
+  validator it takes the validator out.
+- **Component parameters**: only the first value was read. Each value of a
+  single-parameter component is now its own constraint, and several values for
+  a parameter of a multi-parameter component fail the shapes graph (SHACL §4).
+  A sub-select must project every pre-bound variable, parameters included
+  (Appendix A).
+- **Multi-graph runs**: `sh:path` from an IRI focus node was evaluated inside
+  each data graph in turn, so a path crossing graphs found nothing while
+  `sh:sparql` and blank-node focus nodes saw the merge. Paths now read the
+  merge of the data graphs (SHACL §3.4) for every focus node.
+
+## Beyond the suite: entailment regimes (2026-10-03)
+
+Neither suite declares `sh:entailment`, which SHACL §1.5 and SHACL-AF §8.3
+define: a processor validates under a declared regime it supports and must
+signal a failure for one it does not. The engine used to ignore the
+declaration in both directions — `sh:Rules` shapes graphs were validated
+without running their rules, and every other regime was validated as if
+undeclared. Covered by `tests/shacl_conformance.rs` (`sh_rules_entailment_*`,
+`an_unsupported_entailment_regime_fails_the_shapes_graph`,
+`rdfs_entailment_*`, `rules_and_rdfs_entailment_*`),
+`tests/shacl_rules_conformance.rs`
+(`entailment_rules_validation_matches_infer_then_validate`) and, for a write
+gate, `tests/shacl_studio_gate_authority_http.rs`:
+
+- **`sh:Rules`**: the rules run first, with the `/infer` engine (`sh:order`,
+  `sh:condition`, `sh:deactivated`, to a fixed point), into an inferences graph
+  of a run-local copy of the data; the validation sees the data graphs plus
+  that graph. The store holds the same quads after the run as before, a gate
+  stores only the write, and the run reports the same focus nodes as running
+  `/infer` and then validating without the declaration.
+- **RDFS** (`http://www.w3.org/ns/entailment/RDFS`): the `rdfs-entailment`
+  materialiser's output is validated the same way; with `sh:Rules` as well, the
+  two run in turn until neither adds a triple.
+- **Anything else** — an OWL regime, D, a literal — fails the run with an error
+  naming the value, alone or next to a supported regime.
 
 ## Typed-term engine refactor (2026-06-11)
 
@@ -116,5 +294,9 @@ fixed real engine bugs:
   so two stores in one process sharing a focus IRI + path could serve each other stale
   values — nondeterministic validation results. Cache keys now include a process-unique
   per-store id.
+- **`sh:value` of SPARQL-based results** (2026-10-02, found by the full-report
+  level): when a `sh:sparql` constraint or a `sh:select` validator on a node
+  shape leaves `?value` unbound, SHACL §5.3.2 makes the focus node the value;
+  the engine reported none (8 `sparql` cases).
 - **String-typed focus/value nodes** (the typed-term refactor above) — 51 additional
   suite tests fixed in one contained refactor.

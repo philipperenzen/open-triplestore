@@ -77,15 +77,8 @@ pub const STATUSES: [&str; 7] = [
 /// Cap on the items one refused run opens. A refusal over a whole table with
 /// a systematic defect is a mapping problem — the dry-run classifier's
 /// territory — not a queue for a human to work through subject by subject.
-pub const MAX_ITEMS_ENV: &str = "OTS_REVIEW_MAX_ITEMS";
-const DEFAULT_MAX_ITEMS: usize = 500;
-
 fn max_items() -> usize {
-    std::env::var(MAX_ITEMS_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_ITEMS)
+    crate::config::REVIEW_MAX_ITEMS.get()
 }
 
 pub fn review_graph_iri(source_id: &str) -> String {
@@ -110,7 +103,6 @@ fn lex(row: &oxigraph::sparql::QuerySolution, var: &str) -> Option<String> {
 
 /// One validation result on the item's subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Violation {
     /// The constraint as the engine names it: `sh:minInclusive 0`,
     /// `sh:maxInclusive 1000`, `sh:minCount 1`, `sh:datatype <…>`.
@@ -148,7 +140,6 @@ fn plain_iri(path: &str) -> String {
 
 /// A change the fixer made, or would make.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Fix {
     /// `sign-typo` or `clamp`.
     pub rule: String,
@@ -159,7 +150,6 @@ pub struct Fix {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ReviewItem {
     pub id: String,
     pub iri: String,
@@ -276,7 +266,10 @@ fn insert_all(store: &TripleStore, graph: &str, items: &[ReviewItem]) -> Result<
     Ok(())
 }
 
-fn item_select(graph_pattern: &str, filter: &str) -> String {
+/// `filter` sits inside the graph pattern's group; `outer` after it, where a
+/// `GRAPH ?g` variable is bound (SPARQL does not bind it inside the pattern it
+/// scopes).
+fn item_select(graph_pattern: &str, filter: &str, outer: &str) -> String {
     format!(
         "{}SELECT ?i ?id ?source ?run ?graph ?mapping ?version ?subject ?status ?violations ?snapshot \
          ?fixes ?reviewer ?decision ?created ?modified WHERE {{ {graph_pattern} {{\n\
@@ -289,13 +282,14 @@ fn item_select(graph_pattern: &str, filter: &str) -> String {
            OPTIONAL {{ ?i ds:fixes ?fixes }}\n\
            OPTIONAL {{ ?i prov:wasAttributedTo ?reviewer }}\n\
            OPTIONAL {{ ?i ds:decision ?decision }}\n\
-         }} }} ORDER BY DESC(?created) ?subject",
+         }} {outer} }} ORDER BY DESC(?created) ?subject",
         prefixes()
     )
 }
 
-fn items(store: &TripleStore, graph_pattern: &str, filter: &str) -> Vec<ReviewItem> {
-    let Ok(QueryResults::Solutions(rows)) = store.query(&item_select(graph_pattern, filter)) else {
+fn items(store: &TripleStore, graph_pattern: &str, filter: &str, outer: &str) -> Vec<ReviewItem> {
+    let Ok(QueryResults::Solutions(rows)) = store.query(&item_select(graph_pattern, filter, outer))
+    else {
         return Vec::new();
     };
     rows.flatten()
@@ -339,7 +333,7 @@ pub fn list(store: &TripleStore, source_id: &str, status: Option<&str>) -> Vec<R
         Some(s) => format!("FILTER(?status = \"{}\")", escape_sparql_literal(s)),
         None => String::new(),
     };
-    items(store, &graph, &filter)
+    items(store, &graph, &filter, "")
 }
 
 /// One item, by id, whichever datasource it belongs to.
@@ -350,10 +344,8 @@ pub fn find(store: &TripleStore, id: &str) -> Option<ReviewItem> {
     items(
         store,
         "GRAPH ?g",
-        &format!(
-            "FILTER(STRSTARTS(STR(?g), \"urn:system:reviews:\") && ?i = <{}>)",
-            escape_sparql_iri(&item_iri(id))
-        ),
+        &format!("FILTER(?i = <{}>)", escape_sparql_iri(&item_iri(id))),
+        "FILTER(STRSTARTS(STR(?g), \"urn:system:reviews:\"))",
     )
     .into_iter()
     .next()
@@ -463,7 +455,6 @@ pub fn delete_for_source(store: &TripleStore, source_id: &str) -> Result<(), Str
 
 /// What the fixer would do to an item.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct FixPlan {
     pub fixes: Vec<Fix>,
     /// The change as an RDF Patch against the candidate graph.
@@ -699,8 +690,9 @@ pub fn proposed_patch(
 /// mark the item corrected.
 pub fn apply(store: &TripleStore, item: &mut ReviewItem, plan: &FixPlan) -> Result<(), String> {
     let patch = crate::rdf_patch::parse(&plan.patch)?;
-    let sparql = crate::rdf_patch::to_sparql_update(&patch);
-    store.update(&sparql).map_err(|e| e.to_string())?;
+    store
+        .apply_quad_ops(&patch.quad_ops(None)?)
+        .map_err(|e| e.to_string())?;
     item.snapshot = crate::ldes::capture::describe_entity(store, &item.graph, &item.subject);
     item.fixes.extend(plan.fixes.iter().cloned());
     item.status = "corrected".to_string();
@@ -790,7 +782,7 @@ pub async fn get_item(
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct StatusRequest {
     pub status: String,
     pub note: Option<String>,
@@ -828,7 +820,7 @@ pub async fn set_status(
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct AutofixRequest {
     /// `false` previews the patch; `true` applies it to the candidate graph.
     #[serde(default)]
@@ -836,7 +828,6 @@ pub struct AutofixRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AutofixResponse {
     pub item: String,
     pub applied: bool,
@@ -885,14 +876,13 @@ pub async fn autofix(
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Suggestion {
     pub item: String,
     pub model: String,
     /// Always false: a suggestion is never applied by this endpoint.
     pub applied: bool,
     /// Whether the offending values went to the model (the datasource's
-    /// `allowModelAssist`), or only the constraints.
+    /// `allow_model_assist`), or only the constraints.
     pub values_shared: bool,
     /// The model's answer: `{explanation, replacement?}` when it answered as
     /// asked, else its text under `text`.
@@ -915,7 +905,7 @@ Never invent data. Answer with JSON only: {\"explanation\": string, \"replacemen
 /// nothing; a suggestion is applied by a human through the status and
 /// patch paths.
 ///
-/// What leaves the deployment follows the datasource's `allowModelAssist`:
+/// What leaves the deployment follows the datasource's `allow_model_assist`:
 /// with it, the constraint, the path and the offending value; without it,
 /// the constraint and the path only, the value withheld — the same rule the
 /// proposer is held to.
@@ -981,7 +971,7 @@ pub async fn suggest(
 
 /// Items awaiting someone across every datasource: opened, gathering or
 /// corrected but not yet decided or promoted. The metrics endpoint's
-/// `reviewQueueDepth`.
+/// `review_queue_depth`.
 pub fn queue_depth(store: &TripleStore) -> u64 {
     let closed = ["valid", "approved", "rejected", "promoted"]
         .iter()
@@ -1058,12 +1048,12 @@ pub async fn promote_run(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/sources/:id/reviews", get(list_source_reviews))
-        .route("/api/reviews/:id", get(get_item))
-        .route("/api/reviews/:id/status", post(set_status))
-        .route("/api/reviews/:id/autofix", post(autofix))
-        .route("/api/reviews/:id/suggest", post(suggest))
-        .route("/api/runs/:id/promote", post(promote_run))
+        .route("/api/sources/{id}/reviews", get(list_source_reviews))
+        .route("/api/reviews/{id}", get(get_item))
+        .route("/api/reviews/{id}/status", post(set_status))
+        .route("/api/reviews/{id}/autofix", post(autofix))
+        .route("/api/reviews/{id}/suggest", post(suggest))
+        .route("/api/runs/{id}/promote", post(promote_run))
 }
 
 #[cfg(test)]
@@ -1088,6 +1078,9 @@ mod tests {
             value: value.map(str::to_string),
             source_shape: "http://example.org/products/ontology#ProductShape".into(),
             source_constraint: constraint.to_string(),
+            source_constraint_component: String::new(),
+            annotations: Vec::new(),
+            terms: Default::default(),
             message: format!("{constraint} failed"),
         }
     }

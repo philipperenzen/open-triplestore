@@ -539,9 +539,8 @@ async fn unknown_model_and_unknown_version_are_clean_404s() {
 // ── Visibility ────────────────────────────────────────────────────────────
 
 /// The registry's own rule, applied by the handler: a private model answers as
-/// if it did not exist. Asserted directly on the gate because the route is
-/// additionally admin-gated by the router it is merged into, which would deny a
-/// non-admin before the handler ever runs — the gate must hold on its own.
+/// if it did not exist. Asserted directly on the gate, which must hold on its
+/// own whatever router the route is merged into.
 #[tokio::test]
 async fn a_private_model_is_not_readable_by_someone_who_may_not_read_it() {
     let (state, _token) = fixture();
@@ -565,8 +564,11 @@ async fn a_private_model_is_not_readable_by_someone_who_may_not_read_it() {
     assert!(profile::readable_model(&state, Some("adm"), "m1").is_ok());
 }
 
+/// Over HTTP the profile is read by whoever may read the entry, as `/data` is:
+/// a signed-in caller who may not read a private model gets the same answer as
+/// for a model that does not exist, and nothing of the ontology leaks in it.
 #[tokio::test]
-async fn a_non_admin_never_reaches_the_profile() {
+async fn a_non_admin_who_may_not_read_the_model_never_reaches_the_profile() {
     let (state, _token) = fixture();
     state
         .auth_db
@@ -578,8 +580,8 @@ async fn a_non_admin_never_reaches_the_profile() {
         get_profile(&state, &mallory, "/api/models/m1/versions/1.0.0/profile").await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "the router this endpoint is merged into is admin-gated: {body}"
+        StatusCode::NOT_FOUND,
+        "a private model answers as one that does not exist: {body}"
     );
     let text = body.to_string();
     assert!(

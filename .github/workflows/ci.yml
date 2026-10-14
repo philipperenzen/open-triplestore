@@ -8,6 +8,9 @@ on:
   push:
     branches: [main, master, 'release/**']
   pull_request:
+  # release-prepare.yml opens its PRs with GITHUB_TOKEN, which starts no
+  # pull_request runs, so it dispatches this workflow on the PR's head instead.
+  workflow_dispatch:
 
 # Collapse superseded runs: a new push/PR-update on the same ref cancels the
 # in-flight one. push (refs/heads/*) and PR (refs/pull/*/merge) have distinct refs,
@@ -47,16 +50,31 @@ jobs:
           sudo docker image prune --all --force > /dev/null 2>&1 || true
           df -h /
 
+      # An S3-compatible server for tests/storage_s3_live.rs (the step after
+      # the security tests). Started here, before the build, so it is up long
+      # before the tests run. Versity S3 Gateway (Apache-2.0) over a POSIX
+      # directory in the container, pinned by tag and digest; it checks request
+      # signatures, so the wrong-credentials test means something. MinIO
+      # stopped publishing community images, and its old tags no longer pull.
+      # A plain `docker run` rather than a service container, because GitHub
+      # cannot pass a service its command-line arguments. The credentials are
+      # throwaway values for this container.
+      - name: Start the S3 server
+        run: >-
+          docker run -d --name s3 -p 127.0.0.1:7070:7070
+          versity/versitygw:v1.9.0@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
+          --access ots-ci-s3 --secret ots-ci-s3-secret posix /tmp
+
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Hard gate: the tree is fully rustfmt-clean. Run `cargo fmt --all`
       # before pushing if this fails.
@@ -68,21 +86,24 @@ jobs:
       # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
+      # The three SQL connector plugins ride along too: their registration in
+      # src/plugins.rs compiles only when the main crate is built with them, and
+      # the live-sources job builds just `plugin-postgres`.
       # `--workspace` is load-bearing: without it cargo selects only the root
       # package, so the `opengraph` member was never linted or test-compiled. Its
       # test module had been broken (a stale oxigraph `on_store` signature) for
       # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql -- -D warnings
 
       - name: Build
-        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked
 
       # The Docker builder stage writes the crates' licence notices with this
-      # generator; run it here too so a change that breaks it fails a PR, not
-      # the next image release.
+      # generator; run it here too, with the image's default CARGO_FEATURES, so
+      # a change that breaks it fails a PR, not the next image release.
       - name: Third-party licence notices (server)
-        run: python3 scripts/gen_rust_third_party_licenses.py --features full --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+        run: python3 scripts/gen_rust_third_party_licenses.py --features image --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
 
       # No test is ignored (scripts/no-ignored-tests.sh says why): the source
       # scan catches an `#[ignore]` behind a cfg_attr for another platform,
@@ -94,7 +115,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked 2>&1 | tee test.log
+          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked 2>&1 | tee test.log
           if grep -E 'test result: .* [1-9][0-9]* ignored' test.log; then
             echo "::error::Some tests were ignored — fix or delete them (scripts/no-ignored-tests.sh)."
             exit 1
@@ -121,7 +142,7 @@ jobs:
           set -o pipefail
           count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
 
-          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --test 'security_*' 2>&1)
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test 'security_*' 2>&1)
           echo "$files_out"
           files_passed=$(count_passed "$files_out")
           echo "==> tests/security_*.rs passed: $files_passed"
@@ -130,7 +151,7 @@ jobs:
             exit 1
           fi
 
-          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked security 2>&1)
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked security 2>&1)
           echo "$named_out"
           named_passed=$(count_passed "$named_out")
           echo "==> security-named tests passed across all binaries: $named_passed"
@@ -138,6 +159,65 @@ jobs:
             echo "::error::Expected at least 40 security-named tests to run, but only $named_passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
             exit 1
           fi
+
+      # The S3 asset store against the S3 server started above: object and
+      # HTTP round trips, absent keys, wrong credentials. The Test step ran
+      # these without OTS_TEST_S3_ENDPOINT, so they skipped there; this re-run
+      # uses the binary it built. OTS_TEST_LIVE_REQUIRED turns a missing or
+      # renamed variable into a failure instead of a skip.
+      - name: S3 storage against Versity S3 Gateway
+        env:
+          OTS_TEST_LIVE_REQUIRED: '1'
+          OTS_TEST_S3_ENDPOINT: http://127.0.0.1:7070
+          OTS_TEST_S3_ACCESS_KEY: ots-ci-s3
+          OTS_TEST_S3_SECRET_KEY: ots-ci-s3-secret
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test storage_s3_live
+
+      - name: S3 server log
+        if: always()
+        run: docker logs s3 || true
+
+  # `sfcgal3d` (certified CSG and volumeExact through native SFCGAL) is in no
+  # other job's feature list: the sfcgal 0.8 / sfcgal-sys 0.9 crates need
+  # SFCGAL >= 2.0, and Ubuntu 24.04's libsfcgal-dev is 1.5. So this job runs in
+  # the Debian trixie Rust image the GitLab jobs use (SFCGAL 2.0, and Rust 1.94
+  # like the Dockerfile) and builds the library's unit tests with the feature
+  # on, warnings denied, then runs the 3D function tests. The runner's
+  # preinstalled tooling is mounted in so the "Free up disk space" step can
+  # delete it from inside the container.
+  sfcgal3d:
+    name: sfcgal3d (native SFCGAL 2.x)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.94-trixie
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache:/host/toolcache
+    env:
+      # RUSTFLAGS replaces the linker flag in .cargo/config.toml, so it is
+      # repeated here. Dependencies keep their capped lints.
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=lld
+    steps:
+      - name: Free up disk space
+        run: |
+          df -h /
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/toolcache/*
+          df -h /
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies (GEOS, SFCGAL 2.x)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev lld
+          dpkg -s libsfcgal-dev | grep '^Version'
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build and test the 3D functions with sfcgal3d
+        run: cargo test --lib --features full,test-utils,sfcgal3d --locked -- geo::functions3d
 
   # `default = ["full"]` makes the README's plain `cargo build` produce the
   # binary its Highlights table describes. The minimal configuration then has no
@@ -153,8 +233,8 @@ jobs:
       - name: Install system dependencies (GEOS for GeoSPARQL)
         run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build (no default features)
         run: cargo build --no-default-features --locked
@@ -165,10 +245,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Plugin crates (plugins/api, plugins/hello, plugins/accounts-dashboard —
       # see docs/plugins.md) are
@@ -190,6 +270,9 @@ jobs:
   # sets OTS_TEST_LIVE_REQUIRED: a missing or renamed variable fails here
   # instead of skipping. The MySQL plugin serves MariaDB too, so its test runs
   # against both. The passwords are throwaway values for these containers.
+  # Every server also gets a certificate from a throwaway CA, so each driver
+  # runs once more with tls: true against that CA (OTS_TEST_<DIALECT>_TLS_CA
+  # names where it lies on the server; the test reads it back).
   live-sources:
     name: Database connectors against live servers
     runs-on: ubuntu-latest
@@ -237,8 +320,19 @@ jobs:
       OTS_TEST_MSSQL_HOST: 127.0.0.1
       OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
       OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+      OTS_TEST_POSTGRES_TLS_CA: /var/lib/postgresql/ots-tls/ca.pem
+      OTS_TEST_MYSQL_TLS_CA: /var/lib/mysql-files/ots-tls/ca.pem
+      OTS_TEST_MSSQL_TLS_CA: /var/opt/mssql/ots-tls/ca.pem
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # First, so the MariaDB and SQL Server restarts it needs overlap with
+      # the build; the tests wait for a server that is still coming back.
+      - name: Turn on TLS in the servers
+        run: >-
+          scripts/live-sources-tls.sh
+          ${{ job.services.postgres.id }} ${{ job.services.mysql.id }}
+          ${{ job.services.mariadb.id }} ${{ job.services.mssql.id }}
 
       # The HTTP pipeline test builds the main crate (see the backend job).
       - name: Free up disk space
@@ -254,8 +348,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: PostgreSQL 16
         run: cargo test -p ots-plugin-postgres --test live --locked
@@ -276,14 +370,23 @@ jobs:
       - name: The whole pipeline over HTTP (PostgreSQL)
         run: cargo test --features test-utils,plugin-postgres --test sources_postgres_http --locked
 
+      # The W3C R2RML test cases on PostgreSQL 16 and MySQL 8.4 (SQLite runs
+      # in the conformance job). Fetched, not vendored — see the script.
+      - name: W3C R2RML test cases (PostgreSQL, MySQL)
+        env:
+          OTS_TEST_R2RML_REQUIRED: '1'
+        run: |
+          scripts/fetch-w3c-r2rml-tests.sh
+          cargo test --features test-utils,plugin-postgres,plugin-mysql --test w3c_r2rml_conformance --locked
+
   conformance:
     name: Conformance suites
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting` conformance
-      # test binaries don't run the disk out (see the backend job).
+      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting`
+      # test binaries below don't run the disk out (see the backend job).
       - name: Free up disk space
         run: |
           df -h /
@@ -298,13 +401,72 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
-      # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
-      - name: Run conformance tests
-        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
+      # The W3C / GeoSPARQL / OWL 2 / LDP conformance binaries are not run
+      # here as a whole: the backend job's `cargo test --workspace` runs every
+      # one of them with a superset of these features, and running them again
+      # here doubled their CI time for nothing. This job keeps what the backend
+      # job cannot do: the corpora fetched at CI time, the live reasoner sidecar
+      # and the seed bundles on fetched data.
+      # Geonovum's DCAT-AP-NL 3 shapes are fetched at a pinned commit (sha256-
+      # checked), not vendored: their repository has no LICENSE file.
+      - name: Fetch the DCAT-AP-NL 3 shapes
+        run: tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh
+      # The W3C R2RML test cases are fetched at a pinned commit, never
+      # vendored; OTS_TEST_R2RML_REQUIRED turns a failed fetch into a failure
+      # instead of a skip.
+      - name: Fetch the W3C R2RML test cases
+        run: scripts/fetch-w3c-r2rml-tests.sh
+      # The buildingSMART IDS corpus is not vendored (CC BY-ND 4.0): its runner
+      # downloads it from a pinned commit and checks every file's SHA-256, and
+      # OTS_TEST_IDS_CORPUS_REQUIRED turns a failed download into a failure
+      # instead of a skip.
+      - name: Conformance suites over fetched corpora
+        env:
+          OTS_TEST_DCAT_AP_NL_REQUIRED: '1'
+          OTS_TEST_R2RML_REQUIRED: '1'
+          OTS_TEST_IDS_CORPUS_REQUIRED: '1'
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test dcat_conformance --test w3c_r2rml_conformance --test buildingsmart_ids_conformance
+
+      # OWL 2 DL against the reasoner sidecar the project ships
+      # (sidecars/reasoner: OWL API + HermiT). Its live tests and the W3C OWL 2
+      # DL runner skip everywhere else; here the sidecar is built (with its own
+      # unit tests) and started, and OTS_TEST_LIVE_REQUIRED turns a missing
+      # variable into a failure. The test-name filter leaves out the Konclude
+      # live tests, which need a Konclude binary this job does not install.
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: sidecars/reasoner/pom.xml
+
+      - name: Build and start the reasoner sidecar
+        working-directory: sidecars/reasoner
+        env:
+          OTS_REASONER_TOKEN: ots-ci-reasoner-token
+        run: |
+          ./mvnw -B -q package
+          nohup java -jar target/ots-reasoner.jar > "$RUNNER_TEMP/reasoner.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8090/version && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/reasoner.log"
+          exit 1
+
+      - name: OWL 2 DL against the reasoner sidecar (W3C OWL 2 DL test cases + live tests)
+        env:
+          OTS_TEST_LIVE_REQUIRED: '1'
+          OTS_TEST_REASONER_URL: http://127.0.0.1:8090
+          OTS_TEST_REASONER_TOKEN: ots-ci-reasoner-token
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test owl2_dl_conformance --test w3c_owl2_dl_manifests -- sidecar_live w3c_owl2_dl
+
+      - name: Reasoner sidecar log
+        if: always()
+        run: cat "$RUNNER_TEMP/reasoner.log" || true
 
       # The seed bundles built on national-standard data (NEN 2660-2, IMBOR,
       # GWSW) are not vendored — NEN 2660-2 carries no licence that allows
@@ -332,7 +494,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -367,6 +529,43 @@ jobs:
       # test suites; a stale table (counts that no longer match the code) fails.
       - name: Check the conformance table
         run: python3 scripts/conformance_table.py --check
+      # Every setting the docs tell operators to put in .env must reach the
+      # server under docker compose (env_file, no hard-coded overrides).
+      - name: Check compose forwards the documented settings
+        run: python3 scripts/check_compose_env.py
+
+      # The variables .env.example and docs/administration.md document against
+      # what docker-compose.yml hands the triplestore service: a forwarded
+      # variable neither documents, or an .env.example entry compose never
+      # passes on, fails; documented settings compose does not forward are
+      # listed as a warning.
+      - name: Check the env docs against docker-compose.yml
+        run: python3 scripts/check_env_drift.py
+
+  docker-manifests:
+    name: Docker image loads the Cargo manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The release image is only built when a tag is pushed (release.yml), after
+      # the GitHub Release is already published. Cargo refuses to load a manifest
+      # whose declared target file is missing (a [[test]], bench or workspace
+      # member the Dockerfile does not copy), but `cargo chef prepare` does not
+      # check, so the planner stage alone passes. Load what the image builds with
+      # cargo instead: the planner's tree (which the builder stage copies) and
+      # the skeleton `cargo chef cook` compiles the dependencies in. `cargo
+      # metadata --no-deps` skips the target check; `cargo fetch` does not.
+      - name: Build the Dockerfile's planner stage
+        run: docker build --target planner -t ots-planner .
+      - name: Cargo loads the builder's tree and the cook skeleton
+        run: |
+          docker run --rm ots-planner sh -euc '
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
+            mkdir /tmp/cook && cp recipe.json /tmp/cook/ && cp -R vendor /tmp/cook/ && cd /tmp/cook
+            cargo chef cook --no-build --recipe-path recipe.json
+            cargo fetch --locked --offline --target x86_64-unknown-linux-gnu
+          '
 
   audit:
     name: Dependency audit
@@ -380,7 +579,7 @@ jobs:
         with:
           command: check advisories bans sources licenses
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 

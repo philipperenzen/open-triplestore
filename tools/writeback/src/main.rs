@@ -231,6 +231,9 @@ fn apply_fragment(
 }
 
 fn main() -> anyhow::Result<()> {
+    // reqwest is built with `rustls-no-provider`: ring must be the rustls
+    // provider before the first client is built.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // Logs on stderr: stdout is the dry run's SQL and nothing else.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

@@ -1,0 +1,10 @@
+# Build context of sidecars/reasoner/Dockerfile (the repository root):
+# only what the image needs.
+*
+!sidecars/reasoner/mvnw
+!sidecars/reasoner/pom.xml
+!sidecars/reasoner/.mvn/
+!sidecars/reasoner/src/
+!LICENSES/
+!NOTICE
+!LICENSE

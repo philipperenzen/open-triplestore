@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { adminListUsers, adminCreateUser, adminUpdateUser, adminDeleteUser, adminResetPassword, adminPurgeUser } from '../lib/api.js';
   import { user as currentUserStore, isAdmin, authInitialized } from '../lib/stores.js';
   import { SYSTEM_ROLES } from '../lib/permissions.js';
@@ -57,7 +58,7 @@
       users = res.users;
       total = res.total;
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     loading = false;
   }
@@ -146,7 +147,7 @@
       await loadUsers();
     } catch (e) {
       deactivateTarget = null;
-      alert(e.message);
+      toastError(e.message);
     }
   }
 
@@ -157,7 +158,7 @@
       await loadUsers();
     } catch (e) {
       purgeTarget = null;
-      alert(e.message);
+      toastError(e.message);
     }
   }
 

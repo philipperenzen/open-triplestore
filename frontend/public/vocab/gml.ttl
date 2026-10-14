@@ -1,0 +1,229 @@
+# GML 3.2.1 geometry class hierarchy — written by Open Triplestore for the
+# GeoSPARQL RDFS Entailment Extension (OGC 11-052r4 Req 27, 22-047r1 Req 49):
+# "an RDFS/OWL class hierarchy of geometry types consistent with the GML schema".
+# OGC no longer publishes an RDF version of that hierarchy, so this file derives
+# one class per GML geometry element, with rdfs:subClassOf following the
+# element's substitutionGroup, from the GML 3.2.1 schema at
+# https://schemas.opengis.net/gml/3.2.1/ (geometryBasic0d1d.xsd, geometryBasic2d.xsd,
+# geometryPrimitives.xsd, geometryAggregates.xsd, geometryComplexes.xsd, grids.xsd;
+# retrieved 2026-10-03, the files carry version="3.2.2", OGC's corrigendum that
+# kept the 3.2.1 namespace http://www.opengis.net/gml/3.2).
+# A geometry element is one in the substitution group of gml:AbstractGeometry,
+# directly or indirectly. Elements in the gml:AbstractObject group (gml:Envelope,
+# the curve segments and the surface patches such as gml:PolygonPatch and
+# gml:Triangle) are not geometries in GML 3.2.1 and have no class here.
+# gml:AbstractGeometry, whose own substitution group is gml:AbstractGML, is a
+# subclass of geo:Geometry. The GeoSPARQL 1.0 text's example
+# "gml:Polygon rdfs:subClassOf gml:SurfacePatch" does not match the schema
+# (gml:Polygon substitutes for gml:AbstractSurface); this file follows the schema.
+# No schema text is copied: only element names and their substitution groups.
+# Written by Open Triplestore; under the project licence (see LICENSE).
+@prefix gml:  <http://www.opengis.net/ont/gml#> .
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+<http://www.opengis.net/ont/gml> a owl:Ontology ;
+  rdfs:label "GML 3.2.1 geometry types"@en ;
+  rdfs:comment "One class per GML 3.2.1 geometry element; rdfs:subClassOf follows the element's substitution group in the GML 3.2.1 schema. Written by Open Triplestore for the GeoSPARQL RDFS Entailment Extension."@en ;
+  dcterms:source <https://schemas.opengis.net/gml/3.2.1/> ;
+  owl:versionInfo "1.0" .
+
+gml:AbstractGeometry a owl:Class ;
+  rdfs:subClassOf geo:Geometry ;
+  rdfs:label "AbstractGeometry"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractGeometry (geometryBasic0d1d.xsd), in the substitution group of gml:AbstractGML."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractGeometricPrimitive a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometry ;
+  rdfs:label "AbstractGeometricPrimitive"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractGeometricPrimitive (geometryBasic0d1d.xsd), in the substitution group of gml:AbstractGeometry."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Point a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricPrimitive ;
+  rdfs:label "Point"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Point (geometryBasic0d1d.xsd), in the substitution group of gml:AbstractGeometricPrimitive."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractCurve a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricPrimitive ;
+  rdfs:label "AbstractCurve"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractCurve (geometryBasic0d1d.xsd), in the substitution group of gml:AbstractGeometricPrimitive."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:LineString a owl:Class ;
+  rdfs:subClassOf gml:AbstractCurve ;
+  rdfs:label "LineString"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:LineString (geometryBasic0d1d.xsd), in the substitution group of gml:AbstractCurve."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractSurface a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricPrimitive ;
+  rdfs:label "AbstractSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractSurface (geometryBasic2d.xsd), in the substitution group of gml:AbstractGeometricPrimitive."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Polygon a owl:Class ;
+  rdfs:subClassOf gml:AbstractSurface ;
+  rdfs:label "Polygon"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Polygon (geometryBasic2d.xsd), in the substitution group of gml:AbstractSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractRing a owl:Class ;
+  rdfs:subClassOf gml:AbstractCurve ;
+  rdfs:label "AbstractRing"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractRing (geometryBasic2d.xsd), in the substitution group of gml:AbstractCurve."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:LinearRing a owl:Class ;
+  rdfs:subClassOf gml:AbstractRing ;
+  rdfs:label "LinearRing"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:LinearRing (geometryBasic2d.xsd), in the substitution group of gml:AbstractRing."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Curve a owl:Class ;
+  rdfs:subClassOf gml:AbstractCurve ;
+  rdfs:label "Curve"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Curve (geometryPrimitives.xsd), in the substitution group of gml:AbstractCurve."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:OrientableCurve a owl:Class ;
+  rdfs:subClassOf gml:AbstractCurve ;
+  rdfs:label "OrientableCurve"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:OrientableCurve (geometryPrimitives.xsd), in the substitution group of gml:AbstractCurve."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Ring a owl:Class ;
+  rdfs:subClassOf gml:AbstractRing ;
+  rdfs:label "Ring"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Ring (geometryPrimitives.xsd), in the substitution group of gml:AbstractRing."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Surface a owl:Class ;
+  rdfs:subClassOf gml:AbstractSurface ;
+  rdfs:label "Surface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Surface (geometryPrimitives.xsd), in the substitution group of gml:AbstractSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:OrientableSurface a owl:Class ;
+  rdfs:subClassOf gml:AbstractSurface ;
+  rdfs:label "OrientableSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:OrientableSurface (geometryPrimitives.xsd), in the substitution group of gml:AbstractSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:PolyhedralSurface a owl:Class ;
+  rdfs:subClassOf gml:Surface ;
+  rdfs:label "PolyhedralSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:PolyhedralSurface (geometryPrimitives.xsd), in the substitution group of gml:Surface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:TriangulatedSurface a owl:Class ;
+  rdfs:subClassOf gml:Surface ;
+  rdfs:label "TriangulatedSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:TriangulatedSurface (geometryPrimitives.xsd), in the substitution group of gml:Surface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Tin a owl:Class ;
+  rdfs:subClassOf gml:TriangulatedSurface ;
+  rdfs:label "Tin"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Tin (geometryPrimitives.xsd), in the substitution group of gml:TriangulatedSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Shell a owl:Class ;
+  rdfs:subClassOf gml:AbstractSurface ;
+  rdfs:label "Shell"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Shell (geometryPrimitives.xsd), in the substitution group of gml:AbstractSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractSolid a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricPrimitive ;
+  rdfs:label "AbstractSolid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractSolid (geometryPrimitives.xsd), in the substitution group of gml:AbstractGeometricPrimitive."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Solid a owl:Class ;
+  rdfs:subClassOf gml:AbstractSolid ;
+  rdfs:label "Solid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Solid (geometryPrimitives.xsd), in the substitution group of gml:AbstractSolid."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractGeometricAggregate a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometry ;
+  rdfs:label "AbstractGeometricAggregate"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractGeometricAggregate (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometry."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:MultiGeometry a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricAggregate ;
+  rdfs:label "MultiGeometry"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:MultiGeometry (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometricAggregate."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:MultiPoint a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricAggregate ;
+  rdfs:label "MultiPoint"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:MultiPoint (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometricAggregate."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:MultiCurve a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricAggregate ;
+  rdfs:label "MultiCurve"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:MultiCurve (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometricAggregate."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:MultiSurface a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricAggregate ;
+  rdfs:label "MultiSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:MultiSurface (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometricAggregate."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:MultiSolid a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometricAggregate ;
+  rdfs:label "MultiSolid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:MultiSolid (geometryAggregates.xsd), in the substitution group of gml:AbstractGeometricAggregate."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:GeometricComplex a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometry ;
+  rdfs:label "GeometricComplex"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:GeometricComplex (geometryComplexes.xsd), in the substitution group of gml:AbstractGeometry."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:CompositeCurve a owl:Class ;
+  rdfs:subClassOf gml:AbstractCurve ;
+  rdfs:label "CompositeCurve"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:CompositeCurve (geometryComplexes.xsd), in the substitution group of gml:AbstractCurve."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:CompositeSurface a owl:Class ;
+  rdfs:subClassOf gml:AbstractSurface ;
+  rdfs:label "CompositeSurface"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:CompositeSurface (geometryComplexes.xsd), in the substitution group of gml:AbstractSurface."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:CompositeSolid a owl:Class ;
+  rdfs:subClassOf gml:AbstractSolid ;
+  rdfs:label "CompositeSolid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:CompositeSolid (geometryComplexes.xsd), in the substitution group of gml:AbstractSolid."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:AbstractImplicitGeometry a owl:Class ;
+  rdfs:subClassOf gml:AbstractGeometry ;
+  rdfs:label "AbstractImplicitGeometry"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:AbstractImplicitGeometry (grids.xsd), in the substitution group of gml:AbstractGeometry."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:Grid a owl:Class ;
+  rdfs:subClassOf gml:AbstractImplicitGeometry ;
+  rdfs:label "Grid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:Grid (grids.xsd), in the substitution group of gml:AbstractImplicitGeometry."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .
+
+gml:RectifiedGrid a owl:Class ;
+  rdfs:subClassOf gml:Grid ;
+  rdfs:label "RectifiedGrid"@en ;
+  rdfs:comment "The GML 3.2.1 element gml:RectifiedGrid (grids.xsd), in the substitution group of gml:Grid."@en ;
+  rdfs:isDefinedBy <http://www.opengis.net/ont/gml> .

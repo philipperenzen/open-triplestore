@@ -55,7 +55,6 @@ pub fn is_readable_by_proposer(path: &str) -> bool {
         || path.starts_with("/api/mappings")
         || path.starts_with("/api/runs")
         || path.starts_with("/api/tickets")
-        || (path.starts_with("/api/models/") && path.ends_with("/profile"))
 }
 
 /// A POST that computes and writes nothing, open to `sources:read`:
@@ -137,7 +136,6 @@ mod tests {
             "/api/mappings/x/rml",
             "/api/runs/r",
             "/api/tickets/t",
-            "/api/models/m/versions/1.0.0/profile",
         ] {
             assert!(is_readable_by_proposer(p), "{p}");
         }

@@ -276,15 +276,41 @@ fn store_quad_probes_before_it_counts() {
     assert_eq!(rows[1].post_count, Some(1));
 }
 
+/// A streamed default-graph load used to be one store-scoped unknown row —
+/// which closed every chain in the store on every boot that seeded a
+/// multi-graph payload. It now probes its quads on the way past (delta note
+/// §8.5 Q2): exact rows, per graph.
 #[test]
-fn a_streamed_default_graph_load_is_an_honest_unknown() {
+fn a_streamed_default_graph_load_is_recorded_exactly_per_graph() {
     let s = store();
     s.load_str(&ttl(&[1, 2]), RdfFormat::Turtle, None).unwrap();
     let rows = s.changes().rows_after(0, 10);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].extent, Extent::Unknown);
-    assert_eq!(rows[0].scope, "store");
+    assert_eq!(rows[0].extent, Extent::Full);
+    assert_eq!(rows[0].scope, "graph");
+    assert_eq!(rows[0].graph_iri, None, "the default graph");
+    assert_eq!(rows[0].added_n, 2);
     assert_eq!(rows[0].origin, "load_reader");
+    // Loading the same data again adds nothing, and says so.
+    s.load_str(&ttl(&[1, 2]), RdfFormat::Turtle, None).unwrap();
+    let again = s.changes().rows_after(rows[0].seq.unwrap(), 10);
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0].added_n, 0);
+}
+
+/// Over the scan cap a streamed load cannot probe every quad: the graphs it
+/// could not cover are unknown — those graphs, never the whole store.
+#[test]
+fn a_streamed_load_over_the_cap_is_unknown_per_graph_not_store_wide() {
+    let s = TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(1, DEFAULT_MAX_PAYLOAD);
+    s.load_str(&ttl(&[1, 2, 3]), RdfFormat::Turtle, None)
+        .unwrap();
+    let rows = s.changes().rows_after(0, 10);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].scope, "graph");
+    assert_eq!(rows[0].extent, Extent::Unknown);
 }
 
 #[test]
@@ -347,7 +373,7 @@ fn the_off_switch_records_nothing_and_changes_nothing_else() {
 /// bypassed the log (the raw oxigraph store) is caught by the count check.
 #[test]
 fn reopening_resolves_pending_rows_and_reconciles_counts() {
-    std::env::set_var("OTS_CHANGE_CAPTURE", "on");
+    std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "on");
     let dir = tempfile::tempdir().unwrap();
     {
         let s = TripleStore::open(dir.path()).unwrap();
@@ -460,7 +486,7 @@ async fn call(
 
 #[tokio::test]
 async fn the_change_log_is_read_and_bookmarked_through_the_admin_api() {
-    std::env::set_var("OTS_CHANGE_CAPTURE", "on");
+    std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "on");
     let (state, token) = admin_state();
     state
         .store

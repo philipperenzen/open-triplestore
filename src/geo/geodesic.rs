@@ -9,10 +9,11 @@
 //! returns unbound rather than a number in unknown units.
 //!
 //! The primitives are Karney's geodesic algorithms as the `geo` crate exposes
-//! them (`GeodesicDistance`, `GeodesicLength`, `GeodesicArea`, and the bearing /
-//! destination pair) — accurate to nanometres, and convergent even for nearly
-//! antipodal points, where Vincenty's iteration fails. Lengths and areas treat
-//! each edge as the geodesic between its vertices.
+//! them (the `Geodesic` metric space's distance, length, destination and
+//! interpolation, `GeodesicArea`, and `GeodesicBearing`) — accurate to
+//! nanometres, and convergent even for nearly antipodal points, where
+//! Vincenty's iteration fails. Lengths and areas treat each edge as the
+//! geodesic between its vertices.
 //!
 //! The distance between two non-point geometries, and a buffer, need a plane.
 //! They use the *ellipsoidal azimuthal equidistant* projection built from the
@@ -32,36 +33,19 @@
 
 use geo::orient::Direction;
 use geo::{
-    Centroid, Coord, GeodesicArea, GeodesicBearing, GeodesicDestination, GeodesicDistance,
-    GeodesicLength, Geometry, LineString, MapCoords, Orient, Point, Polygon,
+    Centroid, Coord, Destination, Distance, Geodesic, GeodesicArea, GeodesicBearing, Geometry,
+    Length, LineString, MapCoords, Orient, Point, Polygon,
 };
 use geos::{Geom, Geometry as GeosGeometry, GeometryTypes};
 use oxrdf::Term;
 use wkt::{ToWkt, TryFromWkt};
 
 use super::crs::{transform_xy, Crs};
-use super::datatypes::{literal_crs_uri, literal_wkt, parse_wkt_literal};
-use super::gml::gml_srs_name;
-use super::vocabulary as vocab;
+pub use super::datatypes::literal_crs;
+use super::datatypes::{literal_wkt, parse_wkt_literal};
 
 /// GEOS buffer segments per quarter circle — the same as `geof:buffer`.
 const QUADRANT_SEGMENTS: i32 = 16;
-
-/// The CRS a geometry literal is written in: a WKT literal's `<crs>` prefix, a
-/// GML literal's `srsName`, or CRS84 when there is none (GeoSPARQL's default,
-/// and always the case for GeoJSON). `None` for a CRS this build cannot
-/// reproject. (The topology functions do not read `srsName` yet; measuring in
-/// metres has to, or RD New coordinates would be taken for degrees.)
-pub fn literal_crs(term: &Term) -> Option<Crs> {
-    let uri = match term {
-        Term::Literal(l) if l.datatype().as_str() == vocab::GML_LITERAL => gml_srs_name(l.value()),
-        _ => literal_crs_uri(term).map(str::to_string),
-    };
-    match uri {
-        Some(uri) => Crs::from_uri(&uri),
-        None => Some(Crs::Wgs84),
-    }
-}
 
 /// A geometry literal of any serialisation as a `geo` geometry in CRS84, or
 /// `None` when it does not parse, its CRS cannot be reprojected, or it does not
@@ -96,7 +80,7 @@ fn literal_point(term: &Term) -> Option<Point<f64>> {
 /// any CRS this build can reproject.
 pub fn literal_distance(a: &Term, b: &Term) -> Option<f64> {
     if let (Some(p), Some(q)) = (literal_point(a), literal_point(b)) {
-        return Some(p.geodesic_distance(&q));
+        return Some(Geodesic.distance(p, q));
     }
     metric_distance(&literal_to_crs84(a)?, &literal_to_crs84(b)?)
 }
@@ -129,7 +113,7 @@ impl Aeqd {
     fn inverse(&self, x: f64, y: f64) -> Option<(f64, f64)> {
         let s = x.hypot(y);
         let azimuth = x.atan2(y).to_degrees();
-        let p = self.centre.geodesic_destination(azimuth, s);
+        let p = Geodesic.destination(self.centre, azimuth, s);
         (p.x().is_finite() && p.y().is_finite()).then_some((p.x(), p.y()))
     }
 
@@ -175,7 +159,7 @@ fn nearest(a: &GeosGeometry, b: &GeosGeometry) -> Option<(Point<f64>, Point<f64>
 /// The point halfway along the geodesic from `p` to `q`.
 fn midpoint(p: Point<f64>, q: Point<f64>) -> Point<f64> {
     let (azimuth, s) = p.geodesic_bearing_distance(q);
-    p.geodesic_destination(azimuth, s / 2.0)
+    Geodesic.destination(p, azimuth, s / 2.0)
 }
 
 /// Longest edge kept as a single chord in the azimuthal equidistant plane. A
@@ -189,15 +173,15 @@ const MAX_CHORD_M: f64 = 1_000.0;
 /// Edges already that short — the usual case for buildings and parcels — are
 /// left as they are.
 fn densify(geom: &Geometry<f64>) -> Geometry<f64> {
-    use geo::{GeodesicIntermediate, GeometryCollection, MultiLineString, MultiPolygon};
+    use geo::{GeometryCollection, InterpolatePoint, MultiLineString, MultiPolygon};
     fn line(ls: &LineString<f64>) -> LineString<f64> {
         let mut out: Vec<Coord<f64>> = Vec::with_capacity(ls.0.len());
         for w in ls.0.windows(2) {
             out.push(w[0]);
             let (p, q) = (Point::from(w[0]), Point::from(w[1]));
             out.extend(
-                p.geodesic_intermediate_fill(&q, MAX_CHORD_M, false)
-                    .into_iter()
+                Geodesic
+                    .points_along_line(p, q, MAX_CHORD_M, false)
                     .map(|pt| pt.0),
             );
         }
@@ -231,7 +215,7 @@ fn densify(geom: &Geometry<f64>) -> Geometry<f64> {
 /// functions take them; 0 when they intersect, `None` when either is empty.
 pub fn metric_distance(a: &Geometry<f64>, b: &Geometry<f64>) -> Option<f64> {
     if let (Geometry::Point(p), Geometry::Point(q)) = (a, b) {
-        return Some(p.geodesic_distance(q));
+        return Some(Geodesic.distance(*p, *q));
     }
     // First estimate in the raw lon/lat plane: exact when they intersect (the
     // pair is then one shared point), otherwise only a starting point.
@@ -256,7 +240,7 @@ pub fn metric_distance(a: &Geometry<f64>, b: &Geometry<f64>) -> Option<f64> {
         p = Point::new(px, py);
         q = Point::new(qx, qy);
     }
-    Some(p.geodesic_distance(&q))
+    Some(Geodesic.distance(p, q))
 }
 
 /// Visit every polygon of a geometry (a `Rect`/`Triangle` as its polygon).
@@ -302,7 +286,7 @@ pub fn metric_perimeter(geom: &Geometry<f64>) -> f64 {
 }
 
 fn ring_length(ring: &LineString<f64>) -> f64 {
-    ring.geodesic_length()
+    Geodesic.length(ring)
 }
 
 /// The geodesic length in metres of a CRS84 geometry's one-dimensional
@@ -310,9 +294,9 @@ fn ring_length(ring: &LineString<f64>) -> f64 {
 /// JTS's, count an areal geometry's rings) — zero for points.
 pub fn metric_length(geom: &Geometry<f64>) -> f64 {
     match geom {
-        Geometry::Line(l) => l.geodesic_length(),
-        Geometry::LineString(ls) => ls.geodesic_length(),
-        Geometry::MultiLineString(mls) => mls.geodesic_length(),
+        Geometry::Line(l) => Geodesic.length(l),
+        Geometry::LineString(ls) => Geodesic.length(ls),
+        Geometry::MultiLineString(mls) => Geodesic.length(mls),
         Geometry::GeometryCollection(gc) => gc.iter().map(metric_length).sum(),
         Geometry::Point(_) | Geometry::MultiPoint(_) => 0.0,
         polygonal => metric_perimeter(polygonal),
@@ -354,6 +338,7 @@ fn wraps_around(geom: &Geometry<f64>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geo::vocabulary as vocab;
     use geo::{line_string, point, polygon};
 
     #[test]
@@ -373,7 +358,7 @@ mod tests {
         let (x, y) = aeqd.forward(5.1, 52.05).unwrap();
         let (lon, lat) = aeqd.inverse(x, y).unwrap();
         assert!((lon - 5.1).abs() < 1e-12 && (lat - 52.05).abs() < 1e-12);
-        let s = aeqd.centre.geodesic_distance(&point!(x: 5.1, y: 52.05));
+        let s = Geodesic.distance(aeqd.centre, point!(x: 5.1, y: 52.05));
         assert!((x.hypot(y) - s).abs() < 1e-6, "radial distance is exact");
         assert_eq!(aeqd.forward(5.0, 52.0), Some((0.0, 0.0)));
     }
@@ -437,7 +422,7 @@ mod tests {
             panic!("a polygon, got {buf:?}")
         };
         for c in p.exterior().coords() {
-            let d = centre.geodesic_distance(&Point::from(*c));
+            let d = Geodesic.distance(centre, Point::from(*c));
             assert!((d - 1000.0).abs() < 1e-6, "vertex at {d} m");
         }
     }

@@ -17,8 +17,10 @@ clap = { version = "4", features = ["derive", "env"] }
 oxrdf = "0.3"
 oxttl = "0.2"
 postgres = "0.19"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+# `rustls-no-provider` + ring: main() installs ring as the rustls provider.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

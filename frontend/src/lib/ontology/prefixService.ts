@@ -6,6 +6,7 @@
 // long outages).
 
 import { NAMESPACES, VOCAB_INFO } from './vocabularies.js';
+import { withBase } from '../basePath';
 
 // v2: entries now come from the internal /api/prefixes service (the old v1
 // cache held direct prefix.cc responses; a stale v1 entry could shadow a
@@ -93,7 +94,7 @@ export async function lookupPrefix(prefix: string): Promise<string | null> {
   if (hit && !hit.iri && Date.now() - hit.t < NEG_TTL_MS) return null;
   return coalesce(inFlightPrefix, prefix, async () => {
     try {
-      const res = await fetch(`/api/prefixes/${encodeURIComponent(prefix)}`);
+      const res = await fetch(withBase(`/api/prefixes/${encodeURIComponent(prefix)}`));
       if (!res.ok) throw new Error('not found');
       const data = await res.json();
       if (data && data.namespace) {
@@ -156,7 +157,7 @@ async function fetchNamespacePrefix(ns: string): Promise<string | null> {
   // transient — caching it as a miss would blank the label for a full day.
   let definitive = false;
   try {
-    const res = await fetch(`/api/prefixes/reverse?uri=${encodeURIComponent(ns)}`);
+    const res = await fetch(withBase(`/api/prefixes/reverse?uri=${encodeURIComponent(ns)}`));
     if (res.ok) {
       const data = await res.json();
       if (data && data.prefix && data.namespace) {
@@ -307,7 +308,7 @@ export async function searchPrefixes(
   // (bundled prefix.cc + LOV) plus platform-registered vocabularies.
   if (remote && q && (BARE_PREFIX_RE.test(q) || q.length >= 3)) {
     try {
-      const res = await fetch(`/api/prefixes?q=${encodeURIComponent(q)}&limit=${limit}`);
+      const res = await fetch(withBase(`/api/prefixes?q=${encodeURIComponent(q)}&limit=${limit}`));
       if (res.ok) {
         const data = await res.json();
         for (const r of data?.results || []) {

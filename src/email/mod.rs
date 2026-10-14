@@ -1,41 +1,45 @@
 //! Transactional email for account lifecycle flows (address verification,
 //! password reset, username reminders, email-change confirmation).
 //!
-//! Configured from the environment. When `SMTP_HOST` is unset the mailer falls
+//! Configured from the environment. When `OTS_SMTP_HOST` is unset the mailer falls
 //! back to a log-only backend: every message is written to the server log at
 //! INFO level (including any action link), so development and test
 //! deployments can exercise the full flows without an SMTP relay.
 //!
 //! Environment variables:
-//! - `SMTP_HOST` — SMTP relay host. Unset → log-only backend.
-//! - `SMTP_PORT` — relay port (default 587).
-//! - `SMTP_USERNAME` / `SMTP_PASSWORD` — optional credentials. The password is
+//! - `OTS_SMTP_HOST` — SMTP relay host. Unset → log-only backend.
+//! - `OTS_SMTP_PORT` — relay port (default 587).
+//! - `OTS_SMTP_USERNAME` / `OTS_SMTP_PASSWORD` — optional credentials. The password is
 //!   read as a secret reference (`env:`, `file:`, `vault:`) and resolved at
 //!   startup; a raw value is accepted outside the production posture with a
 //!   deprecation warning.
-//! - `SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
+//! - `OTS_SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
 //!   trusted private network, e.g. the bundled compose `mail` service),
 //!   `starttls`, or `implicit` (TLS-wrapped/SMTPS). Default: implicit TLS on
 //!   port 465, STARTTLS otherwise.
-//! - `SMTP_STARTTLS` — legacy switch: `1`/`true` forces STARTTLS, `0`/`false`
-//!   forces implicit TLS. Ignored when `SMTP_TLS` is set.
-//! - `SMTP_FROM` — From mailbox (default `Open Triplestore <no-reply@localhost>`).
-//! - `PUBLIC_BASE_URL` — base URL minted into email links (default: the
+//! - `OTS_SMTP_FROM` — From mailbox (default `Open Triplestore <no-reply@localhost>`).
+//! - `OTS_PUBLIC_BASE_URL` — base URL minted into email links (default: the
 //!   server's linked-data base URL).
 //!
-//! Note: the ops alerting module (`alerting` feature) has its own independent
-//! `ALERT_SMTP_*` configuration; this mailer is for user-facing account email.
+//! Note: the ops alerting module (`alerting` feature) has its own
+//! `OTS_ALERT_SMTP_*` configuration, and falls back to this relay (`OTS_SMTP_HOST`,
+//! `OTS_SMTP_PORT`, `OTS_SMTP_USERNAME`, `OTS_SMTP_PASSWORD`, `OTS_SMTP_TLS`, `OTS_SMTP_FROM`)
+//! when `OTS_ALERT_SMTP_HOST` is unset; this mailer is for user-facing account
+//! email.
 
 use crate::secrets::env_secret_opt;
 
 use std::sync::Arc;
+
+/// The From mailbox when `OTS_SMTP_FROM` is unset.
+pub(crate) const DEFAULT_FROM: &str = "Open Triplestore <no-reply@localhost>";
 
 /// How long (seconds) an email send may take before it is abandoned.
 const SEND_TIMEOUT_SECS: u64 = 30;
 
 /// SMTP transport security for the relay hop.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SmtpTls {
+pub enum SmtpTls {
     /// Plaintext SMTP — only sane towards a relay on a trusted private network
     /// (e.g. the bundled compose `mail` service; nothing there is published on
     /// a host interface).
@@ -46,30 +50,41 @@ enum SmtpTls {
     Implicit,
 }
 
-/// Resolve the transport security mode: explicit `SMTP_TLS` wins, then the
-/// legacy `SMTP_STARTTLS` flag, then the port convention (465 ⇒ implicit TLS,
-/// anything else ⇒ STARTTLS).
-fn resolve_tls(port: u16, tls: Option<&str>, starttls: Option<&str>) -> SmtpTls {
-    if let Some(v) = tls {
-        match v.trim().to_ascii_lowercase().as_str() {
-            "none" | "off" | "plain" => return SmtpTls::None,
-            "starttls" => return SmtpTls::StartTls,
-            "implicit" | "tls" | "smtps" => return SmtpTls::Implicit,
-            other => tracing::warn!(
-                "email: unrecognized SMTP_TLS value {other:?} (expected none|starttls|implicit) — falling back"
-            ),
-        }
+/// Resolve the transport security mode: an explicit `OTS_SMTP_TLS` wins, else
+/// the port convention (465 ⇒ implicit TLS, anything else ⇒ STARTTLS). The
+/// configuration registry refuses any other `OTS_SMTP_TLS` value at startup.
+pub(crate) fn resolve_tls(port: u16, tls: Option<&str>) -> SmtpTls {
+    match tls.and_then(parse_tls) {
+        Some(mode) => mode,
+        None if port == 465 => SmtpTls::Implicit,
+        None => SmtpTls::StartTls,
     }
-    match starttls {
-        Some("1") | Some("true") | Some("TRUE") => SmtpTls::StartTls,
-        Some("0") | Some("false") | Some("FALSE") => SmtpTls::Implicit,
-        _ => {
-            if port == 465 {
-                SmtpTls::Implicit
-            } else {
-                SmtpTls::StartTls
-            }
-        }
+}
+
+/// One `OTS_SMTP_TLS`-style value (`none`, `starttls` or `implicit`, any case),
+/// or `None` when it is not one of them.
+pub(crate) fn parse_tls(value: &str) -> Option<SmtpTls> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(SmtpTls::None),
+        "starttls" => Some(SmtpTls::StartTls),
+        "implicit" => Some(SmtpTls::Implicit),
+        _ => None,
+    }
+}
+
+/// The lettre transport builder for `host` under `tls` (port and credentials
+/// still to be set). Shared by this mailer and the ops alerting channel.
+pub(crate) fn smtp_transport(
+    host: &str,
+    tls: SmtpTls,
+) -> Result<lettre::transport::smtp::AsyncSmtpTransportBuilder, lettre::transport::smtp::Error> {
+    use lettre::{AsyncSmtpTransport, Tokio1Executor};
+    match tls {
+        SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
+        SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
+        SmtpTls::None => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+            host,
+        )),
     }
 }
 
@@ -104,36 +119,29 @@ pub(crate) fn rfc5322_message_id(from_domain: &str) -> String {
     format!("<{}@{}>", uuid::Uuid::new_v4(), domain)
 }
 
-fn env_opt(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
-}
-
 impl Mailer {
-    /// Build the mailer from `SMTP_*` env vars. `default_link_base` is used for
-    /// action links unless `PUBLIC_BASE_URL` overrides it.
+    /// Build the mailer from `OTS_SMTP_*` env vars. `default_link_base` is used for
+    /// action links unless `OTS_PUBLIC_BASE_URL` overrides it.
     pub fn from_env(default_link_base: &str) -> Self {
-        let link_base = env_opt("PUBLIC_BASE_URL")
+        use crate::config as c;
+        let link_base = c::PUBLIC_BASE_URL
+            .get()
             .unwrap_or_else(|| default_link_base.to_string())
             .trim_end_matches('/')
             .to_string();
-        let from = env_opt("SMTP_FROM")
-            .unwrap_or_else(|| "Open Triplestore <no-reply@localhost>".to_string());
+        let from = c::SMTP_FROM
+            .get()
+            .unwrap_or_else(|| DEFAULT_FROM.to_string());
 
-        let backend = match env_opt("SMTP_HOST") {
+        let backend = match c::SMTP_HOST.get() {
             Some(host) => {
-                let port: u16 = env_opt("SMTP_PORT")
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(587);
-                let tls = resolve_tls(
-                    port,
-                    env_opt("SMTP_TLS").as_deref(),
-                    env_opt("SMTP_STARTTLS").as_deref(),
-                );
+                let port: u16 = c::SMTP_PORT.get().unwrap_or(587);
+                let tls = resolve_tls(port, c::SMTP_TLS.get().as_deref());
                 Backend::Smtp {
                     host,
                     port,
-                    username: env_opt("SMTP_USERNAME"),
-                    password: env_secret_opt("SMTP_PASSWORD"),
+                    username: c::SMTP_USERNAME.get(),
+                    password: env_secret_opt("OTS_SMTP_PASSWORD"),
                     tls,
                 }
             }
@@ -151,7 +159,7 @@ impl Mailer {
     pub fn log_only(link_base: &str) -> Self {
         Self {
             backend: Backend::Log,
-            from: "Open Triplestore <no-reply@localhost>".to_string(),
+            from: DEFAULT_FROM.to_string(),
             link_base: link_base.trim_end_matches('/').to_string(),
         }
     }
@@ -179,7 +187,7 @@ impl Mailer {
         let from_mbox: Mailbox = self
             .from
             .parse()
-            .map_err(|e| format!("bad SMTP_FROM address: {e}"))?;
+            .map_err(|e| format!("bad OTS_SMTP_FROM address: {e}"))?;
         let to_mbox: Mailbox = to.parse().map_err(|e| format!("invalid recipient: {e}"))?;
         let message_id = rfc5322_message_id(from_mbox.email.domain());
         lettre::Message::builder()
@@ -210,15 +218,8 @@ impl Mailer {
                 password,
                 tls,
             } => {
-                use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-                let builder = match tls {
-                    SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
-                    SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
-                    SmtpTls::None => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-                        host,
-                    )),
-                };
-                let builder = match builder {
+                use lettre::AsyncTransport;
+                let builder = match smtp_transport(host, *tls) {
                     Ok(b) => b.port(*port),
                     Err(e) => {
                         tracing::warn!("email: SMTP relay setup failed: {e}");
@@ -240,7 +241,7 @@ impl Mailer {
                         return false;
                     }
                 };
-                let transport = builder.build();
+                let transport = builder.build::<lettre::Tokio1Executor>();
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(SEND_TIMEOUT_SECS),
                     transport.send(msg),
@@ -342,21 +343,14 @@ mod tests {
 
     #[test]
     fn smtp_tls_explicit_mode_wins() {
-        assert_eq!(resolve_tls(587, Some("none"), None), SmtpTls::None);
-        assert_eq!(resolve_tls(465, Some("NONE"), Some("1")), SmtpTls::None);
-        assert_eq!(resolve_tls(25, Some(" starttls "), None), SmtpTls::StartTls);
-        assert_eq!(resolve_tls(587, Some("implicit"), None), SmtpTls::Implicit);
-        assert_eq!(
-            resolve_tls(587, Some("smtps"), Some("1")),
-            SmtpTls::Implicit
-        );
-    }
-
-    #[test]
-    fn smtp_tls_legacy_starttls_flag() {
-        assert_eq!(resolve_tls(587, None, Some("0")), SmtpTls::Implicit);
-        assert_eq!(resolve_tls(465, None, Some("1")), SmtpTls::StartTls);
-        assert_eq!(resolve_tls(587, None, Some("false")), SmtpTls::Implicit);
+        assert_eq!(resolve_tls(587, Some("none")), SmtpTls::None);
+        assert_eq!(resolve_tls(465, Some("NONE")), SmtpTls::None);
+        assert_eq!(resolve_tls(25, Some(" starttls ")), SmtpTls::StartTls);
+        assert_eq!(resolve_tls(587, Some("implicit")), SmtpTls::Implicit);
+        // No aliases: `smtps`, `tls`, `plain` and `off` are not modes.
+        for alias in ["smtps", "tls", "plain", "off"] {
+            assert_eq!(parse_tls(alias), None, "{alias}");
+        }
     }
 
     #[test]
@@ -387,14 +381,8 @@ mod tests {
 
     #[test]
     fn smtp_tls_port_default() {
-        assert_eq!(resolve_tls(465, None, None), SmtpTls::Implicit);
-        assert_eq!(resolve_tls(587, None, None), SmtpTls::StartTls);
-        assert_eq!(resolve_tls(25, None, None), SmtpTls::StartTls);
-        // Unrecognized SMTP_TLS falls through to the legacy flag / port default.
-        assert_eq!(resolve_tls(465, Some("bogus"), None), SmtpTls::Implicit);
-        assert_eq!(
-            resolve_tls(587, Some("bogus"), Some("0")),
-            SmtpTls::Implicit
-        );
+        assert_eq!(resolve_tls(465, None), SmtpTls::Implicit);
+        assert_eq!(resolve_tls(587, None), SmtpTls::StartTls);
+        assert_eq!(resolve_tls(25, None), SmtpTls::StartTls);
     }
 }

@@ -1,4 +1,5 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   // Validation pipelines list. Phase 1 ships read-only browsing + Run-now;
   // Phase 3 adds the full create/edit form with the friendly schedule builder
   // and the gate-writes confirmation flow.
@@ -104,8 +105,8 @@
 
   <div class="card toolbar">
     <h2>{$t('pages.pipelinesList.heading')}</h2>
-    <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-    <p class="dim">{@html $t('pages.pipelinesList.intro')}</p>
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+    <p class="dim">{@html $tHtml('pages.pipelinesList.intro')}</p>
     <div class="toolbar-cta">
       <Link to="/shacl/shapes" class="btn btn-sm btn-ghost">{$t('pages.pipelinesList.shapesLibrary')}</Link>
       <Link to="/shacl/pipelines/new" class="btn">{$t('pages.pipelinesList.newPipeline')}</Link>

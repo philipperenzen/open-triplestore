@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { getHealth, tryRefreshToken } from './api.js';
+import { withBase } from './basePath';
 
 export interface User {
   id: string;
@@ -23,6 +24,8 @@ export interface ServiceStatus {
 export interface HealthStatus {
   status: 'ok' | 'degraded' | null;
   version?: string;
+  /** Standards this server build serves (display names, from `GET /health`). */
+  capabilities?: string[];
   services: {
     triplestore: ServiceStatus & { triples?: number; graphs?: number };
     database: ServiceStatus;
@@ -46,6 +49,7 @@ export async function checkBackend(): Promise<void> {
     backendHealth.set({
       status: data.status === 'ok' ? 'ok' : 'degraded',
       version: data.version,
+      capabilities: Array.isArray(data.capabilities) ? data.capabilities.filter((c) => typeof c === 'string') : undefined,
       services: data.services ?? null,
     });
   } catch {
@@ -74,7 +78,7 @@ export async function refreshUser(): Promise<void> {
   // Restore the session from the HttpOnly auth cookies (sent automatically via
   // credentials:'include'). A raw fetch is used rather than the request() wrapper
   // so a genuinely-anonymous 401 stays silent (no auth-expired event / redirect).
-  const fetchMe = () => fetch('/api/auth/me', {
+  const fetchMe = () => fetch(withBase('/api/auth/me'), {
     credentials: 'include',
     headers: { Accept: 'application/json' },
   });

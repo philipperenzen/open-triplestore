@@ -97,11 +97,20 @@ describe('llmServiceHealthView — unreachable gateway', () => {
     ]);
   });
 
+  it('carries the probe failure as the reason, for the tooltip', () => {
+    const view = llmServiceHealthView(
+      health({
+        reachable: false,
+        unreachable_reason: 'http://ollama:11434/v1/models: dns error: no such host',
+      }),
+    );
+    expect(view.gateway.detailKey).toBe('nav.llmUnreachable');
+    expect(view.gateway.reason).toBe('http://ollama:11434/v1/models: dns error: no such host');
+  });
+
   it('is "not configured" with no rows when configured is false', () => {
-    expect(
-      llmServiceHealthView(health({ reachable: false, configured: false, gateway: 'http://127.0.0.1:8000' })),
-    ).toEqual({
-      gateway: { state: 'warn', detailKey: 'nav.llmNotConfigured', address: 'http://127.0.0.1:8000' },
+    expect(llmServiceHealthView(health({ reachable: false, configured: false, gateway: null }))).toEqual({
+      gateway: { state: 'warn', detailKey: 'nav.llmNotConfigured', address: null },
       services: [],
     });
   });

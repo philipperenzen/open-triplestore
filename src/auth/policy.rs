@@ -1,8 +1,9 @@
-//! Configurable capability policy for the two principals whose power used to be
-//! implicit: self-registered **guests**, and **OIDC access tokens** this server
-//! issues to registered clients.
+//! Configurable capability policy for the principals whose power used to be
+//! implicit: self-registered **guests**, **OIDC access tokens** this server
+//! issues to registered clients, and access tokens an **external IdP** issues
+//! for this store's audience (resource-server mode).
 //!
-//! Both are deliberately env-driven with a conservative default, because the
+//! All three are deliberately env-driven with a conservative default, because the
 //! right answer differs per deployment: a public demo wants guests who can only
 //! look, an internal instance may want them to fill forms.
 //!
@@ -10,12 +11,21 @@
 //!   `Guest` role existed but nothing consulted it, so a self-registered guest
 //!   could create datasets, write graph data and mint API tokens exactly like a
 //!   full user.
-//! * [`oidc_session_policy`] — `OTS_OIDC_SESSION_POLICY`, default `session`. An
+//! * [`oidc_session_policy`] — `OTS_OIDC_PROVIDER_TOKEN_POLICY`, default `session`. An
 //!   access token was accepted as a full-power credential and could be exchanged
 //!   for a long-lived API token at `POST /api/auth/tokens`, turning a read-only
 //!   delegation into permanent account access.
+//! * [`idp_token_policy`] — `OTS_OIDC_IDP_TOKEN_POLICY`, default `session`. The same
+//!   choice for IdP access tokens, which used to mint API tokens too. It is a
+//!   separate setting because the two token sources are configured for
+//!   different audiences: tightening this store's own provider for third-party
+//!   clients must not silently make every IdP user read-only, and loosening it
+//!   for one legacy client must not reopen minting for every IdP token.
 //!
 //! The parsing is pure so the decisions are unit-testable without a server.
+
+use crate::auth::db::AuthDb;
+use crate::config::runtime;
 
 /// What a `Guest` may do beyond reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,8 +67,8 @@ pub fn parse_guest_capabilities(raw: &str) -> GuestCapabilities {
         match word.as_str() {
             "all" => return GuestCapabilities::all(),
             "write" => caps.write = true,
-            "create_datasets" | "create-datasets" => caps.create_datasets = true,
-            "api_tokens" | "api-tokens" => caps.api_tokens = true,
+            "create_datasets" => caps.create_datasets = true,
+            "api_tokens" => caps.api_tokens = true,
             "publish" => caps.publish = true,
             "read" | "none" => {}
             other => tracing::warn!(
@@ -70,15 +80,44 @@ pub fn parse_guest_capabilities(raw: &str) -> GuestCapabilities {
     caps
 }
 
-/// Capabilities granted to the `Guest` role in this deployment (default: read only).
-pub fn guest_capabilities() -> GuestCapabilities {
-    match std::env::var("OTS_GUEST_CAPABILITIES") {
-        Ok(raw) => parse_guest_capabilities(&raw),
-        Err(_) => GuestCapabilities::default(),
+/// The words [`parse_guest_capabilities`] knows.
+const GUEST_CAPABILITY_WORDS: &[&str] = &[
+    "read",
+    "none",
+    "write",
+    "create_datasets",
+    "api_tokens",
+    "publish",
+    "all",
+];
+
+/// Validate an `OTS_GUEST_CAPABILITIES` value (the configuration registry
+/// refuses an unknown word at startup, so a typo is never silently dropped).
+pub fn check_guest_capabilities(raw: &str) -> Result<(), String> {
+    for word in raw
+        .split([',', ' ', '\t'])
+        .map(|w| w.trim().to_ascii_lowercase())
+        .filter(|w| !w.is_empty())
+    {
+        if !GUEST_CAPABILITY_WORDS.contains(&word.as_str()) {
+            return Err(format!(
+                "`{word}` is not a guest capability (known: read, write, create_datasets, \
+                 api_tokens, publish, all)"
+            ));
+        }
     }
+    Ok(())
 }
 
-/// How much authority an OIDC access token issued by this server carries.
+/// Capabilities granted to the `Guest` role in this deployment (default: read
+/// only): the runtime setting `OTS_GUEST_CAPABILITIES`.
+pub fn guest_capabilities(db: &AuthDb) -> GuestCapabilities {
+    parse_guest_capabilities(&runtime::get(db, &crate::config::GUEST_CAPABILITIES))
+}
+
+/// How much authority a delegated OIDC access token carries: one issued by
+/// this server ([`oidc_session_policy`]) or by the external IdP
+/// ([`idp_token_policy`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OidcSessionPolicy {
     /// Interactive-session semantics: may read and write, but may NOT mint API
@@ -98,11 +137,26 @@ pub enum OidcSessionPolicy {
 }
 
 impl OidcSessionPolicy {
-    /// Whether a token carrying `scope` may write.
-    pub fn allows_write(self, scope: &str) -> bool {
+    /// Whether a provider token carrying `scope` may write. Extra write
+    /// scopes come from `OTS_OIDC_PROVIDER_WRITE_SCOPES` (a runtime setting).
+    pub fn allows_write(self, db: &AuthDb, scope: &str) -> bool {
+        self.allows_write_with(scope, || {
+            runtime::get(db, &crate::config::OIDC_PROVIDER_WRITE_SCOPES).unwrap_or_default()
+        })
+    }
+
+    /// Whether an IdP token carrying `scope` may write. Extra write scopes
+    /// come from `OTS_OIDC_IDP_WRITE_SCOPES` (a runtime setting).
+    pub fn allows_idp_write(self, db: &AuthDb, scope: &str) -> bool {
+        self.allows_write_with(scope, || {
+            runtime::get(db, &crate::config::OIDC_IDP_WRITE_SCOPES).unwrap_or_default()
+        })
+    }
+
+    fn allows_write_with(self, scope: &str, extra_scopes: impl FnOnce() -> String) -> bool {
         match self {
             OidcSessionPolicy::Session | OidcSessionPolicy::Full => true,
-            OidcSessionPolicy::Scoped => scope_grants_write(scope),
+            OidcSessionPolicy::Scoped => scope_grants_write_with(scope, &extra_scopes()),
         }
     }
 
@@ -114,14 +168,9 @@ impl OidcSessionPolicy {
 
 /// Scope values understood as granting write. `admin` implies write.
 ///
-/// Clients that namespace their scopes (`myapp:write`) name the extra spellings
-/// in `OTS_OIDC_WRITE_SCOPES` rather than teaching this server about them.
-fn scope_grants_write(scope: &str) -> bool {
-    let extra = std::env::var("OTS_OIDC_WRITE_SCOPES").unwrap_or_default();
-    scope_grants_write_with(scope, &extra)
-}
-
-/// Pure form of [`scope_grants_write`], so the matching is testable without env.
+/// Issuers that namespace their scopes (`myapp:write`) name the extra
+/// spellings in `extra_scopes` (`OTS_OIDC_PROVIDER_WRITE_SCOPES` / `OTS_OIDC_IDP_WRITE_SCOPES`)
+/// rather than teaching this server about them.
 fn scope_grants_write_with(scope: &str, extra_scopes: &str) -> bool {
     let extra: Vec<String> = scope_words(extra_scopes).collect();
     scope_words(scope).any(|s| matches!(s.as_str(), "write" | "admin") || extra.contains(&s))
@@ -133,34 +182,54 @@ fn scope_words(raw: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|s| !s.is_empty())
 }
 
-/// Parse `OTS_OIDC_SESSION_POLICY`. Anything unrecognised falls back to the
+/// Parse `OTS_OIDC_PROVIDER_TOKEN_POLICY`. Anything unrecognised falls back to the
 /// default rather than to the permissive setting.
 pub fn parse_oidc_session_policy(raw: &str) -> OidcSessionPolicy {
+    parse_policy("OTS_OIDC_PROVIDER_TOKEN_POLICY", raw)
+}
+
+/// Parse `OTS_OIDC_IDP_TOKEN_POLICY`; same values and fallback as
+/// [`parse_oidc_session_policy`].
+pub fn parse_idp_token_policy(raw: &str) -> OidcSessionPolicy {
+    parse_policy("OTS_OIDC_IDP_TOKEN_POLICY", raw)
+}
+
+fn parse_policy(var: &str, raw: &str) -> OidcSessionPolicy {
     match raw.trim().to_ascii_lowercase().as_str() {
         "scoped" => OidcSessionPolicy::Scoped,
-        "full" | "legacy" => OidcSessionPolicy::Full,
+        "full" => OidcSessionPolicy::Full,
         "session" | "" => OidcSessionPolicy::Session,
         other => {
             tracing::warn!(
-                "OTS_OIDC_SESSION_POLICY: unknown value {other:?}, using 'session' \
-                 (known: session, scoped, full)"
+                "{var}: unknown value {other:?}, using 'session' (known: session, scoped, full)"
             );
             OidcSessionPolicy::Session
         }
     }
 }
 
-/// The OIDC access-token policy for this deployment (default: `session`).
-pub fn oidc_session_policy() -> OidcSessionPolicy {
-    match std::env::var("OTS_OIDC_SESSION_POLICY") {
-        Ok(raw) => parse_oidc_session_policy(&raw),
-        Err(_) => OidcSessionPolicy::Session,
-    }
+/// The policy for access tokens this server issues as an OIDC provider
+/// (default: `session`).
+pub fn oidc_session_policy(db: &AuthDb) -> OidcSessionPolicy {
+    parse_oidc_session_policy(&runtime::get(
+        db,
+        &crate::config::OIDC_PROVIDER_TOKEN_POLICY,
+    ))
+}
+
+/// The policy for access tokens the external IdP issues for this store's
+/// audience (default: `session`). Independent of [`oidc_session_policy`].
+pub fn idp_token_policy(db: &AuthDb) -> OidcSessionPolicy {
+    parse_idp_token_policy(&runtime::get(db, &crate::config::OIDC_IDP_TOKEN_POLICY))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn db() -> AuthDb {
+        AuthDb::in_memory().unwrap()
+    }
 
     #[test]
     fn guests_are_read_only_by_default() {
@@ -177,8 +246,9 @@ mod tests {
         assert!(!caps.api_tokens, "never granted unless named");
 
         assert_eq!(parse_guest_capabilities("all"), GuestCapabilities::all());
-        // Separator and case tolerance, plus the hyphenated spellings.
-        assert!(parse_guest_capabilities("API-TOKENS").api_tokens);
+        // Case tolerance; the hyphenated spellings are gone (no aliases).
+        assert!(parse_guest_capabilities("API_TOKENS").api_tokens);
+        assert!(check_guest_capabilities("api-tokens").is_err());
     }
 
     #[test]
@@ -196,7 +266,7 @@ mod tests {
         let p = parse_oidc_session_policy("");
         assert_eq!(p, OidcSessionPolicy::Session);
         // First-party apps commonly request only `openid profile email`.
-        assert!(p.allows_write("openid profile email"));
+        assert!(p.allows_write(&db(), "openid profile email"));
         // ...but a delegated token must not become a permanent credential.
         assert!(!p.allows_api_token_minting());
     }
@@ -204,9 +274,9 @@ mod tests {
     #[test]
     fn scoped_policy_honours_the_scope_claim() {
         let p = parse_oidc_session_policy("scoped");
-        assert!(!p.allows_write("openid profile email"));
-        assert!(p.allows_write("openid write"));
-        assert!(p.allows_write("admin"));
+        assert!(!p.allows_write(&db(), "openid profile email"));
+        assert!(p.allows_write(&db(), "openid write"));
+        assert!(p.allows_write(&db(), "admin"));
         assert!(!p.allows_api_token_minting());
     }
 
@@ -228,7 +298,7 @@ mod tests {
     #[test]
     fn full_policy_is_the_legacy_escape_hatch() {
         let p = parse_oidc_session_policy("full");
-        assert!(p.allows_write("openid"));
+        assert!(p.allows_write(&db(), "openid"));
         assert!(p.allows_api_token_minting());
     }
 
@@ -237,5 +307,16 @@ mod tests {
         let p = parse_oidc_session_policy("banana");
         assert_eq!(p, OidcSessionPolicy::Session);
         assert!(!p.allows_api_token_minting());
+    }
+
+    #[test]
+    fn idp_token_policy_reads_the_same_values_and_defaults_to_session() {
+        assert_eq!(parse_idp_token_policy(""), OidcSessionPolicy::Session);
+        assert!(!parse_idp_token_policy("").allows_api_token_minting());
+        assert_eq!(parse_idp_token_policy("Scoped"), OidcSessionPolicy::Scoped);
+        assert_eq!(parse_idp_token_policy("full"), OidcSessionPolicy::Full);
+        // No aliases: the registry refuses `legacy` at startup.
+        assert_eq!(parse_idp_token_policy("legacy"), OidcSessionPolicy::Session);
+        assert_eq!(parse_idp_token_policy("banana"), OidcSessionPolicy::Session);
     }
 }

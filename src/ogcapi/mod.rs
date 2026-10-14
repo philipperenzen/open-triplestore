@@ -43,13 +43,13 @@ pub fn ogcapi_routes() -> Router<AppState> {
         .route("/api/ogc/", get(landing))
         .route("/api/ogc/conformance", get(conformance))
         .route("/api/ogc/collections", get(collections))
-        .route("/api/ogc/collections/:collectionId", get(collection))
+        .route("/api/ogc/collections/{collectionId}", get(collection))
         .route(
-            "/api/ogc/collections/:collectionId/items",
+            "/api/ogc/collections/{collectionId}/items",
             get(collection_items),
         )
         .route(
-            "/api/ogc/collections/:collectionId/items/:featureId",
+            "/api/ogc/collections/{collectionId}/items/{featureId}",
             get(collection_item),
         )
 }

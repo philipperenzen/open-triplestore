@@ -93,7 +93,7 @@ ex:Dracula a ex:Book ;
 
 ## Describing datasets & organisations (DCAT · VoID · ADMS · ORG)
 
-Metadata *about* a dataset or organisation is itself linked data. From the fields you set on a [dataset](/docs/datasets), the store generates a full DCAT 2 catalogue — with VoID statistics, ADMS status, licence, access rights, and ORG/FOAF publisher — at `/.well-known/void`. See the [DCAT Catalogue](/docs/dcat) guide.
+Metadata *about* a dataset or organisation is itself linked data. From the fields you set on a [dataset](/docs/datasets), the store generates a DCAT 3 catalogue — with VoID statistics, ADMS status, licence, access rights, and ORG/FOAF publisher — at `/.well-known/void`. See the [DCAT Catalogue](/docs/dcat) guide.
 
 ```turtle
 @prefix dcat: <http://www.w3.org/ns/dcat#> .

@@ -1,7 +1,6 @@
 <script>
-  // SHACL Studio — Overview / Dashboard. A light first-cut: counts + recent
-  // activity + nudges. Phase 4 will turn this into a real conformance
-  // dashboard with trends and per-shape failure breakdowns.
+  // SHACL Studio — Overview: counts, recent activity and nudges. Validation
+  // runs and their reports live on the Results page (/shacl/results).
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { listShapeGraphs, listPipelines, listDatasets } from '../lib/api.js';

@@ -232,12 +232,9 @@ fn fn_sf3d_disjoint(args: &[Term]) -> Option<Term> {
 /// containment so a point strictly inside a closed solid counts as intersecting.
 ///
 /// The triangle–triangle narrow phase is a robust pure-Rust Möller test (see
-/// [`tri_tri_intersect`]). `parry3d`'s `TriMesh` + `query::intersection_test`
-/// would be an equivalent drop-in; we keep the well-defined pure-Rust path here
-/// to avoid relying on the exact `TriMesh::new`/`intersection_test` signatures
-/// (which shifted across parry releases) while still getting an exact answer.
-/// TODO(parry): swap to `parry3d_f64::query::intersection_test(&Isometry::identity(),
-/// &mesh1, &Isometry::identity(), &mesh2)` once we pin the 0.17 TriMesh API.
+/// [`tri_tri_intersect`]). It is exact and independent of `parry3d`'s
+/// `TriMesh`/`intersection_test` signatures, which have shifted across parry
+/// releases, so it stays the narrow phase rather than a drop-in to swap out.
 fn exact_intersects(a: &Geometry3D, b: &Geometry3D) -> Option<bool> {
     let (ba, bb) = (a.aabb()?, b.aabb()?);
     // Fast reject: disjoint bounding boxes ⇒ disjoint geometries.

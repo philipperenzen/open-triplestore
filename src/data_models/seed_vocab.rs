@@ -33,8 +33,9 @@
 //! checked against and a digest of the triples as stored
 //! ([`registry::set_seed_check`]). A record calls the copy the file's triples,
 //! unchanged (and downloads say so), only when the seeder loaded it verbatim
-//! or found it equal to the file, compared in the store's canonical literal
-//! forms ([`content_digest::as_stored`]). An edit through the API (a PATCH,
+//! or found it equal to the file ([`content_digest::compare_copy`]; a copy an
+//! earlier version stored with typed literals in a canonical form is restored
+//! to the file's triples). An edit through the API (a PATCH,
 //! version metadata stamped on publish) and a direct write into the graph (a
 //! SPARQL Update or a Graph Store Protocol request, see
 //! [`crate::data_models::write_guard`]) mark the record as possibly modified.
@@ -74,7 +75,7 @@
 //! (the latest-version labels match what shipped previously, so existing
 //! entries gain their historical versions without duplication). Best-effort —
 //! a failure on one entry is logged and skipped. Opt out with
-//! `SEED_STANDARD_VOCABS=false`: that stops seeding and the checks of the
+//! `OTS_SEED_STANDARD_VOCABS_ENABLED=false`: that stops seeding and the checks of the
 //! other vocabularies, but not the per-start check and repair of a copy the
 //! seeder already made of a vocabulary whose licence allows no altered copies.
 //! The seeder does nothing on a node whose store is read-only (a replica, or a
@@ -535,6 +536,40 @@ const VOCABS: &[StdVocab] = &[
             },
         ],
     },
+    // The geometry class hierarchies GeoSPARQL's RDFS Entailment Extension
+    // reasons over (Req 48/49 of 22-047r1; R26/R27 of 11-052r4). Datasets that
+    // use GeoSPARQL terms get both, with the ontology, as reasoning premises
+    // (`crate::geo::premises`).
+    StdVocab {
+        id: "sf",
+        title: "Simple Features Vocabulary",
+        namespace: "http://www.opengis.net/ont/sf#",
+        versions: &[StdVersion {
+            version: "1.1.1",
+            official_name: "OGC Simple Features Vocabulary 1.1.1 (2026)",
+            date: "2026-02-27",
+            spec_url: "https://docs.ogc.org/is/22-047r1/22-047r1.html",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::SF,
+        }],
+    },
+    StdVocab {
+        id: "gml-geometries",
+        title: "GML 3.2.1 geometry types",
+        namespace: "http://www.opengis.net/ont/gml#",
+        versions: &[StdVersion {
+            version: "1.0",
+            official_name: "GML 3.2.1 geometry types (Open Triplestore, 2026)",
+            date: "2026-10-03",
+            spec_url: "https://schemas.opengis.net/gml/3.2.1/",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::GML_GEOMETRIES,
+        }],
+    },
     StdVocab {
         id: "ots",
         title: "Open Triplestore Vocabulary",
@@ -845,9 +880,9 @@ const VOCABS: &[StdVocab] = &[
         title: "Description of a Project (DOAP)",
         namespace: "http://usefulinc.com/ns/doap#",
         versions: &[StdVersion {
-            version: "2012-01-04",
-            official_name: "Description of a Project vocabulary (2012)",
-            date: "2012-01-04",
+            version: "2022-03-13",
+            official_name: "Description of a Project vocabulary (2022)",
+            date: "2022-03-13",
             spec_url: "https://github.com/ewilderj/doap",
             status: VersionStatus::Published,
             latest: true,
@@ -956,6 +991,42 @@ struct RetiredVersion {
     notes: &'static str,
     /// The creation date that seeder gave it.
     date: &'static str,
+    /// The licence record the kept copy gets in place of the one an earlier
+    /// seeder wrote, which described the bundled file of the same name that
+    /// this build replaced. `None` for a version whose licence allows no
+    /// altered copies: with no record of the file it stays withheld.
+    record: Option<RetiredRecord>,
+}
+
+/// What a retired version's kept copy is, for its licence record.
+struct RetiredRecord {
+    /// The source it was loaded from, in words (it is no longer a bundled file).
+    file: &'static str,
+    copyright: &'static [&'static str],
+    source: &'static str,
+    stored_copy: &'static str,
+    remarks: &'static str,
+}
+
+impl RetiredRecord {
+    fn attribution(&self, specification_url: &str) -> ContentAttribution {
+        ContentAttribution {
+            file: self.file.to_string(),
+            licenses: Vec::new(),
+            copyright: self.copyright.iter().map(|c| c.to_string()).collect(),
+            notice: None,
+            status: None,
+            source_url: self.source.to_string(),
+            specification_url: Some(specification_url.to_string()),
+            changes: None,
+            stored_copy: self.stored_copy.to_string(),
+            unchanged: false,
+            remarks: Some(self.remarks.to_string()),
+            no_derivatives: false,
+            header: None,
+            notice_url: vf::NOTICE_PATH.to_string(),
+        }
+    }
 }
 
 /// Releases 0.4.0 to 0.6.0 seeded IMBOR's hand-authored "excerpt", which
@@ -963,12 +1034,43 @@ struct RetiredVersion {
 /// deprecated and withheld ([`enforce_no_derivatives`]). The `bag` and `otl`
 /// entries those releases also seeded are entries of their own that this
 /// build does not seed; they are left as they are.
-const RETIRED_SEEDED_VERSIONS: &[RetiredVersion] = &[RetiredVersion {
-    id: "imbor",
-    version: "excerpt",
-    notes: "CROW IMBOR (excerpt)",
-    date: "2024-01-01",
-}];
+///
+/// Releases up to 0.7.0 seeded DOAP `2012-01-04` from LOV's re-serialization
+/// of the old DOAP namespace document, whose Japanese labels have no published
+/// licence; this build ships the upstream repository's Apache-2.0 file as
+/// `2022-03-13` instead. The old copy is kept, deprecated, with a record that
+/// says what it is ([`retire_versions`]).
+const RETIRED_SEEDED_VERSIONS: &[RetiredVersion] = &[
+    RetiredVersion {
+        id: "imbor",
+        version: "excerpt",
+        notes: "CROW IMBOR (excerpt)",
+        date: "2024-01-01",
+        record: None,
+    },
+    RetiredVersion {
+        id: "doap",
+        version: "2012-01-04",
+        notes: "Description of a Project vocabulary (2012)",
+        date: "2012-01-04",
+        record: Some(RetiredRecord {
+            file: "the vocab/doap.ttl that releases up to 0.7.0 bundled (LOV's re-serialization \
+                   of the DOAP namespace document)",
+            copyright: &["Copyright © 2004-2009 Edd Dumbill"],
+            source: "http://usefulinc.com/ns/doap",
+            stored_copy: "Seeded by a release up to 0.7.0 from its bundled vocab/doap.ttl: LOV's \
+                          Turtle re-serialization of the DOAP namespace document served at \
+                          http://usefulinc.com/ns/doap from 2009 to 2015. Later releases ship the \
+                          upstream repository's own file instead, as version 2022-03-13, so this \
+                          copy is kept, deprecated, and is not the current bundled file.",
+            remarks: "That file stated no licence. The upstream repository \
+                      https://github.com/ewilderj/doap has been under the Apache License 2.0 since \
+                      2018-03-31, which covers most of this copy; its 97 Japanese-language labels \
+                      and comments and a few other strings were never in that repository, and no \
+                      licence has been published for them.",
+        }),
+    },
+];
 
 /// Whether `id` is the registry id of a vocabulary this build seeds. Other
 /// seeders (seed bundles) leave these ids to it, whatever the boot order.
@@ -1114,7 +1216,7 @@ fn fault(step: &'static str) -> anyhow::Result<()> {
 enum Mode {
     /// Seed missing versions and check every seeded copy.
     Seed,
-    /// `SEED_STANDARD_VOCABS=false`: seed nothing, and only check (and
+    /// `OTS_SEED_STANDARD_VOCABS_ENABLED=false`: seed nothing, and only check (and
     /// repair) the copies of vocabularies whose licence allows no altered
     /// copies.
     VerifyOnly,
@@ -1123,23 +1225,15 @@ enum Mode {
 /// Seed every standard vocabulary version that isn't already in the registry,
 /// and check the copies seeded earlier. Returns the number of newly-seeded
 /// *versions* (0 once everything is present — the idempotent steady state).
-/// With `SEED_STANDARD_VOCABS=false` nothing is seeded, but copies the seeder
+/// With `OTS_SEED_STANDARD_VOCABS_ENABLED=false` nothing is seeded, but copies the seeder
 /// made earlier of a vocabulary whose licence allows no altered copies are
 /// still checked and repaired.
 pub fn seed_standard_vocabularies(state: &AppState) -> usize {
-    let disabled = std::env::var("SEED_STANDARD_VOCABS")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    seed_standard_vocabularies_with(state, !disabled)
+    seed_standard_vocabularies_with(state, crate::config::SEED_STANDARD_VOCABS_ENABLED.get())
 }
 
 /// [`seed_standard_vocabularies`], with the opt-out given (`seeding: false`
-/// is `SEED_STANDARD_VOCABS=false`).
+/// is `OTS_SEED_STANDARD_VOCABS_ENABLED=false`).
 pub(crate) fn seed_standard_vocabularies_with(state: &AppState, seeding: bool) -> usize {
     // A replica, or a cluster member that does not lead, refuses every write:
     // the leader seeds and checks, and its writes replicate here.
@@ -1161,7 +1255,7 @@ pub(crate) fn seed_standard_vocabularies_with(state: &AppState, seeding: bool) -
         }
         if repaired > 0 {
             tracing::info!(
-                "SEED_STANDARD_VOCABS=false: nothing seeded; {repaired} record(s) of previously \
+                "OTS_SEED_STANDARD_VOCABS_ENABLED=false: nothing seeded; {repaired} record(s) of previously \
                  seeded vocabularies whose licence allows no altered copies checked and updated"
             );
         }
@@ -1348,8 +1442,86 @@ fn sync_seeded_records(state: &AppState, v: &StdVocab, mode: Mode) -> anyhow::Re
     }
     if has_no_derivatives(v) {
         updated += enforce_no_derivatives(state, v, &snap)?;
+    } else if mode == Mode::Seed {
+        updated += retire_versions(state, v, &snap)?;
     }
     Ok(updated)
+}
+
+/// For a vocabulary whose licence allows other copies: a version an earlier
+/// seeder made and this build no longer ships ([`RETIRED_SEEDED_VERSIONS`]) is
+/// kept, deprecated, and its licence record — written for a bundled file this
+/// build replaced — is replaced by one that says what the copy is. Only the
+/// seeder's own version is touched, and a record someone changed since this
+/// pass began is left as they set it. Returns the number of records changed.
+fn retire_versions(state: &AppState, v: &StdVocab, snap: &Snapshot) -> anyhow::Result<usize> {
+    let mut changed = 0usize;
+    for r in RETIRED_SEEDED_VERSIONS.iter().filter(|r| r.id == v.id) {
+        let Some(p) = snap.versions.get(r.version) else {
+            continue;
+        };
+        let iri = registry::version_record_iri(&state.base_url, v.id, r.version);
+        match version_owned(state, v, r.version, p) {
+            None => {
+                tracing::warn!(
+                    "vocabulary '{}': version '{}' is not the one an earlier seeder made; left \
+                     as it is",
+                    v.id,
+                    r.version
+                );
+                continue;
+            }
+            Some(Owned::Legacy) => {
+                registry::set_seeded_by(&state.store, &iri, SEEDED_BY)?;
+                changed += 1;
+            }
+            Some(Owned::Marked) => {}
+        }
+        if p.status == Some(VersionStatus::Published) {
+            registry::update_version_status(
+                &state.store,
+                &state.base_url,
+                v.id,
+                r.version,
+                VersionStatus::Deprecated,
+            )?;
+            state.mark_vocab_registry_dirty();
+            tracing::info!(
+                "vocabulary '{}': version '{}', which an earlier build seeded and this one no \
+                 longer ships, is kept and deprecated",
+                v.id,
+                r.version
+            );
+            changed += 1;
+        }
+        if let Some(rec) = &r.record {
+            let spec = v
+                .versions
+                .iter()
+                .find(|ver| ver.latest)
+                .map_or("", |ver| ver.spec_url);
+            let expected = rec.attribution(spec);
+            let current = p.attribution_json.clone();
+            if record_json(Some(&expected)) != current {
+                if registry::replace_attribution_if(
+                    &state.store,
+                    &iri,
+                    current.as_deref(),
+                    Some(&expected),
+                )? {
+                    changed += 1;
+                } else {
+                    tracing::warn!(
+                        "vocabulary '{}' version '{}': its licence record changed while it was \
+                         checked; left as the other writer set it",
+                        v.id,
+                        r.version
+                    );
+                }
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// The bundled file's triples as the store holds them, and the parse they
@@ -1404,10 +1576,15 @@ fn loader_stamp(
 ///   marked it — no read of the graph (unless the record says modified and the
 ///   copy may be the next case);
 /// * the stored triples equal the file's: unchanged;
+/// * they are the file's triples as the store wrote them before it kept
+///   lexical forms, typed literals in a canonical form ([`content_digest::CopyForm::EarlierStore`];
+///   its record says so, so this is checked once even when the file has not
+///   changed): the file's triples replace them in one transaction, and the
+///   copy is the file again — unchanged;
 /// * they equal the file's plus the `owl:versionInfo` triple a loader before
-///   0.7 added ([`loader_stamp`]) and nothing else: that triple, which the
-///   server wrote and nobody asked for, is removed, and the copy is the file
-///   again — unchanged;
+///   0.7 added ([`loader_stamp`]) and nothing else (in either form): that
+///   triple, which the server wrote and nobody asked for, is removed, and the
+///   copy is the file again — unchanged;
 /// * they differ otherwise: the copy may hold an admin's edit. Nothing is
 ///   modified: it is kept exactly as stored, and its record says it differs
 ///   from the file or may have been modified. To take the current file
@@ -1430,8 +1607,13 @@ fn check_copy(
     let graph = registry::version_record_iri(&state.base_url, v.id, ver.version);
     let recorded_unchanged = recorded.as_ref().is_none_or(|a| a.unchanged);
     // Open Triplestore's own vocabulary has no record to hold the outcome.
+    // A record from before the store kept lexical forms that names literals
+    // the store rewrote describes a copy in the earlier form: check it once.
     let checked_before = p.seed_source_sha256.as_deref() == Some(file_sha.as_str())
-        && (recorded.is_some() || !ver.file.third_party);
+        && (recorded.is_some() || !ver.file.third_party)
+        && !recorded
+            .as_ref()
+            .is_some_and(|a| a.stored_copy.contains(vf::EARLIER_STORE_FORM_TEXT));
     if checked_before && recorded_unchanged {
         return Ok(Checked {
             unchanged: true,
@@ -1449,18 +1631,29 @@ fn check_copy(
         });
     }
     let stored = content_digest::graph_triples(&state.store, &graph)?;
-    if content_digest::same_triples(&stored, &file) {
-        let digest = content_digest::triples_digest(&stored);
-        registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
-        return Ok(Checked {
-            unchanged: true,
-            keep_text: None,
-            writes: 1,
-        });
+    match content_digest::compare_copy(&stored, &file) {
+        content_digest::CopyForm::Exact => {
+            let digest = content_digest::triples_digest(&stored);
+            registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
+            return Ok(Checked {
+                unchanged: true,
+                keep_text: None,
+                writes: 1,
+            });
+        }
+        content_digest::CopyForm::EarlierStore => {
+            return restore_earlier_store_form(state, v, ver, &graph, &file_sha, quads, &file);
+        }
+        content_digest::CopyForm::Differs => {}
     }
     if let Some(stamp) = stamp {
         let mut with_stamp = file.clone();
         with_stamp.extend(content_digest::as_stored(std::slice::from_ref(&stamp))?);
+        if content_digest::compare_copy(&stored, &with_stamp)
+            == content_digest::CopyForm::EarlierStore
+        {
+            return restore_earlier_store_form(state, v, ver, &graph, &file_sha, quads, &file);
+        }
         if content_digest::same_triples(&stored, &with_stamp) {
             state.store.update(&format!(
                 "DELETE DATA {{ GRAPH <{graph}> {{ {} {} {} }} }}",
@@ -1502,13 +1695,55 @@ fn check_copy(
     })
 }
 
+/// A copy holding the file's triples as the store wrote them before it kept
+/// lexical forms (typed literals in a canonical form, [`content_digest::CopyForm::EarlierStore`]),
+/// so nobody's edit: replace it with the file's triples in one transaction
+/// ([`restore_atomically`]), verify, and record the check.
+fn restore_earlier_store_form(
+    state: &AppState,
+    v: &StdVocab,
+    ver: &StdVersion,
+    graph: &str,
+    file_sha: &str,
+    quads: Vec<Quad>,
+    file: &[Triple],
+) -> anyhow::Result<Checked> {
+    restore_atomically(state, v, ver, graph, quads, file)?;
+    let now = content_digest::graph_triples(&state.store, graph)?;
+    if !content_digest::same_triples(&now, file) {
+        anyhow::bail!(
+            "{} {}: after the restore the graph does not hold the triples of vocab/{}",
+            v.id,
+            ver.version,
+            ver.file.path
+        );
+    }
+    let digest = content_digest::triples_digest(&now);
+    registry::set_seed_check(&state.store, graph, file_sha, Some(&digest))?;
+    state.mark_vocab_registry_dirty();
+    #[cfg(feature = "text-search")]
+    state.mark_text_dirty();
+    tracing::info!(
+        "vocabulary '{}' version '{}': the copy held the triples of vocab/{} in the canonical \
+         literal forms an earlier version of the store wrote; it now holds them exactly as in \
+         the file",
+        v.id,
+        ver.version,
+        ver.file.path
+    );
+    Ok(Checked {
+        unchanged: true,
+        keep_text: None,
+        writes: 2,
+    })
+}
+
 /// Check, on every start, a seeded copy whose licence allows no altered
 /// copies (IMBOR), and repair it without losing anything:
 ///
 /// * the stored graph still digests as recorded at the last check against
 ///   this very file, and its record says unchanged: nothing to do;
-/// * its triples equal the file's (in the store's canonical literal forms):
-///   the check is recorded;
+/// * its triples equal the file's: the check is recorded;
 /// * they differ (a write outside the registry, an earlier build's altered
 ///   file, an interrupted repair):
 ///   1. the record stops calling the copy unchanged, so from here on it is
@@ -2475,7 +2710,8 @@ mod tests {
                     &version_iri(&state, v.id, ver.version),
                 );
                 assert_eq!(got, ver.attribution(true), "{} {}", v.id, ver.version);
-                if v.id != "ots" {
+                // Open Triplestore's own vocabularies carry no licence record.
+                if ver.file.third_party {
                     let a = got.unwrap();
                     assert_eq!(a.file, ver.file.path);
                     assert_eq!(a.specification_url.as_deref(), Some(ver.spec_url));
@@ -2654,6 +2890,75 @@ mod tests {
         assert_eq!(sync_seeded_records(&state, rdf, Mode::Seed).unwrap(), 0);
     }
 
+    /// The upgrade to a store that keeps lexical forms: a copy an earlier
+    /// version held with its typed literals in canonical form (PROV's
+    /// `"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`), whose record says
+    /// so, is checked even though the file is the one checked before, and the
+    /// file's triples replace it. The start after that writes nothing.
+    #[test]
+    fn a_copy_in_the_earlier_store_form_is_restored_to_the_file_once() {
+        let state = fresh();
+        seed_standard_vocabularies(&state);
+        let prov = vocab("prov");
+        let ver = prov.versions.iter().find(|v| v.latest).unwrap();
+        let iri = version_iri(&state, "prov", ver.version);
+        let file = stored_triples(&state, "prov", ver.version);
+        let earlier = content_digest::earlier_store_form(&file);
+        assert_ne!(
+            earlier, file,
+            "PROV has a literal the earlier store rewrote"
+        );
+        // The graph and record as the earlier version left them.
+        update(
+            &state,
+            &format!("DELETE WHERE {{ GRAPH <{iri}> {{ ?s ?p ?o }} }}"),
+        );
+        let graph = oxigraph::model::NamedNode::new(iri.as_str()).unwrap();
+        state
+            .store
+            .bulk_insert_quads(
+                earlier
+                    .iter()
+                    .cloned()
+                    .map(|t| t.in_graph(graph.clone()))
+                    .collect(),
+                std::slice::from_ref(&iri),
+            )
+            .unwrap();
+        let mut old = ver.record(true, None).unwrap();
+        old.stored_copy.push_str(&format!(
+            "{}, the same values, so 1 xsd:nonNegativeInteger literal (an OWL cardinality) \
+             reads as xsd:integer.",
+            vf::EARLIER_STORE_FORM_TEXT
+        ));
+        let current = registry::attribution_json(&state.store, &iri);
+        assert!(registry::replace_attribution_if(
+            &state.store,
+            &iri,
+            current.as_deref(),
+            Some(&old)
+        )
+        .unwrap());
+        let digest = content_digest::triples_digest(&stored_triples(&state, "prov", ver.version));
+        registry::set_seed_check(
+            &state.store,
+            &iri,
+            &content_digest::file_sha256(ver.file.ttl.as_bytes()),
+            Some(&digest),
+        )
+        .unwrap();
+
+        assert!(sync_seeded_records(&state, prov, Mode::Seed).unwrap() > 0);
+        assert_eq!(
+            content_digest::compare_copy(&stored_triples(&state, "prov", ver.version), &file),
+            content_digest::CopyForm::Exact
+        );
+        let now = record(&state, "prov", ver.version);
+        assert!(now.unchanged, "{}", now.stored_copy);
+        assert!(!now.stored_copy.contains(vf::EARLIER_STORE_FORM_TEXT));
+        assert_eq!(sync_seeded_records(&state, prov, Mode::Seed).unwrap(), 0);
+    }
+
     /// A seeded record whose notes an admin edited no longer reads as the
     /// seeder wrote it: without the marker it is not proven to be the
     /// seeder's, so it is left alone.
@@ -2727,7 +3032,7 @@ mod tests {
                     v.id,
                     ver.version
                 );
-                if v.id != "ots" {
+                if ver.file.third_party {
                     assert!(record(&state, v.id, ver.version).unchanged);
                 }
             }
@@ -2941,7 +3246,11 @@ mod tests {
                 digest,
                 "{id} {version} was reloaded"
             );
-            if id != "ots" {
+            if vocab(id)
+                .versions
+                .iter()
+                .any(|v| v.version == version && v.file.third_party)
+            {
                 assert!(record(&state, id, version).unchanged, "{id} {version}");
             }
             assert_eq!(
@@ -2955,7 +3264,7 @@ mod tests {
 
     /// IMBOR's copy is re-verified on every start: a write outside the
     /// registry (here a raw SPARQL Update) is kept aside and undone on the
-    /// next boot, even with `SEED_STANDARD_VOCABS=false`, which seeds nothing
+    /// next boot, even with `OTS_SEED_STANDARD_VOCABS_ENABLED=false`, which seeds nothing
     /// and leaves the other vocabularies' copies alone.
     #[test]
     fn a_raw_write_into_imbor_is_kept_aside_and_undone_even_with_seeding_off() {
@@ -3064,6 +3373,88 @@ mod tests {
                 "{step}: the staging graph is empty"
             );
         }
+    }
+
+    /// An install upgraded from 0.7.0 holds DOAP `2012-01-04`, seeded from
+    /// LOV's copy of the old namespace document. The new build seeds the
+    /// upstream file as `2022-03-13` and points the entry at it; the old copy
+    /// is kept (graph and record), deprecated, and its licence record now says
+    /// what it is instead of calling it the bundled file. The next start
+    /// writes nothing.
+    #[test]
+    fn the_old_doap_copy_is_kept_deprecated_with_a_truthful_record() {
+        let state = fresh();
+        let entry = registry::data_model_iri(&state.base_url, "doap");
+        registry::insert_data_model(
+            &state.store,
+            &state.base_url,
+            "doap",
+            "Description of a Project (DOAP)",
+            "http://usefulinc.com/ns/doap#",
+            Some(DESC),
+            true,
+            None,
+            None,
+            None,
+            "2012-01-04T00:00:00Z",
+        )
+        .unwrap();
+        registry::set_seeded_by(&state.store, &entry, SEEDED_BY).unwrap();
+        let old = version_iri(&state, "doap", "2012-01-04");
+        registry::insert_version(
+            &state.store,
+            &state.base_url,
+            &DataModelVersion {
+                data_model_id: "doap".into(),
+                version: "2012-01-04".into(),
+                status: VersionStatus::Published,
+                graph_iri: old.clone(),
+                sub_graphs: vec![old.clone()],
+                created_at: "2012-01-04T00:00:00Z".into(),
+                created_by: None,
+                derived_from: None,
+                notes: Some("Description of a Project vocabulary (2012)".into()),
+                branch: None,
+                sub_graph_status: Vec::new(),
+            },
+        )
+        .unwrap();
+        update(
+            &state,
+            &format!(
+                "INSERT DATA {{ GRAPH <{old}> {{ <http://usefulinc.com/ns/doap#Project> \
+                 <http://www.w3.org/2000/01/rdf-schema#label> \"Projekt\"@ja }} }}"
+            ),
+        );
+        // The record the 0.7.0 seeder wrote: the bundled file, unchanged.
+        let stale = vf::DOAP.attribution(Some("https://github.com/ewilderj/doap"), true);
+        registry::replace_attribution_if(&state.store, &old, None, stale.as_ref()).unwrap();
+        registry::update_latest_published(&state.store, &state.base_url, "doap", "2012-01-04")
+            .unwrap();
+
+        seed_standard_vocabularies(&state);
+
+        let entry_rec = registry::get_data_model(&state.store, &state.base_url, "doap").unwrap();
+        assert_eq!(entry_rec.latest_published.as_deref(), Some("2022-03-13"));
+        assert!(record(&state, "doap", "2022-03-13").unchanged);
+        let kept = registry::get_version(&state.store, &state.base_url, "doap", "2012-01-04")
+            .expect("the old copy is kept");
+        assert_eq!(kept.status, VersionStatus::Deprecated);
+        assert!(ask(
+            &state,
+            &format!("ASK {{ GRAPH <{old}> {{ ?s ?p ?o }} }}")
+        ));
+        let a = registry::get_attribution(&state.store, &old).unwrap();
+        assert!(!a.unchanged);
+        assert!(a.licenses.is_empty(), "it states no licence");
+        assert!(a.file.contains("releases up to 0.7.0"), "{}", a.file);
+        assert!(a.stored_copy.contains("2022-03-13"), "{}", a.stored_copy);
+        assert_eq!(seeded_by(&state, &old).as_deref(), Some(SEEDED_BY));
+        assert_eq!(
+            sync_seeded_records(&state, vocab("doap"), Mode::Seed).unwrap(),
+            0,
+            "steady state"
+        );
     }
 
     /// Releases 0.4.0 to 0.6.0 seeded a hand-authored IMBOR "excerpt". It is

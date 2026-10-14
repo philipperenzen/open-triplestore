@@ -175,6 +175,14 @@ fn basic_graph_patterns_and_joins() {
     ] {
         assert_same(&format!("{P}{q}"), false);
     }
+    // `IRI()` resolves a relative string against the query's BASE, as the
+    // engine does (W3C functions#iri01), and parses it absolutely without one.
+    for q in [
+        "BASE <http://example.org/b/> SELECT ?s (IRI(\"rel\") AS ?i) (URI(\"../up\") AS ?u) WHERE { ?s ex:name ?n }",
+        "SELECT ?s (IRI(\"rel\") AS ?i) (IRI(\"http://example.org/abs\") AS ?a) WHERE { ?s ex:name ?n }",
+    ] {
+        assert_same(&format!("{P}{q}"), false);
+    }
 }
 
 #[test]
@@ -297,6 +305,43 @@ fn ask_construct_graphs_and_paths() {
     }
 }
 
+/// Several `FROM` graphs make one default graph, their RDF merge: `ex:p1
+/// ex:city "Paris"` is in both `ex:g1` and `ex:g2` and matches once, in the
+/// engine and in the copy alike (and so counts once).
+#[test]
+fn a_multi_from_default_graph_is_a_set() {
+    let (store, c) = stores();
+    for (q, rows) in [
+        (
+            "SELECT ?s ?c FROM ex:g1 FROM ex:g2 WHERE { ?s ex:city ?c }",
+            3,
+        ),
+        // The same graph twice is the same graph.
+        (
+            "SELECT ?s ?c FROM ex:g1 FROM ex:g1 WHERE { ?s ex:city ?c }",
+            2,
+        ),
+        // A join over the merge: each side matches the shared triple once.
+        (
+            "SELECT ?s ?c ?d FROM ex:g1 FROM ex:g2 WHERE { ?s ex:city ?c . ?s ex:city ?d }",
+            3,
+        ),
+    ] {
+        let q = format!("{P}{q}");
+        assert_eq!(engine(&store, &q).1.len(), rows, "engine: {q}");
+        let (_, cr, _) = columnar(&c, &q).unwrap_or_else(|| panic!("declined: {q}"));
+        assert_eq!(cr.len(), rows, "columnar: {q}");
+    }
+    let q = format!("{P}SELECT (COUNT(*) AS ?n) FROM ex:g1 FROM ex:g2 WHERE {{ ?s ex:city ?c }}");
+    assert_same(&q, false);
+    assert_eq!(
+        engine(&store, &q).1,
+        vec![vec![Some(
+            "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        )]]
+    );
+}
+
 #[test]
 fn what_is_not_implemented_is_declined() {
     for q in [
@@ -304,6 +349,12 @@ fn what_is_not_implemented_is_declined() {
         "SELECT ?a ?b WHERE { ?a ex:knows* ?b }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?s ex:nick ?k } }",
+        // `GRAPH ?g` around an operator SPARQL evaluates per graph, with `?g`
+        // out of scope inside (W3C negation#graph-minus): carrying `?g` into
+        // both sides of the MINUS would make them share it.
+        "SELECT ?s WHERE { GRAPH ?g { ?s ex:city ?c MINUS { ?x ex:city ?c } } }",
+        "SELECT ?g ?n WHERE { GRAPH ?g { SELECT (COUNT(*) AS ?n) WHERE { ?s ex:city ?c } } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ex:city ?c } LIMIT 1 } }",
         "SELECT ?s (NOW() AS ?t) WHERE { ?s ex:name ?n }",
         "SELECT ?s (MD5(?n) AS ?h) WHERE { ?s ex:name ?n }",
         "SELECT ?s (xsd:integer(?a) AS ?i) WHERE { ?s ex:age ?a }",
@@ -511,4 +562,68 @@ fn a_filter_over_one_pattern_is_left_to_the_engine() {
         &format!("{P}SELECT ?a WHERE {{ ?s ex:age ?a FILTER(?a > 30) }}"),
         false,
     );
+}
+
+/// RDF 1.2 terms the decoded `Value` cannot carry: literals with a base
+/// direction and triple terms.
+#[cfg(feature = "sparql-12")]
+const RDF12: &str = r#"
+@prefix ex: <http://example.org/> .
+ex:d1 ex:dlabel "مرحبا"@ar--rtl ; ex:label "مرحبا"@ar .
+ex:d2 ex:dlabel "hello"@en--ltr ; ex:label "hello"@en .
+ex:d3 ex:claims <<( ex:a ex:b ex:c )>> .
+"#;
+
+/// A literal with a base direction, or a triple term, passes through the copy
+/// untouched (its dictionary term is what is emitted), but the moment an
+/// expression has to read one the query is declined: rebuilt without its
+/// direction the literal would equal its undirected twin and report
+/// `rdf:langString`, and a triple term would turn every test into a type error.
+#[cfg(feature = "sparql-12")]
+#[test]
+fn rdf12_terms_reaching_an_expression_are_declined() {
+    let store = Store::new().unwrap();
+    store
+        .load_from_reader(RdfFormat::Turtle, RDF12.as_bytes())
+        .unwrap();
+    let c = Columnar::from_quads(store.iter().map(|q| q.unwrap()));
+
+    // Matched and emitted as dictionary terms: answered, direction intact.
+    for q in [
+        "SELECT ?s ?l WHERE { ?s ex:dlabel ?l }",
+        "SELECT ?s WHERE { ?s ex:dlabel \"hello\"@en--ltr }",
+        "SELECT ?s ?t WHERE { ?s ex:claims ?t }",
+    ] {
+        let q = format!("{P}{q}");
+        let (ev, mut er, _) = engine(&store, &q);
+        let (cv, mut cr, _) = columnar(&c, &q).unwrap_or_else(|| panic!("declined: {q}"));
+        er.sort();
+        cr.sort();
+        assert_eq!((ev, er), (cv, cr), "differs for {q}");
+    }
+    assert!(
+        columnar(&c, &format!("{P}SELECT ?l WHERE {{ ?s ex:dlabel ?l }}"))
+            .unwrap()
+            .1
+            .iter()
+            .any(|r| r[0].as_deref() == Some("\"hello\"@en--ltr"))
+    );
+
+    // Read by an expression: accepted on its text, declined at evaluation.
+    for q in [
+        "SELECT ?l (DATATYPE(?l) AS ?d) WHERE { ?s ex:dlabel ?l }",
+        "SELECT ?s WHERE { ?s ex:dlabel ?l FILTER(LANG(?l) = \"ar\") }",
+        "SELECT ?a ?b WHERE { ?a ex:dlabel ?x . ?b ex:label ?y FILTER(?x = ?y) }",
+        "SELECT ?s WHERE { ?s ex:label ?l FILTER(?l = \"hello\"@en--ltr) }",
+        "SELECT ?l WHERE { ?s ex:dlabel ?l } ORDER BY ?l",
+        "ASK { ?s ex:dlabel ?l FILTER(LANG(?l) = \"en\") }",
+        "SELECT ?s WHERE { ?s ex:claims ?t FILTER(?t != ex:x) }",
+    ] {
+        let q = format!("{P}{q}");
+        assert!(accepts_text(&q), "accepted on its text: {q}");
+        assert!(
+            c.query_semantics(&q).unwrap().is_none(),
+            "declined at evaluation: {q}"
+        );
+    }
 }

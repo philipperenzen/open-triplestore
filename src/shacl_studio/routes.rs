@@ -20,7 +20,7 @@ pub fn studio_auth_routes() -> Router<AppState> {
             get(crate::spec_import::list_importers),
         )
         .route(
-            "/api/shacl/import/:format",
+            "/api/shacl/import/{format}",
             post(crate::spec_import::import_spec),
         )
         .route(
@@ -28,7 +28,7 @@ pub fn studio_auth_routes() -> Router<AppState> {
             get(crate::spec_import::list_exporters),
         )
         .route(
-            "/api/shacl/export/:format",
+            "/api/shacl/export/{format}",
             post(crate::spec_import::export_spec),
         )
         .route(
@@ -36,53 +36,53 @@ pub fn studio_auth_routes() -> Router<AppState> {
             get(handlers::list_shape_graphs).post(handlers::create_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id",
+            "/api/shacl/shape-graphs/{id}",
             get(handlers::get_shape_graph)
                 .put(handlers::update_shape_graph)
                 .delete(handlers::delete_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/turtle",
+            "/api/shacl/shape-graphs/{id}/turtle",
             get(handlers::get_shape_graph_turtle).put(handlers::put_shape_graph_turtle),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/revisions",
+            "/api/shacl/shape-graphs/{id}/revisions",
             get(handlers::list_shape_graph_revisions),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/revisions/:rev",
+            "/api/shacl/shape-graphs/{id}/revisions/{rev}",
             get(handlers::get_shape_graph_revision),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/restore/:rev",
+            "/api/shacl/shape-graphs/{id}/restore/{rev}",
             post(handlers::restore_shape_graph_revision),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/clone",
+            "/api/shacl/shape-graphs/{id}/clone",
             post(handlers::clone_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/import-shapes",
+            "/api/shacl/shape-graphs/{id}/import-shapes",
             post(handlers::import_shapes),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/validate",
+            "/api/shacl/shape-graphs/{id}/validate",
             post(handlers::validate_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/commits",
+            "/api/shacl/shape-graphs/{id}/commits",
             get(handlers::list_shape_graph_commits),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/stage",
+            "/api/shacl/shape-graphs/{id}/stage",
             post(handlers::stage_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/publish",
+            "/api/shacl/shape-graphs/{id}/publish",
             post(handlers::publish_shape_graph),
         )
         .route(
-            "/api/shacl/shape-graphs/:id/deprecate",
+            "/api/shacl/shape-graphs/{id}/deprecate",
             post(handlers::deprecate_shape_graph),
         )
         // Shapes catalog (discover shapes across all graphs) + adopt-in-place
@@ -99,7 +99,7 @@ pub fn studio_auth_routes() -> Router<AppState> {
                 .delete(handlers::delete_binding),
         )
         .route(
-            "/api/datasets/:id/effective-shapes",
+            "/api/datasets/{id}/effective-shapes",
             get(handlers::dataset_effective_shapes),
         )
         // Pipelines
@@ -108,18 +108,21 @@ pub fn studio_auth_routes() -> Router<AppState> {
             get(handlers::list_pipelines).post(handlers::create_pipeline),
         )
         .route(
-            "/api/shacl/pipelines/:id",
+            "/api/shacl/pipelines/{id}",
             get(handlers::get_pipeline)
                 .put(handlers::update_pipeline)
                 .delete(handlers::delete_pipeline),
         )
-        .route("/api/shacl/pipelines/:id/run", post(handlers::run_pipeline))
         .route(
-            "/api/shacl/pipelines/:id/runs",
+            "/api/shacl/pipelines/{id}/run",
+            post(handlers::run_pipeline),
+        )
+        .route(
+            "/api/shacl/pipelines/{id}/runs",
             get(handlers::list_pipeline_runs),
         )
         .route(
-            "/api/shacl/pipelines/:id/runs/:run_id",
+            "/api/shacl/pipelines/{id}/runs/{run_id}",
             get(handlers::get_pipeline_run),
         )
         .route(
@@ -135,7 +138,7 @@ pub fn studio_auth_routes() -> Router<AppState> {
 /// is public): currently the form-manifest.
 pub fn studio_optional_auth_routes() -> Router<AppState> {
     Router::new().route(
-        "/api/datasets/:dataset_id/form-manifest",
+        "/api/datasets/{dataset_id}/form-manifest",
         get(handlers::form_manifest),
     )
 }

@@ -1,5 +1,6 @@
 <script>
-  import { Router, Route, Link, navigate } from './lib/router/index.js';
+  import { stripBase } from './lib/basePath';
+  import { Router, Route, Link, Fallback, navigate } from './lib/router/index.js';
   import { onMount, tick } from 'svelte';
   import { t, locale, isLoading } from 'svelte-i18n';
   import { isAuthenticated, user, isAdmin, refreshUser, backendHealth, checkBackend } from './lib/stores.js';
@@ -7,15 +8,19 @@
   import { llmServiceHealthView } from './lib/llmServiceHealth.js';
   import { location } from './lib/locationStore.js';
   import Toasts from './components/Toasts.svelte';
+  import ConfirmHost from './components/ConfirmHost.svelte';
   import SearchBar from './components/SearchBar.svelte';
   import LoadingLogo from './components/LoadingLogo.svelte';
+  import FeedbackDialog from './components/FeedbackDialog.svelte';
+  import { openFeedback } from './lib/feedback.ts';
 
   import {
     Home as HomeIcon, Search as SearchIcon,
     Upload, Database, DatabaseZap, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
-    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags
+    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
+    MessageSquarePlus, MessageSquareText, SlidersHorizontal, HardDrive, Rss, Brain, ShieldCheck
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -38,6 +43,7 @@
   import PreviewOverlay from './components/viewer/PreviewOverlay.svelte';
   import ResourceHoverCard from './components/ResourceHoverCard.svelte';
   import Validation from './pages/Validation.svelte';
+  import NotFound from './pages/NotFound.svelte';
 
   // W4-20: Heavy pages use dynamic imports so their vendor chunks (CodeMirror,
   // Cytoscape, etc.) are only fetched when the route is first visited.
@@ -62,7 +68,11 @@
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
   const lazyAdminPrefixes       = () => import('./pages/AdminPrefixes.svelte');
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
+  const lazyAdminMaintenance    = () => import('./pages/AdminMaintenance.svelte');
+  const lazyAdminLdes           = () => import('./pages/AdminLdes.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
+  const lazyAdminFeedback       = () => import('./pages/AdminFeedback.svelte');
+  const lazyAdminSettings       = () => import('./pages/AdminSettings.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
   const lazyVocabularySearch    = () => import('./pages/VocabularySearch.svelte');
@@ -74,6 +84,12 @@
   const lazyFiles               = () => import('./pages/Files.svelte');
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
+  const lazyDatasetReasoning = () => import('./pages/DatasetReasoning.svelte');
+  const lazyDatasetShex      = () => import('./pages/DatasetShex.svelte');
+  const lazyDatasetPatch     = () => import('./pages/DatasetPatch.svelte');
+  const lazyDatasetVersionDiff = () => import('./pages/DatasetVersionDiff.svelte');
+  const lazyReasoning        = () => import('./pages/Reasoning.svelte');
+  const lazyShexValidation   = () => import('./pages/ShexValidation.svelte');
 
   // Overridable at runtime (no rebuild) via /config.json's "branding.title" — see runtimeConfig.ts.
   $: BRAND = $runtimeBranding.title;
@@ -99,6 +115,8 @@
         { to: '/import', labelKey: 'nav.importData', icon: Upload, match: (p) => p.startsWith('/import'), authRequired: true },
         { to: '/sources', labelKey: 'nav.sqlSources', icon: DatabaseZap, match: (p) => p.startsWith('/sources'), authRequired: true, adminOnly: true },
         { to: '/shacl', labelKey: 'nav.validate', icon: CheckCircle2, match: (p) => p.startsWith('/validation') || p.startsWith('/shacl'), authRequired: true },
+        { to: '/shex', labelKey: 'nav.shex', icon: ShieldCheck, match: (p) => p.startsWith('/shex'), authRequired: true },
+        { to: '/reasoning', labelKey: 'nav.reasoning', icon: Brain, match: (p) => p.startsWith('/reasoning'), authRequired: true },
       ],
     },
     {
@@ -204,7 +222,7 @@
 
     function handleKeydown(e) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        if (!searchEnabledFor(window.location.pathname)) return;
+        if (!searchEnabledFor(stripBase(window.location.pathname))) return;
         e.preventDefault();
         searchOpen = !searchOpen;
         if (searchOpen) setTimeout(() => searchBarRef?.focus(), 50);
@@ -248,7 +266,11 @@
   });
 
   async function logout() {
-    try { await apiLogout(); } catch { /* best effort */ }
+    let samlLogoutUrl = null;
+    try { samlLogoutUrl = await apiLogout(); } catch { /* best effort */ }
+    // A SAML session continues at the IdP, which ends its own session and
+    // sends the browser back here.
+    if (samlLogoutUrl) { window.location.href = samlLogoutUrl; return; }
     refreshUser();
     navigate('/');
     sidebarOpen = false;
@@ -272,6 +294,8 @@
       ['/import', 'pages.import.title', 'pages.import.detail'],
       ['/validation', 'pages.validation.title', 'pages.validation.detail'],
       ['/shacl', 'pages.shaclStudio.title', 'pages.shaclStudio.detail'],
+      ['/shex', 'pages.shex.title', 'pages.shex.detail'],
+      ['/reasoning', 'pages.reasoning.title', 'pages.reasoning.detail'],
       ['/graphs', 'pages.graphList.title', 'pages.graphList.detail'],
       ['/datasets', 'pages.datasets.title', 'pages.datasets.detail'],
       ['/files', 'pages.files.title', 'pages.files.detail'],
@@ -281,7 +305,11 @@
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
+      ['/admin/maintenance', 'pages.adminMaintenance.title', 'pages.adminMaintenance.detail'],
+      ['/admin/ldes', 'pages.adminLdes.title', 'pages.adminLdes.detail'],
       ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
+      ['/admin/feedback', 'pages.adminFeedback.title', 'pages.adminFeedback.detail'],
+      ['/admin/settings', 'pages.adminSettings.title', 'pages.adminSettings.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/vocabularies', 'pages.vocabularySearch.title', 'pages.vocabularySearch.detail'],
@@ -471,9 +499,25 @@
                 <Gauge size={16} />
                 <span class="nav-item-label">{$t('nav.adminOperations')}</span>
               </Link>
+              <Link to="/admin/maintenance" class={`nav-item ${currentPath.startsWith('/admin/maintenance') ? 'selected' : ''}`} on:click={navClick}>
+                <HardDrive size={16} />
+                <span class="nav-item-label">{$t('nav.adminMaintenance')}</span>
+              </Link>
+              <Link to="/admin/ldes" class={`nav-item ${currentPath.startsWith('/admin/ldes') ? 'selected' : ''}`} on:click={navClick}>
+                <Rss size={16} />
+                <span class="nav-item-label">{$t('nav.adminLdes')}</span>
+              </Link>
               <Link to="/admin/prefixes" class={`nav-item ${currentPath.startsWith('/admin/prefixes') ? 'selected' : ''}`} on:click={navClick}>
                 <Tags size={16} />
                 <span class="nav-item-label">{$t('nav.adminPrefixes')}</span>
+              </Link>
+              <Link to="/admin/feedback" class={`nav-item ${currentPath.startsWith('/admin/feedback') ? 'selected' : ''}`} on:click={navClick}>
+                <MessageSquareText size={16} />
+                <span class="nav-item-label">{$t('nav.adminFeedback')}</span>
+              </Link>
+              <Link to="/admin/settings" class={`nav-item ${currentPath.startsWith('/admin/settings') ? 'selected' : ''}`} on:click={navClick}>
+                <SlidersHorizontal size={16} />
+                <span class="nav-item-label">{$t('nav.adminSettings')}</span>
               </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
@@ -530,6 +574,14 @@
               </div>
             {/if}
           </div>
+
+          <button
+            class="foot-btn foot-btn-feedback"
+            on:click={() => { openFeedback(); navClick(); }}
+            title={$t('nav.feedbackHint')}>
+            <MessageSquarePlus size={13} />
+            <span>{$t('nav.feedback')}</span>
+          </button>
 
           <button
             class="foot-btn"
@@ -685,7 +737,7 @@
         <Route path="/shacl/pipelines/:id" let:params>
           <LazyPage loader={lazyPipelineEditor} id={params.id} />
         </Route>
-        <!-- Phase 4 Results dashboard: combines pipeline + dataset runs. -->
+        <!-- Results dashboard: combines pipeline + dataset runs. -->
         <Route path="/shacl/results">
           <LazyPage loader={lazyShaclResults} />
         </Route>
@@ -702,6 +754,24 @@
         </Route>
         <Route path="/datasets/:id/cesium" let:params>
           <LazyPage loader={lazyCesiumView} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/reasoning" let:params>
+          <LazyPage loader={lazyDatasetReasoning} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/shex" let:params>
+          <LazyPage loader={lazyDatasetShex} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/patch" let:params>
+          <LazyPage loader={lazyDatasetPatch} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/versions/diff" let:params>
+          <LazyPage loader={lazyDatasetVersionDiff} id={params.id} />
+        </Route>
+        <Route path="/reasoning">
+          <LazyPage loader={lazyReasoning} />
+        </Route>
+        <Route path="/shex">
+          <LazyPage loader={lazyShexValidation} />
         </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
@@ -723,8 +793,20 @@
         <Route path="/admin/operations">
           <LazyPage loader={lazyAdminOperations} />
         </Route>
+        <Route path="/admin/maintenance">
+          <LazyPage loader={lazyAdminMaintenance} />
+        </Route>
+        <Route path="/admin/ldes">
+          <LazyPage loader={lazyAdminLdes} />
+        </Route>
         <Route path="/admin/prefixes">
           <LazyPage loader={lazyAdminPrefixes} />
+        </Route>
+        <Route path="/admin/feedback">
+          <LazyPage loader={lazyAdminFeedback} />
+        </Route>
+        <Route path="/admin/settings">
+          <LazyPage loader={lazyAdminSettings} />
         </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />
@@ -759,6 +841,10 @@
         <Route path="/graph-viz">
           <LazyPage loader={lazyGraphVisualizer} />
         </Route>
+        <!-- Catch-all: keep last, after every Route has registered its path. -->
+        <Fallback>
+          <NotFound />
+        </Fallback>
         </div>
         {/key}
       </section>
@@ -842,7 +928,7 @@
                 class:h-pending={llmView.gateway.state === 'pending'}
               ></span>
               <span class="health-label">{$t('nav.llmGateway')}</span>
-              <span class="health-detail" title={llmView.gateway.address ?? undefined}>{$t(llmView.gateway.detailKey)}</span>
+              <span class="health-detail" title={[llmView.gateway.address, llmView.gateway.reason].filter(Boolean).join(' — ') || undefined}>{$t(llmView.gateway.detailKey)}</span>
             </div>
             {#each llmView.services as svc (svc.id)}
               <div class="health-row">
@@ -874,6 +960,8 @@
   {/if}
 
   <Toasts />
+  <ConfirmHost />
+  <FeedbackDialog />
 </Router>
 
 <!-- Global 3D-model / geometry preview, requested by RDF terms anywhere

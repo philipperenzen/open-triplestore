@@ -1,4 +1,5 @@
 <script>
+  import { withBase, absoluteUrl } from '../lib/basePath';
   import { onMount, onDestroy } from 'svelte';
   import {
     getDataset,
@@ -42,8 +43,9 @@
     getLatestValidationRun,
     getValidationHistory,
     getGeoStats,
+    getDatasetConformance,
   } from '../lib/api.js';
-  import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
+  import { unwrapValidationRun, validationErrorMessage, formatShaclPath } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
   import { compactNumber } from '../lib/format.ts';
   import { RESOURCE_ROLES, RESOURCE_ROLE_RANK } from '../lib/permissions.js';
@@ -59,7 +61,7 @@
   // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2 } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2, Brain, FileDiff } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -74,15 +76,19 @@
   import CommitHistory from '../components/CommitHistory.svelte';
   import DatasetVersions from '../components/DatasetVersions.svelte';
   import SectionNav from '../components/SectionNav.svelte';
+  import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
   import Select from '../components/Select.svelte';
+  import PartialRunNote from '../components/PartialRunNote.svelte';
+  import DatasetExchange from '../components/exchange/DatasetExchange.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
-  import { findTheme, findAdmsStatus } from '../lib/vocab/themes';
+  import { findTheme, findAdmsStatus, findFrequency } from '../lib/vocab/themes';
 
   // Ontology registry removed — detection/linking no longer available
 
   export let id;
 
   let dataset = null;
+  let conformance = null;
   let graphs = [];
   let services = [];
   // Content summary, derived cheaply from the browse facets (index-backed graph
@@ -438,6 +444,7 @@
   // Whether there is any rich metadata worth showing beyond the basics.
   $: hasRichMetadata = !!(dataset && (dataset.license || mdThemes.length || mdKeywords.length
     || dataset.adms_status || dataset.version_notes || dataset.spatial || dataset.landing_page
+    || dataset.temporal_start || dataset.temporal_end || dataset.accrual_periodicity
     || hasContact || dataset.conforms_to_model));
 
   // Breadcrumb: org name when dataset is org-owned
@@ -451,7 +458,7 @@
   // Copy-to-clipboard state per service
   let copiedSlug = null;
   async function copyEndpoint(slug) {
-    const url = `${window.location.origin}/api/datasets/${id}/services/${slug}/sparql`;
+    const url = absoluteUrl(`/api/datasets/${id}/services/${slug}/sparql`);
     if (await copyToClipboard(url)) {
       copiedSlug = slug;
       setTimeout(() => { copiedSlug = null; }, 2000);
@@ -464,6 +471,8 @@
   let shapesGraphIri = '';
   let validationError = '';
   let validationRanAt = null;
+  // The shown run left out graphs the caller may not read (not recorded).
+  let validationPartial = false;
   let validationHistory = [];
   // Set after a graph's role becomes 'shapes': the backend auto-registers it
   // in the SHACL Studio library, so we surface a pointer to it.
@@ -485,6 +494,7 @@
         if (run.report) {
           validationReport = run.report;
           validationRanAt = run.ranAt;
+          validationPartial = false;
         }
       }
     } catch (_) { /* non-fatal — the card still allows running validation */ }
@@ -735,6 +745,8 @@
   async function fetchDataset() {
     try {
       dataset = await getDataset(id);
+      // The model-version layer: tells the owner when a newer model version was published.
+      getDatasetConformance(id).then(c => { conformance = c; }).catch(() => { conformance = null; });
       editConformsToOntology = dataset.conforms_to_model || '';
       editConformsToVersion = dataset.conforms_to_version || '';
       imageKey = dataset.image_key;
@@ -1122,6 +1134,7 @@
       const run = unwrapValidationRun(res);
       validationReport = run.report;
       validationRanAt = run.ranAt;
+      validationPartial = run.partial;
       // The run may have resolved shapes that weren't listed yet (e.g. freshly
       // auto-registered imported shapes) — refresh the panel and the history.
       await Promise.all([
@@ -1249,6 +1262,8 @@
     { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
     { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
     { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'exchange', label: $i18nT('components.exchange.navLabel') },
+    { id: 'identity', label: $i18nT('components.identityPolicy.navLabel'), visible: $isAuthenticated },
     { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
   ]} />
 {/if}
@@ -1343,6 +1358,23 @@
       <LayoutGrid size={22} />
       <strong>{$i18nT('pages.datasetDetail.namedGraphs')}</strong>
       <span>{$i18nT('pages.datasetDetail.namedGraphsDesc')}</span>
+    </Link>
+    <Link to="/datasets/{id}/reasoning" class="action-tile">
+      <Brain size={22} />
+      <strong>{$i18nT('pages.datasetDetail.reasoningTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.reasoningTileDesc')}</span>
+    </Link>
+    {#if $isAuthenticated}
+      <Link to="/datasets/{id}/shex" class="action-tile">
+        <ShieldCheck size={22} />
+        <strong>{$i18nT('pages.datasetDetail.shexTile')}</strong>
+        <span>{$i18nT('pages.datasetDetail.shexTileDesc')}</span>
+      </Link>
+    {/if}
+    <Link to="/datasets/{id}/patch" class="action-tile">
+      <FileDiff size={22} />
+      <strong>{$i18nT('pages.datasetDetail.patchTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.patchTileDesc')}</span>
     </Link>
   </div>
 </div>
@@ -1651,6 +1683,20 @@
       </div>
     {/if}
 
+    {#if dataset.temporal_start || dataset.temporal_end}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.temporalCoverage')}</dt>
+        <dd>{dataset.temporal_start || $i18nT('pages.datasetDetail.openEnded')} – {dataset.temporal_end || $i18nT('pages.datasetDetail.openEnded')}</dd>
+      </div>
+    {/if}
+
+    {#if dataset.accrual_periodicity}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.updateFrequency')}</dt>
+        <dd>{findFrequency(dataset.accrual_periodicity)?.label || dataset.accrual_periodicity}</dd>
+      </div>
+    {/if}
+
     {#if dataset.landing_page}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.landingPage')}</dt>
@@ -1661,7 +1707,16 @@
     {#if dataset.conforms_to_model}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
-        <dd><a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
+        <dd>
+          <a href={withBase(`/models/${dataset.conforms_to_model}`)} class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
+          {#if conformance?.conforms_to_model?.update_available}
+            <span class="model-update-badge" title={$i18nT('pages.datasetDetail.modelUpdateAvailableHint')}>
+              ⬆ {$i18nT('pages.datasetDetail.modelUpdateAvailable', { values: { version: conformance.conforms_to_model.latest_published } })}
+            </span>
+          {:else if conformance?.conforms_to_model?.pinned}
+            <span class="model-current-badge">{$i18nT('pages.datasetDetail.modelCurrent')}</span>
+          {/if}
+        </dd>
       </div>
     {/if}
 
@@ -1745,7 +1800,7 @@
             {:else}
               {#if svc.is_active}
                 <div class="svc-endpoint-row">
-                  <code class="endpoint-url">{window.location.origin}/api/datasets/{id}/services/{svc.slug}/sparql</code>
+                  <code class="endpoint-url">{absoluteUrl(`/api/datasets/${id}/services/${svc.slug}/sparql`)}</code>
                   <button class="btn btn-xs btn-ghost copy-btn" on:click={() => copyEndpoint(svc.slug)} title={$i18nT('pages.datasetDetail.copyEndpointUrl')}>
                     {#if copiedSlug === svc.slug}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
                   </button>
@@ -1831,6 +1886,9 @@
         <Link to="/validation?dataset={id}" class="btn btn-sm btn-ghost">
           {$i18nT('pages.datasetDetail.openValidationStudio')}
         </Link>
+        <Link to="/datasets/{id}/shex" class="btn btn-sm btn-ghost">
+          {$i18nT('pages.datasetDetail.openShex')}
+        </Link>
         <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.attachShapesDatasetTitle')} on:click={() => attachTarget = { kind: 'dataset', id, label: dataset?.name || id }}>
           <ShieldCheck size={13} /> {$i18nT('pages.datasetDetail.attachShapes')}
         </button>
@@ -1882,6 +1940,7 @@
       <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
         — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}
         {#if validationRanAt}<span class="run-meta" title={validationRanAt}> · {fmtDateTime(validationRanAt)}</span>{/if}</p>
+      {#if validationPartial}<PartialRunNote />{/if}
       {#if validationReport.results.length > 0}
         <table>
           <thead>
@@ -1892,7 +1951,7 @@
               <tr>
                 <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
                 <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
-                <td title={r.path}>{r.path ? shortenIRI(r.path) : '—'}</td>
+                <td title={r.path}>{r.path ? formatShaclPath(r.path) : '—'}</td>
                 <td>{r.message}</td>
               </tr>
             {/each}
@@ -1922,6 +1981,24 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- Exchange formats: event stream, containers, CityJSON, IDS check. -->
+{#if dataset}
+  <DatasetExchange
+    datasetId={id}
+    datasetName={dataset.name || ''}
+    {canWrite}
+    authenticated={$isAuthenticated}
+    {graphs}
+    on:changed={fetchGraphs}
+  />
+{/if}
+
+<!-- Identity policy (owl:sameAs) for reasoning — every identity route needs a
+     sign-in; the card hides itself when the server will not show the setting. -->
+{#if $isAuthenticated}
+  <IdentityPolicyCard scope="dataset" {id} canManage={canWrite} />
 {/if}
 
 <!-- Access management (users + teams, role-based) -->
@@ -2174,7 +2251,8 @@
         {#if validationReport}
           <div class="report" class:conforms={validationReport.conforms}>
             <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
-              \u2014 {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}</p>
+              — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}</p>
+            {#if validationPartial}<PartialRunNote />{/if}
             {#if validationReport.results.length > 0}
               <table>
                 <thead><tr><th>{$i18nT('pages.datasetDetail.severity')}</th><th>{$i18nT('pages.datasetDetail.focusNode')}</th><th>{$i18nT('pages.datasetDetail.path')}</th><th>{$i18nT('pages.datasetDetail.message')}</th></tr></thead>
@@ -2183,7 +2261,7 @@
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
                       <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
-                      <td title={r.path}>{r.path ? shortenIRI(r.path) : '\u2014'}</td>
+                      <td title={r.path}>{r.path ? formatShaclPath(r.path) : '\u2014'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}
@@ -3177,4 +3255,6 @@
   :global(:is([data-theme="dark"], .dark)) .modal-box,
   :global(:is([data-theme="dark"], .dark)) .preview-modal { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .svc-graph-item.checked { background: rgba(16,185,129,0.12); }
+  .model-update-badge { margin-left: .4rem; font-size: .72rem; padding: .1rem .45rem; border-radius: 999px; background: var(--warning-100, #fde9c8); color: var(--warning-800, #7a4b00); border: 1px solid var(--warning-300, #f3c37a); }
+  .model-current-badge { margin-left: .4rem; font-size: .72rem; padding: .1rem .45rem; border-radius: 999px; background: var(--success-100, #dcf5e3); color: var(--success-800, #0f5a2a); }
 </style>

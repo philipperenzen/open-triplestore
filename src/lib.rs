@@ -14,6 +14,8 @@
 //! - [`sparql`], [`geo`] — SPARQL evaluation helpers and GeoSPARQL functions.
 //! - [`reasoning`], [`shacl`], [`shaclc`], [`shex`], [`swrl`] — entailment
 //!   (RDFS, OWL 2 RL/EL/QL/DL) and shape/rule validation.
+//! - [`repair`] — TGD/EGD repair rules, a restricted chase in a sandbox, and
+//!   repair proposals as RDF Patch.
 //! - [`imports`], [`rml`], [`data_models`] — bulk ingest, RML mappings, and the
 //!   unified model registry (OWL/RDFS ontologies and SKOS vocabularies).
 //! - [`catalog`], [`dcat`], [`dataset_versions`], [`commit_log`] — dataset
@@ -34,18 +36,25 @@ pub mod auth;
 pub mod backup;
 pub mod catalog;
 pub mod commit_log;
+pub mod config;
 pub mod conformance;
 pub mod containers;
 pub mod data_models;
+pub mod dataset_changes;
+pub mod dataset_rules;
+pub mod dataset_settings;
 pub mod dataset_versions;
 pub mod dcat;
 pub mod docs;
 pub mod email;
 pub mod entailment;
 pub mod federation;
+pub mod feedback;
 pub mod geo;
+pub mod http_client;
 pub mod ifc;
 pub mod imports;
+pub mod jsonld;
 pub mod kind_detector;
 pub mod ldes;
 #[cfg(feature = "ldp")]
@@ -57,8 +66,10 @@ pub mod prefixes;
 pub mod property_states;
 pub mod provenance;
 pub mod rdf_patch;
+pub mod rdf_patch_log;
 pub mod reasoning;
 pub mod remote;
+pub mod repair;
 pub mod rml;
 pub mod saved_queries;
 pub mod secrets;
@@ -72,6 +83,7 @@ pub mod shex;
 pub mod sources;
 pub mod sparql;
 pub mod spec_import;
+pub mod statement_provenance;
 pub mod storage;
 pub mod store;
 pub mod svc_registry;

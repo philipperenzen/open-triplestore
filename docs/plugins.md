@@ -9,7 +9,7 @@ job — most customization needs tier 1 or 2, not a code plugin.
 
 | Tier | What it does | Needs a rebuild? | Where |
 |---|---|---|---|
-| 1. [Seed bundles](#tier-1-seed-bundles-data) | Boot-time org/dataset/data loading | No | `--seed-dir` / `SEED_DIR` |
+| 1. [Seed bundles](#tier-1-seed-bundles-data) | Boot-time org/dataset/data loading | No | `--seed-dir` / `OTS_SEED_DIR` |
 | 2. [Runtime config](#tier-2-runtime-config-frontend) | Backend URLs + branding for the web UI | No | `/config.json` |
 | 3. [Code plugins](#tier-3-code-plugins-compile-time) | New HTTP endpoints, background jobs | Yes (feature flag) | `plugins/<name>` |
 
@@ -32,7 +32,7 @@ CI on every change, not just by a downstream fork's own bundles.
 
 ### Directory layout
 
-Point `--seed-dir <path>` (or `SEED_DIR=<path>`) at a directory containing one
+Point `--seed-dir <path>` (or `OTS_SEED_DIR=<path>`) at a directory containing one
 subdirectory per bundle:
 
 ```
@@ -52,7 +52,7 @@ A complete, runnable example (also the one CI exercises) lives in
 
 ```toml
 id = "acme-catalog"                 # unique id; used in logs and the default opt-out env var
-opt_out_env = "SEED_ACME_CATALOG"   # optional — defaults to SEED_BUNDLE_<ID>
+opt_out_env = "OTS_SEED_ACME_CATALOG_ENABLED"   # optional — defaults to OTS_SEED_BUNDLE_<ID>_ENABLED
 
 [organisation]
 slug = "acme"
@@ -79,6 +79,42 @@ slug = "all-products"
 description = "…"
 sparql = "SELECT ?p WHERE { ?p a <https://acme.example/catalog#Product> }"
 ```
+
+#### Identity and attribution keys (`[account]`, `[[groups]]`)
+
+Both are optional and purely additive: a manifest without them behaves
+exactly as before.
+
+```toml
+[account]                            # the account the bundle's content is attributed to
+username = "acme-steward"
+email = "steward@acme.example"
+display_name = "Acme data steward"   # optional
+password_env = "ACME_STEWARD_PASSWORD"   # optional: the environment variable holding
+                                         # the initial password (never the password itself)
+
+[[groups]]                           # teams inside the bundle's organisation
+name = "Data stewards"
+role = "member"                      # admin | member | viewer; default member
+members = ["acme-steward", "alice"]  # usernames
+```
+
+- **`[account]`** is created when no account with that username exists, with
+  the system role `user` (never higher: the manifest cannot mint an admin),
+  and is made an **admin of the bundle's organisation**. Its password is the
+  value of `password_env` when that variable is set at seed time; otherwise
+  the account gets a password nobody knows, so it signs in only once an admin
+  sets one (or through single sign-on). An account that already exists is
+  used as it is: its role, password and profile are never changed. The
+  account is the **owner of the bundle's saved-query services**, so they are
+  created on the first boot instead of waiting for an instance admin to
+  exist, and every version the bundle's `[[data_models]]` publishes carries
+  it as its creator (`dct:creator`).
+- **`[[groups]]`** are matched by `name` inside the organisation and created
+  when missing. Each `members` entry is resolved by username and added with
+  the group's `role`; an existing membership is left as it is. A username
+  that does not resolve yet (an account that registers later) is logged and
+  **deferred to the next reseed**, which runs at every boot.
 
 #### Layered-convention keys (reference models, conformance, shapes)
 
@@ -143,7 +179,7 @@ added to a registry entry the bundle's organisation does not own.
   load is logged as a warning and skipped; it never aborts boot or the other
   bundles.
 - **Per-bundle opt-out.** Set the bundle's `opt_out_env` (or the derived
-  `SEED_BUNDLE_<ID>`) to `false`/`0`/`no`/`off` to disable one bundle without
+  `OTS_SEED_BUNDLE_<ID>_ENABLED`) to `false` to disable one bundle without
   removing it from the seed directory.
 - **Works with both ephemeral and persistent stores** — it runs at the same
   point in boot as the built-in demo seed, after the store is open.
@@ -167,8 +203,8 @@ A domain profile is a bundle, not a code change. The repository ships:
 | `nen2660-imbor` | Dutch infrastructure (NEN 2660-2 + IMBOR 2025) | fetched by `fetch.sh` (public downloads); the real-data Stage-1 benchmark |
 | `nen2660-relations` | NEN 2660-2 part-whole, containment and connection relations: a profile (transitivity on proper parthood only) and SHACL-SPARQL consistency shapes (acyclic, irreflexive, part within whole / RCC8 proper part, contained within region) with a sample | profile, shapes and sample vendored and run in CI by `tests/nen2660_relations_bundle.rs`; the NEN 2660-2 RDFS file fetched by `fetch.sh` |
 | `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the Turtle export from data.gwsw.nl; not vendored, since the ontology states no licence (RIONED's CC0 covers the GWSW Server data, not the ontology) |
-| `ifc-lift` | the IFC importer's own vocabulary: the IFC 4.3 facility spine under `bot:Zone`, typed quantities and properties with QUDT units, classifications, materials, the map conversion — everything the lift emits that BOT, props:, ifcOWL, QUDT, SKOS and NEN 2660-2 do not declare | vendored; minted under `{base_url}/ns/ifc-lift#` at seed time; every lift-namespace term the emitter produces is checked against it by `tests/ifc_lift.rs`; opt out with `SEED_IFC_LIFT=false` |
-| `dqv-quality` | data quality (W3C DQV): a profile of categories, dimensions and metrics, and the shapes that pin what a well-formed `dqv:QualityMeasurement` is — DQV's Note constrains nothing itself | vendored (DQV is already the seeded `dqv` vocabulary); profile, shapes and a seven-violation sample run in CI by `tests/dqv_quality_bundle.rs`; opt out with `SEED_DQV_QUALITY=false` |
+| `ifc-lift` | the IFC importer's own vocabulary: the IFC 4.3 facility spine under `bot:Zone`, typed quantities and properties with QUDT units, classifications, materials, the map conversion — everything the lift emits that BOT, props:, ifcOWL, QUDT, SKOS and NEN 2660-2 do not declare | vendored; minted under `{base_url}/ns/ifc-lift#` at seed time; every lift-namespace term the emitter produces is checked against it by `tests/ifc_lift.rs`; opt out with `OTS_SEED_IFC_LIFT_ENABLED=false` |
+| `dqv-quality` | data quality (W3C DQV): a profile of categories, dimensions and metrics, and the shapes that pin what a well-formed `dqv:QualityMeasurement` is — DQV's Note constrains nothing itself | vendored (DQV is already the seeded `dqv` vocabulary); profile, shapes and a seven-violation sample run in CI by `tests/dqv_quality_bundle.rs`; opt out with `OTS_SEED_DQV_QUALITY_ENABLED=false` |
 
 CB'23 (material passports) and clinical terminologies such as SNOMED CT are
 licensed or not published as RDF by their owners; write a manifest like the
@@ -178,12 +214,12 @@ into `--seed-dir`.
 ### Docker: mounting extra bundles
 
 The shipped image doesn't bake in any bundles beyond the reference one used in
-tests. Mount a host (or CI-built) directory over `SEED_DIR` and point the
+tests. Mount a host (or CI-built) directory over `OTS_SEED_DIR` and point the
 container at it:
 
 ```bash
 docker run -v ./my-bundles:/seed-bundles \
-  -e SEED_DIR=/seed-bundles \
+  -e OTS_SEED_DIR=/seed-bundles \
   -p 7878:7878 ghcr.io/philipperenzen/open-triplestore:latest
 ```
 
@@ -194,7 +230,7 @@ services:
   triplestore:
     image: ghcr.io/philipperenzen/open-triplestore:latest
     environment:
-      SEED_DIR: /seed-bundles
+      OTS_SEED_DIR: /seed-bundles
     volumes:
       - ./my-bundles:/seed-bundles:ro
 ```
@@ -222,7 +258,7 @@ value is resolved highest-priority-first:
    (GitLab Pages, S3+CloudFront, …) that talks to an external backend.
 2. **Runtime config** — `/config.json`'s `"services"` map (below). Changeable
    without a rebuild.
-3. **`/registry` discovery** — the existing opt-in (`LD_DISCOVERY`) cross-app
+3. **`/registry` discovery** — the existing opt-in (`OTS_DISCOVERY_ENABLED`) cross-app
    service-registry SSE resolution, for a multi-app deployment.
 4. **localhost defaults** — the dev-mode fallback ports.
 
@@ -281,16 +317,22 @@ services:
       - ./config.json:/app/frontend/dist/config.json:ro
 ```
 
-### Base path (static sub-path deploys)
+### Base path (sub-path deploys)
 
-If the built frontend is published under a sub-path (e.g.
-`https://example.gitlab.io/ld-suite/`), set `OTS_BASE_PATH` at **build** time:
+If the web UI is published under a sub-path (e.g. `https://example.org/ots/`),
+set `OTS_BASE_PATH` at **build** time:
 
 ```bash
-OTS_BASE_PATH=/ld-suite/ npm run build
+OTS_BASE_PATH=/ots/ npm run build
 ```
 
-Defaults to `/`, so every existing deployment is unaffected.
+The router, links, API calls, `config.json` and `/embed/*` then all live below
+`/ots/`; `config.json` itself is fetched from `/ots/config.json`, and a
+root-relative `branding.logoUrl` resolves below the prefix too. Defaults to `/`,
+so every existing deployment is unaffected. Serving the whole instance under a
+prefix also needs `OTS_BASE_URL` and the reverse proxy set up to match: see
+[Serving under a path prefix](operations.md#serving-under-a-path-prefix) for the
+nginx and Traefik configuration.
 
 ---
 
@@ -322,8 +364,8 @@ pub trait Plugin: Send + Sync + 'static {
 }
 ```
 
-`PluginContext` gives a plugin the instance's `base_url` and two capability
-objects, both in the same plain-strings idiom so the plugin crate needs no
+`PluginContext` gives a plugin the instance's `base_url` and three capability
+objects, all in the same plain-strings idiom so the plugin crate needs no
 dependency on this project's internal types:
 
 - `store: Arc<dyn PluginStore>` — `query_json` / `update`, SPARQL against the
@@ -340,6 +382,15 @@ dependency on this project's internal types:
   `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
   consumer: a deployment-wide accounts/entitlements/LLM-usage dashboard at
   `/ext/accounts-dashboard/ui`.
+- `secrets: Arc<dyn PluginSecrets>` — the host's secrets module
+  ([docs/sources.md](sources.md#credentials-are-references-never-values)):
+  `env_secret("MY_PLUGIN_KEY")` reads the variable as the server reads its own
+  credentials — a reference (`env:NAME`, `file:/path`, `vault:…`) is resolved,
+  a raw value is accepted in development with a one-time warning and
+  **refused under `OTS_ENV=production`** (`Err`, with a message that never
+  carries the value). A plugin never reads a credential variable itself;
+  `plugins/accounts-dashboard` resolves `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` this
+  way. `ots_plugin_api::NoSecrets` is the stand-in for unit tests.
 - `Plugin::connectors` *(ots-plugin-api 0.3)* — datasource drivers for the
   SQL sources feature ([docs/sources.md](sources.md)): a plugin hands the host
   a `SourceConnector` per dialect, registered next to the built-in SQLite
@@ -348,6 +399,21 @@ dependency on this project's internal types:
   drivers, built on the shared `INFORMATION_SCHEMA` catalogue and profiler in
   `ots_plugin_api::sources::catalogue`; a driver for another dialect
   implements `Executor` and `Dialect` there and owns only its wire protocol.
+
+### Plugin settings
+
+Plugins read their settings from the environment. The shipped plugins use
+these:
+
+| Plugin | Variable | Default | Meaning |
+|---|---|---|---|
+| `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_APP_GROUPS` | *(unset)* | Comma-separated `app=group` pairs, e.g. `validation=data-stewards,forms-design=form-designers`. The dashboard lists them under *Per-app entitlements* exactly as configured; it does not work out which accounts belong to each group. Malformed pairs are skipped. |
+| `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` | *(unset)* | Base URL of an external LLM gateway whose usage ledger is merged into the dashboard's LLM section. The plugin calls `GET <url>/v1/usage?group_by=user` with a 5-second timeout on each dashboard load. If the gateway is unreachable or answers with an error, that part is marked unavailable with the reason and the rest of the dashboard still loads. |
+| `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
+| SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
+
+The `plugin-*` features are not part of `full`, so the published image
+contains none of these plugins. Build with the feature to use one.
 
 ### Writing a new plugin (cookiecutter flow)
 
@@ -385,11 +451,11 @@ Putting all three tiers together, a downstream fork's *entire* divergence from
 upstream can typically be expressed as: a `--seed-dir` of bundles, a
 `config.json`, and (only if needed) one or two `plugin-*` features turned on
 at build time — with zero patches to any file under `src/` or `frontend/src/`.
-The upstreamed port-fallback flag (`--port-fallback` / `PORT_FALLBACK`,
+The upstreamed port-fallback flag (`--port-fallback` / `OTS_PORT_FALLBACK_ENABLED`,
 default off) is a related, smaller piece of the same story: when set, a busy
 `--port` falls back to any free port instead of refusing to start, and the
 advertised base URL used for service-registry self-registration
-(`--discovery` / `LD_DISCOVERY`) is rewritten to match — see
+(`--discovery` / `OTS_DISCOVERY_ENABLED`) is rewritten to match — see
 `src/netutil.rs`.
 
 ---

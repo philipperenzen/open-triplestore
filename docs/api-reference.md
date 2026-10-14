@@ -2,7 +2,8 @@
 
 The full machine-readable API specification is available as an OpenAPI 3 JSON document. You can import it into **Postman**, **Insomnia**, or any OpenAPI-compatible tooling to explore and test all available endpoints.
 
-- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON, always up to date. (An interactive viewer is available at [API Reference](/api-docs).)
+- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON. A unit test (`spec_documents_every_mounted_route` in `src/server/openapi.rs`) fails the build when a route the server mounts is missing from it, or when it documents one the server does not mount. The only routes it leaves out on purpose are the Raft transport between cluster members, the consent step behind the `/oauth/authorize` page, the banner-preset pickers of the web UI and the `/api/ogc/` alias of `/api/ogc`; plugin routes under `/ext/{name}` are the plugin's own. Each copy is tailored to the caller: operations it may not reach are left out. (An interactive viewer is available at [API Reference](/api-docs).)
+- **Field names** — every JSON field the API reads or writes is snake_case (`statement_timeout_ms`, `has_more`, `focus_node`). Enum *values* keep their own casing (`needsHuman`, `dateTime`, `sameas-narrow`). Formats another specification defines keep that specification's names: the OGC API Features and 3D Tiles/glTF documents, ShExJ, CityJSON, WebAuthn credentials, SAML form fields and the LOV API v2 search envelope (`queryString`). A unit test (`spec_has_no_camel_case_properties` in `src/server/openapi.rs`) fails the build when a schema in the OpenAPI document has a property with an upper-case letter.
 - **Authentication** — every endpoint needs one of three levels, **none**, **token** or **admin**; [the table below](#authentication--the-level-every-endpoint-needs) states the level per endpoint. A **token** or **admin** endpoint wants an `Authorization: Bearer <token>` header, generated in **Settings → API Tokens**.
 
 ## Authentication — the level every endpoint needs
@@ -45,11 +46,11 @@ Three facts worth knowing before an instance is exposed:
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | `GET` | `/` | **none** | SPARQL 1.1 Service Description of this node. |
-| `GET` | `/health` | **none** | Liveness plus store counters. |
+| `GET` | `/health` | **none** | Liveness plus store counters and the build's `capabilities` (standards it serves). |
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
-| `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones. |
-| `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**. |
-| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header built from the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
+| `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones: the graphs of public datasets and of every published version of a public model-registry entry (the bundled vocabularies included). A private entry's version graphs are read by its owner, the owner organisation's members and admins, exactly as `/api/models/{id}/versions/{ver}/data` serves them. |
+| `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**; writing a model-registry graph is refused unless the caller may write the entry, whether or not they may read it. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph (a public dataset's, or a published version's of a public model) answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header: a dataset graph's own prefix table first, then the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
 | `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
 | `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
 | `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |
@@ -68,8 +69,22 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
 | `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset graphs the caller may read; a run that could not read them all is a test run. |
 | `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
+| `POST` | `/api/datasets/{dataset_id}/repair` | **token** | Propose a repair (see `docs/repair.md`): an explained RDF Patch computed in a throwaway copy of the dataset. Write access to the dataset; nothing is written. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals` | **token** | The dataset's kept repair proposals, to its writers. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}` | **token** | One kept proposal: its report, patch and a page of its actions, to the dataset's writers. |
+| `POST` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/apply` | **token** | Apply a kept proposal: its base is checked (`409`), the write gates run (`422`), and the commit names it. Write access. |
+| `POST` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/reject` | **token** | Reject a kept proposal. Write access. |
 | `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
+| `POST` | `/api/datasets/{dataset_id}/patch` | **token** | Apply an RDF Patch (writers only); `PA` / `PD` change the dataset's prefix table. See [versioning.md](versioning.md#rdf-patch). |
+| `GET` | `/api/datasets/{dataset_id}/prefixes` | **none** | A public dataset's prefix table; a private one only to those who may read it. |
+| `PUT` | `/api/datasets/{dataset_id}/prefixes` | **token** | Replace the prefix table (writers only); `PUT` / `DELETE …/prefixes/{label}` change one entry. |
+| `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld. |
+| `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
+| `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
+| `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
+| `DELETE` | `/api/models/{id}/versions/{ver}` | **token** | Delete one version, its graphs and its registry record: admins, and publishers who may write the entry (`403` otherwise). `409` for a published version without `?force=true`, and while datasets depend on it whatever `force` says; see [models.md](models.md#deleting-a-version). |
+| `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
 | `GET` | `/api/organisations/{org_id}` | **none** | As the listing: an organisation that owns something public is visible. |
@@ -84,8 +99,14 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
-| `POST` | `/api/shaclc/parse` | **token** | SHACLC → SHACL. Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
-| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACLC of a graph named by the caller. Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
+| `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
+| `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |
+| `POST` | `/api/reasoning/check` | **token** | OWL 2 DL consistency, entailment, satisfiability or profile check over graphs the caller may read, or over Turtle in the body; `?async=true` queues it as a job. |
+| `GET` | `/api/reasoning/jobs` | **token** | The caller's background reasoning jobs, newest first (an admin sees everyone's); `?dataset=` narrows them to one dataset. |
+| `GET` | `/api/reasoning/jobs/{job_id}` | **token** | A background reasoning job, to the user who started it and admins (`404` to anyone else). |
+| `GET` | `/api/datasets/{dataset_id}/rules` | **none** | A dataset's stored SWRL rules, to whoever may read the dataset; a private rule graph only to its writers. |
+| `POST` | `/api/datasets/{dataset_id}/rules` | **token** | Store a rule set with the dataset (its writers); the rules run at once. `PUT` / `DELETE …/rules/{set_id}` replace or remove one, `POST …/rules/run` runs them again. |
+| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
 | `GET` | `/api/admin/prefixes` | **admin** | What this deployment has decided its prefixes mean. |
@@ -100,8 +121,20 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/admin/changes/status` | **admin** | Capture state, epoch, cursors, caps. |
 | `PUT` | `/api/admin/changes/cursors/{name}` | **admin** | Move a consumer's bookmark. |
 | `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
+| `GET` | `/api/admin/changes/stats` | **admin** | Change-log size per dataset, pins, cursors, delta-version builds. |
+| `POST` | `/api/admin/versions/sweep` | **admin** | Purges versions of deleted datasets, unreferenced version graphs, stale pins, expired builds. |
+| `GET` | `/api/datasets/{id}/changes` | **none** | The dataset's change feed: rows of the graphs the caller may read, without quads. |
+| `GET` | `/api/datasets/{id}/changes/{seq}` | **none** | One change as an RDF Patch (`…/inverse` undoes it), if its graph is readable. |
+| `PUT` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | A reader's position in the feed; pins retention; its owner or an admin moves or drops it. |
+| `DELETE` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | Drop a cursor (its owner or an admin). |
+| `GET` | `/api/datasets/{id}/settings` | **none** | The dataset's Skolem and statement-provenance opt-ins, to its readers. |
+| `PUT` | `/api/datasets/{id}/settings` | **token** | Change them; dataset writers only (`403` otherwise). |
+| `POST` | `/api/datasets/{id}/patch` | **token** | Apply an RDF Patch; dataset writers only. |
 | `GET` | `/api/admin/users` | **admin** | The account directory. |
 | `GET` | `/api/admin/audit` | **admin** | The audit trail. |
+| `GET` | `/api/admin/config` | **admin** | Every setting with its effective value, default and source; secrets redacted. |
+| `GET` | `/api/admin/settings` | **admin** | The runtime settings an admin can change without a restart. |
+| `PUT` | `/api/admin/settings/{name}` | **admin** | Override a runtime setting, or reset it with `{"value": null}`; audit-logged. |
 | `GET` | `/api/replication/status` | **none** | This node's role and lag; a health signal, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | **admin** | What a follower needs to bootstrap. |
 | `GET` | `/api/replication/identity` | **admin** | The identity database, whole. |
@@ -109,6 +142,11 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/.well-known/void` | **none** | Catalog of the public datasets. |
 | `GET` | `/api-docs/openapi.json` | **none** | The spec is tailored to the caller: operations it may not reach are left out. |
 | `GET` | `/api/docs` | **none** | Documentation pages; admin-only pages are filtered out. |
+| `POST` | `/api/feedback` | **token** | Send a bug report, feature request or question to this instance's admins. Needs a write-capable token; rate-limited and capped at 20 a day per user. |
+| `GET` | `/api/feedback/mine` | **token** | Your own reports, with their status and the admins' reply. |
+| `GET` | `/api/admin/feedback` | **admin** | The feedback inbox; `?status=` and `?kind=` narrow it. |
+| `PATCH` | `/api/admin/feedback/{id}` | **admin** | Set a report's status, reply to the reporter, or keep an internal note. |
+| `DELETE` | `/api/admin/feedback/{id}` | **admin** | Delete a report. |
 
 `tests/api_reference_auth.rs` reads this table out of the shipped Markdown and
 fires an anonymous request at every row it can address, so a level stated here
@@ -121,11 +159,37 @@ and the level the router enforces cannot drift apart.
 - `/store` — Graph Store HTTP Protocol (GET/PUT/POST/DELETE, with `?graph=<iri>`)
 - `/api/{datasets|organisations|groups}/{id}/api-services/{slug}/run` — run a saved API service
 - `/resource/<path>` — content-negotiated IRI dereference
-- `/.well-known/void` — DCAT 2 / VoID dataset catalog (content-negotiated RDF)
+- `/.well-known/void` — DCAT 3 / VoID dataset catalog (content-negotiated RDF)
 - `/api/models/{id}/versions` — list model versions
 - `/api/models/{id}/latest/data` — latest published model (content-negotiated RDF)
 
 Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.
+
+## The dataset of a `/sparql` query
+
+A query's RDF dataset is the one SPARQL 1.1 defines, confined to the graphs the
+caller may read:
+
+- **The request names a dataset** with `FROM` / `FROM NAMED` in the query, or with
+  the protocol parameters `default-graph-uri` / `named-graph-uri` (each repeatable;
+  they take precedence over the query's own clauses, SPARQL 1.1 Protocol §2.1.4).
+  The clauses keep their meaning: `FROM <a>` alone makes `<a>` the default graph
+  and leaves no named graphs, `FROM NAMED <b>` alone gives an empty default graph
+  and the one named graph `<b>`, and several `FROM` graphs merge into one default
+  graph (a triple held in two of them counts once). A graph the caller may not read
+  is dropped, as if it were empty, so the answer does not reveal whether it exists.
+  An admin's dataset is used as written (admins may name any graph).
+- **The request names no dataset:** the default graph is the merge of every graph
+  the caller may read (every registered graph, for an admin), and those graphs are
+  also the named graphs, so a plain `SELECT * { ?s ?p ?o }` sees the data, which
+  this store keeps in named graphs. The service description advertises this as
+  `sd:UnionDefaultGraph`.
+- `?entailment=<regime>` adds the regime's entailment graph to the default graph
+  (and to the named graphs when no dataset is named).
+
+GET carries the parameters in the URL; a form-encoded POST in its body (or the URL);
+a POST with an `application/sparql-query` body in the URL. A parameter that is not
+an absolute IRI is a `400`.
 
 ## Batched SPARQL updates — `/sparql/batch`
 
@@ -159,14 +223,43 @@ stream). Streams without a policy never answer 410. Full fragments also carry
 `<node> ldes:immutable true`. `POST /api/ldes/sync` reports gain
 `nodes_gone`, `retention_policy` and `warnings`; existing fields are unchanged.
 
-## SHACL Compact Syntax — `?lenient`
+## LDES sync — an LDES 1.0 consumer
 
-`PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and
-`POST /api/shaclc/parse` parse SHACLC **strictly**: input the grammar does not
-recognise is a `400` whose body names the line, column and offending text, and
-nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
-the previous behaviour, in which unrecognised input is ignored and whatever parsed
-is kept. Status codes and response bodies are otherwise unchanged.
+`POST /api/ldes/sync` initialises as LDES 1.0 §3.1 says: `url` must be the
+event stream, its root node, a redirect to either, or a page with exactly one
+`tree:view`. Anything else (several views, none at all) is a **`502`** whose
+body names §3.1; it used to crawl whatever links it found. Redirects are
+followed within `OTS_LDES_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
+with back-off, and any other error status is a `502`. The report gains
+`stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
+`nodes_skipped_immutable`, `nodes_pruned`, `retries` and
+`versions_superseded`; existing fields keep their meaning, except that
+`members_skipped_older` no longer counts members on immutable pages the
+client did not fetch again (those are in `nodes_skipped_immutable`). See
+[ldes.md](ldes.md#syncing-a-stream-into-a-dataset).
+
+## SHACL Compact Syntax — `?dialect`, `?lenient`, `?base`, `?lossy`
+
+`PUT /api/datasets/{dataset_id}/shapes`, `PUT /api/shacl/shape-graphs/{id}/turtle`
+(both with `Content-Type: text/shaclc`) and `POST /api/shaclc/parse` parse the
+**W3C SHACL Compact Syntax** (the SHACL Community Group report's grammar)
+**strictly**: input the grammar does not allow is a `400` whose body names the
+line, column and offending token, and nothing is stored. **Changed after 0.7:** a
+bare non-XSD IRI after a path is `sh:class` (it was `sh:node`), and the old
+dialect's keywords are refused. `dialect=legacy` (deprecated, accepted for one
+more release, logged on every use) parses the 0.7 dialect instead, and only
+with it does `lenient=true` (or `1`) keep its old meaning of ignoring
+unrecognised input; `lenient` without it is a `400`. `POST /api/shaclc/parse`
+also takes `base=<iri>`, the initial base IRI.
+
+Every SHACL-C read — `GET /api/datasets/{dataset_id}/shapes?format=shaclc`,
+`GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` (or
+`Accept: text/shaclc`) and `POST /api/shaclc/serialize` — is lossless or a
+**`422`** `{"error": …, "losses": [{"subject", "predicate", "object",
+"reason"}, …]}` listing every triple the compact syntax cannot express (it used
+to answer `200` with those constraints silently missing). `lossy=true` returns
+the partial document with `200`, an `X-SHACLC-Losses` count header and the
+losses named in a leading comment block.
 
 ## Browse scope — `dataset_id`, `dataset_ids`, `org_id`, `org_ids`
 
@@ -202,7 +295,7 @@ scope.
 Every write records one row per graph it touched — the net delta as
 N-Quads when it fits, exact counts otherwise, or an honest `unknown` — with
 a dense sequence number in commit order. Capture is **off by default**
-(`OTS_CHANGE_CAPTURE=on` turns it on, and a replication leader keeps it on
+(`OTS_CHANGE_CAPTURE_ENABLED=on` turns it on, and a replication leader keeps it on
 regardless); with it off, `status` says so and the rows are empty. Admin-only, since rows carry quads from every tenant. See `docs/versioning.md` "Change log" for the row format,
 retention and the caps.
 
@@ -215,6 +308,57 @@ retention and the caps.
 
 A cursor is a consumer's bookmark: retention never deletes rows above the
 lowest live one, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30) is dropped.
+`GET /api/admin/changes/stats` returns `{ "enabled", "readable", "epoch",
+"size_bytes", "rows", "max_deleted_seq", "first_seq_commit", "datasets":
+{ <id>: { "rows", "payload_bytes", "materialised_quads", "materialisations",
+"checkpoints", "deltas" } }, "unregistered_graphs", "store_scoped_rows",
+"pins", "cursors" }`.
+
+A dataset's readers have their own view of the log:
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/api/datasets/<id>/changes?since=<seq>&limit=<n>&wait_ms=<ms>` | `{ "dataset_id", "enabled", "epoch", "rows", "next" }` — rows of the dataset's graphs the caller may read (plus store-scoped rows) above `since`, in commit order, without `added`/`removed` (`limit` 1–5000, default 500; `wait_ms` long-polls up to 30 000) |
+| `GET` | `/api/datasets/<id>/changes/<seq>` | the change as `application/rdf-patch` (`H id <urn:ots:change:<epoch>:<seq>>`, `H seq`, `H epoch`, `H dataset`, `H commit`); `404` when the change is not the dataset's or not readable, `410` when retention removed it, `409` (with `extent`, `added_n`, `removed_n`) when the row carries no quads |
+| `GET` | `/api/datasets/<id>/changes/<seq>/inverse` | the patch that undoes it (`H prev` names the forward patch) |
+| `PUT` | `/api/datasets/<id>/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor (`name`, `seq`, `owner`, `expires_at`); `403` for someone else's cursor, `400` for a bad name or `seq`, `409` while capture is off |
+| `DELETE` | `/api/datasets/<id>/changes/cursors/<name>` | `204`; `403` unless the owner or an admin; `404` |
+
+A commit on `GET /api/datasets/<id>/commits` gains `seq_from`, `seq_to`,
+`net_added` and `net_removed` when the change log recorded its write.
+
+## Dataset versions — checkpoints and deltas
+
+With change capture on, a version may be a *delta* rather than a copy (see
+`docs/versioning.md`, "Delta versions"). The routes are unchanged; additions:
+
+- `POST /api/datasets/<id>/versions` takes an optional `"checkpoint": true`,
+  and its `201` body adds `checkpoint_reason` when the version is a
+  checkpoint.
+- A version record adds `kind` (`checkpoint` | `delta`), `base_version`,
+  `patch_range` (`epoch`, `from_seq`, `to_seq`), `anchor` (`epoch`, `seq`),
+  `content_hash`, `quad_count`, `change_count`, `chain_broken` and
+  `materialised`; each `source_map` entry adds its graph's `content_hash`
+  and `quad_count`. A delta's `snapshot_graphs` name the graphs it builds
+  into.
+- A read of a delta's data (`…/versions/<ver>/data`, a `versions=` pin, a
+  dataset service's `?version=`, a saved query) builds it first: `503` with
+  `Retry-After` for an anonymous caller until it is built, `503` when the
+  build outlasts the write timeout, `507` over
+  `OTS_MATERIALISATION_MAX_QUADS`, `410` when its chain is broken.
+- `…/diff/<other>` adds `"source": "chain" | "materialised"`.
+- `…/restore` adds `"tier": 1 | 2`.
+- `DELETE …/versions/<ver>` answers `409` with `dependants` for a checkpoint
+  a delta chains from; `…/versions/gc` adds `kept_as_base`.
+- `POST …/publish` of a delta answers `409` when the build does not match
+  its content hash (the chain is then marked broken).
+
+`POST /api/datasets/<id>/patch` answers with `seq` (the write's last
+change-log sequence number) beside its net `added` / `removed`; `H
+base-digest` makes it conditional (`412` when the graphs no longer hash to
+it); RDF 1.2 triple terms are accepted as objects; anonymous is `401`.
+Graph Store `GET` of a graph holding RDF 1.2 triple terms as JSON-LD answers
+`406` before any byte is sent.
 
 ## Replication — `/api/replication/*` and a follower's `503`
 
@@ -224,7 +368,7 @@ See `docs/operations.md, "Replication"`. Two new routes, no change to existing o
 |---|---|---|
 | `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph), `datasets` (`id`, `graphs`) and `identity_version` (SQLite's change counter of the identity database; `null` for an in-memory one). Admin only (`401` / `403`). |
-| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes: `404` off a cluster, `401` without the secret, `503` while the member starts. |
+| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes, and not in the OpenAPI document: `404` off a cluster, `401` without the secret, `503` while the member starts. |
 | `GET` | `/api/replication/identity` | The identity database, whole, as a consistent SQLite snapshot (`application/vnd.sqlite3`). Admin only (`401` / `403`). |
 
 `GET /api/admin/changes` takes `wait_ms` (at most 30000): when no row is

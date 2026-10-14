@@ -155,7 +155,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         json!({
             "id": "pgsrc", "name": "A PostgreSQL source", "dialect": "postgresql",
             "host": t.host, "port": t.port, "database": t.db, "username": t.user,
-            "credential": "env:OTS_PG_HTTP_TEST_PASSWORD", "statementTimeoutMs": 5000,
+            "credential": "env:OTS_PG_HTTP_TEST_PASSWORD", "statement_timeout_ms": 5000,
             "options": { "search_path": schema },
         }),
     )
@@ -179,15 +179,15 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         .iter()
         .find(|tb| tb["name"] == "products")
         .unwrap_or_else(|| panic!("{txt}"));
-    assert_eq!(products["primaryKey"][0], "product_id");
+    assert_eq!(products["primary_key"][0], "product_id");
     let price = products["columns"]
         .as_array()
         .unwrap()
         .iter()
         .find(|c| c["name"] == "price")
         .unwrap();
-    assert_eq!(price["genericType"], "decimal");
-    assert_eq!(price["nativeType"], "numeric(10,2)");
+    assert_eq!(price["generic_type"], "decimal");
+    assert_eq!(price["native_type"], "numeric(10,2)");
 
     let (st, profile, txt) = req(
         &app,
@@ -229,7 +229,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         Method::POST,
         "/api/sources/pgsrc/dry-run",
         &admin,
-        json!({ "mapping": "pg-products", "sampleSize": 2 }),
+        json!({ "mapping": "pg-products", "sample_size": 2 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -245,7 +245,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     assert_eq!(run["status"], "succeeded");
-    assert_eq!(run["rowsExtracted"], 3);
+    assert_eq!(run["rows_extracted"], 3);
     let graph = run["graph"].as_str().unwrap().to_string();
 
     let resp = app
@@ -262,10 +262,12 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let nt = body_text(resp.into_body()).await;
+    // NUMERIC(10,2) prints two decimals; a datatype-override literal carries
+    // the value's natural (canonical) lexical form (R2RML §10.3).
     assert!(nt.contains("<http://example.org/products/product_2> <http://example.org/products/ontology#hasPrice> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>"), "{nt}");
     assert!(nt.contains("\"Bolt\""), "{nt}");
-    // The timestamp arrived in XSD shape, took the natural datatype, and the
-    // store canonicalised it (as it did the decimals above).
+    // The timestamp took the natural datatype in its canonical lexical form
+    // (R2RML §10.2: UTC written as `Z`).
     assert!(
         nt.contains("\"2026-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"),
         "{nt}"

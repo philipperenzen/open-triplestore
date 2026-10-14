@@ -3,8 +3,12 @@
 // getViewerFeed). termDisplay owns it and pulls in nothing itself, so this stays
 // free of the import cycle api.ts is otherwise careful to avoid.
 import { uiLang } from './ontology/termDisplay';
+import { BASE_PATH, withBase } from './basePath';
 
-const API_BASE = '';
+// The backend sits under the same path prefix as the web UI (a reverse proxy
+// strips it for both, see docs/operations.md): '' at the root, `/ots` under
+// OTS_BASE_PATH=/ots/. Every URL below is `${API_BASE}/api/…`.
+const API_BASE = BASE_PATH;
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
 // The server sets HttpOnly cookies for the actual auth; these in-memory copies
@@ -157,12 +161,12 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
   const opts: RequestInit = { method, headers: authHeaders(), credentials: 'include' };
   if (init.signal) opts.signal = init.signal;
   if (body) opts.body = JSON.stringify(body);
-  let res = await fetch(`${API_BASE}${path}`, opts);
+  let res = await fetch(withBase(path), opts);
 
   // Transparent retry on 429 (rate limited).
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
-    res = await fetch(`${API_BASE}${path}`, opts);
+    res = await fetch(withBase(path), opts);
   }
 
   if (res.status === 401 && true /* always try refresh if 401 */) {
@@ -170,7 +174,7 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
     const refreshed = await tryRefreshToken();
     if (refreshed) {
       opts.headers = authHeaders();
-      res = await fetch(`${API_BASE}${path}`, opts);
+      res = await fetch(withBase(path), opts);
     } else {
       clearTokens();
       // Only redirect to login if the user was previously authenticated.
@@ -197,25 +201,28 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
 // Turtle). Uses the same cookie-based auth + 429/401 handling as `request`.
 async function requestRaw(method, path, body, contentType) {
   const makeOpts = (): RequestInit => ({ method, headers: { 'Content-Type': contentType }, credentials: 'include', body });
-  let res = await fetch(`${API_BASE}${path}`, makeOpts());
+  let res = await fetch(withBase(path), makeOpts());
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
-    res = await fetch(`${API_BASE}${path}`, makeOpts());
+    res = await fetch(withBase(path), makeOpts());
   }
   if (res.status === 401) {
     const wasAuthenticated = _accessToken !== null;
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch(`${API_BASE}${path}`, makeOpts());
+      res = await fetch(withBase(path), makeOpts());
     } else {
       clearTokens();
       if (wasAuthenticated) window.dispatchEvent(new CustomEvent('auth-expired'));
     }
   }
   if (!res.ok) {
-    const msg = await extractErrorMessage(res);
-    const err = new ApiError(msg);
+    // The structured body too: an RDF Patch refused by a SHACL write gate
+    // answers 422 with the report, which the caller shows.
+    const { message, body: errorBody } = await extractError(res);
+    const err = new ApiError(message);
     err.status = res.status;
+    err.body = errorBody;
     throw err;
   }
   const ct = res.headers.get('content-type') || '';
@@ -235,17 +242,30 @@ export const refreshAccessToken = () => {
   return request('POST', '/api/auth/refresh', { refresh_token: refreshToken });
 };
 
-export const logout = async () => {
+/**
+ * Sign out: the server revokes the refresh token (this one, else the cookie's)
+ * and clears the HttpOnly cookies. For a SAML session it also answers with the
+ * IdP's Single Logout URL, which this returns so the caller can send the
+ * browser there; otherwise `null`.
+ */
+export const logout = async (): Promise<string | null> => {
+  let samlLogoutUrl: string | null = null;
   try {
     // M-2: send credentials so the HttpOnly cookies are cleared server-side
-    await fetch(`${API_BASE}/api/auth/logout`, {
+    const refreshToken = getRefreshToken();
+    const res = await fetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: '{}',
+      body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
     });
+    if (res.status === 200) {
+      const body = await res.json().catch(() => null);
+      if (body && typeof body.saml_logout_url === 'string') samlLogoutUrl = body.saml_logout_url;
+    }
   } catch {}
   clearTokens();
+  return samlLogoutUrl;
 };
 
 export const getMe = () => request('GET', '/api/auth/me');
@@ -473,10 +493,10 @@ export const listSavedQueryTests = (scope: SavedQueryScope, ownerId: string, slu
   request('GET', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests`);
 export const acknowledgeSavedQueryTest = (scope: SavedQueryScope, ownerId: string, slug: string, testId: string) =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests/${encodeURIComponent(testId)}/ack`);
-export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; savedRevision: number | null }> =>
+export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; valid: boolean; parse_error: string | null; saved_revision: number | null }> =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/repair`, data);
 export const savedQueryOpenApiUrl = (scope: SavedQueryScope, ownerId: string) =>
-  `/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`;
+  withBase(`/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`);
 
 /// Run a saved query as an API. Returns parsed SPARQL-results JSON plus the
 /// dataset version that served it (from the `x-ots-dataset-version` header).
@@ -541,7 +561,7 @@ export const getDatasetBranches = (id) => request('GET', `/api/datasets/${id}/br
 export const createDatasetBranch = (id, branch, fromVersion, targetVersion?) =>
   request('POST', `/api/datasets/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
 export function getDatasetVersionDataUrl(id, ver, format?, graph?) {
-  let url = `/api/datasets/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = withBase(`/api/datasets/${id}/versions/${ver}/data?format=${format || 'trig'}`);
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }
@@ -768,16 +788,22 @@ export interface LlmHealth {
   /** Set only by `llmHealth()`'s own fallback: the request failed, so nothing
    *  is known about the gateway (never sent by the server). */
   error?: true;
-  /** Gateway base URL the server talks to. */
-  gateway?: string;
+  /** Gateway base URL the server talks to; `null` when none is configured. */
+  gateway?: string | null;
+  /** Why the gateway probe failed, when it did (connection or HTTP error). */
+  unreachable_reason?: string | null;
+  /** `false`: AI is turned off for this caller (a `0` budget, or an anonymous
+   *  caller with anonymous AI off). */
+  available_to_caller?: boolean;
   /** Body of the gateway's `/v1/models` (or `/health`) response. */
   detail?: unknown;
-  rate_limit_per_min?: number;
-  rate_limit_anon_per_min?: number;
+  /** Requests per minute: `0` = refused, `null` = unlimited. */
+  rate_limit_per_min?: number | null;
+  rate_limit_anon_per_min?: number | null;
   caller?: 'user' | 'guest';
   chat_model?: string;
   context_tokens?: number | null;
-  /** `LLM_GATEWAY_URL` is set and not blank; `false` = the server falls back to its built-in default. */
+  /** `OTS_LLM_GATEWAY_URL` is set; `false` = the AI features are off. */
   configured?: boolean;
   services?: LlmServiceStatus[];
 }
@@ -942,6 +968,15 @@ export const adminDeleteOauthClient = (clientId) =>
   request('DELETE', `/api/admin/oauth-clients/${encodeURIComponent(clientId)}`);
 
 // ─── Admin: instance settings (admin only; server enforces) ──────────────────
+// The effective configuration: every setting with its value and source
+// (secrets redacted). Returns { profile, settings, warnings }.
+export const adminGetConfig = () => request('GET', '/api/admin/config');
+// Runtime settings an admin can change without a restart. Returns { settings }.
+export const adminListSettings = () => request('GET', '/api/admin/settings');
+// Override one (validated like its environment variable), or reset it with
+// value null. Returns { setting }.
+export const adminSetSetting = (name: string, value: string | null) =>
+  request('PUT', `/api/admin/settings/${encodeURIComponent(name)}`, { value });
 export const adminGetGuestRegistration = () =>
   request('GET', '/api/admin/settings/guest-registration'); // { enabled }
 // Flipping OFF bulk-disables guest accounts (with a clear sign-in message);
@@ -1039,7 +1074,7 @@ export const getShapeGraphCommits = (id, limit = 50) =>
 
 /** Fetch the shape graph's Turtle (or SHACLC via `?format=shaclc`). */
 export async function getShapeGraphTurtle(id: string, format: 'turtle' | 'shaclc' = 'turtle'): Promise<string> {
-  const url = `/api/shacl/shape-graphs/${id}/turtle${format === 'shaclc' ? '?format=shaclc' : ''}`;
+  const url = withBase(`/api/shacl/shape-graphs/${id}/turtle${format === 'shaclc' ? '?format=shaclc' : ''}`);
   const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) throw new Error(`Failed to load shape graph turtle: ${res.status}`);
   return res.text();
@@ -1060,7 +1095,7 @@ export async function putShapeGraphTurtle(
 ): Promise<{ version: number }> {
   const { message = '', contentType = 'text/turtle' } = options;
   const query = message.trim() ? `?message=${encodeURIComponent(message.trim())}` : '';
-  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle${query}`, {
+  const res = await fetch(`${API_BASE}/api/shacl/shape-graphs/${id}/turtle${query}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': contentType },
@@ -1160,6 +1195,24 @@ export const listDocs = () => request('GET', '/api/docs');
 export const getDoc = (slug) => request('GET', `/api/docs/${slug}`);
 export const saveDoc = (slug, body) => request('PUT', `/api/docs/${slug}`, body);
 export const deleteDoc = (slug) => request('DELETE', `/api/docs/${slug}`);
+
+// Feedback: bug reports, feature requests and questions for this instance's admins.
+export const submitFeedback = (body: {
+  kind: string; title: string; body: string; page?: string | null; include_browser?: boolean;
+}) => request('POST', '/api/feedback', body);
+export const listMyFeedback = () => request('GET', '/api/feedback/mine');
+export const adminListFeedback = (filter: { status?: string; kind?: string } = {}) => {
+  const q = new URLSearchParams();
+  if (filter.status) q.set('status', filter.status);
+  if (filter.kind) q.set('kind', filter.kind);
+  const qs = q.toString();
+  return request('GET', `/api/admin/feedback${qs ? `?${qs}` : ''}`);
+};
+export const adminUpdateFeedback = (id: string, body: {
+  status?: string; admin_response?: string; admin_note?: string;
+}) => request('PATCH', `/api/admin/feedback/${encodeURIComponent(id)}`, body);
+export const adminDeleteFeedback = (id: string) =>
+  request('DELETE', `/api/admin/feedback/${encodeURIComponent(id)}`);
 // Pass { test: true } for a dry run that validates but is NOT recorded.
 export const runPipeline = (id, opts: { test?: boolean } = {}) =>
   request('POST', `/api/shacl/pipelines/${id}/run${opts.test ? '?test=true' : ''}`, {});
@@ -1246,7 +1299,7 @@ export function deleteGraph(graphIri) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
+  return fetchRetry429(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'DELETE', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return true;
   });
@@ -1257,7 +1310,7 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
   const headers = { 'Content-Type': contentType };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const method = replace ? 'PUT' : 'POST';
-  const url = `/store?graph=${encodeURIComponent(graphIri)}`;
+  const url = withBase(`/store?graph=${encodeURIComponent(graphIri)}`);
   let res = await fetch(url, { method, headers, body });
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
@@ -1348,7 +1401,7 @@ export function exportGraph(graphIri) {
   const token = getAccessToken();
   const headers = { 'Accept': 'text/turtle' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
+  return fetchRetry429(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'GET', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   });
@@ -1363,11 +1416,11 @@ export async function sparqlUpdate(update) {
     return h;
   }
   // A 429 rejection happens before the update executes, so retrying is safe.
-  let res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+  let res = await fetchRetry429(withBase('/sparql'), { method: 'POST', headers: buildHeaders(), body: update });
   if (res.status === 401 && getRefreshToken()) {
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+      res = await fetchRetry429(withBase('/sparql'), { method: 'POST', headers: buildHeaders(), body: update });
     } else {
       clearTokens();
       window.dispatchEvent(new CustomEvent('auth-expired'));
@@ -1394,7 +1447,7 @@ async function uploadImage(path, file) {
   formData.append('file', file);
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { method: 'PUT', headers, body: formData });
+  const res = await fetch(withBase(path), { method: 'PUT', headers, body: formData });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -1443,7 +1496,7 @@ export function uploadAsset(datasetId, file, onProgress, folder = '') {
   formData.append('file', file);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/datasets/${datasetId}/assets`);
+    xhr.open('POST', withBase(`/api/datasets/${datasetId}/assets`));
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     if (onProgress) {
       xhr.upload.addEventListener('progress', (e) => {
@@ -1514,7 +1567,7 @@ export function fetchAssetContent(datasetId, assetId) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/api/datasets/${datasetId}/assets/${assetId}`, { headers });
+  return fetch(`${API_BASE}/api/datasets/${datasetId}/assets/${assetId}`, { headers });
 }
 
 // Auth state
@@ -1540,7 +1593,7 @@ export interface ModelLicenseRef {
 export interface ModelAttribution {
   /** The bundled file, relative to /vocab/ (e.g. "dcat/2.0.0.ttl"). */
   file: string;
-  /** Empty when no licence is known (DOAP). */
+  /** Empty when no licence is known (a DOAP copy seeded by 0.7.0 or earlier). */
   licenses: ModelLicenseRef[];
   /** Copyright notices or, where a source states none, its creator credit. */
   copyright: string[];
@@ -1642,7 +1695,14 @@ export const updateDataModel = (id, data) => request('PATCH', `/api/models/${id}
 
 export const listDataModelVersions = (id) => request('GET', `/api/models/${id}/versions`);
 export const getDataModelVersion = (id, ver) => request('GET', `/api/models/${id}/versions/${ver}`);
-export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/models/${id}/versions/${ver}`);
+/**
+ * Delete one model version (admins, and publishers who may write the entry).
+ * A published version answers 409 unless `force`; datasets depending on it
+ * answer 409 whatever `force` says. The 409 body (on `err.body`) carries
+ * `reasons` and `force_allowed`.
+ */
+export const deleteDataModelVersion = (id, ver, force = false) =>
+  request('DELETE', `/api/models/${id}/versions/${ver}${force ? '?force=true' : ''}`);
 export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/models/${id}/versions/${ver}`, { notes });
 export const stageDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/stage`);
 export const publishDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/publish`);
@@ -1651,6 +1711,10 @@ export const createDataModelDraft = (id, fromVer, targetVer) =>
 export const getDataModelDiff = (id, from, to) =>
   request('GET', `/api/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
 export const getDataModelCollaborators = (id) => request('GET', `/api/models/${id}/collaborators`);
+/** Datasets that declare conformance to this model, with their pinned version and whether a newer one is published. */
+export const getDataModelDependents = (id) => request('GET', `/api/models/${id}/dependents`);
+/** The dataset's resolved conformance layer (model version, latest published, update_available, shapes). */
+export const getDatasetConformance = (id) => request('GET', `/api/datasets/${id}/conformance`);
 export const getDataModelBranches = (id) => request('GET', `/api/models/${id}/branches`);
 export const getDataModelCommits = (id, branch) =>
   request('GET', `/api/models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
@@ -1673,7 +1737,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
   if (notes) form.append('notes', notes);
   if (merge) form.append('merge', 'true');
   form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/models/${id}/versions`, { method: 'POST', headers, body: form })
+  return fetch(`${API_BASE}/api/models/${id}/versions`, { method: 'POST', headers, body: form })
     .then(async (res) => {
       if (!res.ok) {
         const msg = await res.text().then(t => {
@@ -1688,7 +1752,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
 }
 
 export function getDataModelVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = withBase(`/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`);
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }
@@ -1715,6 +1779,24 @@ export const adminUpdateOauthProvider = (id, data) =>
 
 export const adminDeleteOauthProvider = (id) =>
   request('DELETE', `/api/admin/oauth/providers/${id}`);
+
+/** Read IdP metadata from `{ url }` (https) or `{ xml }` into provider fields. */
+export const adminReadSamlMetadata = (data: { url?: string; xml?: string }) =>
+  request('POST', '/api/admin/oauth/saml-metadata', data);
+
+/** Our entity ID, endpoints and SP keys, and the IdP certificates. */
+export const adminSamlOverview = (id) =>
+  request('GET', `/api/admin/oauth/providers/${id}/saml`);
+
+/** Add an SP key: generated, or `{ private_key, certificate }`. */
+export const adminCreateSamlKey = (id, data = {}) =>
+  request('POST', `/api/admin/oauth/providers/${id}/saml/keys`, data);
+
+export const adminActivateSamlKey = (id, kid) =>
+  request('POST', `/api/admin/oauth/providers/${id}/saml/keys/${encodeURIComponent(kid)}/activate`, {});
+
+export const adminDeleteSamlKey = (id, kid) =>
+  request('DELETE', `/api/admin/oauth/providers/${id}/saml/keys/${encodeURIComponent(kid)}`);
 
 // ─── Admin: Endpoint ACL ──────────────────────────────────────────────────────
 
@@ -1951,3 +2033,538 @@ export interface ResolvedPrefixLookup {
   namespace: string;
   source: string;
 }
+
+// ─── Identity policy (owl:sameAs) — docs/reasoning.md "Identity policy" ─────────
+
+export type IdentityPolicyName = 'sameas-off' | 'sameas-narrow' | 'sameas-full';
+export type IdentityScope = 'dataset' | 'organisation';
+
+/** `GET/PUT/DELETE /api/{datasets|organisations}/:id/identity`. */
+export interface IdentityPolicyState {
+  scope: IdentityScope;
+  id: string;
+  /** The policy in force. */
+  policy: IdentityPolicyName;
+  /** Where it comes from: this resource's own setting, its organisation, or the built-in default. */
+  source: 'dataset' | 'organisation' | 'default';
+  /** This resource's own setting; null when it inherits. */
+  setting: IdentityPolicyName | null;
+  description: string;
+  /** Correspondence predicates that are never identity, whatever the policy. */
+  never_identity: string[];
+  options: { policy: IdentityPolicyName; description: string }[];
+}
+
+const identityPath = (scope: IdentityScope, id: string) =>
+  `/api/${scope === 'dataset' ? 'datasets' : 'organisations'}/${encodeURIComponent(id)}/identity`;
+
+export const getIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
+  request('GET', identityPath(scope, id));
+export const setIdentityPolicy = (scope: IdentityScope, id: string, policy: IdentityPolicyName): Promise<IdentityPolicyState> =>
+  request('PUT', identityPath(scope, id), { policy });
+/** Drop the resource's own setting: back to the organisation's or the default. */
+export const clearIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
+  request('DELETE', identityPath(scope, id));
+
+
+// ─── Uploads with progress ───────────────────────────────────────────────────
+// XMLHttpRequest, not fetch, because only XHR reports upload progress. Same
+// auth as uploadAsset (the HttpOnly cookie, plus the in-memory bearer token
+// when there is one). A non-2xx answer rejects with an ApiError carrying the
+// parsed JSON body, so a caller can show a refusal's report (a strict
+// container import's `validation`, say) and not just its sentence.
+export function xhrSend(
+  method: string,
+  path: string,
+  body: XMLHttpRequestBodyInit,
+  opts: { contentType?: string; onProgress?: (fraction: number) => void } = {},
+): Promise<any> {
+  const token = getAccessToken();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, withBase(path));
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
+    if (opts.onProgress) {
+      const report = opts.onProgress;
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && e.total > 0) report(e.loaded / e.total);
+      });
+    }
+    xhr.onload = () => {
+      let parsed: any = null;
+      try { parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed ?? xhr.responseText);
+        return;
+      }
+      const msg = (parsed && (parsed.message || parsed.error || parsed.detail))
+        || xhr.responseText?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        || xhr.statusText
+        || 'Request failed';
+      const err = new ApiError(msg);
+      err.status = xhr.status;
+      err.body = parsed;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.send(body);
+  });
+}
+
+// ─── Linked Data Event Streams ───────────────────────────────────────────────
+export interface LdesRetention {
+  full_log_duration?: string;
+  version_amount?: number;
+  version_duration?: string;
+  version_delete_duration?: string;
+  starting_from?: string;
+}
+export interface LdesConfig {
+  dataset_id: string;
+  enabled: boolean;
+  configured: boolean;
+  page_size: number;
+  polling_interval: number;
+  retention: LdesRetention | null;
+  members: number;
+  sealed_nodes: number;
+  created_at: string | null;
+  stream: string;
+  can_write: boolean;
+}
+export const getLdesConfig = (datasetId: string): Promise<LdesConfig> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/ldes/config`);
+/** Enable or disable the stream; `retention: {}` clears the policy, absent leaves it. */
+export const putLdesStream = (datasetId: string, body: {
+  enabled: boolean; page_size?: number; polling_interval?: number; retention?: LdesRetention;
+}) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/ldes`, body);
+/** Run a sync now (adds the job when it is new). Answers the run's report. */
+export const runLdesSync = (body: { url: string; dataset_id: string; graph_iri: string }) =>
+  request('POST', '/api/ldes/sync', body);
+export interface LdesSyncJob {
+  dataset_id: string;
+  dataset_name: string | null;
+  source_url: string;
+  graph_iri: string | null;
+  created_by: string | null;
+  last_timestamp: string | null;
+  members_applied: number;
+  synced_at: string | null;
+  last_run_at: string | null;
+  last_status: 'ok' | 'error' | null;
+  last_error: string | null;
+  last_report: Record<string, any> | null;
+}
+export const adminListLdesSyncs = (): Promise<LdesSyncJob[]> => request('GET', '/api/admin/ldes/syncs');
+export const adminForgetLdesSync = (datasetId: string, url: string) =>
+  request('DELETE', `/api/admin/ldes/syncs?dataset_id=${encodeURIComponent(datasetId)}&url=${encodeURIComponent(url)}`);
+
+// ─── Linked-document containers (ICDD) ───────────────────────────────────────
+export const listContainerProfiles = () => request('GET', '/api/containers/profiles');
+/** Import a container archive into a dataset; `strict` refuses (422 + `validation`) a non-conformant one. */
+export const importContainer = (
+  datasetId: string, file: Blob, opts: { strict?: boolean; profile?: string } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const q = new URLSearchParams();
+  if (opts.profile) q.set('profile', opts.profile);
+  if (opts.strict) q.set('strict', 'true');
+  const qs = q.toString();
+  return xhrSend('POST', `/api/datasets/${encodeURIComponent(datasetId)}/containers/import${qs ? `?${qs}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+};
+/** Validate a container without storing anything: `{profile, conforms, violations, warnings, findings}`. */
+export const validateContainer = (file: Blob, onProgress?: (f: number) => void, profile?: string) =>
+  xhrSend('POST', `/api/containers/validate${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`,
+    file, { contentType: 'application/zip', onProgress });
+/**
+ * Export a dataset as a container. The archive comes back with the export's
+ * own validation in headers (X-Container-Conforms / -Validation / -Findings),
+ * which a plain download link would hide, so it is fetched here and the
+ * caller saves the blob.
+ */
+export async function exportContainer(datasetId: string, profile = 'icdd'): Promise<{
+  blob: Blob; filename: string; headers: { conforms: string | null; validation: string | null; findings: string | null };
+}> {
+  const res = await fetchRetry429(
+    withBase(`/api/datasets/${encodeURIComponent(datasetId)}/containers/export?profile=${encodeURIComponent(profile)}`),
+    { credentials: 'include' },
+  );
+  if (!res.ok) {
+    const { message, body } = await extractError(res);
+    const err = new ApiError(message);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  const cd = res.headers.get('content-disposition') || '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return {
+    blob: await res.blob(),
+    filename: m ? m[1] : `${datasetId}.icdd`,
+    headers: {
+      conforms: res.headers.get('x-container-conforms'),
+      validation: res.headers.get('x-container-validation'),
+      findings: res.headers.get('x-container-findings'),
+    },
+  };
+}
+
+// ─── CityJSON ingest ─────────────────────────────────────────────────────────
+/** Convert (and with `preview`, only convert) a CityJSON file into a dataset graph. */
+export const ingestCityJson = (
+  datasetId: string, file: File,
+  opts: { targetGraph?: string; publicAsset?: boolean; preview?: boolean } = {},
+  onProgress?: (f: number) => void,
+) => {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (opts.targetGraph) fd.append('target_graph', opts.targetGraph);
+  if (opts.publicAsset) fd.append('public', 'true');
+  return xhrSend('POST',
+    `/api/datasets/${encodeURIComponent(datasetId)}/ingest/cityjson${opts.preview ? '?preview=true' : ''}`,
+    fd, { onProgress });
+};
+
+// ─── Constraint specifications (IDS) ─────────────────────────────────────────
+export const listSpecImporters = () => request('GET', '/api/shacl/importers');
+export const listSpecExporters = () => request('GET', '/api/shacl/exporters');
+/**
+ * Import a specification document (IDS XML) as SHACL. A refused document
+ * rejects with `err.body = {error, stage, problems}` — the audit report.
+ */
+export const importSpec = (
+  format: string, xml: string,
+  opts: { create?: boolean; name?: string; visibility?: string } = {},
+) => {
+  const q = new URLSearchParams();
+  if (opts.create) q.set('create', 'true');
+  if (opts.name) q.set('name', opts.name);
+  if (opts.visibility) q.set('visibility', opts.visibility);
+  const qs = q.toString();
+  return requestRaw('POST', `/api/shacl/import/${encodeURIComponent(format)}${qs ? `?${qs}` : ''}`, xml, 'application/xml');
+};
+/** Export Turtle shapes: `{format, document, specification_count, verbatim_specifications, losses}`. */
+export const exportSpec = (format: string, turtle: string, title?: string) =>
+  requestRaw('POST', `/api/shacl/export/${encodeURIComponent(format)}${title ? `?title=${encodeURIComponent(title)}` : ''}`,
+    turtle, 'text/turtle');
+
+// ─── Admin: backups and the text index ───────────────────────────────────────
+export const adminBackupStatus = () => request('GET', '/api/admin/backup/status');
+export const adminListBackups = () => request('GET', '/api/admin/backup');
+export const adminCreateBackup = () => request('POST', '/api/admin/backup', {});
+export const adminVerifyBackup = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/verify`, {});
+export const adminStageRestore = (id: string) =>
+  request('POST', `/api/admin/backup/${encodeURIComponent(id)}/restore`, {});
+export const adminCancelRestore = () => request('DELETE', '/api/admin/backup/restore');
+export const textSearchStatus = () => request('GET', '/api/text-search/status');
+export const textSearchReindex = () => request('POST', '/api/text-search/reindex', {});
+// ─── Dataset reasoning — docs/reasoning.md, docs/owl2-dl.md ─────────────────────
+
+export type EntailmentRegime = 'rdfs' | 'owl2-rl' | 'owl2-el' | 'owl2-ql' | 'owl2-dl' | 'skos';
+export type MaterializeRegime = Exclude<EntailmentRegime, 'skos'>;
+
+/** What the last run of a dataset's stored SWRL rules did. */
+export interface RulesReport {
+  rule_graphs: string[];
+  rules: number;
+  target_graph: string;
+  triples_inferred: number;
+  rounds: number;
+  converged: boolean;
+  error?: string | null;
+  ran_at: string;
+}
+
+/** `GET /api/datasets/:id/entailment`. */
+export interface EntailmentState {
+  dataset_id: string;
+  regime: EntailmentRegime | null;
+  mode: 'materialize' | 'off';
+  graph?: string;
+  updated_at?: string;
+  last_run_at?: string | null;
+  last_triples?: number | null;
+  consistent?: boolean | null;
+  inconsistency?: { rule: string; detail: string } | null;
+  /** queued | running | ok | inconsistent | not_converged | not_in_profile | unavailable | timeout | too_large | failed */
+  status?: string | null;
+  error?: string | null;
+  backend?: string | null;
+  complete?: boolean | null;
+  /** `owl2-rl` / `skos`: also derive `x owl:sameAs x` for every term. */
+  eq_ref?: boolean;
+  identity: IdentityPolicyName;
+  identity_source: 'dataset' | 'organisation' | 'default';
+  identity_options: IdentityPolicyName[];
+  reasoning_sources: string[];
+  /** The server's OWL 2 DL backend; null: `owl2-dl` is unavailable. */
+  dl_backend: string | null;
+  inference_graph: string;
+  rules: { graphs: string[]; count: number; error: string | null; last_run: RulesReport | null } | null;
+}
+
+export const getEntailment = (datasetId: string): Promise<EntailmentState> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`);
+export const setEntailment = (
+  datasetId: string,
+  body: { regime: EntailmentRegime; mode: 'materialize' | 'off'; eq_ref?: boolean },
+) => request('PUT', `/api/datasets/${encodeURIComponent(datasetId)}/entailment`, body);
+
+/** One axiom construct a regime left out (outside its profile). */
+export interface IgnoredConstruct { construct: string; count: number; example?: string | null }
+
+/** `POST /api/reasoning/materialize` (200). */
+export interface MaterializeReport {
+  regime: string;
+  triples_added: number;
+  iterations: number;
+  elapsed_ms: number;
+  target_graph: string;
+  sources: string[] | null;
+  consistent: boolean | null;
+  ignored?: IgnoredConstruct[];
+  /** The identity policy the run applied. */
+  identity?: IdentityPolicyName;
+  backend?: string;
+  backend_version?: string | null;
+  complete?: boolean;
+  warnings?: string[];
+}
+
+/** The 202 answer of an `?async=true` run. */
+export interface QueuedJob { job_id: string; status: string; location: string }
+
+export const materializeEntailment = (
+  body: { regime: MaterializeRegime; dataset?: string; target_graph?: string; source_graphs?: string[]; eq_ref?: boolean; identity?: IdentityPolicyName },
+  runAsync = false,
+): Promise<MaterializeReport | QueuedJob> =>
+  request('POST', `/api/reasoning/materialize${runAsync ? '?async=true' : ''}`, body);
+
+export type CheckTask = 'consistency' | 'entailment' | 'satisfiability' | 'profile';
+
+/** `POST /api/reasoning/check` (200). */
+export interface CheckResult {
+  task: CheckTask;
+  result: 'true' | 'false' | 'unknown';
+  regime: string;
+  backend: string;
+  backend_version?: string | null;
+  complete: boolean;
+  sources: string[] | null;
+  warnings?: string[];
+  detail?: string;
+  in_profile?: boolean;
+  violations?: { rule: string; detail: string }[];
+  consistent?: boolean | null;
+  rule?: string;
+}
+
+export const reasoningCheck = (
+  body: { task: CheckTask; dataset?: string; source_graphs?: string[]; premise?: string; conclusion?: string; class?: string; identity?: IdentityPolicyName },
+  runAsync = false,
+): Promise<CheckResult | QueuedJob> =>
+  request('POST', `/api/reasoning/check${runAsync ? '?async=true' : ''}`, body);
+
+/** A background materialisation or check. */
+export interface ReasoningJob {
+  id: string;
+  kind: 'materialize' | 'check';
+  dataset: string | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  http_status: number | null;
+  result: Record<string, unknown> | null;
+}
+
+export const listReasoningJobs = (datasetId?: string): Promise<{ jobs: ReasoningJob[] }> =>
+  request('GET', `/api/reasoning/jobs${datasetId ? `?dataset=${encodeURIComponent(datasetId)}` : ''}`);
+export const getReasoningJob = (jobId: string): Promise<ReasoningJob> =>
+  request('GET', `/api/reasoning/jobs/${encodeURIComponent(jobId)}`);
+/** Triples per shared entailment graph, and the server's DL backend (null: owl2-dl unavailable). */
+export const getReasoningStatus = (): Promise<{ graphs: Record<string, number>; dl_backend: string | null }> =>
+  request('GET', '/api/reasoning/status');
+/** The OWL 2 QL rewriting of a query (not run). */
+export const rewriteQuery = (query: string, regime = 'owl2-ql', dataset?: string): Promise<{ rewritten: string }> =>
+  request('POST', '/api/reasoning/rewrite', dataset ? { query, regime, dataset } : { query, regime });
+
+// ─── SWRL — docs/swrl.md ─────────────────────────────────────────────────────────
+
+export type SwrlFormat = 'swrlapi' | 'text' | 'functional' | 'xml' | 'rdf' | 'ruleml';
+
+export interface SwrlRuleSetBody {
+  label?: string;
+  rules: string;
+  format: SwrlFormat;
+  rdf_format?: string;
+  base_iri?: string;
+  prefixes?: Record<string, string>;
+}
+
+/** A rule set kept in the dataset's managed rules graph. */
+export interface SwrlRuleSet {
+  id: string;
+  iri: string;
+  label: string | null;
+  format: SwrlFormat | null;
+  source: string | null;
+  options: { rdf_format?: string | null; base_iri?: string | null; prefixes?: Record<string, string> };
+  updated_at: string | null;
+  updated_by: string | null;
+  rules: { iri: string; functional: string | null }[];
+}
+
+export interface DatasetRules {
+  dataset_id: string;
+  graph: string;
+  can_write: boolean;
+  sets: SwrlRuleSet[];
+  other: { graph: string; rules: { iri: string | null; functional: string }[]; error: string | null }[];
+  inference_graph: string;
+  last_run: RulesReport | null;
+  formats: string[];
+}
+
+/** What running a dataset's rules again did. */
+export interface RulesRun { regime: string | null; queued: boolean; report: RulesReport | null; error: string | null }
+
+const rulesPath = (datasetId: string) => `/api/datasets/${encodeURIComponent(datasetId)}/rules`;
+export const listDatasetRules = (datasetId: string): Promise<DatasetRules> => request('GET', rulesPath(datasetId));
+export const createDatasetRules = (datasetId: string, body: SwrlRuleSetBody): Promise<{ id: string; rules: number; run: RulesRun }> =>
+  request('POST', rulesPath(datasetId), body);
+export const updateDatasetRules = (datasetId: string, setId: string, body: SwrlRuleSetBody): Promise<{ id: string; rules: number; run: RulesRun }> =>
+  request('PUT', `${rulesPath(datasetId)}/${encodeURIComponent(setId)}`, body);
+export const deleteDatasetRules = (datasetId: string, setId: string): Promise<{ deleted: string; run: RulesRun }> =>
+  request('DELETE', `${rulesPath(datasetId)}/${encodeURIComponent(setId)}`);
+export const runDatasetRules = (datasetId: string): Promise<RulesRun> => request('POST', `${rulesPath(datasetId)}/run`);
+
+/** `POST /api/swrl/execute` (200). */
+export interface SwrlExecuteReport {
+  rules_count: number;
+  iterations: number;
+  triples_inferred: number;
+  converged: boolean;
+  stop_reason: 'fixpoint' | 'max_iterations' | 'timeout';
+  rule_results?: { rule_name: string; sparql: string; success: boolean; error: string | null }[];
+  target_graph?: string | null;
+  sources?: string[] | null;
+  regime?: string;
+  rounds?: number;
+  regime_triples?: number;
+  [k: string]: unknown;
+}
+
+export const executeSwrl = (body: SwrlRuleSetBody & {
+  dataset?: string; source_graphs?: string[]; target_graph?: string; regime?: MaterializeRegime; max_iterations?: number; identity?: IdentityPolicyName;
+}): Promise<SwrlExecuteReport> => request('POST', '/api/swrl/execute', body);
+
+// ─── ShEx — docs/shex.md ─────────────────────────────────────────────────────────
+
+export type ShexStatus = 'Conformant' | { NonConformant: string };
+export interface ShexResult { focus_node: string; shape: string; status: ShexStatus }
+export interface ShexReport { conforms: boolean; results: ShexResult[] }
+
+export const validateShex = (
+  datasetId: string | null,
+  body: { schema: string; schema_format?: 'shexc' | 'shexj'; base?: string; shape_map?: string | { node: string; shape: string }[] },
+): Promise<ShexReport> =>
+  request('POST', datasetId ? `/api/datasets/${encodeURIComponent(datasetId)}/shex/validate` : '/api/shex/validate', body);
+
+// ─── RDF Patch and the patch log — docs/versioning.md ───────────────────────────
+
+/** `POST …/patch` and `POST …/log` (the latter adds `version`, `prev`). */
+export interface PatchApplied {
+  applied: boolean;
+  id?: string | null;
+  aborted?: boolean;
+  /** The blocks committed and aborted, and the rows as written. */
+  transactions?: {
+    committed: number;
+    aborted: number;
+    add_rows: number;
+    delete_rows: number;
+    prefix_rows: number;
+  };
+  /** The net change: quads that were not there before, and that went. */
+  added: number;
+  removed: number;
+  graphs?: string[];
+  /** The write's last change-log sequence number, when capture recorded it. */
+  seq?: number | null;
+  reason?: string;
+  version?: number;
+  prev?: string | null;
+}
+
+export interface PatchLogEntry {
+  version: number;
+  id: string;
+  prev?: string | null;
+  kind?: 'patch' | 'version';
+  author?: string | null;
+  dataset_version?: string | null;
+  default_graph?: string | null;
+  graphs?: string[];
+  created_at?: string;
+  withheld?: boolean;
+}
+
+export interface PatchLog {
+  name: string;
+  init?: unknown;
+  latest: { version: number; id: string } | null;
+  entries: PatchLogEntry[];
+}
+
+const graphParam = (graph?: string | null) => (graph ? `?graph=${encodeURIComponent(graph)}` : '');
+export const applyDatasetPatch = (datasetId: string, patch: string, graph?: string | null): Promise<PatchApplied> =>
+  requestRaw('POST', `/api/datasets/${encodeURIComponent(datasetId)}/patch${graphParam(graph)}`, patch, 'application/rdf-patch');
+export const appendDatasetPatchLog = (datasetId: string, patch: string, graph?: string | null): Promise<PatchApplied> =>
+  requestRaw('POST', `/api/datasets/${encodeURIComponent(datasetId)}/log${graphParam(graph)}`, patch, 'application/rdf-patch');
+export const getDatasetPatchLog = (datasetId: string, opts: { after?: number; limit?: number } = {}): Promise<PatchLog> => {
+  const qs = new URLSearchParams();
+  if (opts.after != null) qs.set('after', String(opts.after));
+  if (opts.limit != null) qs.set('limit', String(opts.limit));
+  const q = qs.toString();
+  return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/log${q ? `?${q}` : ''}`);
+};
+/** One patch of the log, by log version or id, as text. */
+export const getDatasetLogPatch = (datasetId: string, ref: string | number): Promise<string> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/log/patch/${encodeURIComponent(String(ref))}`);
+/** Download links (same-origin, the session cookie authorises them). */
+export const datasetLogPatchUrl = (datasetId: string, ref: string | number) =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/patch/${encodeURIComponent(String(ref))}`);
+export const datasetLogInitUrl = (datasetId: string, format: 'trig' | 'nquads' = 'trig') =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/init${format === 'nquads' ? '?format=nquads' : ''}`);
+export const datasetLogCurrentUrl = (datasetId: string) =>
+  withBase(`/api/datasets/${encodeURIComponent(datasetId)}/log/current`);
+
+// ─── Dataset version diff and retention ─────────────────────────────────────────
+
+export interface DatasetVersionDiff {
+  dataset_id: string;
+  from: string;
+  to: string;
+  added: number;
+  removed: number;
+  graphs: { source_graph: string; added: number; removed: number; missing_on_other_side?: boolean; only_on_other_side?: boolean }[];
+}
+
+const diffPath = (datasetId: string, from: string, to: string) =>
+  `/api/datasets/${encodeURIComponent(datasetId)}/versions/${encodeURIComponent(from)}/diff/${encodeURIComponent(to)}`;
+/** Per-graph added/removed counts from `from` to `to` (a version, or `live`). */
+export const diffDatasetVersions = (datasetId: string, from: string, to: string): Promise<DatasetVersionDiff> =>
+  request('GET', diffPath(datasetId, from, to));
+/** The same diff as an RDF Patch (text). */
+export const diffDatasetVersionsPatch = (datasetId: string, from: string, to: string): Promise<string> =>
+  request('GET', `${diffPath(datasetId, from, to)}?format=rdf-patch`);
+export const datasetVersionDiffPatchUrl = (datasetId: string, from: string, to: string) =>
+  withBase(`${diffPath(datasetId, from, to)}?format=rdf-patch`);
+/** Keep the newest `keep` unpublished versions; delete the rest. */
+export const gcDatasetVersions = (datasetId: string, keep: number): Promise<{ kept: number; deleted: string[] }> =>
+  request('POST', `/api/datasets/${encodeURIComponent(datasetId)}/versions/gc`, { keep });

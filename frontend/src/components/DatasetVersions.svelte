@@ -1,13 +1,17 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
+  import { toastError, toastInfo, toastSuccess } from '../lib/toast';
+  import { Link } from '../lib/router/index.js';
+  import { gcPreview } from '../lib/reasoning';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
-    Plus, Loader2, Download, GitBranch, PlayCircle, CheckCircle, RotateCcw, History, X,
+    Plus, Loader2, Download, GitBranch, PlayCircle, CheckCircle, RotateCcw, History, X, GitCompare, Eraser,
   } from 'lucide-svelte';
   import {
     listDatasetVersions, getDatasetBranches, createDatasetVersion, stageDatasetVersion,
     publishDatasetVersion, deprecateDatasetVersion, restoreDatasetVersion, createDatasetBranch,
-    getDatasetVersionDataUrl,
+    getDatasetVersionDataUrl, gcDatasetVersions, getDatasetPatchLog,
   } from '../lib/api.js';
 
   export let id;
@@ -90,6 +94,10 @@
     : '';
   $: canCreate = !!trimmedVersion && !versionError && !graphsError && !creating;
 
+  // The version the dataset's RDF Patch log starts from (its version 0), if a
+  // version holds it: deleting that one makes the log's version 0 answer 410.
+  let logInitVersion = null;
+
   async function load() {
     loading = true; error = '';
     try {
@@ -99,6 +107,11 @@
       ]);
     } catch (e) {
       error = e?.message || String(e);
+    }
+    try {
+      logInitVersion = (await getDatasetPatchLog(id, { limit: 1 }))?.init?.version ?? null;
+    } catch {
+      logInitVersion = null;
     }
     loading = false;
   }
@@ -141,7 +154,7 @@
       showNew = false; newVersion = ''; newNotes = ''; newSelected = new Set();
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     creating = false;
   }
@@ -153,20 +166,58 @@
       else if (action === 'publish') await publishDatasetVersion(id, ver);
       else if (action === 'deprecate') await deprecateDatasetVersion(id, ver);
       else if (action === 'restore') {
-        if (!confirm($t('components.datasetVersions.restoreConfirm', { values: { version: ver } }))) { actionKey = ''; return; }
+        const ok = await askConfirm({
+          title: $t('system.areYouSure'),
+          message: $t('components.datasetVersions.restoreConfirm', { values: { version: ver } }),
+          confirmLabel: $t('system.restore'),
+          variant: 'warning',
+        });
+        if (!ok) { actionKey = ''; return; }
         const res = await restoreDatasetVersion(id, ver);
         // Graphs that have left the dataset since the snapshot are not restored.
         if (res?.skipped?.length) {
-          alert($t('components.datasetVersions.restoreSkipped', {
+          toastInfo($t('components.datasetVersions.restoreSkipped', {
             values: { count: res.skipped.length, graphs: res.skipped.map((s) => s.graph).join(', ') },
-          }));
+          }), 10000);
         }
       }
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     actionKey = '';
+  }
+
+  // Retention (POST …/versions/gc): keep the newest `gcKeep` unpublished
+  // versions. What would go is shown before the app's own confirm dialog.
+  let showGc = false;
+  let gcKeep = 10;
+  let gcBusy = false;
+  $: gcDoomed = gcPreview(versions, Number(gcKeep) || 0);
+  $: gcHitsLog = !!logInitVersion && gcDoomed.some((v) => v.version === logInitVersion);
+
+  async function runGc() {
+    const keep = Math.max(0, Math.floor(Number(gcKeep) || 0));
+    const doomed = gcPreview(versions, keep);
+    if (!doomed.length) return;
+    const ok = await askConfirm({
+      title: $t('components.datasetVersions.gcConfirmTitle'),
+      message: $t('components.datasetVersions.gcConfirmMessage', { values: { count: doomed.length, versions: doomed.map((v) => v.version).join(', ') } })
+        + (logInitVersion && doomed.some((v) => v.version === logInitVersion) ? ` ${$t('components.datasetVersions.gcLogInit', { values: { version: logInitVersion } })}` : ''),
+      confirmLabel: $t('components.datasetVersions.gcConfirm'),
+      variant: 'danger',
+    });
+    if (!ok) return;
+    gcBusy = true;
+    try {
+      const res = await gcDatasetVersions(id, keep);
+      toastSuccess($t('components.datasetVersions.gcDone', { values: { count: res.deleted.length } }));
+      showGc = false;
+      await load();
+    } catch (e) {
+      toastError(e?.message || String(e));
+    }
+    gcBusy = false;
   }
 
   async function makeBranch() {
@@ -177,7 +228,7 @@
       branchFrom = null; branchName = '';
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     branchBusy = false;
   }
@@ -186,12 +237,51 @@
 <section class="dsv">
   <div class="dsv-head">
     <h3><History size={16} /> {$t('components.datasetVersions.heading', { values: { count: versions.length } })}</h3>
+    <div class="ver-actions">
+    {#if versions.length > 0}
+      <Link to={`/datasets/${id}/versions/diff?from=${encodeURIComponent(versions[0].version)}&to=live`} class="dsv-link">
+        <GitCompare size={13} /> {$t('components.datasetVersions.compare')}
+      </Link>
+    {/if}
+    {#if canWrite && versions.length > 0}
+      <button class="btn-sm" on:click={() => (showGc = !showGc)} aria-expanded={showGc}>
+        <Eraser size={13} /> {$t('components.datasetVersions.cleanUp')}
+      </button>
+    {/if}
     {#if canWrite}
       <button class="btn-sm" on:click={() => (showNew ? (showNew = false) : openNew())}>
         <Plus size={13} /> {$t('components.datasetVersions.newVersion')}
       </button>
     {/if}
+    </div>
   </div>
+
+  {#if showGc && canWrite}
+    <div class="new-form" data-testid="version-gc">
+      <div class="field">
+        <label class="field-label" for="gc-keep">{$t('components.datasetVersions.gcKeepLabel')}</label>
+        <div class="row">
+          <input id="gc-keep" class="inp ver-inp" type="number" min="0" bind:value={gcKeep} />
+          <span class="field-hint">{$t('components.datasetVersions.gcHint')}</span>
+        </div>
+      </div>
+      {#if gcDoomed.length}
+        <span class="field-hint">{$t('components.datasetVersions.gcWillDelete', { values: { count: gcDoomed.length } })}
+          {#each gcDoomed as v (v.version)}<code class="gc-ver">{v.version}</code>{/each}</span>
+      {:else}
+        <span class="field-hint">{$t('components.datasetVersions.gcNothing')}</span>
+      {/if}
+      {#if gcHitsLog}
+        <span class="field-err">{$t('components.datasetVersions.gcLogInit', { values: { version: logInitVersion } })}</span>
+      {/if}
+      <div class="row end">
+        <button class="btn-sm ghost" on:click={() => (showGc = false)}>{$t('system.cancel')}</button>
+        <button class="btn-sm danger" disabled={gcBusy || !gcDoomed.length} on:click={runGc}>
+          {#if gcBusy}<Loader2 size={13} class="animate-spin" />{:else}<Eraser size={13} />{/if} {$t('components.datasetVersions.cleanUp')}
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if error}<p class="err">{error}</p>{/if}
 
@@ -279,6 +369,9 @@
             {#if v.notes}<span class="muted sm notes" title={v.notes}>· {v.notes}</span>{/if}
           </div>
           <div class="ver-actions">
+            <Link to={`/datasets/${id}/versions/diff?from=${encodeURIComponent(v.version)}&to=live`} class="dsv-link" title={$t('components.datasetVersions.diffWithLiveTitle')}>
+              <GitCompare size={13} /> {$t('components.datasetVersions.diffWithLive')}
+            </Link>
             <a class="btn-sm" href={getDatasetVersionDataUrl(id, v.version, 'trig')} download="{id}-{v.version}.trig" title={$t('components.datasetVersions.downloadSnapshotTitle')}>
               <Download size={13} /> {$t('components.datasetVersions.download')}
             </a>
@@ -400,6 +493,10 @@
   .graph-item.sel { background: rgba(31, 152, 151, 0.07); }
   .graph-name { font-weight: 600; color: var(--ink-900, #0f172a); flex-shrink: 0; }
   .graph-iri { font-family: var(--mono, monospace); font-size: 0.7rem; color: var(--ink-400, #94a3b8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gc-ver { font-family: var(--mono, monospace); margin-left: 0.3rem; padding: 0 0.25rem; border-radius: 0.25rem; background: var(--bg, #fff); border: 1px solid var(--border, #e2e8f0); }
+  /* <Link> renders its own <a>: the class reaches it unscoped. */
+  .dsv :global(a.dsv-link) { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 0.35rem; border: 1px solid var(--border, #e2e8f0); background: var(--bg, #fff); color: var(--ink-600, #475569); text-decoration: none; }
+  .dsv :global(a.dsv-link:hover) { background: var(--bg-soft, #f1f5f9); }
   .branches { margin-top: 0.6rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
   .branch-chip { font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--brand-50, #eef2ff); color: var(--brand-700, #4338ca); border: 1px solid var(--brand-100, #e0e7ff); }
 

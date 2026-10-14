@@ -68,6 +68,9 @@ pub mod optimizer;
 pub mod parallel;
 pub mod rocksdb_config;
 
+// `SERVICE ?var` as a lateral join (federation, SPARQL 1.1 Federated Query §4).
+pub mod service_var;
+
 // The one SPARQL parser configuration every query path shares (custom
 // aggregates declared once by the embedding application).
 pub mod parser;

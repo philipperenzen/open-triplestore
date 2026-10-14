@@ -7,15 +7,24 @@
 //!   belongs to a *different* org (cross-org path) with 404.
 //! * [CB3] PUT /api/datasets/:id/shacl rejects a `shapes_graph_iri` that points
 //!   at another dataset's namespace for a non-admin caller.
+//! * PUT /api/admin/oauth/providers/:id accepts the body the admin form sends
+//!   and keeps the redacted client secret and SAML certificate when absent.
+//! * [P1-2] The client IP in audit rows and in the LLM guard's guest budget is
+//!   the TCP peer; `X-Forwarded-For` counts only from a `OTS_TRUSTED_PROXY_CIDRS`
+//!   peer. The peer is injected as `ConnectInfo`, as the real server does.
 //!
 //! Driven through the real Axum router via `tower::ServiceExt::oneshot` (no socket).
 
 mod common;
 use common::*;
 
+use std::net::SocketAddr;
+
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{header, Method, Request, StatusCode},
+    Router,
 };
 use open_triplestore::auth::models::{OwnerType, Role, SystemRole, Visibility};
 use tower::ServiceExt as _;
@@ -318,4 +327,487 @@ async fn shapes_graph_in_own_namespace_is_accepted() {
         StatusCode::NO_CONTENT,
         "own-namespace shapes graph must be accepted"
     );
+}
+
+// ─── Identity-provider edits keep what a read redacts ─────────────────────────
+
+async fn admin_json(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let body = match body {
+        Some(v) => {
+            b = b.header(header::CONTENT_TYPE, "application/json");
+            Body::from(v.to_string())
+        }
+        None => Body::empty(),
+    };
+    let resp = app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// Two throwaway self-signed certificates (public parts only). A build with
+/// the `saml` feature refuses an IdP certificate that does not parse.
+const CERT_A: &str = "-----BEGIN CERTIFICATE-----\nMIIBjzCCATWgAwIBAgIUIjqfh5zqhmH1xnwGUq/QcTy7rPswCgYIKoZIzj0EAwIw\nHDEaMBgGA1UEAwwRaWRwLWEuZXhhbXBsZS5vcmcwIBcNMjYxMDAzMDAyNzA4WhgP\nMjEyNjA5MDkwMDI3MDhaMBwxGjAYBgNVBAMMEWlkcC1hLmV4YW1wbGUub3JnMFkw\nEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3gQC74t8Dyc98b51OQlvEftoy+4HlVSE\nvoHKz+fzNiY2rWZK969Yb+Bsf7q2dWw7KVVWn3bl7H1W6bMA0wkxn6NTMFEwHQYD\nVR0OBBYEFIPTHvOwMbf1YMxyLehMubBLTMD4MB8GA1UdIwQYMBaAFIPTHvOwMbf1\nYMxyLehMubBLTMD4MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIh\nAKtoJKTjRYIJvlqraaOnA4u4Dm81rkPAy9WKQyTgEat6AiB0zWiQdhhGsYLv8y+N\nqgJVeVw09c139bMic0vS5a5/3A==\n-----END CERTIFICATE-----";
+const CERT_B: &str = "-----BEGIN CERTIFICATE-----\nMIIBjjCCATWgAwIBAgIUF3enFtZkx9UNk5vj2pOriUKBaGAwCgYIKoZIzj0EAwIw\nHDEaMBgGA1UEAwwRaWRwLWIuZXhhbXBsZS5vcmcwIBcNMjYxMDAzMDAyNzA4WhgP\nMjEyNjA5MDkwMDI3MDhaMBwxGjAYBgNVBAMMEWlkcC1iLmV4YW1wbGUub3JnMFkw\nEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEl9Vo8reNxWbXZC5hsJumwizXE1aS/5g/\nZt5D0bx6mMUamhppRsjtpOcVCsn5Lo527hgJUMp32HZEr0x0ZFP+x6NTMFEwHQYD\nVR0OBBYEFIlKIFm6M3FiAUYsgd7SMPtf/o2BMB8GA1UdIwQYMBaAFIlKIFm6M3Fi\nAUYsgd7SMPtf/o2BMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIg\nGxZNifKtz8jgwWUkn9r+uasILugXZPdwhhGNzAccE2oCIEIXfFsoZRQrAB9d1u8H\nvB03ylhxZHXiMGF0eqGRGy2E\n-----END CERTIFICATE-----";
+
+/// The admin form cannot send back the client secret or the SAML IdP
+/// certificate (no read returns them), so an edit that omits them must keep
+/// the stored values. The bodies are the shape the form sends: `scopes` and
+/// `role_claim_map` as strings, `is_active` rather than `enabled`.
+#[tokio::test]
+async fn provider_edit_keeps_redacted_secret_and_certificate() {
+    let (state, token) = admin_state();
+    let db = state.auth_db.clone();
+    let app = test_app(state);
+    let base = serde_json::json!({
+        "name": "Example SAML", "slug": "example-saml", "provider_type": "saml",
+        "client_id": null, "discovery_url": null, "tenant_id": "tenant-1",
+        "entity_id": "https://idp.example.org/saml", "sso_url": "https://idp.example.org/sso",
+        "scopes": "openid email profile",
+        "role_claim_map": "{\"staff\":\"user\"}",
+        "auto_provision": true, "default_role": "user", "is_active": true,
+    });
+    let mut create = base.clone();
+    create["idp_certificate"] = CERT_A.into();
+    create["client_secret"] = "secret-a".into();
+    let (st, txt) = admin_json(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        Some(create),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let id = serde_json::from_str::<serde_json::Value>(&txt).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stored = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    let secret_a = stored.client_secret_enc.clone();
+    assert!(secret_a.is_some());
+
+    // Disable it without resending either secret value.
+    let mut edit = base.clone();
+    edit["is_active"] = false.into();
+    let uri = format!("/api/admin/oauth/providers/{id}");
+    let (st, txt) = admin_json(&app, Method::PUT, &uri, &token, Some(edit)).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    assert!(!p.is_active);
+    assert_eq!(p.idp_certificate.as_deref(), Some(CERT_A));
+    assert_eq!(p.client_secret_enc, secret_a);
+    assert_eq!(p.tenant_id.as_deref(), Some("tenant-1"));
+    assert_eq!(p.role_claim_map.as_deref(), Some("{\"staff\":\"user\"}"));
+
+    // A supplied certificate replaces the stored one.
+    let mut edit = base.clone();
+    edit["idp_certificate"] = CERT_B.into();
+    let (st, txt) = admin_json(&app, Method::PUT, &uri, &token, Some(edit)).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    assert!(p.is_active);
+    assert_eq!(p.idp_certificate.as_deref(), Some(CERT_B));
+
+    // The list the form reads carries `is_active` and string `scopes`, and
+    // never the certificate.
+    let (st, txt) = admin_json(
+        &app,
+        Method::GET,
+        "/api/admin/oauth/providers",
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let list: serde_json::Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(list[0]["is_active"], true);
+    assert_eq!(list[0]["scopes"], "openid email profile");
+    assert!(!txt.contains("BEGIN CERTIFICATE"), "{txt}");
+}
+
+// ─── [P1-2] client IP: TCP peer, forwarded headers only from trusted proxies ──
+
+/// A request as the server sees it: arriving from TCP peer `peer`.
+fn from_peer(mut req: Request<Body>, peer: &str) -> Request<Body> {
+    let addr: SocketAddr = format!("{peer}:40000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+fn failed_login(peer: &str, forwarded: &[(&str, &str)], username: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json");
+    for (k, v) in forwarded {
+        b = b.header(*k, *v);
+    }
+    let body = serde_json::json!({ "username": username, "password": "wrong-password" });
+    from_peer(b.body(Body::from(body.to_string())).unwrap(), peer)
+}
+
+/// The IP recorded on the `login_failure` row for `username`.
+fn audited_login_ip(state: &open_triplestore::server::AppState, username: &str) -> Option<String> {
+    let rows = state
+        .audit
+        .list(100, 0, Some("login_failure"), None, None)
+        .unwrap();
+    let row = rows
+        .into_iter()
+        .find(|e| e.actor_username.as_deref() == Some(username))
+        .expect("a login_failure row for the user");
+    row.ip_address
+}
+
+fn app_behind_proxy(state: open_triplestore::server::AppState) -> Router {
+    open_triplestore::server::build_router(state, "", vec!["10.0.0.0/8".parse().unwrap()])
+}
+
+#[tokio::test]
+async fn audit_ignores_forwarded_headers_from_untrusted_peer() {
+    let state = test_state();
+    // A proxy is configured, but this request does not come from it.
+    let resp = app_behind_proxy(state.clone())
+        .oneshot(failed_login(
+            "203.0.113.9",
+            &[
+                ("x-forwarded-for", "192.0.2.66"),
+                ("x-real-ip", "192.0.2.67"),
+            ],
+            "forger",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        audited_login_ip(&state, "forger").as_deref(),
+        Some("203.0.113.9"),
+        "a client-written X-Forwarded-For must not choose the audited IP"
+    );
+}
+
+#[tokio::test]
+async fn audit_records_peer_on_direct_connection() {
+    let state = test_state();
+    // No proxy configured: the TCP peer is the client, headers or not.
+    let resp = test_app(state.clone())
+        .oneshot(failed_login(
+            "198.51.100.7",
+            &[("x-forwarded-for", "192.0.2.66")],
+            "direct",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        audited_login_ip(&state, "direct").as_deref(),
+        Some("198.51.100.7"),
+        "without a proxy the audit row carries the TCP peer, not nothing"
+    );
+}
+
+#[tokio::test]
+async fn audit_believes_trusted_proxy_chain_right_to_left() {
+    let state = test_state();
+    // The client forged the left-most entry; the trusted proxy appended the
+    // address it really saw.
+    let resp = app_behind_proxy(state.clone())
+        .oneshot(failed_login(
+            "10.0.0.5",
+            &[("x-forwarded-for", "192.0.2.66, 198.51.100.20")],
+            "proxied",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        audited_login_ip(&state, "proxied").as_deref(),
+        Some("198.51.100.20"),
+        "behind a trusted proxy the right-most untrusted hop is the client"
+    );
+}
+
+fn anonymous_nl_sparql(peer: &str, forwarded_for: &str) -> Request<Body> {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/llm/sparql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", forwarded_for)
+        .body(Body::from(
+            serde_json::json!({ "question": "How many datasets are there?" }).to_string(),
+        ))
+        .unwrap();
+    from_peer(req, peer)
+}
+
+#[tokio::test]
+async fn llm_guest_budget_cannot_be_reset_with_a_forged_header() {
+    // Nothing listens on port 1: a request the guard lets through fails fast
+    // with 503 at the gateway; one the guard refuses is a 429.
+    std::env::set_var("OTS_LLM_GATEWAY_URL", "http://127.0.0.1:1");
+    let app = test_app(test_state());
+
+    // The guest budget defaults to 5 per minute per client IP.
+    for i in 0..5 {
+        let resp = app
+            .clone()
+            .oneshot(anonymous_nl_sparql("203.0.113.50", &format!("192.0.2.{i}")))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "request {i} is within the guest budget"
+        );
+    }
+    let resp = app
+        .clone()
+        .oneshot(anonymous_nl_sparql("203.0.113.50", "192.0.2.99"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a fresh X-Forwarded-For from the same peer must not mint a fresh budget"
+    );
+
+    // Another guest on a direct connection has a budget of their own: guests
+    // are no longer pooled in one shared "unknown" bucket.
+    let resp = app
+        .oneshot(anonymous_nl_sparql("203.0.113.51", "192.0.2.99"))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+// ─── Configuration: GET /api/admin/config and runtime settings ────────────────
+
+async fn call(
+    app: Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let req = match body {
+        Some(v) => b
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(v.to_string()))
+            .unwrap(),
+        None => b.body(Body::empty()).unwrap(),
+    };
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// The effective configuration is for administrators only, names every
+/// setting with its source, and never shows a secret value — only a
+/// reference, which is no secret.
+#[tokio::test]
+async fn admin_config_is_admin_only_and_never_shows_a_secret() {
+    std::env::set_var("OTS_LLM_API_KEY", "sk-raw-secret-value-1234");
+    std::env::set_var("OTS_SMTP_PASSWORD", "file:/run/secrets/smtp");
+    let (state, admin) = admin_state();
+    let user = make_user(&state, "cfg-reader");
+
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&user),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a non-admin may not read the configuration"
+    );
+
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("sk-raw-secret-value-1234"),
+        "a raw secret leaked: {body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let settings = v["settings"].as_array().expect("settings");
+    let get = |n: &str| {
+        settings
+            .iter()
+            .find(|s| s["name"] == n)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(get("OTS_LLM_API_KEY")["value"], "[redacted]", "{body}");
+    assert_eq!(get("OTS_LLM_API_KEY")["source"], "env");
+    assert_eq!(get("OTS_SMTP_PASSWORD")["value"], "file:/run/secrets/smtp");
+    assert_eq!(get("OTS_SMTP_PASSWORD")["source"], "file");
+    assert_eq!(get("OTS_PORT")["source"], "default");
+    assert!(v["profile"].is_string());
+    std::env::remove_var("OTS_LLM_API_KEY");
+    std::env::remove_var("OTS_SMTP_PASSWORD");
+}
+
+/// A runtime setting: an administrator overrides it without a restart, the
+/// override is validated like the environment variable, takes effect on the
+/// next request, and a reset hands the decision back to the environment.
+#[tokio::test]
+async fn runtime_settings_override_validate_apply_and_reset() {
+    let (state, admin) = admin_state();
+    let user = make_user(&state, "settings-user");
+    let register = |name: &'static str| {
+        let state = state.clone();
+        async move {
+            call(
+                test_app(state),
+                Method::POST,
+                "/api/auth/register",
+                None,
+                Some(serde_json::json!({
+                    "username": name,
+                    "email": format!("{name}@example.org"),
+                    "password": "a-long-enough-password-1",
+                })),
+            )
+            .await
+            .0
+        }
+    };
+
+    // Listed, with its configured value and no override.
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/settings",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reg = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "OTS_REGISTRATION_ENABLED")
+        .cloned()
+        .expect("registration is a runtime setting");
+    assert_eq!(reg["overridden"], false);
+    assert_eq!(reg["value"], "true");
+
+    // Only admins change settings.
+    let (st, _) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&user),
+        Some(serde_json::json!({ "value": "false" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Validated like the variable: no aliases, no unknown settings, and a
+    // startup-only setting cannot be changed at runtime.
+    for (name, value, want) in [
+        ("OTS_REGISTRATION_ENABLED", "maybe", StatusCode::BAD_REQUEST),
+        (
+            "OTS_OIDC_PROVIDER_TOKEN_POLICY",
+            "legacy",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("OTS_NO_SUCH_SETTING", "1", StatusCode::NOT_FOUND),
+        ("OTS_PORT", "8080", StatusCode::NOT_FOUND),
+    ] {
+        let (st, body) = call(
+            test_app(state.clone()),
+            Method::PUT,
+            &format!("/api/admin/settings/{name}"),
+            Some(&admin),
+            Some(serde_json::json!({ "value": value })),
+        )
+        .await;
+        assert_eq!(st, want, "{name}={value}: {body}");
+    }
+
+    // Close registration: it applies on the next request.
+    assert!(register("before-close").await.is_success());
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&admin),
+        Some(serde_json::json!({ "value": "off" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["setting"]["value"], "false", "stored in canonical form");
+    assert_eq!(v["setting"]["source"], "admin");
+    assert_eq!(v["setting"]["configured"], "true");
+    assert_eq!(register("after-close").await, StatusCode::FORBIDDEN);
+
+    // The effective configuration shows the override as such.
+    let (_, body) = call(
+        test_app(state.clone()),
+        Method::GET,
+        "/api/admin/config",
+        Some(&admin),
+        None,
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reg = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "OTS_REGISTRATION_ENABLED")
+        .cloned()
+        .unwrap();
+    assert_eq!(reg["source"], "admin");
+    assert_eq!(reg["runtime"], true);
+
+    // Reset: the environment (here the default) decides again.
+    let (st, body) = call(
+        test_app(state.clone()),
+        Method::PUT,
+        "/api/admin/settings/OTS_REGISTRATION_ENABLED",
+        Some(&admin),
+        Some(serde_json::json!({ "value": null })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("\"overridden\":false"), "{body}");
+    assert!(register("after-reset").await.is_success());
 }

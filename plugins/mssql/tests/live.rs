@@ -6,15 +6,24 @@
 //! read-only login it creates. The account named is expected to be an
 //! administrator: the test builds its own database and a reader login.
 //!
+//! The TLS test runs when `OTS_TEST_MSSQL_TLS_CA` names, on the server, the
+//! CA that signed the server's certificate; `scripts/live-sources-tls.sh`
+//! sets one up in a container (which it restarts: SQL Server reads its
+//! certificate at start only).
+//!
 //! ```bash
-//! docker run -d --rm --platform linux/amd64 --name ots-mssql -e ACCEPT_EULA=Y \
+//! docker run -d --platform linux/amd64 --name ots-mssql -e ACCEPT_EULA=Y \
 //!   -e MSSQL_SA_PASSWORD='Str0ng!Pass' \
 //!   -p 1499:1433 mcr.microsoft.com/mssql/server:2022-latest
+//! scripts/live-sources-tls.sh - - - ots-mssql
 //! OTS_TEST_MSSQL_HOST=127.0.0.1 OTS_TEST_MSSQL_PORT=1499 OTS_TEST_MSSQL_PASSWORD='Str0ng!Pass' \
-//!   OTS_TEST_MSSQL_READER_PASSWORD='R3ader!Pass' cargo test -p ots-plugin-mssql --test live
+//!   OTS_TEST_MSSQL_READER_PASSWORD='R3ader!Pass' \
+//!   OTS_TEST_MSSQL_TLS_CA=/var/opt/mssql/ots-tls/ca.pem \
+//!   cargo test -p ots-plugin-mssql --test live
 //! ```
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard};
 
 use ots_plugin_api::sources::{
     ConnectParams, SecretString, SourceConnector, SourceError, TableKind, ValueKind,
@@ -69,37 +78,88 @@ fn params(t: &Target, user: &str, password: &str, timeout_ms: u64) -> ConnectPar
     }
 }
 
+/// The tests share one fixture database and reader login, so they take
+/// turns.
+fn turn() -> MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+type AdminClient = tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>;
+
+/// The administrator's connection, in cleartext.
+async fn admin(t: &Target) -> AdminClient {
+    use tokio_util::compat::TokioAsyncWriteCompatExt;
+    let mut config = tiberius::Config::new();
+    config.host(&t.host);
+    config.port(t.port);
+    config.authentication(tiberius::AuthMethod::sql_server(&t.user, &t.password));
+    config.encryption(tiberius::EncryptionLevel::NotSupported);
+    // The server may still be starting when a CI job reaches this test:
+    // the administrator's connection is retried for up to a minute.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let attempt = async {
+            let tcp = tokio::net::TcpStream::connect(config.get_addr()).await?;
+            tcp.set_nodelay(true)?;
+            tiberius::Client::connect(config.clone(), tcp.compat_write()).await
+        };
+        match attempt.await {
+            Ok(client) => return client,
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("waiting for the server: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) => panic!("admin connection: {e}"),
+        }
+    }
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// The CA that signed the server's certificate, read back over the
+/// administrator's connection from where `OTS_TEST_MSSQL_TLS_CA` says it lies
+/// on the server, and written to a local `.pem` file for `sslrootcert`.
+fn tls_ca(t: &Target) -> Option<String> {
+    let Ok(on_server) = std::env::var("OTS_TEST_MSSQL_TLS_CA") else {
+        assert!(
+            std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+            "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_MSSQL_TLS_CA is not"
+        );
+        return None;
+    };
+    let pem = runtime().block_on(async {
+        let sql = format!(
+            "SELECT BulkColumn FROM OPENROWSET(BULK N'{}', SINGLE_CLOB) AS ca",
+            on_server.replace('\'', "''")
+        );
+        let row = admin(t)
+            .await
+            .simple_query(sql)
+            .await
+            .unwrap_or_else(|e| panic!("reading {on_server} on the server: {e}"))
+            .into_row()
+            .await
+            .unwrap_or_else(|e| panic!("reading {on_server} on the server: {e}"))
+            .expect("one row");
+        row.get::<&str, _>(0).expect("the CA").to_string()
+    });
+    let local = std::env::temp_dir().join(format!("ots-live-mssql-ca-{}.pem", std::process::id()));
+    std::fs::write(&local, pem).expect("write the CA");
+    Some(local.display().to_string())
+}
+
 /// The fixture is built through the driver itself, in the master database,
 /// by the administrator — which is also the account the read-only check
 /// must refuse.
 fn fixture(t: &Target) {
-    let mut runtime = tokio::runtime::Builder::new_current_thread();
-    let runtime = runtime.enable_all().build().unwrap();
-    runtime.block_on(async {
-        use tokio_util::compat::TokioAsyncWriteCompatExt;
-        let mut config = tiberius::Config::new();
-        config.host(&t.host);
-        config.port(t.port);
-        config.authentication(tiberius::AuthMethod::sql_server(&t.user, &t.password));
-        config.encryption(tiberius::EncryptionLevel::NotSupported);
-        // The server may still be starting when a CI job reaches this test:
-        // the administrator's connection is retried for up to a minute.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut client = loop {
-            let attempt = async {
-                let tcp = tokio::net::TcpStream::connect(config.get_addr()).await?;
-                tcp.set_nodelay(true)?;
-                tiberius::Client::connect(config.clone(), tcp.compat_write()).await
-            };
-            match attempt.await {
-                Ok(client) => break client,
-                Err(e) if std::time::Instant::now() < deadline => {
-                    eprintln!("waiting for the server: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-                Err(e) => panic!("admin connection: {e}"),
-            }
-        };
+    runtime().block_on(async {
+        let mut client = admin(t).await;
         let db = &t.db;
         let reader_password = &t.reader_password;
         for statement in [
@@ -150,6 +210,7 @@ fn fixture(t: &Target) {
 
 #[test]
 fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
+    let _turn = turn();
     let Some(t) = target() else {
         eprintln!("OTS_TEST_MSSQL_HOST unset; skipping the live test");
         return;
@@ -307,4 +368,69 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
         &mut |_| Ok(()),
     );
     assert!(matches!(slow, Err(SourceError::Timeout)), "{slow:?}");
+}
+
+#[test]
+fn tls_trusts_the_named_ca_and_nothing_less() {
+    let _turn = turn();
+    let Some(t) = target() else {
+        eprintln!("OTS_TEST_MSSQL_HOST unset; skipping the TLS test");
+        return;
+    };
+    let Some(ca) = tls_ca(&t) else {
+        eprintln!("OTS_TEST_MSSQL_TLS_CA unset; skipping the TLS test");
+        return;
+    };
+    fixture(&t);
+    let mut p = params(&t, "ots_reader", &t.reader_password, 5_000);
+    p.tls = true;
+
+    // The platform roots do not know the private CA: the handshake fails,
+    // and the connector does not fall back to cleartext.
+    match MssqlConnector.connect(&p) {
+        Err(SourceError::Connect(m)) => assert!(m.contains("UnknownIssuer"), "{m}"),
+        other => panic!(
+            "an unknown issuer must be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    p.options.insert("sslrootcert".to_string(), ca);
+    let mut conn = MssqlConnector.connect(&p).expect("connect over TLS");
+    // The reader may not see connection state, so it names its session and
+    // the administrator looks it up.
+    let mut session = Vec::new();
+    conn.stream("SELECT @@SPID AS spid", 1, &mut |b| {
+        session.extend(b);
+        Ok(())
+    })
+    .expect("the session id");
+    let spid: u16 = session[0]["spid"].lexical.parse().expect("a session id");
+    let encrypted = runtime().block_on(async {
+        let row = admin(&t)
+            .await
+            .simple_query(format!(
+                "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = {spid}"
+            ))
+            .await
+            .expect("the session's TLS state")
+            .into_row()
+            .await
+            .expect("the session's TLS state")
+            .expect("the reader's session");
+        row.get::<&str, _>(0).map(str::to_string)
+    });
+    assert_eq!(
+        encrypted.as_deref(),
+        Some("TRUE"),
+        "the session is encrypted"
+    );
+    assert_eq!(
+        conn.table_names().unwrap(),
+        vec!["child", "child_v", "parent"]
+    );
+    let rows = conn
+        .stream("SELECT * FROM child", 10, &mut |_| Ok(()))
+        .expect("stream over TLS");
+    assert_eq!(rows, 4);
 }

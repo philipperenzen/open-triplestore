@@ -24,6 +24,7 @@ describe('unwrapValidationRun', () => {
     expect(run.runId).toBe('run-123');
     expect(run.ranAt).toBe('2026-06-11T10:00:00Z');
     expect(run.test).toBe(false);
+    expect(run.partial).toBe(false);
   });
 
   it('flags test (dry-run) envelopes', () => {
@@ -34,8 +35,23 @@ describe('unwrapValidationRun', () => {
       test: true,
     });
     expect(run.test).toBe(true);
+    expect(run.partial).toBe(false);
     expect(run.report!.conforms).toBe(true);
     expect(run.runId).toBeNull();
+  });
+
+  it('flags partial runs, which left out graphs the caller may not read', () => {
+    const run = unwrapValidationRun({
+      report: fullReport,
+      run_id: null,
+      ran_at: null,
+      test: true,
+      partial: true,
+    });
+    expect(run.partial).toBe(true);
+    expect(run.test).toBe(true);
+    expect(run.report!.results_count).toBe(2);
+    expect(unwrapValidationRun(null).partial).toBe(false);
   });
 
   it('returns a null report when the envelope has no report', () => {

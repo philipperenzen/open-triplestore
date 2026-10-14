@@ -336,9 +336,9 @@ provisional 1.5 tolerance (see above) until their noise is measured.
 
 Every `query/*`, `path/*` and `geosparql/*` benchmark repeats one query on a store
 that nothing writes to between iterations. `TripleStore` keeps a result cache
-(`OTS_QUERY_CACHE`, on by default, generation-keyed), so with the cache on every
+(`OTS_QUERY_CACHE_ENABLED`, on by default, generation-keyed), so with the cache on every
 iteration after the first is a hit: an audit on 2026-09-08 (same binary, cache on
-vs `OTS_QUERY_CACHE=off`) found **63 of the 68** read benchmarks measuring the
+vs `OTS_QUERY_CACHE_ENABLED=off`) found **63 of the 68** read benchmarks measuring the
 cache — `query_group_by/10000` at 1.8 µs against 8.6 ms of evaluation,
 `geosparql_sf_contains/50` at 75 ns against 135 µs, `path_zero_or_more/200` at
 4.6 µs against 6 ms. Only the five whose results are not cacheable (CONSTRUCT, or
@@ -348,7 +348,7 @@ cache landed (2026-06).
 Since then the bench file builds every store with the result cache **disabled**
 (`fresh_store()` → `with_query_cache(false, …)`), so the numbers are evaluation
 by construction, and every runner (perf.yml, perf-baseline.yml, GitLab, the
-Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE=off`, which
+Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE_ENABLED=off`, which
 keeps the merge-base side honest while the base commit still has the old bench
 file. One benchmark measures the cached path on purpose — `query/cache_hit`, a
 small query with the cache explicitly enabled — because that path has its own
@@ -458,7 +458,7 @@ the only variable is the host hardware.
 | RAM visible to Docker | 54.9 GiB (`MemTotal`, pinned via `.wslconfig`) |
 | Storage | NVMe SSD |
 | GPU | Not used — the triplestore has no GPU code path |
-| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 |
+| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 — as of the 2026-06 run; the project now pins Oxigraph 0.5 |
 | Rust / image | rustc 1.91.1 · `ots-builder` (rust:1.91-bookworm) · `--release` |
 
 > GPUs are listed for completeness only; RDF/SPARQL/GeoSPARQL/SHACL workloads
@@ -511,11 +511,19 @@ per-benchmark `estimates.json` files that can be diffed across runs or machines.
 
 A **full** `cargo bench --bench performance --features full` run on the reference
 system above (Docker/WSL2, release, 24 vCPU), captured 2026-06 — **97 benchmarks**,
-Criterion median shown. Reproduce with the [run command](#reproducible-run-command);
+Criterion median shown.
+
+> **Dated figures.** Every table and chart in this section, down to and including
+> "Extra-large scaling", comes from that **June 2026** run on Oxigraph 0.4.11
+> unless a row says otherwise. It has not been re-run since the Oxigraph 0.5
+> upgrade, the query mirror and the columnar copy, so read the numbers as that
+> build's, not today's. Later measurements are dated where they appear (the 2026-09
+> asset-shaped benchmark and 9M SHACL sections, the CI baseline in
+> `benches/perf_baseline.json`). Reproduce with the [run command](#reproducible-run-command);
 per-benchmark `estimates.json` is written under `target/criterion/`. Charts are
 in [`docs/benchmarks/`](benchmarks/).
 
-#### SPARQL query latency
+#### SPARQL query latency (2026-06 run)
 
 ![SPARQL query latency at 10k persons / 50k triples](benchmarks/query-latency-10k.svg)
 
@@ -528,7 +536,7 @@ in [`docs/benchmarks/`](benchmarks/).
 | FILTER (numeric) | 262 µs | 2.44 ms | — |
 | REGEX filter | 218 µs | 1.80 ms | — |
 | OPTIONAL | 664 µs | 9.70 ms | — |
-| COUNT(*) | 620 µs | 7.09 ms | 66.2 ms |
+| COUNT(*) over all triples | 0.14 µs† | 0.14 µs† | 0.14 µs† |
 | GROUP BY + AVG | 604 µs | 8.84 ms | — |
 | GROUP_CONCAT | 639 µs | 7.71 ms | — |
 | subquery (MAX) | 741 µs | 9.57 ms | — |
@@ -542,7 +550,13 @@ in [`docs/benchmarks/`](benchmarks/).
 `LIMIT` short-circuits: `lookup_with_limit` stays ~17 µs regardless of dataset
 size (early termination), whereas an unbounded scan is O(n).
 
-#### SPARQL operators — pick the cheaper equivalent
+† Not from this run: a whole-store `COUNT(*)` is now answered from the per-graph
+count index instead of a scan, so it costs the same at every size. The figure is
+`query_count_star` in the 2026-09-24 CI baseline (`benches/perf_baseline.json`,
+GitHub runner); this run, made while it still scanned, measured 620 µs, 7.09 ms
+and 66.2 ms. The chart above leaves it out.
+
+#### SPARQL operators — pick the cheaper equivalent (2026-06 run)
 
 ![operator cost at 10k](benchmarks/operators.svg)
 
@@ -550,7 +564,7 @@ size (early termination), whereas an unbounded scan is O(n).
 MINUS hashes the exclusion set once; NOT EXISTS re-evaluates its inner pattern
 per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 
-#### Property paths
+#### Property paths (2026-06 run)
 
 | Path | small | mid | large |
 |---|--:|--:|--:|
@@ -564,7 +578,7 @@ per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 Inverse paths match forward-scan speed (they use the O-P-S index); `*` adds ~2 %
 over `+` for the identity solutions.
 
-#### Bulk loading & writes
+#### Bulk loading & writes (2026-06 run)
 
 ![bulk-loader throughput vs size](benchmarks/bulk-load-throughput.svg)
 
@@ -580,7 +594,7 @@ Single `INSERT DATA` is 72 µs/triple (~14 K/s); batching 10 triples per stateme
 drops that to 27 µs/triple (~37 K/s, **2.6×**). Use the bulk loader for ingestion
 (~0.5–0.9 M triples/s).
 
-#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache
+#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache (2026-06 run)
 
 ![GeoSPARQL points vs polygons](benchmarks/geosparql.svg)
 
@@ -601,7 +615,7 @@ Relation queries drop 35–57% — polygons (more coordinates → more `strtod`)
 benefit most. `buffer` is constructive (builds a new geometry per row), so it is
 compute-bound and the parse cache doesn't help it.
 
-#### SHACL validation
+#### SHACL validation (2026-06 run)
 
 ![SHACL throughput vs focus-node count](benchmarks/shacl-scaling.svg)
 
@@ -616,7 +630,7 @@ nodes is shapes-loading + target resolution, so throughput rises from 85 K to
 286 K nodes/s as that fixed cost amortizes. Violations add negligible overhead
 for this shape.
 
-#### Concurrency
+#### Concurrency (2026-06 run)
 
 ![concurrent read latency vs threads](benchmarks/concurrent-reads.svg)
 
@@ -633,7 +647,7 @@ Writes serialize on the store's write lock. Mixed 4-reader + 1-writer: 5.47 ms.
 > The 7900X3D's 3D V-Cache notably helps the index-scan-heavy paths. GPUs are
 > irrelevant — every path here is CPU/memory-bound.
 
-#### Extra-large scaling — 1M to 100M triples (persistent store)
+#### Extra-large scaling — 1M to 100M triples (persistent store, 2026-06 run)
 
 The criterion figures above are in-memory (tiny→large, ≤500k triples). At 1M–100M
 an in-memory store would exhaust RAM, so this tier uses the **persistent (RocksDB)
@@ -662,7 +676,7 @@ The tiers above measure generic shapes. This tier measures what an object-type
 library deployment does: `N` assets typed against 40 object types with six
 typed properties, a part-of link and a location — ~9 quads per asset — in one
 named graph on the persistent store; six query shapes with the **result cache
-off** (`OTS_QUERY_CACHE=false`, so every number is an evaluation); SHACL over
+off** (`OTS_QUERY_CACHE_ENABLED=false`, so every number is an evaluation); SHACL over
 every asset against six property shapes (datatype, minCount, class, pattern,
 `sh:in`, bounds); and a 20-second phase of 4 writers inserting 500-quad
 batches next to 4 readers doing lookups. Harness:
@@ -683,11 +697,33 @@ Apple M-series laptop, release build.
 | `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
 | SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 6.3 s on the mirror, 13.5 s on RocksDB in the 4g container⁴ (118 s before the engine rebuild) | — |
 | 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+| RDF Patch, 1 000 lines (500 `D`, 500 `A`)⁵ | 3.9 s as `POST …/patch` writes it; 15 ms as a repair proposal's apply writes it | — | — |
 
 ⁴ Measured 2026-09-16 with [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs)
 (ignored; run on purpose) on the reference system below, in Docker, release
 build; the row's other 9M cells are the laptop figures of the first run. The
 full measurement is under "The 9M SHACL measurement" further down.
+
+⁵ Measured 2026-10-02 with `scale_otl 100000 <dir> --patch` on an Apple M1 Pro
+(16 GB), release build. Each figure is the median of 5 applies, each undone
+before the next. The patch route writes a patch as one SPARQL update, then
+recounts every graph it touches: a scan of all 0.9M quads. A repair proposal's
+apply (`docs/repair.md`) writes the same ground update through
+`update_targeted_delta`, which adjusts the count by the exact delta.
+
+In the same session, `develop` with and without the repair layer ran the
+whole harness alternately, three times each. Medians with the layer against
+without:
+
+- SHACL: 1.07 s against 1.04 s.
+- 4 writers: 61.9k against 61.7k quads/s written, write p95 55 against 54 ms.
+- group by: 1.18 s against 1.12 s.
+- 2-way join: 73 against 70 ms.
+
+Every other row moved less. The largest move, +9 % on the
+sub-millisecond property path, is inside the spread between runs. No row got
+slower by anything near the 20 % the project allows. Those runs are faster
+than the cells above, which come from an earlier engine.
 
 ² The Docker Fuseki image is amd64-only and the webapp distribution needs a
 login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
@@ -703,10 +739,11 @@ and 20 s of 4 writers (`INSERT DATA`, 500 quads per request) next to 4
 readers (single-asset lookups). Fuseki is Apache Jena Fuseki 6.2 "main" (the
 no-UI jar, TDB2, `-Xmx4g`, started by
 [`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) with
-`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE=false`.
+`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE_ENABLED=false`.
 Same machine, same file, one server at a time. SHACL is Jena's `shacl validate`
-command line against the same shapes and data, and the platform's Studio
-pipeline over HTTP.
+command line against the same shapes and data (split out of the dump by
+[`scripts/scale_split_dump.py`](../scripts/scale_split_dump.py), since that
+command takes them as two files), and the platform's Studio pipeline over HTTP.
 
 | 100k assets, 0.9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|
@@ -777,6 +814,54 @@ OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 OTS_PARALLEL_QUERY_MAX_TRIPLE
   cargo test --release --features full --test scale_shacl_9m -- --nocapture
 ```
 
+##### Validation after a write, a shape update and the write gate (2026-10-01)
+
+The 9M measurement above timed whole-dataset validation. The delta
+versioning note (`docs/notes/delta-versioning-design.md` §8.3) asks for three
+more numbers on the same data, and the change log adds a fourth workload:
+
+1. the whole-dataset **pipeline run** (the Studio path, in-process);
+2. the **write-triggered run** after an edit of a few hundred quads, which
+   revalidates only the nodes the edit touched and merges them into the last
+   report ([shacl.md](shacl.md), "Run on write");
+3. the **shape-update revalidation**: one property shape edited, every
+   target revalidated, because no change log can narrow a change to the
+   shapes;
+4. the **write gate's sandbox** for a 1 000-quad Graph Store `POST` into the
+   instance graph, which copies the whole graph into a temporary store before
+   it validates the merge (`seed_existing_graph`).
+
+They are the second test of `tests/scale_shacl_9m.rs`, run with change
+capture on. At its default size, 20 000 assets, it runs in every suite run
+and asserts what matters at any size: the merged incremental report equals a
+full validation result for result, the shape update finds exactly the
+violations it introduced, and the gate refuses a write into a graph that
+does not conform.
+
+What the suite run printed on the branch (debug build, 20 000 assets, a
+shared machine under heavy load — an ordering, not a benchmark):
+
+| 20 000 assets, ~180 000 quads | seconds |
+|---|--:|
+| pipeline run, whole dataset | 2.08 |
+| full validation, for comparison | 1.96 |
+| write-triggered run after a 104-quad edit | 0.72 |
+| shape update, full revalidation | 2.04 |
+| gate sandbox, 999-quad `POST` | 9.89 |
+
+Two things hold at any size. The shape-update revalidation is a
+whole-dataset run, so at 9M it costs what the 9M table above says (6–14 s),
+inside the threshold that keeps SHACL→SQL deferred. The **write gate's
+sandbox costs about five whole validations**: serialising the graph to
+Turtle and parsing it back dominates the validation it exists for, so the
+lever there is the change log — validate the focus nodes of the merged
+write, as the write trigger does — not a SQL translation. The 9M figures for
+this test have not been taken; the run is:
+
+```bash
+OTS_SCALE_ASSETS=1000000 cargo test --release --features full --test scale_shacl_9m -- --nocapture write_triggered
+```
+
 **Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
 is now one transaction — `clear_graph` plus every parsed quad inserted on
 the same `Transaction`, one commit — so a concurrent reader sees the old
@@ -811,8 +896,8 @@ on separate graphs, if that is a concern.
 | 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
 | same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
 
-² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
-512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_BYTES` (default
+512 MiB); the 226 MB file was appended in five 45 MB chunks (`POST`,
 incremental index maintenance), which is also how a client would stream a
 large import. Both tables were taken after a settle (60 s and 150 s) so the
 in-memory query accelerator had been rebuilt — a background tick does that
@@ -909,7 +994,7 @@ is the **median of 9 warm runs** returning ≤10 rows, so the timing reflects en
 work, not result transfer. Open Triplestore is queried through a dataset's SPARQL
 **service endpoint** (so the ACL layer scopes to that one graph, like Fuseki's
 `/ds` and QLever's single dataset); the per-IP rate limiter is disabled for the
-run (`RATE_LIMIT_DISABLED=1`) so it measures the engine, not the limiter.
+run (`OTS_RATE_LIMIT_ENABLED=false`) so it measures the engine, not the limiter.
 
 | Query (~501k triples, over HTTP) | Open&nbsp;Triplestore | Fuseki&nbsp;(TDB2) | QLever |
 |---|--:|--:|--:|
@@ -953,7 +1038,7 @@ join/`GROUP BY` numbers dropped from hundreds-of-ms / multi-second to single-dig
 ~150 ms.
 
 **The numbers above are cold (cache-off) engine compute.** On top of the engine,
-`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE`, on by default): a
+`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE_ENABLED`, on by default): a
 repeated *deterministic* query — the bulk of real traffic — collapses from full
 evaluation to a µs-scale LRU lookup, so a re-run of *any* row of the table collapses
 to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 17 ms
@@ -974,12 +1059,13 @@ graph; Fuseki via GSP; QLever via `qlever-index`), and times the queries with
 **Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
 the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
 figures run on different machines and configurations and are not comparable
-line-for-line. Open Triplestore embeds **Oxigraph** as its engine (0.4.11 when these
-figures were measured; 0.5 today), so its raw
-query/parse throughput tracks Oxigraph's (a modern Rust store competitive with
-RDF4J and Jena on many workloads). The Fuseki comparison is included precisely
-because it could be run here under identical conditions; apply the same recipe to
-GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
+line-for-line. That is why the multi-store comparison is its own measurement:
+[performance-comparison.md](performance-comparison.md) runs Open Triplestore,
+upstream Oxigraph, Fuseki, QLever, Virtuoso and RDF4J one at a time on the same
+machine, under the same container limits, on BSBM data with the explore mix, a
+SPARQL 1.1 feature mix, loading, SHACL (the method of the Jena comparison above)
+and 1/4/8 concurrent clients, with every answer's result count cross-checked.
+Its harness is [`scripts/bench-compare/`](../scripts/bench-compare/).
 
 ---
 
@@ -1088,8 +1174,9 @@ shard, **subject-star joins, row-local `FILTER`, `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
 (global or grouped), `COUNT(DISTINCT)` (global or grouped), `ASK` and `DISTINCT`**
 decompose correctly; anything that could join *across* subjects (object→subject joins,
 property paths, `ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`, a mix of distinct and
-non-distinct aggregates) is detected and **not** decomposed — the caller falls back to
-single-store evaluation. Grouped/global `SUM`/`AVG` over `xsd:double`/`float`, and a
+non-distinct aggregates, and any `EXISTS`/`NOT EXISTS` in a `FILTER`, `BIND` or `COUNT`
+argument, which reads triples about other subjects that a shard does not hold) is
+detected and **not** decomposed — the caller falls back to single-store evaluation. Grouped/global `SUM`/`AVG` over `xsd:double`/`float`, and a
 `COUNT(DISTINCT)` over blank nodes, are accepted statically but **declined at runtime**
 (IEEE-754 summation is order-dependent; blank-node labels are store-scoped — neither is
 bit-identical across shards) — `MIN`/`MAX` decompose for every type. The classifier is deliberately
@@ -1135,10 +1222,16 @@ the same quads, so results are identical (a parity suite asserts equality across
 named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP BY`/
 `DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
 The mirror is a derived index: rebuilt lazily after writes and **bounded by a
-triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two engine copies cost
-~2× the dataset in RAM, the columnar copy about 48 bytes a quad on top) so it never
-mirrors a store larger than RAM — above the cap the copies stay off and the persistent store answers, leaving the 1–100M disk tiers
-(data > RAM) unaffected.
+triple-count cap** (a quarter of the memory limit at ~1 KiB a triple — 1M in a 4 GiB
+container — or 2M where no limit can be read; `OTS_PARALLEL_QUERY_*`-tunable; the two
+engine copies cost ~2× the dataset in RAM, the columnar copy about 48 bytes a quad on
+top) so it never mirrors a store larger than RAM — above the cap the copies stay off and
+the persistent store answers, leaving the 1–100M disk tiers (data > RAM) unaffected. A
+build waits for writes to stay quiet (5 s after a burst of writes to a store over 50k
+triples), stops as soon
+as a write starts, and on Linux does not start unless the process's resident memory plus
+the copies fit in 80 % of the limit (issue #469: a 3.5M-triple load into 4 GiB was
+OOM-killed in 2 of 6 attempts when a build ran next to it).
 
 Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
 in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):
@@ -1188,8 +1281,8 @@ attempt:
 
 | | |
 |---|---|
-| **Accepted** | `SELECT`, `ASK`, `CONSTRUCT` (templates without blank nodes); basic graph patterns, including a property-path sequence of named nodes, which the parser folds into one; joins, `OPTIONAL` with its filter, `UNION`, `MINUS`, `FILTER`, `BIND`, `VALUES`; `GRAPH` with a constant name, and `GRAPH ?g` when the body surely binds a triple and `?g` is not reused inside it; `FROM` / `FROM NAMED`; `GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE` (and `DISTINCT` within them); `ORDER BY`, `DISTINCT` / `REDUCED`, `LIMIT` / `OFFSET`, subqueries; the logical, comparison and arithmetic operators, `IF`, `COALESCE`, `BOUND`, `IN`, `sameTerm`, and the string, `IRI` and type-test functions |
-| **Declined for fidelity** | property paths the parser cannot fold into a basic graph pattern (an alternative, or a sequence with one), and unbounded or negated paths; `EXISTS`, `SERVICE`, `LATERAL`, `DESCRIBE`, quoted triples; `NOW`, `RAND`, `BNODE`, `UUID`, the hashes, the casts, custom functions and aggregates; `SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors, whose argument validation differs; `GRAPH ?g` over a body that need not bind a triple, or with `?g` reused inside; `CONSTRUCT` templates with blank nodes; and — as the full copy also declines them — `SUM` and `AVG`, whose IEEE-754 summation order a re-ordered copy cannot reproduce |
+| **Accepted** | `SELECT`, `ASK`, `CONSTRUCT` (templates without blank nodes); basic graph patterns, including a property-path sequence of named nodes, which the parser folds into one; joins, `OPTIONAL` with its filter, `UNION`, `MINUS`, `FILTER`, `BIND`, `VALUES`; `GRAPH` with a constant name, and `GRAPH ?g` when the body surely binds a triple, `?g` is not reused inside it, and the body is built only from triple patterns, paths, `VALUES`, joins, `UNION`, `OPTIONAL`, `FILTER` and `BIND` (SPARQL evaluates it per named graph; under `MINUS`, grouping, `DISTINCT`, `LIMIT` or a sub-select that differs from carrying `?g` into each pattern, so those are declined); `FROM` / `FROM NAMED`; `GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE` (and `DISTINCT` within them); `ORDER BY`, `DISTINCT` / `REDUCED`, `LIMIT` / `OFFSET`, subqueries; the logical, comparison and arithmetic operators, `IF`, `COALESCE`, `BOUND`, `IN`, `sameTerm`, and the string, `IRI` and type-test functions |
+| **Declined for fidelity** | property paths the parser cannot fold into a basic graph pattern (an alternative, or a sequence with one), and unbounded or negated paths; `EXISTS`, `SERVICE`, `LATERAL`, `DESCRIBE`, quoted triples; an expression that reads a triple term or a literal with an RDF 1.2 base direction (declined when evaluation reaches one — the decoded value has no room for the direction, so `DATATYPE` would say `rdf:langString` and `"a"@en--ltr` would equal `"a"@en`; matching and returning such terms untouched stays accepted); `NOW`, `RAND`, `BNODE`, `UUID`, the hashes, the casts, custom functions and aggregates; `SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors, whose argument validation differs; `GRAPH ?g` over a body that need not bind a triple, or with `?g` reused inside; `CONSTRUCT` templates with blank nodes; and — as the full copy also declines them — `SUM` and `AVG`, whose IEEE-754 summation order a re-ordered copy cannot reproduce |
 | **Declined for speed** | Four shapes the engine simply answers faster, each measured rather than assumed. `REGEX` and `REPLACE`, whose work is string matching over decoded terms that the engine does against its own storage (3× the engine here). A query that is one unconstrained triple pattern returning more than 50 000 rows, which has no join for the index to accelerate and would only be materialised twice. A `LIMIT` over more than one triple pattern, where the row budget reaches only the last pattern while the engine stops early throughout (`concurrent/reads`, 377 µs against 605 µs). And a `FILTER` over a single triple pattern: finding rows is this copy's advantage, testing them is not, because each candidate goes back through the dictionary to become a term — a cost a join pays for many times over and one pattern has nothing to pay with (`query/filter`, slower on three consecutive gate runs). A filtered *join*, an unfiltered single pattern, and `HAVING` (one test per group, not per solution) all keep the shape. These are a routing policy, not a limit: the parity suites go through `query_semantics`, which skips them, so the evaluator is still held to the engine's answer for every one |
 
 **A `LIMIT` stops the scan.** The evaluator carries a row budget down through the
@@ -1211,7 +1304,7 @@ language tags, the date/time family, blank nodes, aggregates over erroring
 expressions, `GRAPH ?g` used against itself — and allows a query only two
 outcomes: declined, or equal to the engine. Thirty-four of those corners diverged
 when they were first run; the table above is the result.
-`OTS_COLUMNAR_QUERY=off` switches the copy off entirely.
+`OTS_COLUMNAR_QUERY_ENABLED=off` switches the copy off entirely.
 
 **Before and after** — the `query/*` and `path/*` groups of
 `benches/performance.rs` on the reference system, the same builder image, back to
@@ -1565,7 +1658,7 @@ make the recount grow with the sample count.
 
 ### Change capture and the update benchmarks
 
-The per-quad change log (`OTS_CHANGE_CAPTURE`) records one row per graph per
+The per-quad change log (`OTS_CHANGE_CAPTURE_ENABLED`) records one row per graph per
 write. It is **off by default**, and these benchmarks are why.
 
 With it off — the shipped default — the three update groups above and the two

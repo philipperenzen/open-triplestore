@@ -1,0 +1,44 @@
+# SHACL Core shapes over the BSBM dataset, written for the performance
+# comparison. Most constraints hold on every generated node; three are set so a
+# deterministic share of nodes violates them (deliveryDays > 7, numeric1 > 1900,
+# review text not in English), which gives the stores a report size to agree on.
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/> .
+@prefix rev:  <http://purl.org/stuff/rev#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix dc:   <http://purl.org/dc/elements/1.1/> .
+@prefix ex:   <http://example.org/bench/shapes#> .
+
+ex:ProductShape a sh:NodeShape ;
+  sh:targetClass bsbm:Product ;
+  sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+  sh:property [ sh:path bsbm:producer ; sh:minCount 1 ; sh:maxCount 1 ; sh:class bsbm:Producer ] ;
+  sh:property [ sh:path bsbm:productFeature ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ;
+  sh:property [ sh:path bsbm:productPropertyNumeric1 ; sh:minCount 1 ; sh:datatype xsd:integer ;
+                sh:minInclusive 1 ; sh:maxInclusive 1900 ] ;
+  sh:property [ sh:path bsbm:productPropertyTextual1 ; sh:datatype xsd:string ] .
+
+ex:OfferShape a sh:NodeShape ;
+  sh:targetClass bsbm:Offer ;
+  sh:property [ sh:path bsbm:product ; sh:minCount 1 ; sh:maxCount 1 ; sh:class bsbm:Product ] ;
+  sh:property [ sh:path bsbm:vendor ; sh:minCount 1 ; sh:maxCount 1 ; sh:class bsbm:Vendor ] ;
+  sh:property [ sh:path bsbm:price ; sh:minCount 1 ; sh:datatype bsbm:USD ] ;
+  sh:property [ sh:path bsbm:validTo ; sh:minCount 1 ; sh:datatype xsd:dateTime ] ;
+  sh:property [ sh:path bsbm:deliveryDays ; sh:datatype xsd:integer ; sh:minInclusive 1 ; sh:maxInclusive 7 ] ;
+  sh:property [ sh:path bsbm:offerWebpage ; sh:nodeKind sh:IRI ] .
+
+ex:ReviewShape a sh:NodeShape ;
+  sh:targetClass rev:Review ;
+  sh:property [ sh:path bsbm:reviewFor ; sh:minCount 1 ; sh:maxCount 1 ; sh:class bsbm:Product ] ;
+  sh:property [ sh:path rev:reviewer ; sh:minCount 1 ; sh:class foaf:Person ] ;
+  sh:property [ sh:path dc:title ; sh:minCount 1 ] ;
+  sh:property [ sh:path rev:text ; sh:languageIn ( "en" ) ] ;
+  sh:property [ sh:path bsbm:rating1 ; sh:datatype xsd:integer ; sh:minInclusive 1 ; sh:maxInclusive 10 ] ;
+  sh:property [ sh:path bsbm:rating2 ; sh:datatype xsd:integer ; sh:minInclusive 1 ; sh:maxInclusive 10 ] .
+
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass foaf:Person ;
+  sh:property [ sh:path foaf:name ; sh:minCount 1 ] ;
+  sh:property [ sh:path bsbm:country ; sh:nodeKind sh:IRI ] .

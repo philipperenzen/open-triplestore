@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use ots_plugin_api::sources::{
     is_low_cardinality, BatchSink, ColumnInfo, ColumnProfile, ConnectParams, DetectedPattern,
-    ForeignKey, IndexInfo, NumericSummary, Row, SourceConnection, SourceConnector, SourceError,
-    TableInfo, TableKind, TableProfile, Value, ValueCount, ValueKind,
+    ForeignKey, IdentifierRules, IndexInfo, NumericSummary, Row, SourceConnection, SourceConnector,
+    SourceError, TableInfo, TableKind, TableProfile, Value, ValueCount, ValueKind,
     LOW_CARDINALITY_MAX_VALUE_LEN, PROFILE_SAMPLE_ROWS, TOP_K,
 };
 use rusqlite::types::ValueRef;
@@ -80,15 +80,19 @@ struct SqliteConnection {
 impl SqliteConnection {
     /// Arm the per-statement budget. SQLite calls the progress handler every
     /// `n` VM steps; returning `true` aborts the statement, which surfaces as
-    /// `SQLITE_INTERRUPT`.
-    fn arm_timeout(&self) {
+    /// `SQLITE_INTERRUPT`. A statement never runs without its budget: if the
+    /// handler cannot be installed, the query is refused.
+    fn arm_timeout(&self) -> Result<(), SourceError> {
         let deadline = Instant::now() + self.timeout;
         self.conn
-            .progress_handler(1_000, Some(move || Instant::now() >= deadline));
+            .progress_handler(1_000, Some(move || Instant::now() >= deadline))
+            .map_err(|e| self.query_error(e))
     }
 
     fn disarm(&self) {
-        self.conn.progress_handler(0, None::<fn() -> bool>);
+        // Only fails on a connection this process does not own, and then
+        // there is no handler to remove either.
+        let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
     }
 
     fn query_error(&self, e: rusqlite::Error) -> SourceError {
@@ -109,7 +113,7 @@ impl SqliteConnection {
     }
 
     fn strings(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, SourceError> {
-        self.arm_timeout();
+        self.arm_timeout()?;
         let result = (|| -> Result<Vec<Vec<Option<String>>>, rusqlite::Error> {
             let mut stmt = self.conn.prepare(sql)?;
             let width = stmt.column_count();
@@ -480,6 +484,20 @@ impl SourceConnection for SqliteConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        self.arm_timeout()?;
+        let names = match self.conn.prepare(query) {
+            Ok(stmt) => Ok(stmt
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect()),
+            Err(e) => Err(self.query_error(e)),
+        };
+        self.disarm();
+        names.map(Some)
+    }
+
     fn stream(
         &mut self,
         query: &str,
@@ -487,7 +505,7 @@ impl SourceConnection for SqliteConnection {
         sink: BatchSink<'_>,
     ) -> Result<u64, SourceError> {
         let batch_size = batch_size.max(1);
-        self.arm_timeout();
+        self.arm_timeout()?;
         let mut stmt = match self.conn.prepare(query) {
             Ok(s) => s,
             Err(e) => {
@@ -740,6 +758,12 @@ impl SourceConnection for SqliteConnection {
             foreign_keys: info.foreign_keys,
             sampled_rows: sample.len() as u64,
         })
+    }
+
+    /// SQLite compares every identifier, delimited or not, without regard to
+    /// the case of ASCII letters, and keeps names as written.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::SQLITE)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

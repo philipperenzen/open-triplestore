@@ -195,12 +195,16 @@ fn pairs01(store: &TripleStore, q: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Last segment of [`version_validation_graph`]. Data snapshots never take it
+/// (`dataset_versions::snapshot` reserves it), so the two cannot share an IRI.
+pub const VERSION_VALIDATION_SEGMENT: &str = "validation";
+
 /// Version-scoped graph that snapshots a dataset version's validation-layer
 /// bindings, so the "what validates what" state travels with the version. A
 /// sibling of the version's data snapshot graphs under the same version IRI.
 pub fn version_validation_graph(base_url: &str, dataset_id: &str, version: &str) -> String {
     format!(
-        "{}/dataset/{}/version/{}/validation",
+        "{}/dataset/{}/version/{}/{VERSION_VALIDATION_SEGMENT}",
         base_url.trim_end_matches('/'),
         dataset_id,
         version

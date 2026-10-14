@@ -80,7 +80,7 @@ enum Backend {
     Local { base_path: PathBuf },
 }
 
-/// Asset storage — either S3/MinIO or local filesystem.
+/// Asset storage — either an S3-compatible store or the local filesystem.
 pub struct ObjectStore {
     backend: Backend,
 }

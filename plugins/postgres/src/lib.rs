@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use ots_plugin_api::sources::catalogue::{self, canonical, Dialect, Executor};
 use ots_plugin_api::sources::{
-    BatchSink, ConnectParams, Row, SourceConnection, SourceConnector, SourceError, TableInfo,
-    TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
+    BatchSink, ConnectParams, IdentifierRules, Row, SourceConnection, SourceConnector, SourceError,
+    TableInfo, TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
 };
 use ots_plugin_api::Plugin;
 use postgres::config::SslMode;
@@ -160,13 +160,21 @@ fn tls_connector(root_bundle: Option<&str>) -> Result<MakeRustlsConnect, SourceE
 }
 
 /// A driver error as a message. The server's own message when there is one
-/// — it never carries the password — else the driver's summary. The host
-/// scrubs host, database and account on top.
+/// — it never carries the password — else the driver's summary with its
+/// causes, so a refused certificate says why ("error performing TLS
+/// handshake: invalid peer certificate: UnknownIssuer"). The host scrubs
+/// host, database and account on top.
 fn describe(e: &postgres::Error) -> String {
-    match e.as_db_error() {
-        Some(db) => db.message().to_string(),
-        None => e.to_string(),
+    if let Some(db) = e.as_db_error() {
+        return db.message().to_string();
     }
+    let mut message = e.to_string();
+    let mut cause = std::error::Error::source(e);
+    while let Some(c) = cause {
+        message.push_str(&format!(": {c}"));
+        cause = c.source();
+    }
+    message
 }
 
 struct PostgresConnection {
@@ -281,6 +289,18 @@ impl SourceConnection for PostgresConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        // Preparing describes the result without running the statement.
+        let statement = self.client.prepare(query).map_err(|e| self.error(e))?;
+        Ok(Some(
+            statement
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect(),
+        ))
+    }
+
     fn stream(
         &mut self,
         query: &str,
@@ -305,9 +325,24 @@ impl SourceConnection for PostgresConnection {
         // Positional aliases, so two columns with one name in the query do
         // not make the cast ambiguous.
         let aliases: Vec<String> = (0..names.len()).map(|i| format!("\"c{i}\"")).collect();
+        // A CHAR(n) value keeps its padding: the cast to text would strip
+        // it, so it goes through the type's output function instead (R2RML
+        // §10.2 — the natural lexical form is the value as the server has it).
+        let types: Vec<String> = statement
+            .columns()
+            .iter()
+            .map(|c| c.type_().name().to_string())
+            .collect();
         let casts: Vec<String> = aliases
             .iter()
-            .map(|a| format!("CAST({a} AS TEXT) AS {a}"))
+            .zip(&types)
+            .map(|(a, t)| {
+                if t == "bpchar" {
+                    format!("CASE WHEN {a} IS NULL THEN NULL ELSE format('%s', {a}) END AS {a}")
+                } else {
+                    format!("CAST({a} AS TEXT) AS {a}")
+                }
+            })
             .collect();
         let wrapped = format!(
             "SELECT {} FROM ({query}) AS ots_q ({})",
@@ -372,6 +407,12 @@ impl SourceConnection for PostgresConnection {
 
     fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
         catalogue::unique_keys(self, &PgDialect, table)
+    }
+
+    /// PostgreSQL folds an unquoted name to lower case (where SQL 2008 folds
+    /// to upper case) and compares names exactly.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::POSTGRESQL)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

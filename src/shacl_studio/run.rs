@@ -147,7 +147,7 @@ fn severity_rank(s: &Severity) -> u8 {
 
 /// Tally results into a `RunOutcome` and apply the severity threshold. Split
 /// out so it can be unit-tested without running the SHACL engine.
-fn summarise(
+pub(crate) fn summarise(
     results: Vec<crate::shacl::report::ValidationResult>,
     threshold: SeverityThreshold,
 ) -> RunOutcome {
@@ -237,6 +237,9 @@ mod tests {
             value: None,
             source_shape: "urn:shape".into(),
             source_constraint: "sh:Test".into(),
+            source_constraint_component: String::new(),
+            annotations: Vec::new(),
+            terms: Default::default(),
             message: "test".into(),
         }
     }

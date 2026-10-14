@@ -16,7 +16,7 @@
 //! Idempotent: skips entirely once the `open-triplestore` organisation exists,
 //! so it never duplicates on restart. Best-effort — a failure loading one graph
 //! or creating one service is logged and skipped without aborting the rest. Opt
-//! out with `SEED_STANDARDS_DEMO=false`.
+//! out with `OTS_SEED_STANDARDS_DEMO_ENABLED=false`.
 
 use std::borrow::Cow;
 
@@ -97,15 +97,7 @@ const DATASET_BRANDS: &[DatasetBrand] = &[
 
 /// Entry point — best-effort, never panics out of startup.
 pub fn seed_open_triplestore(state: &AppState) {
-    let disabled = std::env::var("SEED_STANDARDS_DEMO")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    if disabled {
+    if !crate::config::SEED_STANDARDS_DEMO_ENABLED.get() {
         return;
     }
     // Two seeders can run concurrently on a fresh install: the boot task only
@@ -158,7 +150,7 @@ fn build_bundle() -> Bundle {
         id: "open-triplestore-standards-demo".to_string(),
         // Gating already happens in `seed_open_triplestore` before this bundle
         // is even built; recorded here too so the bundle is self-describing.
-        opt_out_env: Some("SEED_STANDARDS_DEMO".to_string()),
+        opt_out_env: Some("OTS_SEED_STANDARDS_DEMO_ENABLED".to_string()),
         prefixes: Default::default(),
         org: OrgSpec {
             slug: ORG_SLUG.to_string(),
@@ -167,6 +159,8 @@ fn build_bundle() -> Bundle {
         },
         datasets,
         data_models: Vec::new(),
+        account: None,
+        groups: Vec::new(),
     }
 }
 
@@ -246,25 +240,19 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drive `fut` to completion from any calling context. The seed normally runs
-/// on a `spawn_blocking` thread, where `Handle::current().block_on` would be
-/// fine — but tests call it straight from async workers, where that panics
-/// ("Cannot start a runtime from within a runtime"). A throwaway
-/// single-thread runtime on a scoped OS thread works from both.
-fn block_on_anywhere<T: Send>(
-    fut: impl std::future::Future<Output = T> + Send,
-) -> anyhow::Result<T> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                Ok(rt.block_on(fut))
-            })
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
+/// Drive `fut` to completion on the caller's tokio runtime. The seed runs on a
+/// `spawn_blocking` thread, so a runtime is current but this thread may block.
+///
+/// It has to be the caller's runtime and not a throwaway one. The S3 client's
+/// connection pool is process-wide (`storage::https_client`) and each pooled
+/// connection is driven by a task on the runtime that opened it, so a seed
+/// upload on a short-lived runtime left a connection in the pool that died with
+/// that runtime, failing whichever request had just taken it with "dispatch
+/// failure". Called from an async worker this panics rather than block it.
+fn block_on_current_runtime<T>(fut: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+    let rt = tokio::runtime::Handle::try_current()
+        .map_err(|e| anyhow::anyhow!("the seed needs a tokio runtime: {e}"))?;
+    Ok(rt.block_on(fut))
 }
 
 /// Default source of the headline IFC building — the Esplanades project
@@ -276,8 +264,8 @@ fn block_on_anywhere<T: Send>(
 /// and academic purposes", a restriction this open-source demo cannot carry
 /// (and GitHub classifies the repo NOASSERTION). The URL is the Git-LFS media
 /// host — `raw.githubusercontent.com` serves a 133-byte LFS pointer for this
-/// file, not the model. Override with `SEED_IFC_URL`; disable the whole demo
-/// seed with `SEED_STANDARDS_DEMO=false`.
+/// file, not the model. Override with `OTS_SEED_IFC_URL`; `OTS_OFFLINE` skips every
+/// download, and `OTS_SEED_STANDARDS_DEMO_ENABLED=false` the whole demo seed.
 const HEADLINE_IFC_URL: &str = "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades/1807_EP_AR_v18.ifc";
 
 /// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
@@ -323,7 +311,7 @@ struct IfcBuildingSeed {
 /// published), and Esplanades at Maleva 18, Tallinn (authored anchor — the
 /// file's georef rounds to whole arc-minutes). The smaller files come FIRST
 /// so rich IFC buildings appear within seconds of first boot; the headline
-/// Esplanades (which honours `SEED_IFC_URL`) imports last. All carry full BOT
+/// Esplanades (which honours `OTS_SEED_IFC_URL`) imports last. All carry full BOT
 /// topology, property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
@@ -444,8 +432,9 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
         return;
     }
-    // Same network kill-switch as the IFC demo (tests set SEED_IFC_URL="").
-    if std::env::var("SEED_IFC_URL").ok().as_deref().map(str::trim) == Some("") {
+    // No download at startup in an offline deployment (`OTS_OFFLINE`, on
+    // in production; tests set it too).
+    if crate::config::OFFLINE.get() {
         return;
     }
     for (id, filename, url) in STL_LANDMARKS.iter() {
@@ -453,10 +442,10 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
             continue; // already seeded
         }
         tracing::info!("seed: downloading landmark STL {filename} ({url})");
-        let downloaded = block_on_anywhere(async {
+        let downloaded = block_on_current_runtime(async {
             // Wikimedia's robot policy 403s requests without a descriptive
             // User-Agent — reqwest's default is not accepted.
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .user_agent("open-triplestore-seed/1.0 (https://opentriplestore.org; demo content bootstrap)")
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
@@ -484,7 +473,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
         let storage = state.object_store.clone();
         let key = s3_key.clone();
         if let Err(e) =
-            block_on_anywhere(async move { storage.upload(&key, bytes, "model/stl").await })
+            block_on_current_runtime(async move { storage.upload(&key, bytes, "model/stl").await })
         {
             tracing::warn!("landmark STL {filename} upload failed: {e}");
             continue;
@@ -512,14 +501,14 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
         return;
     }
-    // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
-    // tests, which must never reach out to the network). A custom value overrides
-    // only the headline (Esplanades) building.
-    let env_url = std::env::var("SEED_IFC_URL").ok();
-    if env_url.as_deref().map(str::trim) == Some("") {
-        tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
+    // No download at startup in an offline deployment (`OTS_OFFLINE`, on in
+    // production; tests set it too). OTS_SEED_IFC_URL overrides only the headline
+    // (Esplanades) building.
+    if crate::config::OFFLINE.get() {
+        tracing::info!("OTS_OFFLINE is on — skipping the IFC building demos");
         return;
     }
+    let env_url = crate::config::SEED_IFC_URL.get();
     for b in IFC_BUILDINGS.iter() {
         let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
         if state
@@ -530,18 +519,18 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         {
             continue; // already seeded
         }
-        // SEED_IFC_URL overrides only the headline building's source,
+        // OTS_SEED_IFC_URL overrides only the headline building's source,
         // regardless of its position in the list.
         let url = match env_url.as_deref() {
-            Some(u) if b.label == "Esplanades" && !u.trim().is_empty() => u.to_string(),
+            Some(u) if b.label == "Esplanades" => u.to_string(),
             _ => b.url.to_string(),
         };
         tracing::info!(
             "seed: downloading {} IFC ({url}) — first boot only",
             b.label
         );
-        let downloaded = block_on_anywhere(async {
-            let client = reqwest::Client::builder()
+        let downloaded = block_on_current_runtime(async {
+            let client = crate::http_client::builder()
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
             let bytes = client
@@ -564,7 +553,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
                 continue;
             }
         };
-        let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
+        let imported = block_on_current_runtime(crate::imports::ifc::import_ifc_bytes(
             state,
             DS,
             owner_id,
@@ -573,6 +562,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             Some(bot_graph),
             true,
             true,
+            false,
             Some(url.clone()),
             b.anchor.map(str::to_string),
             crate::imports::ifc::IfcImportBranding {
@@ -713,6 +703,22 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v18: the capabilities graph follows the 2026-10-06 regrades in
+// docs/standards.md: RML / R2RML (SQL identifiers resolved by SQL's rules) and
+// JSON-LD 1.1 (the fromRdf list and JSON-literal conversions) are Full.
+// v17: SHACL Advanced is Full (validation under sh:entailment, round-2
+// merge train); the other rows are as v16 left them.
+// v16: the capabilities graph follows the second round of 2026-10-03
+// regrades in docs/standards.md: SPARQL 1.1 Query, SPARQL 1.2, RDF 1.2 (named
+// by their dated drafts), OWL 2 RL, GeoSPARQL 1.0 (a new row) and 1.1, SHACL
+// Core, SHACL-C, ShEx 2.1, SWRL, OPM, buildingSMART IDS, DCAT 3 / DCAT-AP and
+// VoID (a new row) are Full; the SPARQL 1.1 Protocol, full-text search, SKOS
+// and JSON-LD 1.1 rows are new, JSON-LD graded Partial.
+// v15: the capabilities graph follows the 2026-10-03 regrades in
+// docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
+// reasoner sidecar), RDF Patch and LDES are Full.
+// v14: the capabilities graph (its own `capabilities` dataset) gives each
+// standard the grade docs/standards.md gives it; it said "Full" for all of them.
 // v13: refreshes the demo dataset's own name/description from the current
 // seed spec (set at CREATE time only, so old installs still narrated the
 // withdrawn Schependomlaan IFC as a bundled downloadable asset).
@@ -742,7 +748,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 13;
+const DEMO_CONTENT_VERSION: u32 = 18;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -809,6 +815,17 @@ fn refresh_demo_content(state: &AppState) {
         // Deregister removed graphs; the seeders re-register the ones they refill.
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
     }
+    // Re-authored bundled graphs of the other demo datasets, as
+    // (dataset, suffix); the bundle engine refills them this boot.
+    const STALE_OTHER: &[(&str, &str)] = &[("capabilities", "capabilities")];
+    for (ds, s) in STALE_OTHER {
+        let graph = format!("{}/{}/{}", seed_data::DEMO_BASE, ds, s);
+        let had = state.store.graph_count_cached(Some(&graph)).unwrap_or(0) > 0;
+        if state.store.graph_store_delete(Some(&graph)).is_ok() && had {
+            wiped += 1;
+        }
+        let _ = state.auth_db.remove_dataset_graph(ds, &graph);
+    }
     state.auth_db.invalidate_accessible_graphs_cache();
     // Refresh the demo dataset's own metadata too: name/description are set at
     // CREATE time only, so installs from before a rework kept narrating content
@@ -843,7 +860,7 @@ fn refresh_demo_content(state: &AppState) {
             let key = a.s3_key.clone();
             // Best-effort object delete on the blocking-safe path; the DB row
             // goes regardless so the asset stops being listed/served.
-            let _ = block_on_anywhere(async move { storage.delete(&key).await });
+            let _ = block_on_current_runtime(async move { storage.delete(&key).await });
             if let Err(e) = state.auth_db.delete_asset(&a.id) {
                 tracing::warn!("demo refresh: could not purge {}: {e}", a.filename);
             }
@@ -960,7 +977,7 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
             continue;
         }
         let key = format!("{prefix}/{org_id}.png");
-        let uploaded = block_on_anywhere(state.object_store.upload(
+        let uploaded = block_on_current_runtime(state.object_store.upload(
             &key,
             Bytes::from_static(bytes),
             "image/png",
@@ -1004,13 +1021,14 @@ fn seed_dataset_branding(
         }
     }
     if do_image && state.object_store.is_configured() {
-        let rt = tokio::runtime::Handle::current();
         let key = format!("dataset-images/{dataset_id}.png");
-        match rt.block_on(state.object_store.upload(
+        match block_on_current_runtime(state.object_store.upload(
             &key,
             Bytes::from_static(brand.image_png),
             "image/png",
-        )) {
+        ))
+        .and_then(|r| r)
+        {
             Ok(()) => {
                 if let Err(e) = state.auth_db.update_dataset_image(dataset_id, Some(&key)) {
                     tracing::warn!(
@@ -1035,11 +1053,11 @@ mod tests {
     use crate::store::TripleStore;
 
     /// Run the demo seed the way production does — on the blocking pool, so the
-    /// branding helpers' `Handle::current().block_on` has a runtime to use and the
-    /// seeder's internal `block_on`s don't panic on an async worker. An empty
-    /// `SEED_IFC_URL` keeps the seeder off the network (no IFC download).
+    /// seeder's `block_on_current_runtime` has a runtime to use and doesn't panic
+    /// on an async worker. `OTS_OFFLINE` keeps the seeder off the network (no
+    /// IFC download).
     async fn run_seed(state: &AppState) {
-        std::env::set_var("SEED_IFC_URL", "");
+        std::env::set_var("OTS_OFFLINE", "true");
         let s = state.clone();
         tokio::task::spawn_blocking(move || seed_open_triplestore(&s))
             .await
@@ -1139,5 +1157,153 @@ mod tests {
                 .is_empty(),
             "saved-query services back-filled once an owner exists"
         );
+    }
+
+    /// A store seeded by an older build gets the current capabilities graph:
+    /// the version refresh empties it and the bundle engine refills it, so a
+    /// grade corrected in the seed reaches installs that already have the demo.
+    #[tokio::test]
+    async fn version_refresh_replaces_a_stale_capabilities_graph() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        run_seed(&state).await;
+
+        let caps = format!("{}/capabilities/capabilities", seed_data::DEMO_BASE);
+        let ots = "https://opentriplestore.org/ns#";
+        let icdd_grade = |state: &AppState| -> Vec<String> {
+            let q = format!(
+                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}icdd> <{ots}conformance> ?c }} }}"
+            );
+            match state.store.query(&q).unwrap() {
+                oxigraph::sparql::QueryResults::Solutions(sols) => sols
+                    .map(|s| match s.unwrap().get("c") {
+                        Some(oxigraph::model::Term::Literal(l)) => l.value().to_string(),
+                        other => panic!("unexpected {other:?}"),
+                    })
+                    .collect(),
+                _ => panic!("not a SELECT result"),
+            }
+        };
+        assert_eq!(icdd_grade(&state), vec!["Partial".to_string()]);
+
+        // What a v13 install holds: every standard "Full", version 13 recorded.
+        state
+            .store
+            .graph_store_put(
+                Some(caps.as_str()),
+                &format!("<{ots}icdd> <{ots}conformance> \"Full\" .\n"),
+                oxigraph::io::RdfFormat::NTriples,
+            )
+            .unwrap();
+        let meta = format!("{}/viewer-3d-demo/seed-meta", seed_data::DEMO_BASE);
+        state
+            .store
+            .graph_store_put(
+                Some(meta.as_str()),
+                &format!(
+                    "<{}/viewer-3d-demo> <{ots}demoContentVersion> \
+                     \"13\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                    seed_data::DEMO_BASE
+                ),
+                oxigraph::io::RdfFormat::NTriples,
+            )
+            .unwrap();
+        assert_eq!(icdd_grade(&state), vec!["Full".to_string()]);
+
+        run_seed(&state).await;
+        assert_eq!(icdd_grade(&state), vec!["Partial".to_string()]);
+    }
+
+    /// A stand-in S3 endpoint on its own runtime, alive for the rest of the test
+    /// process. Every request gets an empty 200 and keeps its connection, so the
+    /// S3 client pools it, except HEAD (the bucket check in `ObjectStore::new`),
+    /// which closes its connection so the pool starts out empty. A request for a
+    /// key named `slow` notifies `slow_arrived` and is answered half a second
+    /// later, so it is still in flight while the test acts.
+    fn keep_alive_s3_endpoint(slow_arrived: std::sync::Arc<tokio::sync::Notify>) -> String {
+        use axum::http::{header, Method, Uri};
+        use axum::response::IntoResponse;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                // Taking the body lets hyper keep the connection afterwards.
+                let app = axum::Router::new().fallback(
+                    move |method: Method, uri: Uri, _body: Bytes| async move {
+                        if method == Method::HEAD {
+                            return [(header::CONNECTION, "close")].into_response();
+                        }
+                        if uri.path().ends_with("/slow") {
+                            slow_arrived.notify_one();
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        ().into_response()
+                    },
+                );
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        format!("http://{addr}")
+    }
+
+    /// The S3 client's connection pool is process-wide and each pooled
+    /// connection is driven by a task on the runtime that opened it. A seed
+    /// upload used to run on a throwaway runtime: its connection went back to
+    /// the pool, a request on the main runtime could take it, and when the
+    /// throwaway runtime ended a moment later that request failed with
+    /// "dispatch failure". Here the seed waits until the main runtime's request
+    /// is in flight before it returns, which makes that window certain.
+    #[test]
+    fn seed_uploads_leave_no_pooled_connection_on_a_dead_runtime() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let slow_arrived = Arc::new(Notify::new());
+        let seed_uploaded = Arc::new(Notify::new());
+        let endpoint = keep_alive_s3_endpoint(slow_arrived.clone());
+        let main = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        main.block_on(async {
+            let store = crate::storage::ObjectStore::new(
+                &endpoint,
+                "seed-pool",
+                "access",
+                "secret",
+                "us-east-1",
+            )
+            .await
+            .unwrap();
+            // The seed's path: a blocking thread of the main runtime.
+            let seed = {
+                let store = store.clone();
+                let seed_uploaded = seed_uploaded.clone();
+                tokio::task::spawn_blocking(move || {
+                    block_on_current_runtime(async {
+                        let uploaded = store
+                            .upload("seed", Bytes::from_static(b"seed"), "image/png")
+                            .await;
+                        seed_uploaded.notify_one();
+                        slow_arrived.notified().await;
+                        uploaded
+                    })
+                })
+            };
+            // A request handler on the main runtime takes the pooled connection.
+            seed_uploaded.notified().await;
+            let after = store
+                .upload("slow", Bytes::from_static(b"after"), "image/png")
+                .await;
+            seed.await.unwrap().unwrap().expect("seed upload");
+            after.expect("an upload after the seed runs on a live connection");
+        });
     }
 }

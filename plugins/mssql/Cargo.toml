@@ -8,7 +8,11 @@ description = "Open Triplestore plugin: the SQL Server datasource connector — 
 
 [dependencies]
 ots-plugin-api = { path = "../api" }
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls"] }
+# tiberius 0.13 links aws-lc-rs and enables it on rustls next to the ring
+# provider the rest of the tree uses; connect() installs ring as the process
+# default so rustls (and tiberius) never have to choose.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = { version = "0.3", default-features = false }

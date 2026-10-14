@@ -59,6 +59,7 @@ const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SH = 'http://www.w3.org/ns/shacl#';
 const SKOS = 'http://www.w3.org/2004/02/skos/core#';
 const SWRL = 'http://www.w3.org/2003/11/swrl#';
+const RULE_SET = 'https://opentriplestore.org/ns#RuleSet';
 const CLASS_META = new Set([RDFS + 'Class', OWL + 'Class']);
 const PROP_META = new Set([RDF + 'Property', OWL + 'ObjectProperty', OWL + 'DatatypeProperty', OWL + 'AnnotationProperty']);
 const SHAPE_META = new Set([SH + 'NodeShape', SH + 'PropertyShape']);
@@ -96,6 +97,9 @@ export async function datasetContentKind(datasetId: string, signal?: AbortSignal
     else if (c.iri === SKOS + 'ConceptScheme') skosSchemeCount += n;
     else if (c.iri === SKOS + 'Concept') skosConceptCount += n;
     else if (c.iri === SWRL + 'Imp') entailmentCount += n;
+    // A rule's atoms, variables and the rule sets the rules editor keeps them
+    // in are part of the rules, not instance data.
+    else if (c.iri.startsWith(SWRL) || c.iri === RULE_SET) { /* rule machinery */ }
     else if (IGNORE_META.has(c.iri)) { /* ontology header / bare individual — not a distinct instance kind */ }
     else { instanceCount += n; instanceTypes.push({ cls: c.iri, count: n }); }
   }

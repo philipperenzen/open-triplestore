@@ -349,12 +349,36 @@ const BUILTINS: &[Builtin] = &[
         sort: 80,
     },
     Builtin {
+        slug: "swrl",
+        title: "SWRL Rules",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/swrl.md"),
+        admin_only: false,
+        sort: 81,
+    },
+    Builtin {
         slug: "shacl",
         title: "SHACL Validation",
         category: "Reasoning & Validation",
         body: include_str!("../../docs/shacl.md"),
         admin_only: false,
         sort: 82,
+    },
+    Builtin {
+        slug: "shex",
+        title: "ShEx Validation",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/shex.md"),
+        admin_only: false,
+        sort: 82,
+    },
+    Builtin {
+        slug: "repair",
+        title: "Repair Proposals",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/repair.md"),
+        admin_only: false,
+        sort: 83,
     },
     // ── Security ──
     Builtin {
@@ -582,6 +606,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 134,
     },
     Builtin {
+        slug: "performance-comparison",
+        title: "Performance Comparison with Other Triplestores",
+        category: "Reference",
+        body: include_str!("../../docs/performance-comparison.md"),
+        admin_only: false,
+        sort: 135,
+    },
+    Builtin {
         slug: "development",
         title: "Development & build performance",
         category: "Reference",
@@ -724,7 +756,7 @@ pub async fn delete_doc(
 /// create/update/delete enforce admin in-handler.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/docs", get(list_docs)).route(
-        "/api/docs/:slug",
+        "/api/docs/{slug}",
         get(get_doc)
             .put(create_doc)
             .post(create_doc)

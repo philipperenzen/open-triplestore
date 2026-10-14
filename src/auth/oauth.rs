@@ -66,6 +66,9 @@ pub fn new_session_store() -> OAuthSessions {
 /// Redirects are disabled as an SSRF guard so a malicious or misconfigured IdP
 /// can't bounce discovery/token fetches at internal hosts — this complements the
 /// https pin in `is_secure_idp_url`.
+// openidconnect's own reqwest 0.12, whose `rustls-tls` feature brings and
+// selects ring itself; clippy.toml's rule is about this crate's reqwest 0.13.
+#[allow(clippy::disallowed_methods)]
 fn oidc_http_client() -> anyhow::Result<openidconnect::reqwest::Client> {
     openidconnect::reqwest::ClientBuilder::new()
         .redirect(openidconnect::reqwest::redirect::Policy::none())

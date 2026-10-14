@@ -6,7 +6,7 @@
 //! verified later without trusting filesystem mtime.
 //!
 //! Optional `age` X25519 encryption is applied to both files when the
-//! `backup-encrypt` feature is enabled and `BACKUP_ENCRYPT=true`.
+//! `backup-encrypt` feature is enabled and `OTS_BACKUP_ENCRYPTION_ENABLED=true`.
 
 use anyhow::Context;
 use chrono::Utc;
@@ -37,7 +37,7 @@ pub struct BackupManifest {
 
 /// Resolve the age recipient used to encrypt backups.
 ///
-/// The recipient must be supplied by the operator at `BACKUP_ENCRYPT_KEY_PATH`.
+/// The recipient must be supplied by the operator at `OTS_BACKUP_ENCRYPTION_KEY_PATH`.
 /// This deliberately does NOT generate one: it used to, by calling
 /// `Identity::generate()`, writing only `to_public()` and letting the identity
 /// drop at the end of the scope. The private half was never printed or
@@ -51,10 +51,10 @@ pub fn init_backup_encryption(key_path: &Path) -> anyhow::Result<Option<PathBuf>
     {
         if !key_path.exists() {
             anyhow::bail!(
-                "BACKUP_ENCRYPT=true but no age recipient exists at {}. Generate a keypair with \
+                "OTS_BACKUP_ENCRYPTION_ENABLED=true but no age recipient exists at {}. Generate a keypair with \
                  `age-keygen -o backup-identity.txt`, store that identity file somewhere safe and \
                  OUTSIDE the data directory, then write its public line (age1…) to {}. Set \
-                 BACKUP_DECRYPT_IDENTITY_PATH to the identity file to allow automated restore.",
+                 OTS_BACKUP_DECRYPTION_IDENTITY_PATH to the identity file to allow automated restore.",
                 key_path.display(),
                 key_path.display()
             );
@@ -77,7 +77,7 @@ pub fn init_backup_encryption(key_path: &Path) -> anyhow::Result<Option<PathBuf>
     {
         let _ = key_path;
         tracing::error!(
-            "BACKUP_ENCRYPT=true but binary was compiled without `backup-encrypt` feature"
+            "OTS_BACKUP_ENCRYPTION_ENABLED=true but binary was compiled without `backup-encrypt` feature"
         );
         anyhow::bail!("backup encryption not available: recompile with --features backup-encrypt")
     }
@@ -120,6 +120,14 @@ impl BackupManager {
 
     pub fn backup_dir(&self) -> &Path {
         &self.backup_dir
+    }
+
+    pub fn retention(&self) -> usize {
+        self.retention
+    }
+
+    pub fn encrypts(&self) -> bool {
+        self.encrypt
     }
 
     /// Run one backup cycle: dump RDF + SQLite, write manifest, prune old
@@ -212,8 +220,7 @@ impl BackupManager {
     pub fn verify(&self, id: &str) -> anyhow::Result<bool> {
         validate_backup_id(id)?;
         let dir = self.backup_dir.join(id);
-        let manifest: BackupManifest =
-            serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+        let manifest = read_manifest(&dir, id)?;
         let rdf_ok = sha256_hex(&fs::read(dir.join(&manifest.rdf_path))?) == manifest.rdf_sha256;
         let sqlite_ok =
             sha256_hex(&fs::read(dir.join(&manifest.sqlite_path))?) == manifest.sqlite_sha256;
@@ -259,7 +266,13 @@ impl BackupManager {
             return Ok(());
         }
         let to_remove = all.split_off(self.retention);
+        // A backup staged for restore survives retention until it is applied
+        // or cancelled: pruning it would turn the restart into a failure.
+        let pending = pending_restore(&self.backup_dir).map(|p| p.id);
         for m in to_remove {
+            if pending.as_deref() == Some(m.id.as_str()) {
+                continue;
+            }
             let _ = fs::remove_dir_all(self.backup_dir.join(&m.id));
         }
         Ok(())
@@ -272,7 +285,7 @@ impl BackupManager {
         #[cfg(feature = "backup-encrypt")]
         {
             let key_path = self.encrypt_key_path.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("BACKUP_ENCRYPT=true but BACKUP_ENCRYPT_KEY_PATH is unset")
+                anyhow::anyhow!("OTS_BACKUP_ENCRYPTION_ENABLED=true but OTS_BACKUP_ENCRYPTION_KEY_PATH is unset")
             })?;
             let pubkey_str = fs::read_to_string(key_path)
                 .with_context(|| format!("read age recipient key {}", key_path.display()))?;
@@ -295,14 +308,14 @@ impl BackupManager {
         {
             let _ = data;
             anyhow::bail!(
-                "BACKUP_ENCRYPT=true but binary was built without `backup-encrypt` feature"
+                "OTS_BACKUP_ENCRYPTION_ENABLED=true but binary was built without `backup-encrypt` feature"
             );
         }
     }
 }
 
 /// Decrypt both halves of an age-encrypted backup with the operator's identity
-/// from `BACKUP_DECRYPT_IDENTITY_PATH`.
+/// from `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`.
 fn decrypt_backup_pair(
     id: &str,
     rdf_raw: &[u8],
@@ -315,7 +328,7 @@ fn decrypt_backup_pair(
 
         let identity_path = identity_path.ok_or_else(|| {
             anyhow::anyhow!(
-                "backup {id} is age-encrypted; set BACKUP_DECRYPT_IDENTITY_PATH to the age \
+                "backup {id} is age-encrypted; set OTS_BACKUP_DECRYPTION_IDENTITY_PATH to the age \
                  identity file (the private half from `age-keygen`) to restore it. The server \
                  stores only the recipient, never the identity."
             )
@@ -397,15 +410,18 @@ fn sqlite_online_backup(src: &Path, dst: &Path) -> anyhow::Result<()> {
 
 // ─── Admin HTTP handlers ────────────────────────────────────────────────────
 
-/// `POST /api/admin/backup` — trigger a backup synchronously. super_admin only.
+/// `POST /api/admin/backup` — trigger a backup synchronously, and copy it to
+/// S3 when `OTS_BACKUP_S3_ENABLED=true` (as the scheduled backups are). The upload
+/// outcome is in `s3` (`null` when S3 is off); a failed upload does not fail
+/// the backup, which is complete on disk. super_admin only.
 pub async fn admin_create_backup(
     axum::Extension(current_user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
-    axum::extract::State(mgr): axum::extract::State<Option<Arc<BackupManager>>>,
-) -> Result<axum::Json<BackupManifest>, (axum::http::StatusCode, String)> {
+    axum::extract::State(state): axum::extract::State<crate::server::AppState>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     if current_user.role != crate::auth::models::SystemRole::SuperAdmin {
         return Err((axum::http::StatusCode::FORBIDDEN, "super_admin only".into()));
     }
-    let mgr = mgr.ok_or((
+    let mgr = state.backup.clone().ok_or((
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "Backup not configured".into(),
     ))?;
@@ -414,7 +430,22 @@ pub async fn admin_create_backup(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(axum::Json(m))
+    let s3 = if s3_enabled() && state.object_store.is_configured() {
+        let r = maybe_upload_to_s3(&state.object_store, &mgr, &m.id).await;
+        Some(match r {
+            Ok(()) => serde_json::json!({ "uploaded": true }),
+            Err(e) => {
+                tracing::warn!("backup: S3 upload failed: {}", e);
+                serde_json::json!({ "uploaded": false, "error": e.to_string() })
+            }
+        })
+    } else {
+        None
+    };
+    let mut body = serde_json::to_value(&m)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    body["s3"] = s3.unwrap_or(serde_json::Value::Null);
+    Ok(axum::Json(body))
 }
 
 /// `GET /api/admin/backup` — list manifests. super_admin only.
@@ -491,6 +522,20 @@ fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read the manifest of the backup in `dir`, refusing file names that would
+/// leave that directory: `dir.join` of an absolute path *replaces* `dir`, and
+/// `..` climbs out of it, so an edited manifest could otherwise point verify,
+/// restore or the S3 upload at any file on the host.
+fn read_manifest(dir: &Path, id: &str) -> anyhow::Result<BackupManifest> {
+    let manifest: BackupManifest = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .with_context(|| format!("read manifest for backup {id}"))?,
+    )?;
+    validate_backup_file_name(&manifest.rdf_path)?;
+    validate_backup_file_name(&manifest.sqlite_path)?;
+    Ok(manifest)
+}
+
 /// Restore a backup into `store` and the SQLite identity DB at `target_sqlite`,
 /// **replacing** current data. SHA-256 checksums are verified before anything is
 /// touched, so a corrupt backup aborts without destroying the live store.
@@ -500,7 +545,7 @@ fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
 ///
 /// An age-encrypted backup is decrypted in-process when `identity_path` names
 /// the age identity file (the private half produced by `age-keygen`); the
-/// `--restore` CLI passes `BACKUP_DECRYPT_IDENTITY_PATH`. The server never
+/// `--restore` CLI passes `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`. The server never
 /// stores that identity — only the recipient it encrypts to — so restoring an
 /// encrypted backup is an explicit operator action with the key they kept.
 ///
@@ -516,12 +561,7 @@ pub fn restore_backup(
 ) -> anyhow::Result<BackupManifest> {
     validate_backup_id(id)?;
     let dir = backup_dir.join(id);
-    let manifest: BackupManifest = serde_json::from_slice(
-        &fs::read(dir.join("manifest.json"))
-            .with_context(|| format!("read manifest for backup {id}"))?,
-    )?;
-    validate_backup_file_name(&manifest.rdf_path)?;
-    validate_backup_file_name(&manifest.sqlite_path)?;
+    let manifest = read_manifest(&dir, id)?;
 
     // Verify integrity BEFORE replacing any live data.
     let rdf_raw = fs::read(dir.join(&manifest.rdf_path))?;
@@ -581,21 +621,53 @@ pub fn restore_backup(
 }
 
 /// Upload a backup directory's files to S3 under `backups/<id>/...`. No-op
-/// if `BACKUP_S3_ENABLED` is not "true" or the ObjectStore is not configured.
+/// unless `OTS_BACKUP_S3_ENABLED` is on, or if the ObjectStore is not configured.
 pub async fn maybe_upload_to_s3(
     obj: &crate::storage::ObjectStore,
     mgr: &BackupManager,
     id: &str,
 ) -> anyhow::Result<()> {
-    if std::env::var("BACKUP_S3_ENABLED").unwrap_or_default() != "true" {
+    if !s3_enabled() || !obj.is_configured() {
         return Ok(());
     }
-    if !obj.is_configured() {
-        return Ok(());
-    }
+    let r = upload_to_s3(obj, mgr, id).await;
+    *last_s3_upload().lock().unwrap_or_else(|p| p.into_inner()) = Some(S3Upload {
+        id: id.to_string(),
+        at: Utc::now().to_rfc3339(),
+        ok: r.is_ok(),
+        error: r.as_ref().err().map(|e| e.to_string()),
+    });
+    r
+}
+
+/// `OTS_BACKUP_S3_ENABLED`: copy each backup to the object store.
+pub fn s3_enabled() -> bool {
+    crate::config::BACKUP_S3_ENABLED.get()
+}
+
+/// The latest S3 copy this process attempted, for the admin status.
+#[derive(Debug, Clone, Serialize)]
+pub struct S3Upload {
+    pub id: String,
+    pub at: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+fn last_s3_upload() -> &'static std::sync::Mutex<Option<S3Upload>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<S3Upload>>> =
+        std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+async fn upload_to_s3(
+    obj: &crate::storage::ObjectStore,
+    mgr: &BackupManager,
+    id: &str,
+) -> anyhow::Result<()> {
     validate_backup_id(id)?;
     let dir = mgr.backup_dir().join(id);
-    let manifest: BackupManifest = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    let manifest = read_manifest(&dir, id)?;
     for (name, ct) in [
         (manifest.rdf_path.as_str(), "application/octet-stream"),
         (manifest.sqlite_path.as_str(), "application/octet-stream"),
@@ -608,23 +680,262 @@ pub async fn maybe_upload_to_s3(
     Ok(())
 }
 
-/// Spawn a Tokio task that runs the backup every `interval_hours` hours.
+// ─── Staged restore ─────────────────────────────────────────────────────────
+//
+// A restore replaces the identity DB file, which a serving process holds open,
+// so it cannot run while the server serves. The admin UI therefore *stages*
+// one: the checksums are verified now, a marker names the backup, and the next
+// start applies it before anything is opened (as `--restore` does), then
+// records how it went for the UI to show.
+
+const RESTORE_PENDING: &str = "restore-pending.json";
+const RESTORE_LAST: &str = "restore-last.json";
+
+/// A restore staged for the next start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRestore {
+    pub id: String,
+    pub requested_by: Option<String>,
+    pub requested_at: String,
+}
+
+/// How the last staged restore went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreOutcome {
+    pub id: String,
+    pub requested_by: Option<String>,
+    pub requested_at: String,
+    pub finished_at: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub quad_count: Option<usize>,
+}
+
+pub fn pending_restore(backup_dir: &Path) -> Option<PendingRestore> {
+    let bytes = fs::read(backup_dir.join(RESTORE_PENDING)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn last_restore(backup_dir: &Path) -> Option<RestoreOutcome> {
+    let bytes = fs::read(backup_dir.join(RESTORE_LAST)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Stage `id` for restore at the next start, after verifying its checksums
+/// (and, for an encrypted backup, that a decryption identity is configured):
+/// a backup that cannot be restored is refused now, not at the restart.
+pub fn stage_restore(
+    mgr: &BackupManager,
+    id: &str,
+    requested_by: Option<&str>,
+) -> anyhow::Result<PendingRestore> {
+    validate_backup_id(id)?;
+    let manifest = read_manifest(&mgr.backup_dir.join(id), id)?;
+    if !mgr.verify(id)? {
+        anyhow::bail!("backup {id} failed checksum verification; it cannot be restored");
+    }
+    if manifest.encrypted
+        && crate::config::BACKUP_DECRYPTION_IDENTITY_PATH
+            .get()
+            .is_none()
+    {
+        anyhow::bail!(
+            "backup {id} is age-encrypted and OTS_BACKUP_DECRYPTION_IDENTITY_PATH is not set; \
+             the restart could not decrypt it"
+        );
+    }
+    let pending = PendingRestore {
+        id: id.to_string(),
+        requested_by: requested_by.map(str::to_string),
+        requested_at: Utc::now().to_rfc3339(),
+    };
+    write_secure(
+        &mgr.backup_dir.join(RESTORE_PENDING),
+        serde_json::to_string_pretty(&pending)?.as_bytes(),
+    )?;
+    mgr.audit.log(
+        AuditEventBuilder::new(
+            AuditEventType::BackupRestoreRequested,
+            AuditOutcome::Success,
+        )
+        .resource("backup", id)
+        .details(serde_json::json!({ "requested_by": requested_by })),
+    );
+    Ok(pending)
+}
+
+/// Withdraw a staged restore. `false` when none was staged.
+pub fn cancel_restore(mgr: &BackupManager, by: Option<&str>) -> anyhow::Result<bool> {
+    let Some(pending) = pending_restore(&mgr.backup_dir) else {
+        return Ok(false);
+    };
+    fs::remove_file(mgr.backup_dir.join(RESTORE_PENDING))?;
+    mgr.audit.log(
+        AuditEventBuilder::new(
+            AuditEventType::BackupRestoreCancelled,
+            AuditOutcome::Success,
+        )
+        .resource("backup", &pending.id)
+        .details(serde_json::json!({ "cancelled_by": by })),
+    );
+    Ok(true)
+}
+
+/// Apply a staged restore, if there is one. Called at startup before the
+/// identity DB and the store are opened. The marker is removed whatever the
+/// outcome — a failing restore must not stop every later start — and the
+/// outcome is written for the admin UI. A failure leaves the live data as it
+/// was: [`restore_backup`] verifies and decrypts before it replaces anything.
+pub fn apply_pending_restore(
+    backup_dir: &Path,
+    data_dir: &Path,
+    target_sqlite: &Path,
+    identity_path: Option<&Path>,
+) -> Option<RestoreOutcome> {
+    let pending = pending_restore(backup_dir)?;
+    let _ = fs::remove_file(backup_dir.join(RESTORE_PENDING));
+    tracing::info!("Applying the staged restore of backup {}…", pending.id);
+    let result = TripleStore::open(data_dir)
+        .map_err(|e| anyhow::anyhow!("open the store: {e}"))
+        .and_then(|store| {
+            restore_backup(
+                backup_dir,
+                &pending.id,
+                &store,
+                target_sqlite,
+                identity_path,
+            )
+        });
+    let outcome = RestoreOutcome {
+        id: pending.id.clone(),
+        requested_by: pending.requested_by,
+        requested_at: pending.requested_at,
+        finished_at: Utc::now().to_rfc3339(),
+        ok: result.is_ok(),
+        error: result.as_ref().err().map(|e| format!("{e:#}")),
+        quad_count: result.as_ref().ok().map(|m| m.rdf_quad_count),
+    };
+    match &result {
+        Ok(m) => tracing::info!("Restored backup {} ({} quads)", m.id, m.rdf_quad_count),
+        Err(e) => tracing::error!("The staged restore of backup {} failed: {e:#}", pending.id),
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&outcome) {
+        let _ = write_secure(&backup_dir.join(RESTORE_LAST), json.as_bytes());
+    }
+    Some(outcome)
+}
+
+/// `GET /api/admin/backup/status` — whether backups are configured, how they
+/// are kept (retention, encryption, schedule), the S3 copy, and any staged
+/// or last restore. super_admin only. Answers 200 with `configured: false`
+/// when the backup subsystem is off, so the UI can say so.
+pub async fn admin_backup_status(
+    axum::Extension(current_user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    axum::extract::State(state): axum::extract::State<crate::server::AppState>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if current_user.role != crate::auth::models::SystemRole::SuperAdmin {
+        return Err((axum::http::StatusCode::FORBIDDEN, "super_admin only".into()));
+    }
+    let s3 = serde_json::json!({
+        "enabled": s3_enabled(),
+        "object_store_configured": state.object_store.is_configured(),
+        "last_upload": last_s3_upload().lock().unwrap_or_else(|p| p.into_inner()).clone(),
+    });
+    let Some(mgr) = state.backup.clone() else {
+        return Ok(axum::Json(serde_json::json!({
+            "configured": false,
+            "s3": s3,
+        })));
+    };
+    let dir = mgr.backup_dir().to_path_buf();
+    let (count, latest) = tokio::task::spawn_blocking({
+        let mgr = mgr.clone();
+        move || {
+            let list = mgr.list().unwrap_or_default();
+            (list.len(), list.first().cloned())
+        }
+    })
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::Json(serde_json::json!({
+        "configured": true,
+        "dir": dir.display().to_string(),
+        "retention": mgr.retention(),
+        "encrypted": mgr.encrypts(),
+        "decrypt_identity_configured": crate::config::BACKUP_DECRYPTION_IDENTITY_PATH.get().is_some(),
+        "schedule_secs": crate::config::BACKUP_SCHEDULE.get().as_secs(),
+        "count": count,
+        "latest": latest,
+        "s3": s3,
+        "pending_restore": pending_restore(&dir),
+        "last_restore": last_restore(&dir),
+    })))
+}
+
+/// `POST /api/admin/backup/:id/restore` — stage a restore of backup `id` for
+/// the next start (see [`stage_restore`]). Replaces any restore staged
+/// before. super_admin only.
+pub async fn admin_stage_restore(
+    axum::Extension(current_user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    axum::extract::State(mgr): axum::extract::State<Option<Arc<BackupManager>>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<PendingRestore>, (axum::http::StatusCode, String)> {
+    if current_user.role != crate::auth::models::SystemRole::SuperAdmin {
+        return Err((axum::http::StatusCode::FORBIDDEN, "super_admin only".into()));
+    }
+    let mgr = mgr.ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Backup not configured".into(),
+    ))?;
+    let user = current_user.user_id.clone();
+    let pending = tokio::task::spawn_blocking(move || stage_restore(&mgr, &id, Some(&user)))
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    Ok(axum::Json(pending))
+}
+
+/// `DELETE /api/admin/backup/restore` — withdraw the staged restore.
+/// super_admin only.
+pub async fn admin_cancel_restore(
+    axum::Extension(current_user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    axum::extract::State(mgr): axum::extract::State<Option<Arc<BackupManager>>>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if current_user.role != crate::auth::models::SystemRole::SuperAdmin {
+        return Err((axum::http::StatusCode::FORBIDDEN, "super_admin only".into()));
+    }
+    let mgr = mgr.ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Backup not configured".into(),
+    ))?;
+    match cancel_restore(&mgr, Some(&current_user.user_id)) {
+        Ok(true) => Ok(axum::http::StatusCode::NO_CONTENT),
+        Ok(false) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "No restore is staged".into(),
+        )),
+        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+/// Spawn a Tokio task that runs the backup every `interval` (`OTS_BACKUP_SCHEDULE_SECS`).
 pub fn spawn_scheduler(
     mgr: Arc<BackupManager>,
-    interval_hours: u64,
+    interval: std::time::Duration,
     object_store: Option<Arc<crate::storage::ObjectStore>>,
 ) {
     tokio::spawn(async move {
         // A silently failing backup is the worst kind: nothing looks wrong
         // until a restore is needed. Every failure below therefore raises an
         // operational alert as well as logging — `AlertConfig::from_env` is a
-        // no-op when neither ALERT_WEBHOOK_URL nor ALERT_SMTP_* is configured,
+        // no-op when neither OTS_ALERT_WEBHOOK_URL nor OTS_ALERT_SMTP_* is configured,
         // so this costs nothing when alerting is off.
         let alerts = crate::alerting::AlertManager::new(
             crate::alerting::AlertConfig::from_env(),
             mgr.audit.clone(),
         );
-        let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
+        // The registry refuses an interval under a minute.
+        let interval = interval.max(std::time::Duration::from_secs(60));
         loop {
             tokio::time::sleep(interval).await;
             let mgr_inner = mgr.clone();
@@ -751,13 +1062,114 @@ mod tests {
         );
     }
 
+    /// A restore staged from the admin UI: verified when staged, kept from
+    /// retention while it waits, applied at the next start before anything
+    /// opens the store, and its outcome recorded. Cancelling withdraws it.
+    #[test]
+    fn a_staged_restore_survives_retention_and_applies_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let data_dir = dir.path().join("data");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+        let first = {
+            let store = TripleStore::open(&data_dir).unwrap();
+            store
+                .load_str(
+                    "@prefix ex: <http://example.org/> . ex:a ex:b ex:c . ex:d ex:e ex:f .",
+                    RdfFormat::Turtle,
+                    None,
+                )
+                .unwrap();
+            // Retention 1: the next backup would prune this one.
+            let mgr = BackupManager::new(
+                backup_dir.clone(),
+                sqlite_path.clone(),
+                store.clone(),
+                audit.clone(),
+                1,
+                false,
+                None,
+            )
+            .unwrap();
+            let first = mgr.run_once().unwrap();
+            store
+                .update("INSERT DATA { <http://example.org/x> <http://example.org/y> <http://example.org/z> }")
+                .unwrap();
+
+            // Cancel: nothing staged afterwards, and a second cancel says so.
+            stage_restore(&mgr, &first.id, Some("adm")).unwrap();
+            assert!(cancel_restore(&mgr, Some("adm")).unwrap());
+            assert!(pending_restore(&backup_dir).is_none());
+            assert!(!cancel_restore(&mgr, Some("adm")).unwrap());
+
+            let pending = stage_restore(&mgr, &first.id, Some("adm")).unwrap();
+            assert_eq!(pending.requested_by.as_deref(), Some("adm"));
+            assert_eq!(pending_restore(&backup_dir).unwrap().id, first.id);
+
+            // A newer backup does not prune the staged one.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let second = mgr.run_once().unwrap();
+            assert_ne!(second.id, first.id);
+            assert!(
+                backup_dir.join(&first.id).join("manifest.json").exists(),
+                "the staged backup survives retention"
+            );
+            first
+        };
+
+        // The next start: the store is closed again, the restore applies.
+        let outcome =
+            apply_pending_restore(&backup_dir, &data_dir, &sqlite_path, None).expect("applied");
+        assert!(outcome.ok, "{:?}", outcome.error);
+        assert_eq!(outcome.id, first.id);
+        assert_eq!(outcome.quad_count, Some(2));
+        assert!(pending_restore(&backup_dir).is_none(), "applied once");
+        assert!(last_restore(&backup_dir).is_some_and(|o| o.ok && o.id == first.id));
+        let store = TripleStore::open(&data_dir).unwrap();
+        assert_eq!(data_quads(&store), 2, "the store is the staged snapshot");
+        drop(store);
+        assert!(
+            apply_pending_restore(&backup_dir, &data_dir, &sqlite_path, None).is_none(),
+            "nothing staged, nothing applied"
+        );
+    }
+
+    /// A backup whose files no longer match their checksums cannot be staged.
+    #[test]
+    fn a_corrupt_backup_cannot_be_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+        let store = TripleStore::in_memory().unwrap();
+        let mgr = BackupManager::new(
+            backup_dir.clone(),
+            sqlite_path,
+            store,
+            audit,
+            7,
+            false,
+            None,
+        )
+        .unwrap();
+        let m = mgr.run_once().unwrap();
+        fs::write(backup_dir.join(&m.id).join(&m.rdf_path), b"tampered").unwrap();
+        let err = stage_restore(&mgr, &m.id, None).unwrap_err().to_string();
+        assert!(err.contains("checksum"), "{err}");
+        assert!(pending_restore(&backup_dir).is_none());
+        assert!(stage_restore(&mgr, "../etc", None).is_err());
+    }
+
     /// An encrypted backup must be recoverable with the operator's identity.
     ///
     /// It was not: `init_backup_encryption` generated a keypair, wrote only
     /// `to_public()` and dropped the identity, so backups were encrypted to a
     /// key that existed nowhere — and `restore_backup` refused encrypted
     /// archives outright. Both halves are fixed here: the recipient must be
-    /// supplied, and restore decrypts with `BACKUP_DECRYPT_IDENTITY_PATH`.
+    /// supplied, and restore decrypts with `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`.
     #[cfg(feature = "backup-encrypt")]
     #[test]
     fn encrypted_backup_round_trips_with_the_operator_identity() {
@@ -896,6 +1308,52 @@ mod tests {
             !mgr.verify(&manifest.id).unwrap(),
             "tampered backup must fail verification"
         );
+    }
+
+    /// A manifest whose file names leave the backup directory is refused by
+    /// verify (and by restore and the S3 upload, which read it the same way)
+    /// instead of hashing, restoring or uploading a file elsewhere on the host.
+    #[test]
+    fn manifest_paths_outside_the_backup_dir_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+        let mgr = BackupManager::new(
+            backup_dir.clone(),
+            sqlite_path,
+            TripleStore::in_memory().unwrap(),
+            audit,
+            7,
+            false,
+            None,
+        )
+        .unwrap();
+        let manifest = mgr.run_once().unwrap();
+        let manifest_file = backup_dir.join(&manifest.id).join("manifest.json");
+
+        // A file outside the backup directory, with its true checksum in the
+        // manifest, so only the path check can stop it.
+        let outside = dir.path().join("secret.txt");
+        fs::write(&outside, b"not part of any backup").unwrap();
+        let outside_sha = sha256_hex(&fs::read(&outside).unwrap());
+        for evil in [
+            outside.to_string_lossy().into_owned(),
+            "../../secret.txt".to_string(),
+        ] {
+            let mut m = manifest.clone();
+            m.rdf_path = evil.clone();
+            m.rdf_sha256 = outside_sha.clone();
+            fs::write(&manifest_file, serde_json::to_vec(&m).unwrap()).unwrap();
+            let err = mgr
+                .verify(&manifest.id)
+                .expect_err(&format!("rdf_path {evil:?} must be refused"));
+            assert!(
+                err.to_string().contains("invalid backup file name"),
+                "{err}"
+            );
+        }
     }
 
     /// Retention pruning keeps only the newest `retention` snapshots.

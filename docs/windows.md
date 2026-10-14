@@ -8,7 +8,7 @@ Open Triplestore runs on Windows three ways. Pick based on what you're doing:
 | **WSL2 (Ubuntu)** | Developing the Rust backend / frontend | ⭐⭐ easy | All (`full`) |
 | **Native MSVC** | Avoiding WSL/Docker entirely | ⭐⭐⭐ advanced / experimental | Partial (no `saml`) |
 
-The native build depends on the **GEOS** C library (for GeoSPARQL) on every OS, and
+The native build depends on the **GEOS** C library, 3.11 or later (for GeoSPARQL), on every OS, and
 on **libxmlsec1** for the optional `saml` feature. Those are trivial to install on
 Debian/Ubuntu/macOS but awkward under MSVC — which is why **Docker or WSL2 are the
 recommended routes on Windows**.
@@ -39,9 +39,9 @@ Compose has no insecure defaults; it won't start until the secrets exist.
 ```powershell
 Copy-Item .env.example .env
 function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
-Add-Content .env "JWT_SECRET=$(New-Secret 32)"
-Add-Content .env "MINIO_ROOT_USER=$(New-Secret 8)"
-Add-Content .env "MINIO_ROOT_PASSWORD=$(New-Secret 24)"
+Add-Content .env "OTS_JWT_SECRET=$(New-Secret 32)"
+Add-Content .env "S3_GATEWAY_ACCESS_KEY=$(New-Secret 8)"
+Add-Content .env "S3_GATEWAY_SECRET_KEY=$(New-Secret 24)"
 ```
 
 `Get-Random` is fine for generating these secrets locally. (Docker Compose strips the
@@ -74,7 +74,7 @@ docker compose down -v                 # stop and WIPE all data (destructive)
 docker compose exec triplestore open-triplestore --data-dir /data --promote-super-admin <username>
 ```
 
-### Standalone container (no MinIO)
+### Standalone container (no S3 store)
 
 ```powershell
 docker build -t open-triplestore .
@@ -146,7 +146,7 @@ WSL2 forwards `localhost` automatically.
 
 If a process running inside a Docker/WSL container needs to reach a server on the
 Windows host (e.g. the optional service registry or an LLM gateway), use
-`host.docker.internal` — already the default for `LD_REGISTRY_URL` in
+`host.docker.internal` — already the default for `OTS_REGISTRY_URL` in
 [`docker-compose.yml`](../docker-compose.yml). It resolves on Docker Desktop for
 Windows out of the box.
 
@@ -154,9 +154,10 @@ Windows out of the box.
 
 ## Option 3 — Native Windows (MSVC) — experimental
 
-A fully native build is possible but unsupported. `--features full` won't work because the
-`saml` feature needs libxml2 + xmlsec1 (painful under MSVC), so you build **without `saml`**.
-Every native build also links the **GEOS** C library (GeoSPARQL), which you supply via vcpkg.
+A fully native build is possible but unsupported. Leave out the optional `saml` feature: it
+needs libxml2 + xmlsec1, which are painful under MSVC — and the default build (`full`) does not
+include it anyway. Every native build links the **GEOS** C library (GeoSPARQL), which you supply
+via vcpkg.
 
 ### Prerequisites — none ship with Windows; install these first
 
@@ -198,11 +199,13 @@ $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"   # bindgen -> oxrocksdb-sys / 
 To persist these across shells, set them under *System → Environment Variables* (or with
 `setx`) instead of the per-session `$env:` assignments.
 
-### 3. Build without `saml` and run
+### 3. Build and run
+
+The default features are `full`, which carries no `saml`. Apart from GEOS (above), its other
+features need no library beyond the toolchain from the prerequisites.
 
 ```powershell
-cargo build --release --no-default-features `
-  --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-pdf,asset-exif,asset-media,asset-archive,asset-spreadsheet,asset-thumbnail,asset-clamav"
+cargo build --release
 .\target\release\open-triplestore.exe --port 7878 --data-dir .\data
 curl.exe http://localhost:7878/health    # -> {"status":"ok",...}
 ```
@@ -261,7 +264,7 @@ curl.exe -X POST http://localhost:7878/sparql `
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Invoke-WebRequest : Cannot bind parameter 'Headers'` | You used `curl` (the alias) with `-H` | Use `curl.exe` |
-| `required variable JWT_SECRET is missing a value` | No `.env` for `docker compose` | Create `.env` (see Option 1, step 2) |
+| `required variable OTS_JWT_SECRET is missing a value` | No `.env` for `docker compose` | Create `.env` (see Option 1, step 2) |
 | `/bin/bash^M: bad interpreter` in WSL | A script got CRLF endings | Pull latest (the repo's `.gitattributes` pins scripts to LF); or `dos2unix <file>` |
 | `make: *** … Error 127` under Git Bash | `make` not installed, or `docker-compose` (v1) missing | The `Makefile` targets assume a Unix shell + Docker Compose v2; run them in WSL |
 | Docker build can't reach `host.docker.internal` | Not on Docker Desktop | It's Docker-Desktop-only; on plain Linux use the host IP |

@@ -68,6 +68,8 @@ fn test_state() -> AppState {
         query_timeout_secs: 30,
         write_timeout_secs: 120,
         secure_cookies: false,
+        serve_frontend: true,
+        trusted_proxies: open_triplestore::server::client_ip::TrustedProxies::default(),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         #[cfg(feature = "text-search")]
@@ -81,6 +83,8 @@ fn test_state() -> AppState {
         vocab_catalog: Arc::new(open_triplestore::vocab_search::catalog::VocabCatalog::bundled()),
         vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        dl: Default::default(),
+        config: open_triplestore::config::current().clone(),
         #[cfg(feature = "vocab-search")]
         vocab_engine: None,
     }
@@ -107,10 +111,10 @@ fn seeded() -> (AppState, String, String) {
     )
     .unwrap();
 
-    // Tests must never reach the network: an empty SEED_IFC_URL makes the
-    // seeder skip the Schependomlaan IFC download (same pattern as the
+    // Tests must never reach the network: OTS_OFFLINE makes the
+    // seeder skip the IFC downloads (same pattern as the
     // role-visibility tests).
-    std::env::set_var("SEED_IFC_URL", "");
+    std::env::set_var("OTS_OFFLINE", "true");
     seed_open_triplestore(&state);
 
     let org = state
@@ -139,7 +143,7 @@ async fn concurrent_seeders_serialise_into_one_clean_seed() {
             SystemRole::SuperAdmin,
         )
         .unwrap();
-    std::env::set_var("SEED_IFC_URL", "");
+    std::env::set_var("OTS_OFFLINE", "true");
     let (a, b) = (state.clone(), state.clone());
     let race = tokio::join!(
         tokio::task::spawn_blocking(move || seed_open_triplestore(&a)),

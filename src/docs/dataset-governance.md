@@ -10,7 +10,10 @@ Open Triplestore instance and is seeded automatically on a fresh install.
 ## 1. The dataset-structure SHACL model
 
 Every dataset has a metadata graph at `urn:system:metadata:dataset:{id}` — a
-`dcat:Dataset` description (DCAT 2 / VoID / ADMS). The built-in shapes graph
+`dcat:Dataset` description (DCAT 3 / VoID / ADMS), built through the same
+triple builder as the public catalogue: an `adms_status` code becomes its EU
+dataset-status IRI, temporal coverage and update frequency are described, and a
+malformed IRI is dropped instead of breaking the whole graph. The built-in shapes graph
 `urn:system:shapes:dataset-structure` (visible in **SHACL Studio → Shapes
 Library** as *"Dataset structure (governance)"*) asserts the contract a dataset
 must satisfy:
@@ -58,7 +61,8 @@ The bundled **Open Triplestore** org publishes its own model and vocabulary in
 the *"Open Triplestore Model & Vocabulary"* dataset:
 
 - **Model** (`…/ots-model/ots-model`, role `Model`, the T-Box): OWL/RDFS **class**
-  definitions — `ots:Standard`, `ots:AuthMethod`, and the six `GraphRole` classes.
+  definitions — `ots:Standard`, `ots:AuthMethod`, the `ots:GraphRole` class and
+  its ten role individuals.
 - **Vocabulary** (`…/ots-model/ots-vocabulary`, role `Vocabulary`, the R-Box): the
   **property/relation** terms (`ots:conformance`, the `ots:graphRole` relation,
   `ots:visibility`) and a SKOS concept scheme for graph roles, conformance levels
@@ -66,9 +70,9 @@ the *"Open Triplestore Model & Vocabulary"* dataset:
   Vocabulary layer, even though the `GraphRole` classes it points at are defined
   in the Model.
 
-The role individuals are minted in the role namespace
-`https://opentriplestore.org/ns/role#` (e.g. `…/ns/role#Model`,
-`…/ns/role#Vocabulary`, `…/ns/role#Instances`).
+The role individuals are minted in the project namespace
+`https://opentriplestore.org/ns#` (e.g. `…/ns#Model`, `…/ns#Vocabulary`,
+`…/ns#Instances`, `…/ns#DomainValues`).
 
 ## 5. Derived-data write targets
 
@@ -81,5 +85,5 @@ pipeline → Derived data**):
 - **Validation results**: serialise the `sh:ValidationReport` to RDF and write to
   a report graph, a chosen graph, or a new version — or keep run-history only.
 
-All of the above is idempotent and re-seeded on every boot; `SEED_STANDARDS_DEMO=false`
+All of the above is idempotent and re-seeded on every boot; `OTS_SEED_STANDARDS_DEMO_ENABLED=false`
 disables the demo-org seed (the governance model + standards shapes still seed).

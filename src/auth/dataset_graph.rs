@@ -1,7 +1,6 @@
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::{Dataset, DatasetGraphEntry, GraphKind};
 use crate::store::engine::TripleStore;
-use crate::store::escape_sparql_iri;
 use oxigraph::io::RdfFormat;
 
 /// Named graph IRI for a dataset's DCAT metadata.
@@ -76,7 +75,8 @@ pub fn graph_held_by_model_registry(store: &TripleStore, base_url: &str, graph_i
 /// True iff `graph_iri` is one of the graphs the server keeps for `dataset_id`
 /// outside its namespace: its DCAT metadata and validation-report graphs, its
 /// assets graph (`{base}/datasets/{id}/assets`, plural), its property-states
-/// graph and its entailment graphs (`urn:entailment:{regime}:{id}`).
+/// and statement-provenance graphs and its entailment graphs
+/// (`urn:entailment:{regime}:{id}`).
 pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
     graph_iri == dataset_metadata_graph_iri(dataset_id)
         || graph_iri == dataset_reports_graph_iri(dataset_id)
@@ -84,6 +84,7 @@ pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &st
         || graph_iri
             == crate::server::routes::assets_graph_iri(base_url.trim_end_matches('/'), dataset_id)
         || graph_iri == crate::property_states::states_graph(dataset_id)
+        || crate::provenance::is_statement_provenance_graph(dataset_id, graph_iri)
         || graph_iri
             .strip_prefix("urn:entailment:")
             .and_then(|rest| rest.split_once(':'))
@@ -395,7 +396,7 @@ pub fn gate_dataset_graph_target(
              '{dataset_id}'."
         ));
     }
-    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    refuse_reserved_write_target(store, base_url, dataset_id, graph_iri)?;
     let registered = db.dataset_has_graph(dataset_id, graph_iri).map_err(|e| {
         format!("Could not check whether graph <{graph_iri}> belongs to '{dataset_id}': {e}")
     })?;
@@ -452,7 +453,7 @@ pub fn authorize_dataset_write_target(
     graph_iri: &str,
     is_admin: bool,
 ) -> Result<(), String> {
-    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    refuse_reserved_write_target(store, base_url, dataset_id, graph_iri)?;
     if is_admin {
         return Ok(());
     }
@@ -466,17 +467,20 @@ pub fn authorize_dataset_write_target(
     Ok(())
 }
 
-/// `Err(message)` when `graph_iri` is a model-registry graph
-/// ([`graph_held_by_model_registry`]; fails closed). For a write into a graph
-/// that is already registered to the dataset, where the registration gate
-/// ([`gate_dataset_graph_target`]) no longer runs: a registration made before
-/// registry graphs were refused must not become a way to overwrite one.
-pub fn refuse_model_registry_graph(
+/// `Err(message)` when `graph_iri` is a graph no dataset-scoped write may
+/// target, admins included: a system-managed statement-provenance graph
+/// ([`crate::provenance::refuse_direct_write`]) or a model-registry graph
+/// ([`graph_held_by_model_registry`]; fails closed). Also for a write into a
+/// graph that is already registered to the dataset, where the registration
+/// gate ([`gate_dataset_graph_target`]) no longer runs: a registration made
+/// before these graphs were refused must not become a way to overwrite one.
+pub fn refuse_reserved_write_target(
     store: &TripleStore,
     base_url: &str,
     dataset_id: &str,
     graph_iri: &str,
 ) -> Result<(), String> {
+    crate::provenance::refuse_direct_write(graph_iri)?;
     if graph_held_by_model_registry(store, base_url, graph_iri) {
         return Err(format!(
             "Target graph <{graph_iri}> belongs to the model registry, so it cannot be a graph of \
@@ -650,23 +654,25 @@ pub fn graphs_deletable_with_dataset(
     out
 }
 
-/// The `app_settings` key [`release_model_registry_claims`] sets once it has
-/// swept every registration.
+/// The `app_settings` key [`release_model_registry_claims`] sets each time it
+/// has swept every registration with the registry answering.
 const REGISTRY_CLAIMS_MARKER: &str = "cleanup.dataset_registry_claims.v1";
 
-/// Whether [`release_model_registry_claims`] has completed on this identity
-/// database (a lookup error counts as not yet).
+/// Whether [`release_model_registry_claims`] has completed at least once on
+/// this identity database (a lookup error counts as not yet). The Raft
+/// cluster loop uses it to stop retrying once a sweep has gone through.
 pub fn model_registry_claims_released(db: &crate::auth::db::AuthDb) -> bool {
     matches!(db.get_app_setting(REGISTRY_CLAIMS_MARKER), Ok(Some(_)))
 }
 
-/// One-time boot cleanup: `dataset_graphs` rows naming a model-registry graph,
-/// made before the registration gate refused them. They still made the
-/// graph dataset-scoped for reads (`get_accessible_graph_iris`), hid it from
-/// everyone else, and made it one the dataset holds. Each such row goes; a
-/// shapes-role row stays in effect for validation as a SHACL Studio binding,
-/// which only reads the graph. Datasets that lost a row get their metadata
-/// graph rewritten.
+/// Boot cleanup: `dataset_graphs` rows naming a model-registry graph. Made
+/// before the registration gate refused them, or by a path that does not
+/// gate registration (a seed bundle used to register whatever its manifest
+/// named). They still made the graph dataset-scoped for reads
+/// (`get_accessible_graph_iris`), hid it from everyone else, and made it one
+/// the dataset holds. Each such row goes; a shapes-role row stays in effect
+/// for validation as a SHACL Studio binding, which only reads the graph.
+/// Datasets that lost a row get their metadata graph rewritten.
 ///
 /// A dataset's `shapes_graph_iri` naming a registry graph is left as it is:
 /// it does not scope reads, the paths that could write or delete it refuse
@@ -674,32 +680,24 @@ pub fn model_registry_claims_released(db: &crate::auth::db::AuthDb) -> bool {
 /// (the `shacl_on_write` gate refuses any result, keeps an on-write report
 /// and checks source runs; a binding does not).
 ///
-/// Runs once: a marker in `app_settings` records a sweep in which every
-/// registry lookup answered. A lookup that fails removes nothing (unlike the
-/// fail-closed [`graph_held_by_model_registry`]) and leaves the marker unset,
-/// so the next boot tries again. Returns the number of rows removed.
+/// Runs on every boot, so a registration that slipped in after an earlier
+/// sweep does not survive the next start: one registry query lists every
+/// graph a version holds, and each row is checked against it. A registry
+/// that cannot be read removes nothing (unlike the fail-closed
+/// [`graph_held_by_model_registry`]). A marker in `app_settings` records
+/// that a sweep went through with the registry answering
+/// ([`model_registry_claims_released`]). Returns the number of rows removed.
 pub fn release_model_registry_claims(
     store: &TripleStore,
     db: &crate::auth::db::AuthDb,
     base_url: &str,
 ) -> anyhow::Result<usize> {
-    if db.get_app_setting(REGISTRY_CLAIMS_MARKER)?.is_some() {
-        return Ok(0);
-    }
-    let mut undecided = false;
-    let mut held = |g: &str| -> bool {
-        if g == crate::data_models::registry::REGISTRY_GRAPH
+    let version_held = crate::data_models::registry::version_held_graphs(store);
+    let undecided = version_held.is_none();
+    let held = |g: &str| -> bool {
+        g == crate::data_models::registry::REGISTRY_GRAPH
             || in_model_registry_namespace(base_url, g)
-        {
-            return true;
-        }
-        match crate::data_models::registry::graph_held_by_version_checked(store, g) {
-            Some(h) => h,
-            None => {
-                undecided |= oxigraph::model::NamedNode::new(g).is_ok();
-                false
-            }
-        }
+            || version_held.as_ref().is_some_and(|set| set.contains(g))
     };
     let bind = |dataset_id: &str, g: &str| {
         let target = crate::shacl_studio::bindings::dataset_target_iri(base_url, dataset_id);
@@ -735,7 +733,8 @@ pub fn release_model_registry_claims(
     }
     if undecided {
         tracing::warn!(
-            "registry-claim cleanup: a model-registry lookup failed; it runs again next boot"
+            "registry-claim cleanup: the model registry could not be read; dataset registrations \
+             of its graphs, if any, are kept until the next boot"
         );
     } else {
         db.set_app_setting(REGISTRY_CLAIMS_MARKER, &chrono::Utc::now().to_rfc3339())?;
@@ -782,190 +781,188 @@ pub fn write_dataset_metadata_graph_checked(
 }
 
 /// Build the DCAT/ADMS/VoID/VCARD metadata Turtle for a dataset (no I/O).
+///
+/// Written through the catalogue's triple builder ([`crate::dcat::graph::G`]),
+/// with the same DCAT 3 semantics as the catalogue: a status code becomes its
+/// EU dataset-status IRI, a malformed IRI is dropped rather than breaking the
+/// document (which, as hand-built Turtle, used to make the whole graph fail
+/// to load), and objects carry their DCAT range classes.
 pub fn build_dataset_metadata_ttl(
     base_url: &str,
     dataset: &Dataset,
     graph_entries: &[DatasetGraphEntry],
 ) -> String {
+    use crate::dcat::authority;
+    use crate::dcat::graph::{nn, p, Range, G, OTS};
+    use crate::dcat::vocabulary::{ADMS, DCAT, DCT, VCARD, VOID};
+    use oxigraph::model::BlankNode;
+
     // Canonical dataset IRI per the styleguide (§3.3): `{base}/dataset/{id}`
     // (singular). This MUST match the catalogue (`dcat/catalog.rs`), the version
     // registry and the API-service registry, otherwise a dataset's descriptive
     // metadata splits across two IRIs and its node renders incomplete when browsed.
-    let dataset_iri = dataset_iri(base_url, &dataset.id);
-    let mut ttl = String::new();
+    let iri = dataset_iri(base_url, &dataset.id);
+    let mut g = G::new("en");
+    let Some(s) = g.iri(&iri, "dataset IRI") else {
+        return String::new();
+    };
+    let nonempty = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let list = |v: &Option<String>| -> Vec<String> {
+        v.as_deref()
+            .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
 
-    ttl.push_str("@prefix dcat: <http://www.w3.org/ns/dcat#> .\n");
-    ttl.push_str("@prefix dct:  <http://purl.org/dc/terms/> .\n");
-    ttl.push_str("@prefix void: <http://rdfs.org/ns/void#> .\n");
-    ttl.push_str("@prefix adms: <http://www.w3.org/ns/adms#> .\n");
-    ttl.push_str("@prefix vcard: <http://www.w3.org/2006/vcard/ns#> .\n");
-    ttl.push_str("@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n");
-    ttl.push_str("@prefix ots:  <https://opentriplestore.org/ns#> .\n\n");
-
-    ttl.push_str(&format!(
-        "<{}> a dcat:Dataset, void:Dataset ;\n",
-        dataset_iri
-    ));
-    ttl.push_str(&format!(
-        "    dct:title \"{}\" ;\n",
-        escape_ttl_string(&dataset.name)
-    ));
+    g.typ(s.clone(), &p(DCAT, "Dataset"));
+    g.typ(s.clone(), &p(VOID, "Dataset"));
+    g.lit(s.clone(), &p(DCT, "title"), &dataset.name);
     // Required by the dataset-structure SHACL model: stable identity + visibility.
-    ttl.push_str(&format!(
-        "    dct:identifier \"{}\" ;\n",
-        escape_ttl_string(&dataset.id)
-    ));
-    ttl.push_str(&format!(
-        "    ots:visibility \"{}\" ;\n",
-        dataset.visibility.as_str()
-    ));
-
-    if let Some(desc) = &dataset.description {
-        ttl.push_str(&format!(
-            "    dct:description \"{}\" ;\n",
-            escape_ttl_string(desc)
-        ));
+    g.lit(s.clone(), &p(DCT, "identifier"), &dataset.id);
+    g.lit(
+        s.clone(),
+        &p(OTS, "visibility"),
+        dataset.visibility.as_str(),
+    );
+    if let Some(d) = nonempty(&dataset.description) {
+        g.lit(s.clone(), &p(DCT, "description"), &d);
     }
-    if let Some(lic) = &dataset.license {
-        if !lic.is_empty() {
-            ttl.push_str(&format!("    dct:license <{}> ;\n", escape_sparql_iri(lic)));
+    let access = match dataset.visibility {
+        crate::auth::models::Visibility::Public => "PUBLIC",
+        crate::auth::models::Visibility::Members => "RESTRICTED",
+        crate::auth::models::Visibility::Private => "NON_PUBLIC",
+    };
+    g.ranged(
+        s.clone(),
+        &p(DCT, "accessRights"),
+        &format!("{}{access}", authority::EU_ACCESS),
+        Range::RightsStatement,
+        "access rights",
+    );
+    if let Some(l) = nonempty(&dataset.license) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "license"),
+            &l,
+            Range::LicenseDocument,
+            "licence",
+        );
+    }
+    for t in list(&dataset.themes) {
+        g.concept(s.clone(), &p(DCAT, "theme"), &t, "theme");
+    }
+    for k in list(&dataset.keywords) {
+        g.lit(s.clone(), &p(DCAT, "keyword"), &k);
+    }
+    if let Some(st) = nonempty(&dataset.adms_status).and_then(|x| authority::status_iri(&x)) {
+        g.concept(s.clone(), &p(ADMS, "status"), &st, "adms:status");
+    }
+    if let Some(n) = nonempty(&dataset.version_notes) {
+        g.lit(s.clone(), &p(ADMS, "versionNotes"), &n);
+    }
+    if let Some(sp) = nonempty(&dataset.spatial) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "spatial"),
+            &sp,
+            Range::Location,
+            "spatial",
+        );
+    }
+    let start = nonempty(&dataset.temporal_start);
+    let end = nonempty(&dataset.temporal_end);
+    if start.is_some() || end.is_some() {
+        let t = BlankNode::default();
+        g.add(s.clone(), &p(DCT, "temporal"), t.clone());
+        g.typ(t.clone(), &p(DCT, "PeriodOfTime"));
+        if let Some(v) = &start {
+            g.when(t.clone(), &p(DCAT, "startDate"), v);
         }
-    }
-
-    // Themes (stored as JSON array of IRI strings)
-    if let Some(themes_json) = &dataset.themes {
-        if let Ok(themes) = serde_json::from_str::<Vec<String>>(themes_json) {
-            for theme in &themes {
-                if !theme.is_empty() {
-                    ttl.push_str(&format!(
-                        "    dcat:theme <{}> ;\n",
-                        escape_sparql_iri(theme)
-                    ));
-                }
-            }
-        }
-    }
-
-    // Keywords (stored as JSON array of plain strings)
-    if let Some(kw_json) = &dataset.keywords {
-        if let Ok(keywords) = serde_json::from_str::<Vec<String>>(kw_json) {
-            for kw in &keywords {
-                if !kw.is_empty() {
-                    ttl.push_str(&format!(
-                        "    dcat:keyword \"{}\"@en ;\n",
-                        escape_ttl_string(kw)
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Some(status) = &dataset.adms_status {
-        if !status.is_empty() {
-            ttl.push_str(&format!(
-                "    adms:status <{}> ;\n",
-                escape_sparql_iri(status)
-            ));
-        }
-    }
-    if let Some(notes) = &dataset.version_notes {
-        if !notes.is_empty() {
-            ttl.push_str(&format!(
-                "    adms:versionNotes \"{}\" ;\n",
-                escape_ttl_string(notes)
-            ));
-        }
-    }
-    if let Some(spatial) = &dataset.spatial {
-        if !spatial.is_empty() {
-            ttl.push_str(&format!(
-                "    dct:spatial <{}> ;\n",
-                escape_sparql_iri(spatial)
-            ));
+        if let Some(v) = &end {
+            g.when(t.clone(), &p(DCAT, "endDate"), v);
         }
     }
+    if let Some(f) = nonempty(&dataset.accrual_periodicity) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "accrualPeriodicity"),
+            &f,
+            Range::Frequency,
+            "accrual periodicity",
+        );
+    }
+    let landing = nonempty(&dataset.landing_page).unwrap_or_else(|| iri.clone());
+    if !g.ranged(
+        s.clone(),
+        &p(DCAT, "landingPage"),
+        &landing,
+        Range::Document,
+        "landing page",
+    ) {
+        g.ranged(
+            s.clone(),
+            &p(DCAT, "landingPage"),
+            &iri,
+            Range::Document,
+            "landing page",
+        );
+    }
+    g.when(s.clone(), &p(DCT, "issued"), &dataset.created_at);
+    g.when(s.clone(), &p(DCT, "modified"), &dataset.updated_at);
+    g.add(
+        s.clone(),
+        &p(VOID, "sparqlEndpoint"),
+        nn(&format!("{}/sparql", base_url.trim_end_matches('/'))),
+    );
 
-    let landing = dataset
-        .landing_page
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&dataset_iri);
-    ttl.push_str(&format!(
-        "    dcat:landingPage <{}> ;\n",
-        escape_sparql_iri(landing)
-    ));
-
-    ttl.push_str(&format!(
-        "    dct:issued \"{}\"^^xsd:dateTime ;\n",
-        dataset.created_at
-    ));
-    ttl.push_str(&format!(
-        "    dct:modified \"{}\"^^xsd:dateTime ;\n",
-        dataset.updated_at
-    ));
-    ttl.push_str(&format!(
-        "    void:sparqlEndpoint <{}/sparql> ;\n",
-        base_url
-    ));
-
-    // Contact point as blank node
-    let has_contact = dataset
-        .contact_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || dataset
-            .contact_email
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some()
-        || dataset
-            .contact_url
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some();
-
-    if has_contact {
-        ttl.push_str("    dcat:contactPoint _:cp .\n\n");
-        ttl.push_str("_:cp a vcard:Organization ;\n");
-        if let Some(name) = dataset.contact_name.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!("    vcard:fn \"{}\" ;\n", escape_ttl_string(name)));
+    let name = nonempty(&dataset.contact_name);
+    let email = nonempty(&dataset.contact_email);
+    let url = nonempty(&dataset.contact_url);
+    if name.is_some() || email.is_some() || url.is_some() {
+        let cp = BlankNode::default();
+        g.add(s.clone(), &p(DCAT, "contactPoint"), cp.clone());
+        g.typ(cp.clone(), &p(VCARD, "Kind"));
+        g.typ(cp.clone(), &p(VCARD, "Organization"));
+        if let Some(n) = &name {
+            g.lit(cp.clone(), &p(VCARD, "fn"), n);
         }
-        if let Some(email) = dataset.contact_email.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!(
-                "    vcard:hasEmail <mailto:{}> ;\n",
-                escape_sparql_iri(email)
-            ));
+        if let Some(e) = &email {
+            g.link(
+                cp.clone(),
+                &p(VCARD, "hasEmail"),
+                &format!("mailto:{e}"),
+                "contact e-mail",
+            );
         }
-        if let Some(url) = dataset.contact_url.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!(
-                "    vcard:hasURL <{}> ;\n",
-                escape_sparql_iri(url)
-            ));
+        if let Some(u) = &url {
+            g.link(cp.clone(), &p(VCARD, "hasURL"), u, "contact URL");
         }
-        ttl.push_str("    .\n");
-    } else {
-        ttl.push_str("    .\n");
     }
 
     // Per-graph role triples: void:subset + ots:graphRole for each registered graph.
     for entry in graph_entries {
-        if !entry.graph_iri.starts_with("urn:system:") {
-            ttl.push_str(&format!(
-                "<{}> void:subset <{}> .\n",
-                dataset_iri, entry.graph_iri
-            ));
+        if entry.graph_iri.starts_with("urn:system:") {
+            continue;
+        }
+        if let Some(gi) = g.iri(&entry.graph_iri, "graph IRI") {
+            g.add(s.clone(), &p(VOID, "subset"), gi.clone());
             if let Some(role) = entry.graph_role {
-                let role_iri = graph_role_iri(role);
-                ttl.push_str(&format!(
-                    "<{}> ots:graphRole <{}> .\n",
-                    entry.graph_iri, role_iri
-                ));
+                g.add(gi, &p(OTS, "graphRole"), nn(graph_role_iri(role)));
             }
         }
     }
 
-    ttl
+    crate::dcat::graph::serialize(&g.triples, RdfFormat::Turtle)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Rewrite every dataset's DCAT metadata graph so pre-existing datasets adopt the
@@ -1173,13 +1170,6 @@ fn graph_has_subject(store: &TripleStore, graph_iri: &str, subject_iri: &str) ->
         )
         .next()
         .is_some()
-}
-
-fn escape_ttl_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }
 
 /// The IRI of a graph-role individual in the Open Triplestore vocabulary

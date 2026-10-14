@@ -31,6 +31,17 @@ pub struct ModelLayer {
     pub status: String,
     pub graph_iri: String,
     pub sub_graphs: Vec<String>,
+    /// The model's latest published version, so a reader can see at once whether
+    /// the dataset's declared version is current.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_published: Option<String>,
+    /// Whether the dataset pins an explicit version (`conforms_to_version`), as
+    /// opposed to floating with the latest published one.
+    pub pinned: bool,
+    /// A newer version of the model has been published than the one this dataset
+    /// is pinned to: the data owner should run the update procedure (re-validate
+    /// against the new version, correct or collect what it asks for, re-pin).
+    pub update_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +72,12 @@ pub struct ConformanceLayer {
     /// plus the conformed model version's graphs. Shapes, entailment, system,
     /// catalog and provenance graphs are not premises.
     pub reasoning_sources: Vec<String>,
+    /// Standard vocabularies added to `reasoning_sources` because the data
+    /// uses their terms: the GeoSPARQL ontology and the Simple Features and
+    /// GML geometry hierarchies when any layer graph uses a GeoSPARQL term
+    /// (the RDFS Entailment Extension, [`crate::geo::premises`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vocabulary_premises: Vec<String>,
     /// What validation should apply: the bound shape graphs' IRIs.
     pub validation_shapes: Vec<String>,
 }
@@ -106,11 +123,9 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
     let mut unresolved = None;
     if let Some(mid) = ds.conforms_to_model.as_deref().filter(|s| !s.is_empty()) {
         let record = crate::data_models::registry::get_data_model(&state.store, base, mid);
-        let version = ds
-            .conforms_to_version
-            .clone()
-            .filter(|v| !v.is_empty())
-            .or_else(|| record.as_ref().and_then(|r| r.latest_published.clone()));
+        let pinned_version = ds.conforms_to_version.clone().filter(|v| !v.is_empty());
+        let latest_published = record.as_ref().and_then(|r| r.latest_published.clone());
+        let version = pinned_version.clone().or_else(|| latest_published.clone());
         let resolved = version
             .as_deref()
             .and_then(|v| crate::data_models::registry::get_version(&state.store, base, mid, v));
@@ -122,12 +137,19 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
                     .ok()
                     .and_then(|x| x.as_str().map(str::to_string))
                     .unwrap_or_default();
+                let update_available = matches!(
+                    (&pinned_version, &latest_published),
+                    (Some(p), Some(l)) if p != l
+                );
                 model = Some(ModelLayer {
                     id: mid.to_string(),
                     version: v.version.clone(),
                     status,
                     graph_iri: v.graph_iri.clone(),
                     sub_graphs: v.sub_graphs.clone(),
+                    latest_published,
+                    pinned: pinned_version.is_some(),
+                    update_available,
                 });
             }
             None => {
@@ -148,6 +170,8 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
         ds,
     );
 
+    let vocabulary_premises = crate::geo::premises::rdfs_premises(&state.store, base, &sources);
+    sources.extend(vocabulary_premises.iter().cloned());
     sources.sort();
     sources.dedup();
     ConformanceLayer {
@@ -166,6 +190,7 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
             .collect(),
         validation_shapes: shapes.iter().map(|s| s.graph_iri.clone()).collect(),
         reasoning_sources: sources,
+        vocabulary_premises,
     }
 }
 

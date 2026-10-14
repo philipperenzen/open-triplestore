@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { onMount, onDestroy, tick } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
@@ -100,7 +101,10 @@
     $t('pages.llmChat.example5'),
   ];
 
-  $: offline = llmStatus && !llmStatus.reachable;
+  // AI turned off for this caller (a 0 budget, or anonymous AI off): the
+  // composer is disabled like an unreachable gateway, with its own reason.
+  $: aiOff = !!llmStatus && llmStatus.available_to_caller === false;
+  $: offline = (llmStatus && !llmStatus.reachable) || aiOff;
 
   onMount(() => {
     llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
@@ -239,7 +243,7 @@
       await llmSetMemory(memory.instructions, memory.enabled);
       memorySaved = true;
     } catch (e) {
-      alert(e?.message || 'Could not save');
+      toastError(e?.message || 'Could not save');
     } finally {
       memorySaving = false;
     }
@@ -574,12 +578,12 @@
         {/if}
         {#if llmStatus?.gateway}
           <p class="about-row"><span>{$t('pages.llmChat.aboutGateway')}</span> {llmStatus.gateway}</p>
-          {#if (llmStatus.caller === 'guest' ? llmStatus.rate_limit_anon_per_min : llmStatus.rate_limit_per_min) > 0}
+          {#if ((llmStatus.caller === 'guest' ? llmStatus.rate_limit_anon_per_min : llmStatus.rate_limit_per_min) ?? 0) > 0}
             <p class="about-row"><span>{$t('pages.llmChat.aboutRateLimit')}</span>
               {$t('pages.llmChat.aboutRateLimitValue', { values: {
                 n: llmStatus.caller === 'guest' ? llmStatus.rate_limit_anon_per_min : llmStatus.rate_limit_per_min,
               } })}
-              {#if llmStatus.caller === 'guest' && llmStatus.rate_limit_per_min > llmStatus.rate_limit_anon_per_min}
+              {#if llmStatus.caller === 'guest' && (llmStatus.rate_limit_per_min ?? Infinity) > (llmStatus.rate_limit_anon_per_min ?? 0)}
                 {$t('pages.llmChat.aboutRateLimitSignIn', { values: { n: llmStatus.rate_limit_per_min } })}
               {/if}
             </p>
@@ -593,7 +597,12 @@
     {/if}
   </div>
 
-  {#if offline}
+  {#if aiOff}
+    <div class="offline-banner">
+      <AlertTriangle size={15} />
+      <span>{$t(llmStatus?.caller === 'guest' ? 'pages.llmChat.aiOffGuestBanner' : 'pages.llmChat.aiOffBanner')}</span>
+    </div>
+  {:else if offline}
     <div class="offline-banner">
       <AlertTriangle size={15} />
       <span>{$t('pages.llmChat.offlineBanner')}</span>
