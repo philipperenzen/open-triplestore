@@ -62,7 +62,7 @@ jobs:
       - name: Start the S3 server
         run: >-
           docker run -d --name s3 -p 127.0.0.1:7070:7070
-          versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+          versity/versitygw:v1.9.0@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
           --access ots-ci-s3 --secret ots-ci-s3-secret posix /tmp
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
@@ -70,7 +70,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy, rustfmt
 
@@ -233,7 +233,7 @@ jobs:
       - name: Install system dependencies (GEOS for GeoSPARQL)
         run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build (no default features)
@@ -245,7 +245,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -348,7 +348,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: PostgreSQL 16
@@ -401,7 +401,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # The W3C / GeoSPARQL / OWL 2 / LDP conformance binaries are not run
@@ -494,7 +494,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -579,7 +579,7 @@ jobs:
         with:
           command: check advisories bans sources licenses
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
