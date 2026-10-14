@@ -661,15 +661,17 @@ fn fn_area(args: &[Term]) -> Option<Term> {
     ))
 }
 
+/// `geof:getSRID(geom)` — the literal's CRS as an `xsd:anyURI` literal
+/// (GeoSPARQL 1.1 §10.9.39): a WKT `<crs>` prefix or a GML `srsName`,
+/// normalised, and CRS84 by default, which is also what a GeoJSON or KML
+/// literal always has.
 fn fn_get_srid(args: &[Term]) -> Option<Term> {
-    // The literal's CRS — a WKT `<crs>` prefix or a GML `srsName`, normalised —
-    // and CRS84 by default, which is also what a GeoJSON literal always has.
     match args.first()? {
         term @ Term::Literal(_) => {
             let crs = literal_crs_uri(term);
-            NamedNode::new(crs.as_deref().unwrap_or(vocab::CRS84))
-                .ok()
-                .map(Term::NamedNode)
+            let iri = crs.as_deref().unwrap_or(vocab::CRS84);
+            NamedNode::new(iri).ok()?;
+            Some(any_uri_literal(iri))
         }
         _ => None,
     }
@@ -748,19 +750,25 @@ fn fn_is_simple(args: &[Term]) -> Option<Term> {
     Some(boolean_literal(parse_one_geom(args)?.is_simple().ok()?))
 }
 
-/// `geof:geometryType(geom)` — the geometry's class, as an IRI: the GML element
-/// of a GML literal (`gml:Surface`, `gml:Envelope`, …, in the GeoSPARQL GML
-/// namespace), the Simple Features class otherwise (`sf:Point`,
-/// `sf:MultiPolygon`, …).
+/// An `xsd:anyURI` literal: what `geof:getSRID` and `geof:geometryType`
+/// return (GeoSPARQL 1.1 §10.9.18, §10.9.39: `… : xsd:anyURI`).
+fn any_uri_literal(iri: impl Into<String>) -> Term {
+    Term::Literal(oxrdf::Literal::new_typed_literal(
+        iri,
+        NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#anyURI"),
+    ))
+}
+
+/// `geof:geometryType(geom)` — the geometry's class, as an `xsd:anyURI`
+/// literal: the GML element of a GML literal (`gml:Surface`, `gml:Envelope`,
+/// …, in the GeoSPARQL GML namespace), the Simple Features class otherwise
+/// (`sf:Point`, `sf:MultiPolygon`, …).
 fn fn_geometry_type(args: &[Term]) -> Option<Term> {
     let term = args.first()?;
     let g = parse_wkt_literal(term)?;
     if let (Serialisation::Gml, Term::Literal(l)) = (Serialisation::of(term), term) {
         if let Some(name) = super::gml::gml_root_name(l.value()) {
-            return Some(Term::NamedNode(NamedNode::new_unchecked(format!(
-                "{}{name}",
-                vocab::GML_NS
-            ))));
+            return Some(any_uri_literal(format!("{}{name}", vocab::GML_NS)));
         }
     }
     use geos::GeometryTypes as T;
@@ -776,10 +784,7 @@ fn fn_geometry_type(args: &[Term]) -> Option<Term> {
         #[allow(unreachable_patterns)] // curve types, with GEOS >= 3.13 features
         _ => return None,
     };
-    Some(Term::NamedNode(NamedNode::new_unchecked(format!(
-        "{}{class}",
-        vocab::SF_NS
-    ))))
+    Some(any_uri_literal(format!("{}{class}", vocab::SF_NS)))
 }
 
 /// `geof:numGeometries(geom)` — the members of a collection; 1 for a
@@ -1214,12 +1219,12 @@ mod tests {
             "<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1 2)",
             NamedNode::new_unchecked(vocab::WKT_LITERAL),
         ));
-        let result = fn_get_srid(&[term]);
-        if let Some(Term::NamedNode(nn)) = result {
-            assert_eq!(nn.as_str(), "http://www.opengis.net/def/crs/EPSG/0/4326");
-        } else {
-            panic!("Expected NamedNode");
-        }
+        assert_eq!(
+            fn_get_srid(&[term]),
+            Some(any_uri_literal(
+                "http://www.opengis.net/def/crs/EPSG/0/4326"
+            ))
+        );
     }
 
     #[test]
@@ -1231,9 +1236,9 @@ mod tests {
         ));
         assert_eq!(
             fn_get_srid(&[gml]),
-            Some(Term::NamedNode(NamedNode::new_unchecked(
+            Some(any_uri_literal(
                 "http://www.opengis.net/def/crs/EPSG/0/4326"
-            )))
+            ))
         );
         // GML without one, and GeoJSON always, are CRS84.
         let bare_gml = Term::Literal(Literal::new_typed_literal(
@@ -1245,10 +1250,7 @@ mod tests {
             NamedNode::new_unchecked(vocab::GEOJSON_LITERAL),
         ));
         for term in [bare_gml, json] {
-            assert_eq!(
-                fn_get_srid(&[term]),
-                Some(Term::NamedNode(NamedNode::new_unchecked(vocab::CRS84)))
-            );
+            assert_eq!(fn_get_srid(&[term]), Some(any_uri_literal(vocab::CRS84)));
         }
     }
 
@@ -1277,12 +1279,14 @@ mod tests {
     #[test]
     fn test_get_srid_default() {
         let term = wkt_term("POINT(1 2)");
-        let result = fn_get_srid(&[term]);
-        if let Some(Term::NamedNode(nn)) = result {
-            assert_eq!(nn.as_str(), vocab::CRS84);
-        } else {
-            panic!("Expected NamedNode");
-        }
+        let Some(Term::Literal(l)) = fn_get_srid(&[term]) else {
+            panic!("expected an xsd:anyURI literal")
+        };
+        assert_eq!(l.value(), vocab::CRS84);
+        assert_eq!(
+            l.datatype().as_str(),
+            "http://www.w3.org/2001/XMLSchema#anyURI"
+        );
     }
 
     #[test]

@@ -292,11 +292,14 @@ behavior and will flip green when the limitation is resolved.
    function and aggregate requirements) is a separate, optional conformance class
    of the standard, and DGGS literals and `geof:asDGGS` are not implemented.
    Both grades are the project's own, against the requirement matrix — not an
-   OGC certification. Choices the standard leaves open: `getSRID` and
-   `geometryType` return IRIs rather than `xsd:anyURI` literals;
-   `geof:concaveHull` without a target, and `geof:aggConcaveHull` (which takes
-   one argument, because the SPARQL parser allows one expression in a custom
-   aggregate call), use the target 0.5 (see [geosparql.md](geosparql.md#aggregates)).
+   OGC certification. `getSRID` and `geometryType` return the `xsd:anyURI`
+   literals their signatures give (since 2026-10; they returned IRIs before,
+   [#510](https://github.com/philipperenzen/open-triplestore/issues/510)). A choice the standard leaves open:
+   `geof:concaveHull` without a target uses the target 0.5. Not a choice:
+   `geof:aggConcaveHull` takes one argument, always at the target 0.5, where its
+   signature also has `targetPercent`, because the SPARQL parser allows one
+   expression in a custom aggregate call ([#525](https://github.com/philipperenzen/open-triplestore/issues/525); see
+   [geosparql.md](geosparql.md#aggregates)).
 6. **SHACL Core** — the Core constraint components are implemented, and
    blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
    enforced (the loader dereferences blank nodes through the raw quad index;

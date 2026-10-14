@@ -452,7 +452,8 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > (braces in `REGEX` / `sh:pattern`). Filed: [#504](https://github.com/philipperenzen/open-triplestore/issues/504) (RDF 1.2, w3c/rdf-xml#97),
 > [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
 > [#508](https://github.com/philipperenzen/open-triplestore/issues/508) (SHACL test defects), [#509](https://github.com/philipperenzen/open-triplestore/issues/509) (GeoSPARQL DGGS scope) and [#510](https://github.com/philipperenzen/open-triplestore/issues/510)
-> (GeoSPARQL `getSRID` / `geometryType` return type, back with the owner). No grade changed.
+> (GeoSPARQL `getSRID` / `geometryType` return type; since fixed, both now return the
+> `xsd:anyURI` literals their signatures give). No grade changed.
 >
 > Open Triplestore recounted on 2026-10-13 (round 3, card K1), 26 → **28 of 28**: JSON-LD 1.1
 > and RML follow their new Full grades in `docs/standards.md`. JSON-LD's serialiser now runs the

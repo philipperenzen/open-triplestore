@@ -1691,10 +1691,10 @@ fn geos_cx_get_srid() {
         &s,
         "geof:getSRID(\"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(2 1)\"^^geo:wktLiteral)",
     );
-    assert!(
-        no_srs.as_deref().unwrap_or("").contains("CRS84"),
-        "default SRID must be CRS84, got {:?}",
-        no_srs
+    assert_eq!(
+        no_srs.as_deref(),
+        Some("\"http://www.opengis.net/def/crs/OGC/1.3/CRS84\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"),
+        "default SRID must be CRS84 as an xsd:anyURI literal"
     );
     assert!(
         epsg.as_deref().unwrap_or("").contains("4326"),
@@ -3443,7 +3443,8 @@ fn ogc_req20_gml_srs_name_is_harmonised_against_wkt() {
 }
 
 // Req 41 /req/geometry-extension/srid-function: getSRID of a GML literal is its
-// srsName (normalised), not CRS84.
+// srsName (normalised), not CRS84, as an xsd:anyURI literal (§10.9.39:
+// `geof:getSRID (geom: ogc:geomLiteral): xsd:anyURI`).
 #[test]
 fn ogc_req41_get_srid_of_a_gml_literal() {
     let s = ts();
@@ -3452,10 +3453,24 @@ fn ogc_req41_get_srid_of_a_gml_literal() {
         &format!("geof:getSRID({})", gml_point("EPSG:28992", "1 2")),
     )
     .unwrap_or_default();
-    assert_eq!(srid, "<http://www.opengis.net/def/crs/EPSG/0/28992>");
+    assert_eq!(
+        srid,
+        "\"http://www.opengis.net/def/crs/EPSG/0/28992\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"
+    );
     let bare = "\"<gml:Point><gml:pos>1 2</gml:pos></gml:Point>\"^^geo:gmlLiteral";
     let srid = geof_opt(&s, &format!("geof:getSRID({bare})")).unwrap_or_default();
     assert!(srid.contains("CRS84"), "no srsName is CRS84: {srid}");
+    // The result feeds geof:transform's xsd:anyURI target as it is.
+    let rd = gml_point("EPSG:28992", "155000 463000");
+    let moved = geof_opt(
+        &s,
+        &format!(
+            "geof:getSRID(geof:transform({}, geof:getSRID({rd})))",
+            wkt("POINT(5.387 52.155)")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(moved.contains("EPSG/0/28992"), "{moved}");
 }
 
 // Req 43 /req/geometry-topology-extension/relate-query-function: relate brings its
@@ -4930,27 +4945,30 @@ fn ogc_req39_geometry_property_functions() {
     )));
 }
 
-// Req 39: geometryType returns the class as an IRI — the GML element for GML, the
-// Simple Features class otherwise.
+// Req 39: geometryType returns the class as an xsd:anyURI literal (§10.9.18:
+// `geof:geometryType (geom: ogc:geomLiteral): xsd:anyURI`) — the GML element for
+// GML, the Simple Features class otherwise.
 #[test]
-fn ogc_req39_geometry_type_is_an_iri() {
+fn ogc_req39_geometry_type_is_an_any_uri() {
     let s = ts();
     let [w, g, j, k] = square_in_every_serialisation();
     for t in [w, j, k] {
         assert_eq!(
             geof_opt(&s, &format!("geof:geometryType({t})")).as_deref(),
-            Some("<http://www.opengis.net/ont/sf#Polygon>"),
+            Some("\"http://www.opengis.net/ont/sf#Polygon\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"),
             "{t}"
         );
     }
     assert_eq!(
         geof_opt(&s, &format!("geof:geometryType({g})")).as_deref(),
-        Some("<http://www.opengis.net/ont/gml#Polygon>")
+        Some(
+            "\"http://www.opengis.net/ont/gml#Polygon\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"
+        )
     );
     let env = gml_lit("<gml:Envelope><gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>1 1</gml:upperCorner></gml:Envelope>");
     assert_eq!(
         geof_opt(&s, &format!("geof:geometryType({env})")).as_deref(),
-        Some("<http://www.opengis.net/ont/gml#Envelope>")
+        Some("\"http://www.opengis.net/ont/gml#Envelope\"^^<http://www.w3.org/2001/XMLSchema#anyURI>")
     );
     assert_eq!(
         geof_opt(
@@ -4958,7 +4976,7 @@ fn ogc_req39_geometry_type_is_an_iri() {
             &format!("geof:geometryType({})", wkt("MULTIPOINT((0 0), (1 1))"))
         )
         .as_deref(),
-        Some("<http://www.opengis.net/ont/sf#MultiPoint>")
+        Some("\"http://www.opengis.net/ont/sf#MultiPoint\"^^<http://www.w3.org/2001/XMLSchema#anyURI>")
     );
 }
 

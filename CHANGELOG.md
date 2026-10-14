@@ -1007,6 +1007,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. An RML run that would generate one reports a data error. See
   `docs/datatypes.md`.
 
+- **`geof:getSRID` and `geof:geometryType` return `xsd:anyURI` literals**, as
+  their GeoSPARQL 1.1 signatures give (§10.9.39, §10.9.18), instead of IRIs
+  (#510). `FILTER(geof:getSRID(?g) = <http://…/CRS84>)` no longer matches; compare
+  with `"http://…/CRS84"^^xsd:anyURI`, or with `STR()` on both sides.
+  `geof:transform` takes the result as its target as before.
 - **Lexical forms take no whitespace normalization.** The OWL 2 / RDFS
   datatype map reads a literal's lexical form as written, as RDF 1.1 does:
   `" 3 "^^xsd:int`, `" false"^^xsd:boolean` and `" abc "^^xsd:token` are
@@ -1023,7 +1028,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   #504 (RDF 1.2, waiting on w3c/rdf-xml#97), #505 and #506 (OWL 2 DL test
   defects and a HermiT limit), #507 and #508 (SHACL test defects), #509
   (GeoSPARQL DGGS) and #510 (GeoSPARQL `getSRID` / `geometryType` return type,
-  back with the owner). No grade changed by the sweep.
+  since fixed, above). No grade changed by the sweep.
   The W3C OWL 2 DL runner takes its per-check budget from
   `OTS_TEST_W3C_OWL2_TIMEOUT_SECS`.
 
