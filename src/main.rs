@@ -314,12 +314,7 @@ async fn main() -> anyhow::Result<()> {
             .get()
             .unwrap_or_else(|| data_dir.join("auth.db"));
         let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
-        backup::apply_pending_restore(
-            &backup_dir,
-            &data_dir,
-            &target_sqlite,
-            identity.as_deref(),
-        );
+        backup::apply_pending_restore(&backup_dir, &data_dir, &target_sqlite, identity.as_deref());
     }
 
     // Initialize the auth database (SQLite) — needed by --promote-super-admin and the server.
