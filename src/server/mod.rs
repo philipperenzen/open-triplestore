@@ -2985,12 +2985,7 @@ pub async fn run(
         crate::svc_registry::spawn_registrar(self_url, registry_url, registry_token);
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    serve_on(listener, app, shutdown_signal()).await?;
 
     // The server has stopped accepting connections and drained in-flight requests. Flush RocksDB to
     // disk so the store closes in a consistent state: this triplestore has no other shutdown path,
@@ -3003,6 +2998,29 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Serve `app` on `listener` until `shutdown` resolves, the way the server
+/// does: with the caller's address available to the rate limiter and
+/// `TCP_NODELAY` on every accepted connection.
+///
+/// A streamed response — every SPARQL result: the head goes out once the query
+/// has started, the body as it is serialised — is two or more small writes.
+/// With Nagle's algorithm on, a body written after the head waits for the
+/// client's ACK of the head, which a Linux client may delay by 40 ms. Public so
+/// the benchmarks serve through the same setup.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .tcp_nodelay(true)
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM, so the server can shut down

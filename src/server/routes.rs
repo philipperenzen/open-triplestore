@@ -739,6 +739,8 @@ async fn execute_query(
     let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
     let source_caller =
         crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
+    let cancel = oxigraph::sparql::CancellationToken::new();
+    let cancel_eval = cancel.clone();
     tokio::task::spawn_blocking(move || {
         // SERVICE clauses evaluated inside this query act for the caller.
         let _identity = crate::federation::IdentityGuard::set(federated_identity);
@@ -763,7 +765,7 @@ async fn execute_query(
         };
         #[cfg(not(feature = "owl2-ql"))]
         let _ = ql_existentials;
-        let results = match store.query(&effective_query_str) {
+        let results = match store.query_cancellable(&effective_query_str, Some(&cancel_eval)) {
             Ok(r) => r,
             Err(e) => {
                 // Preserve `From<StoreError> for AppError` so syntax errors
@@ -813,10 +815,13 @@ async fn execute_query(
     // M-1: Apply the configured query timeout to the time-to-first-byte
     // (i.e. parsing + planning + first row). Once the body is streaming, the
     // response is committed and the client controls how long it reads for.
+    // Until then, a timeout or a client that goes away cancels the evaluation.
+    let pending = CancelOnDrop::new(cancel);
     let content_type = tokio::time::timeout(timeout, ct_rx)
         .await
         .map_err(|_| AppError::BadRequest("Query execution timed out".to_string()))?
         .map_err(|_| AppError::Internal("Query task aborted".to_string()))??;
+    pending.disarm();
 
     let body = axum::body::Body::from_stream(receiver_stream(chunk_rx));
     Ok(Response::builder()
@@ -2075,14 +2080,16 @@ async fn graph_store_post(
     let format = parse_rdf_content_type(content_type)
         .ok_or_else(|| AppError::UnsupportedMediaType(content_type.to_string()))?;
 
-    let data = String::from_utf8(body.to_vec())
+    // Checked in place: copying the body into a `String` held a second copy
+    // of every chunk of a bulk load for the whole write (issue #469).
+    let data = std::str::from_utf8(&body)
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
     validate_on_write(
         &state,
         user.as_deref(),
         params.graph_iri(),
-        &data,
+        data,
         format,
         crate::shacl_studio::gate::WriteMode::Merge,
     )?;
@@ -2099,8 +2106,10 @@ async fn graph_store_post(
     let (inserted, claim) = run_store_write(&state, "graph store POST", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         let claim = store.claim_search_index();
+        // `body` was checked to be UTF-8 above.
+        let data = std::str::from_utf8(&body).unwrap_or_default();
         claim
-            .run(|| store.graph_store_post_delta(graph.as_deref(), &data, format))
+            .run(|| store.graph_store_post_delta(graph.as_deref(), data, format))
             .map(|inserted| (inserted, claim))
     })
     .await?;
@@ -5848,6 +5857,31 @@ async fn execute_dataset_query(
     run_scoped_sparql(state, query, &graph_set, accept).await
 }
 
+/// Cancels a query's evaluation when dropped armed: the request stopped waiting
+/// for its first result (the query timeout, or a client that went away) and
+/// nothing will read the rest. Without it the evaluation ran on to the end on
+/// its blocking thread, taking a core from every query after it.
+struct CancelOnDrop(Option<oxigraph::sparql::CancellationToken>);
+
+impl CancelOnDrop {
+    fn new(token: oxigraph::sparql::CancellationToken) -> Self {
+        Self(Some(token))
+    }
+
+    /// The response is streaming: leave the evaluation alone.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(token) = self.0.take() {
+            token.cancel();
+        }
+    }
+}
+
 /// Execute `query` restricted to `graph_set`, streaming the serialised result.
 ///
 /// This is the shared core behind the dataset-service endpoint and the saved-query
@@ -5880,9 +5914,11 @@ pub(crate) async fn run_scoped_sparql(
     let accept_owned = accept.to_string();
     let (ct_tx, ct_rx) = oneshot::channel::<Result<&'static str, AppError>>();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let cancel = oxigraph::sparql::CancellationToken::new();
+    let cancel_eval = cancel.clone();
 
     tokio::task::spawn_blocking(move || {
-        let results = match store.query(&final_query_str) {
+        let results = match store.query_cancellable(&final_query_str, Some(&cancel_eval)) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ct_tx.send(Err(AppError::from(e)));
@@ -5929,10 +5965,12 @@ pub(crate) async fn run_scoped_sparql(
     // `/run` paths (some anonymously reachable) could run pathological queries
     // unbounded.
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
+    let pending = CancelOnDrop::new(cancel);
     let content_type = tokio::time::timeout(timeout, ct_rx)
         .await
         .map_err(|_| AppError::BadRequest("Query execution timed out".to_string()))?
         .map_err(|_| AppError::Internal("Query task aborted".to_string()))??;
+    pending.disarm();
 
     let body = axum::body::Body::from_stream(receiver_stream(chunk_rx));
     Ok(Response::builder()

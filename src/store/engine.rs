@@ -1356,6 +1356,21 @@ impl TripleStore {
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
     pub fn query(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
+        self.query_cancellable(sparql, None)
+    }
+
+    /// [`Self::query`] with a cancellation token: once `cancel` is cancelled
+    /// the evaluation stops at its next step and the results end in an error.
+    ///
+    /// The HTTP endpoints cancel at their query timeout. They used to answer
+    /// "Query execution timed out" and leave the evaluation running on its
+    /// blocking thread to the end: a correlated `NOT EXISTS` that timed out in
+    /// the store comparison kept a core busy through every query after it.
+    pub fn query_cancellable(
+        &self,
+        sparql: &str,
+        cancel: Option<&oxigraph::sparql::CancellationToken>,
+    ) -> Result<QueryResults<'static>, StoreError> {
         // Result cache: a repeated, *deterministic* query is answered from a small
         // LRU keyed by the (already ACL-scoped) query string and invalidated on
         // every write — so a hit is the exact result the engine would compute.
@@ -1401,7 +1416,7 @@ impl TripleStore {
             analytical: class == Some(ParClass::Aggregate),
             aggregate_text: QueryShape::mentions_aggregate(eval),
         };
-        let (results, served) = self.query_uncached(eval, class)?;
+        let (results, served) = self.query_uncached(eval, class, cancel)?;
         let results = self.query_cache.put(sparql, gen, results, shape);
         self.telemetry
             .record_query(served, t0.map(|t| t.elapsed()), shape);
@@ -1415,7 +1430,12 @@ impl TripleStore {
         &self,
         sparql: &str,
         class: Option<ParClass>,
+        cancel: Option<&oxigraph::sparql::CancellationToken>,
     ) -> Result<(QueryResults<'static>, Served), StoreError> {
+        let options = || match cancel {
+            Some(token) => self.query_options().with_cancellation_token(token.clone()),
+            None => self.query_options(),
+        };
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -1444,7 +1464,7 @@ impl TripleStore {
         // shard error, so results are identical to single-store evaluation.
         if let Some(parallel) = self
             .parallel_mirror
-            .try_query(&self.store, sparql, class, || self.query_options())
+            .try_query(&self.store, sparql, class, options)
         {
             return Ok((parallel, Served::Shards));
         }
@@ -1465,12 +1485,11 @@ impl TripleStore {
         // results match; `None` (over cap / error) falls through to RocksDB.
         if let Some(full) = self
             .parallel_mirror
-            .try_full_query(&self.store, sparql, || self.query_options())
+            .try_full_query(&self.store, sparql, options)
         {
             return Ok((full, Served::FullCopy));
         }
-        let results = self
-            .query_options()
+        let results = options()
             .parse_query(sparql)?
             .on_store(&self.store)
             .execute()?;
@@ -2720,49 +2739,66 @@ impl TripleStore {
         // index is bumped by that number. Recounting the graph after every load
         // made each write O(graph): under the scale benchmark a 500-quad insert
         // into a 900k-quad graph took seconds, and concurrent writers stalled.
-        let new_quads: Option<Vec<Quad>> = if to_graph.is_some() {
+        // Which quads are new, as a mask over `quads` rather than a copy of
+        // them: a 100 MB Graph Store POST is ~400k quads, and cloning the new
+        // ones next to the parsed batch doubled the load's working set in the
+        // 4 GiB container of the store comparison (issue #469).
+        let fresh_mask: Option<Vec<bool>> = if to_graph.is_some() {
             let mut seen: std::collections::HashSet<&Quad> =
                 std::collections::HashSet::with_capacity(quads.len());
-            let mut fresh = Vec::new();
+            let mut mask = Vec::with_capacity(quads.len());
             for q in &quads {
-                if seen.insert(q) && (target_is_empty || !self.store.contains(q.as_ref())?) {
-                    fresh.push(q.clone());
-                }
+                mask.push(seen.insert(q) && (target_is_empty || !self.store.contains(q.as_ref())?));
             }
-            Some(fresh)
+            Some(mask)
         } else {
             None
         };
+        fn fresh_of<'q>(quads: &'q [Quad], mask: &[bool]) -> Vec<&'q Quad> {
+            quads
+                .iter()
+                .zip(mask)
+                .filter_map(|(q, fresh)| fresh.then_some(q))
+                .collect()
+        }
+        let fresh_len = fresh_mask
+            .as_ref()
+            .map(|m| m.iter().filter(|f| **f).count());
         // The rows: the fresh quads of a named target; per graph unknown for
         // a default-graph load, whose duplicates were never probed.
-        let (targets, deltas): (Vec<Option<String>>, Vec<GraphDelta>) = match (to_graph, &new_quads)
-        {
-            (Some(g), Some(fresh)) => {
-                let g = Some(g.to_string());
-                let delta = if fresh.len() <= self.changes.max_payload() {
-                    GraphDelta::full(g.clone(), fresh.clone(), Vec::new())
-                } else {
-                    GraphDelta::counts(g.clone(), fresh.len(), 0, None)
-                };
-                (vec![g], vec![delta])
-            }
-            _ => {
-                let mut graphs: Vec<Option<String>> =
-                    quads.iter().map(Self::graph_key_of).collect();
-                graphs.sort();
-                graphs.dedup();
-                let deltas = graphs.iter().cloned().map(GraphDelta::unknown).collect();
-                (graphs, deltas)
-            }
-        };
-        match &new_quads {
-            Some(fresh) => self.touch_quads(fresh),
+        let (targets, deltas): (Vec<Option<String>>, Vec<GraphDelta>) =
+            match (to_graph, &fresh_mask) {
+                (Some(g), Some(mask)) => {
+                    let g = Some(g.to_string());
+                    let n = fresh_len.unwrap_or(0);
+                    let delta = if n <= self.changes.max_payload() {
+                        GraphDelta::full(
+                            g.clone(),
+                            fresh_of(&quads, mask).into_iter().cloned().collect(),
+                            Vec::new(),
+                        )
+                    } else {
+                        GraphDelta::counts(g.clone(), n, 0, None)
+                    };
+                    (vec![g], vec![delta])
+                }
+                _ => {
+                    let mut graphs: Vec<Option<String>> =
+                        quads.iter().map(Self::graph_key_of).collect();
+                    graphs.sort();
+                    graphs.dedup();
+                    let deltas = graphs.iter().cloned().map(GraphDelta::unknown).collect();
+                    (graphs, deltas)
+                }
+            };
+        match &fresh_mask {
+            Some(mask) => self.touch_quads(fresh_of(&quads, mask)),
             None => self.touch_graphs(targets.iter().cloned()),
         }
         let pre_count = self.pre_count();
         let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
-        if let Err(e) = loader.load_quads(quads) {
+        if let Err(e) = loader.load_quads(quads.iter().cloned()) {
             if let Some(intent) = intent {
                 self.changes.abort(intent);
             }
@@ -2773,15 +2809,20 @@ impl TripleStore {
             .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
         info!("Data loaded successfully");
-        let delta = match (to_graph, new_quads) {
-            (Some(g), Some(fresh)) => {
+        let delta = match (to_graph, fresh_mask) {
+            (Some(g), Some(mask)) => {
                 if self.graph_index.get_count(Some(g)).is_some() {
-                    self.graph_index.add(Some(g), fresh.len());
+                    self.graph_index.add(Some(g), fresh_len.unwrap_or(0));
                 } else {
                     self.graph_index
                         .recount_specific_graphs(&self.store, &[Some(g.to_string())]);
                 }
-                fresh
+                // Move the new quads out of the batch; nothing is cloned.
+                quads
+                    .into_iter()
+                    .zip(mask)
+                    .filter_map(|(q, fresh)| fresh.then_some(q))
+                    .collect()
             }
             _ => {
                 self.graph_index.rebuild(&self.store);
@@ -4904,6 +4945,58 @@ mod tests {
             store.query("ASK { GRAPH <urn:reg> { <urn:s1> <urn:p> <urn:o> } }"),
             Ok(QueryResults::Boolean(true))
         ));
+    }
+}
+
+/// Issue #468 (found profiling it): a query the HTTP layer gave up on kept
+/// evaluating on its blocking thread.
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use oxigraph::sparql::{CancellationToken, QueryResults};
+
+    #[test]
+    fn a_cancelled_query_stops_evaluating() {
+        // The engine path only: the accelerator's columnar copy has no token.
+        let store = TripleStore::in_memory()
+            .unwrap()
+            .with_query_cache(false, 0, 0)
+            .with_parallel_query(false, 1, 0);
+        let mut ttl = String::new();
+        for i in 0..20_000 {
+            ttl.push_str(&format!("<http://e/s{i}> <http://e/p> <http://e/o{i}> .\n"));
+        }
+        store.load_str(&ttl, RdfFormat::Turtle, None).unwrap();
+        // 4e8 combinations: minutes on its own.
+        let q = "SELECT (COUNT(*) AS ?n) WHERE { ?a <http://e/p> ?b . ?c <http://e/p> ?d }";
+        let token = CancellationToken::new();
+        let canceller = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                token.cancel();
+            })
+        };
+        let start = std::time::Instant::now();
+        let outcome = store
+            .query_cancellable(q, Some(&token))
+            .and_then(|r| match r {
+                QueryResults::Solutions(mut rows) => match rows.next() {
+                    Some(Err(e)) => Err(e.into()),
+                    other => Ok(other.is_some()),
+                },
+                _ => Ok(true),
+            });
+        canceller.join().unwrap();
+        assert!(
+            outcome.is_err(),
+            "the cancelled evaluation ends in an error"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "it stopped soon after the cancel ({:?})",
+            start.elapsed()
+        );
     }
 }
 
