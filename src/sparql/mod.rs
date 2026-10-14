@@ -43,8 +43,14 @@ pub fn exists_patterns(
         }
         GP::Group { aggregates, .. } => {
             for (_, aggregate) in aggregates {
-                if let AggregateExpression::FunctionCall { expr, .. } = aggregate {
+                if let AggregateExpression::FunctionCall {
+                    expr, extra_args, ..
+                } = aggregate
+                {
                     in_expression(expr, &mut out);
+                    for arg in extra_args {
+                        in_expression(arg, &mut out);
+                    }
                 }
             }
         }

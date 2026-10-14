@@ -1,7 +1,7 @@
 use crate::io::RdfParseError;
 use crate::model::NamedNode;
 use crate::store::{CorruptionError, StorageError};
-use oxrdf::{Term, Variable};
+use oxrdf::{Literal, Term, Variable};
 use spareval::QueryEvaluationError;
 use spargebra::SparqlSyntaxError;
 use std::convert::Infallible;
@@ -42,6 +42,9 @@ pub enum UpdateEvaluationError {
     /// If a variable present in the given initial substitution is not present in the `SELECT` part of the query
     #[error("The SPARQL query does not contains variable {0} in its SELECT projection")]
     NotExistingSubstitutedVariable(Variable),
+    /// The update would insert an ill-typed `rdf:JSON` literal: its lexical form is not JSON.
+    #[error("The literal {0} is ill-typed: rdf:JSON takes a JSON text")]
+    IllTypedLiteral(Literal),
     #[doc(hidden)]
     #[error(transparent)]
     Unexpected(Box<dyn Error + Send + Sync>),
@@ -101,7 +104,8 @@ impl From<UpdateEvaluationError> for io::Error {
             | UpdateEvaluationError::InvalidServiceName(_)
             | UpdateEvaluationError::UnsupportedService(_)
             | UpdateEvaluationError::UnsupportedContentType(_)
-            | UpdateEvaluationError::NotExistingSubstitutedVariable(_) => {
+            | UpdateEvaluationError::NotExistingSubstitutedVariable(_)
+            | UpdateEvaluationError::IllTypedLiteral(_) => {
                 Self::new(io::ErrorKind::InvalidInput, error)
             }
         }

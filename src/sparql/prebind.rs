@@ -223,10 +223,16 @@ fn bind_by_values(pattern: &mut GraphPattern, f: &NamedNode, var: &Variable, val
         } => {
             bind_by_values(inner, f, var, value);
             for (_, aggregate) in aggregates {
-                if let spargebra::algebra::AggregateExpression::FunctionCall { expr, .. } =
-                    aggregate
+                if let spargebra::algebra::AggregateExpression::FunctionCall {
+                    expr,
+                    extra_args,
+                    ..
+                } = aggregate
                 {
                     each_expression(expr);
+                    for arg in extra_args {
+                        each_expression(arg);
+                    }
                 }
             }
         }
@@ -355,10 +361,16 @@ fn replace(pattern: &mut GraphPattern, table: &GraphPattern) {
         } => {
             replace(inner, table);
             for (_, aggregate) in aggregates {
-                if let spargebra::algebra::AggregateExpression::FunctionCall { expr, .. } =
-                    aggregate
+                if let spargebra::algebra::AggregateExpression::FunctionCall {
+                    expr,
+                    extra_args,
+                    ..
+                } = aggregate
                 {
                     replace_in_expression(expr, table);
+                    for arg in extra_args {
+                        replace_in_expression(arg, table);
+                    }
                 }
             }
         }

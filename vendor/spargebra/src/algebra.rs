@@ -1329,6 +1329,11 @@ pub enum AggregateExpression {
         name: AggregateFunction,
         expr: Expression,
         distinct: bool,
+        /// The arguments after `expr`, in order. Only a custom aggregate takes
+        /// any (`ex:agg(?x, 0.5)`, the `ArgList` of SPARQL's
+        /// `iriOrFunction`); they are evaluated per solution, like `expr`, as
+        /// the list of expressions SPARQL 1.1 §18.5.1 aggregates over.
+        extra_args: Vec<Expression>,
     },
 }
 
@@ -1350,6 +1355,7 @@ impl AggregateExpression {
                     },
                 expr,
                 distinct,
+                ..
             } => {
                 f.write_str("(group_concat ")?;
                 if *distinct {
@@ -1362,6 +1368,7 @@ impl AggregateExpression {
                 name,
                 expr,
                 distinct,
+                extra_args,
             } => {
                 f.write_str("(")?;
                 name.fmt_sse(f)?;
@@ -1370,14 +1377,24 @@ impl AggregateExpression {
                     f.write_str("distinct ")?;
                 }
                 expr.fmt_sse(f)?;
+                for arg in extra_args {
+                    f.write_str(" ")?;
+                    arg.fmt_sse(f)?;
+                }
                 f.write_str(")")
             }
         }
     }
 
     fn lookup_used_variables<'a>(&'a self, callback: &mut impl FnMut(&'a Variable)) {
-        if let Self::FunctionCall { expr, .. } = self {
+        if let Self::FunctionCall {
+            expr, extra_args, ..
+        } = self
+        {
             expr.lookup_used_variable(callback);
+            for arg in extra_args {
+                arg.lookup_used_variable(callback);
+            }
         }
     }
 }
@@ -1399,6 +1416,7 @@ impl fmt::Display for AggregateExpression {
                     },
                 expr,
                 distinct,
+                ..
             } => {
                 if *distinct {
                     write!(
@@ -1420,12 +1438,17 @@ impl fmt::Display for AggregateExpression {
                 name,
                 expr,
                 distinct,
+                extra_args,
             } => {
                 if *distinct {
-                    write!(f, "{name}(DISTINCT {expr})")
+                    write!(f, "{name}(DISTINCT {expr}")?;
                 } else {
-                    write!(f, "{name}({expr})")
+                    write!(f, "{name}({expr}")?;
                 }
+                for arg in extra_args {
+                    write!(f, ", {arg}")?;
+                }
+                f.write_str(")")
             }
         }
     }

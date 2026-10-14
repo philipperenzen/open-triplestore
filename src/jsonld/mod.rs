@@ -359,4 +359,165 @@ mod tests {
         assert!(is_json("application/activity+json"));
         assert!(!is_json("text/html"));
     }
+
+    /// N-Quads in, JSON-LD out through the serializer every download uses.
+    fn serialise(nquads: &str) -> std::io::Result<String> {
+        use oxigraph::io::{RdfParser, RdfSerializer};
+        let mut out = RdfSerializer::from_format(json_ld()).for_writer(Vec::new());
+        for q in RdfParser::from_format(RdfFormat::NQuads).for_reader(nquads.as_bytes()) {
+            out.serialize_quad(&q.unwrap())?;
+        }
+        Ok(String::from_utf8(out.finish()?).unwrap())
+    }
+
+    /// The quads a JSON-LD document reads as, as sorted N-Quads lines with
+    /// blank-node labels canonicalised.
+    fn read_back(doc: &str) -> Vec<String> {
+        use oxigraph::io::RdfParser;
+        use oxigraph::model::dataset::CanonicalizationAlgorithm;
+        use oxigraph::model::Dataset;
+        let mut ds = Dataset::new();
+        for q in RdfParser::from_format(json_ld()).for_reader(doc.as_bytes()) {
+            ds.insert(&q.unwrap());
+        }
+        ds.canonicalize(CanonicalizationAlgorithm::Unstable);
+        let mut lines: Vec<String> = ds.iter().map(|q| q.to_string()).collect();
+        lines.sort();
+        lines
+    }
+
+    const JSON: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>";
+
+    /// fromRdf: an rdf:JSON literal is its JSON value, typed @json (JSON-LD
+    /// 1.1 API §8.5.2 step 2.4).
+    #[test]
+    fn a_json_literal_is_written_as_its_json_value() {
+        let doc = serialise(&format!(
+            "<http://e/s> <http://e/p> \"{{\\\"a\\\":[1,true,null]}}\"^^{JSON} .\n"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let value = &v[0]["http://e/p"][0];
+        assert_eq!(value["@type"], "@json", "{doc}");
+        assert_eq!(value["@value"], serde_json::json!({"a": [1, true, null]}));
+    }
+
+    /// `@json` reads back as the canonical (JCS) lexical form, which is
+    /// another literal than a non-canonical one: that one keeps its form.
+    #[test]
+    fn a_json_literal_not_in_canonical_form_keeps_its_lexical_form() {
+        let nq = format!("<http://e/s> <http://e/p> \"{{ \\\"a\\\" : 1.0 }}\"^^{JSON} .\n");
+        let doc = serialise(&nq).unwrap();
+        assert!(!doc.contains("@json"), "{doc}");
+        assert_eq!(
+            read_back(&doc),
+            vec![nq.trim_end().trim_end_matches(" .").to_string()]
+        );
+    }
+
+    /// fromRdf js08 / js09: an rdf:JSON literal that is not JSON aborts the
+    /// serialisation (`invalid JSON literal`) — wherever it sits.
+    #[test]
+    fn a_json_literal_that_is_not_json_is_an_error() {
+        for bad in ["bareword", "[{]"] {
+            for nq in [
+                format!("<http://e/s> <http://e/p> \"{bad}\"^^{JSON} .\n"),
+                format!("_:b <http://e/p> \"{bad}\"^^{JSON} .\n<http://e/s> <http://e/q> _:b .\n"),
+            ] {
+                let e = serialise(&nq).unwrap_err();
+                assert!(e.to_string().contains("invalid JSON literal"), "{e}");
+            }
+        }
+    }
+
+    const FIRST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#first>";
+    const REST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>";
+    const NIL: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#nil>";
+    const TYPE: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
+    const LIST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#List>";
+
+    /// fromRdf 0016: a well-formed list becomes @list, and the
+    /// `rdf:type rdf:List` of its nodes goes with them (§8.4.2 step 6.4).
+    #[test]
+    fn a_well_formed_list_is_written_as_a_list_object() {
+        let doc = serialise(&format!(
+            "<http://e/s> <http://e/list> _:a .\n\
+             _:a {TYPE} {LIST} .\n_:a {FIRST} \"A\" .\n_:a {REST} _:b .\n\
+             _:b {FIRST} \"B\" .\n_:b {REST} {NIL} .\n_:b {TYPE} {LIST} .\n"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let nodes = v.as_array().unwrap();
+        assert_eq!(nodes.len(), 1, "the list nodes are gone: {doc}");
+        assert_eq!(
+            nodes[0]["http://e/list"][0]["@list"],
+            serde_json::json!([{"@value": "A"}, {"@value": "B"}]),
+            "{doc}"
+        );
+        assert!(!doc.contains("22-rdf-syntax-ns#List"), "{doc}");
+    }
+
+    /// A list node with a property of its own is not well-formed: the list
+    /// stays node objects, with every quad.
+    #[test]
+    fn a_list_with_an_extra_property_keeps_every_quad() {
+        let nq = format!(
+            "<http://e/s> <http://e/list> _:a .\n\
+             _:a {FIRST} \"A\" .\n_:a {REST} {NIL} .\n_:a {TYPE} {LIST} .\n\
+             _:a <http://e/note> \"kept\" .\n"
+        );
+        let doc = serialise(&nq).unwrap();
+        assert!(!doc.contains("@list\":[{"), "{doc}");
+        assert_eq!(read_back(&doc).len(), 5, "{doc}");
+    }
+
+    /// A list node used twice, or in two graphs, is not referenced once.
+    #[test]
+    fn a_shared_list_node_is_not_folded() {
+        for nq in [
+            format!(
+                "<http://e/s> <http://e/p> _:a .\n<http://e/t> <http://e/p> _:a .\n\
+                 _:a {FIRST} \"A\" .\n_:a {REST} {NIL} .\n"
+            ),
+            format!(
+                "<http://e/s> <http://e/p> _:a <http://e/g1> .\n\
+                 <http://e/s> <http://e/p> _:a <http://e/g2> .\n\
+                 _:a {FIRST} \"A\" <http://e/g1> .\n_:a {REST} {NIL} <http://e/g1> .\n"
+            ),
+        ] {
+            let doc = serialise(&nq).unwrap();
+            assert!(doc.contains(FIRST.trim_matches(['<', '>'])), "{doc}");
+            assert_eq!(read_back(&doc).len(), 4, "{doc}");
+        }
+    }
+
+    /// A list that holds itself has no tree form: it stays node objects.
+    #[test]
+    fn a_self_containing_list_stays_node_objects() {
+        let nq = format!("_:a {FIRST} _:a .\n_:a {REST} {NIL} .\n");
+        let doc = serialise(&nq).unwrap();
+        assert_eq!(read_back(&doc).len(), 2, "{doc}");
+    }
+
+    /// Lists of lists nest; a bare rdf:nil object is the empty list; a stream
+    /// with no blank node is written as it comes.
+    #[test]
+    fn nested_and_empty_lists_round_trip() {
+        let nq = format!(
+            "<http://e/s> <http://e/p> _:o .\n\
+             _:o {FIRST} _:i .\n_:o {REST} {NIL} .\n\
+             _:i {FIRST} \"x\" .\n_:i {REST} {NIL} .\n\
+             <http://e/s> <http://e/empty> {NIL} .\n\
+             <http://e/s> <http://e/name> \"n\" <http://e/g> .\n"
+        );
+        let doc = serialise(&nq).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let text = v.to_string();
+        assert!(
+            text.contains(r#"{"@list":[{"@list":[{"@value":"x"}]}]}"#),
+            "{doc}"
+        );
+        assert!(text.contains(r#"{"@list":[]}"#), "{doc}");
+        assert_eq!(read_back(&doc).len(), 7, "{doc}");
+    }
 }

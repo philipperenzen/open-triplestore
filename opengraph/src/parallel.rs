@@ -764,6 +764,7 @@ fn is_nondistinct_count(agg: &AggregateExpression) -> bool {
             name: AggregateFunction::Count,
             distinct: false,
             expr,
+            ..
         } => !has_exists(expr),
         _ => false,
     }
@@ -949,6 +950,7 @@ fn push_partial(
             name,
             expr: arg.clone(),
             distinct: false,
+            extra_args: Vec::new(),
         },
     ));
     v
@@ -1042,6 +1044,7 @@ fn plan_group_aggregate(query: &Query) -> Option<GroupAggPlan> {
                 name,
                 expr: Expression::Variable(arg),
                 distinct: false,
+                ..
             } => {
                 // Only a plain-variable argument (keeps the partial query simple and
                 // the aggregated value bound by the required shard-local pattern).
@@ -1391,6 +1394,7 @@ fn plan_count_distinct(query: &Query) -> Option<CountDistinctPlan> {
                 name: AggregateFunction::Count,
                 expr: Expression::Variable(arg),
                 distinct: true,
+                ..
             } => {
                 distinct_internal.insert(v.as_str(), arg.clone());
             }

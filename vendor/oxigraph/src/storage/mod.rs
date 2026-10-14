@@ -245,6 +245,62 @@ impl<'a> StorageReader<'a> {
         }
     }
 
+    /// The quads matching the pattern in the RDF merge of `graph_names` (`None`:
+    /// the default graph and every named graph), each triple once, with the
+    /// graph name set to the default graph (upstream #1920).
+    pub fn quads_for_pattern_in_union(
+        &self,
+        subject: Option<&EncodedTerm>,
+        predicate: Option<&EncodedTerm>,
+        object: Option<&EncodedTerm>,
+        graph_names: Option<&[Option<EncodedTerm>]>,
+    ) -> Box<dyn Iterator<Item = Result<EncodedQuad, StorageError>> + 'a> {
+        match &self.kind {
+            #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]
+            StorageReaderKind::RocksDb(reader) => Box::new(
+                reader.quads_for_pattern_in_union(subject, predicate, object, graph_names),
+            ),
+            StorageReaderKind::Memory(_) => {
+                let iter: Box<dyn Iterator<Item = Result<EncodedQuad, StorageError>> + 'a> =
+                    if let Some(graph_names) = graph_names {
+                        // Only the graphs with a match take part; with one left
+                        // no triple can repeat, so it is streamed as it is.
+                        let mut iters = graph_names
+                            .iter()
+                            .map(|graph_name| {
+                                self.quads_for_pattern(
+                                    subject,
+                                    predicate,
+                                    object,
+                                    Some(graph_name.as_ref().unwrap_or(&EncodedTerm::DefaultGraph)),
+                                )
+                                .peekable()
+                            })
+                            .filter_map(|mut iter| iter.peek().is_some().then_some(iter))
+                            .collect::<Vec<_>>();
+                        if iters.len() <= 1 {
+                            return Box::new(iters.pop().into_iter().flatten().map(|quad| {
+                                let mut quad = quad?;
+                                quad.graph_name = EncodedTerm::DefaultGraph;
+                                Ok(quad)
+                            }));
+                        }
+                        Box::new(iters.into_iter().flatten())
+                    } else {
+                        Box::new(self.quads_for_pattern(subject, predicate, object, None))
+                    };
+                let mut seen = rustc_hash::FxHashSet::default();
+                Box::new(iter.filter_map(move |quad| match quad {
+                    Ok(mut quad) => {
+                        quad.graph_name = EncodedTerm::DefaultGraph;
+                        seen.insert(quad.clone()).then_some(Ok(quad))
+                    }
+                    Err(e) => Some(Err(e)),
+                }))
+            }
+        }
+    }
+
     pub fn named_graphs(&self) -> DecodingGraphIterator<'a> {
         DecodingGraphIterator {
             kind: match &self.kind {

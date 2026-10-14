@@ -47,7 +47,7 @@ fn fresh_sqlite(name: &str) -> PathBuf {
     let path = sources_dir().join(format!("{name}-{}.db", uuid::Uuid::new_v4()));
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE products (product_id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL);
+        "CREATE TABLE products (product_id INTEGER PRIMARY KEY, name TEXT NOT NULL, price DECIMAL(10,2));
          INSERT INTO products VALUES (1, 'Bolt', 0.25), (2, 'Nut', -0.10), (3, 'Washer', 5000);",
     )
     .unwrap();

@@ -85,6 +85,28 @@ pub fn management_routes() -> Router<AppState> {
             "/api/admin/changes/cursors/:name",
             put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
         )
+        .route(
+            "/api/admin/changes/stats",
+            get(crate::dataset_changes::admin_stats),
+        )
+        // A dataset's change feed: reads, on the SPARQL group's rate tier
+        // (delta note §7).
+        .route(
+            "/api/datasets/:dataset_id/changes",
+            get(crate::dataset_changes::feed),
+        )
+        .route(
+            "/api/datasets/:dataset_id/changes/:seq",
+            get(crate::dataset_changes::change),
+        )
+        .route(
+            "/api/datasets/:dataset_id/changes/:seq/inverse",
+            get(crate::dataset_changes::change_inverse),
+        )
+        .route(
+            "/api/datasets/:dataset_id/settings",
+            get(crate::dataset_settings::get_settings),
+        )
         .route("/api/replication/status", get(replication_status))
         .route("/api/replication/manifest", get(replication_manifest))
         .route("/api/replication/identity", get(replication_identity))
@@ -609,6 +631,9 @@ async fn execute_query(
     // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
     // existentially over the TBox (see below).
     let mut ql_existentials = false;
+    // Whether a regime applies: its literal constants then match by value
+    // (D-entailment, `reasoning::value_match`).
+    let mut match_values = false;
     let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
         let ds = state
             .auth_db
@@ -642,6 +667,7 @@ async fn execute_query(
             }
             Some(r) => {
                 ql_existentials = r == "owl2-ql";
+                match_values = true;
                 Some(crate::entailment::dataset_entailment_graph(&r, ds_id))
             }
             None => {
@@ -656,6 +682,7 @@ async fn execute_query(
         }
     } else if let Some(regime) = entailment {
         ql_existentials = regime == "owl2-ql";
+        match_values = crate::entailment::REGIMES.contains(&regime);
         match regime {
             "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
             "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
@@ -670,6 +697,7 @@ async fn execute_query(
     } else {
         None
     };
+    let match_values = match_values && entailment_graph.is_some();
     let resolved = resolve_prefixes(state, query).await;
     let query = resolved.as_deref().unwrap_or(query);
 
@@ -739,6 +767,8 @@ async fn execute_query(
     let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
     let source_caller =
         crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
+    let cancel = oxigraph::sparql::CancellationToken::new();
+    let cancel_eval = cancel.clone();
     tokio::task::spawn_blocking(move || {
         // SERVICE clauses evaluated inside this query act for the caller.
         let _identity = crate::federation::IdentityGuard::set(federated_identity);
@@ -763,7 +793,16 @@ async fn execute_query(
         };
         #[cfg(not(feature = "owl2-ql"))]
         let _ = ql_existentials;
-        let results = match store.query(&effective_query_str) {
+        #[cfg(feature = "rdfs-entailment")]
+        let effective_query_str = if match_values {
+            crate::reasoning::value_match::rewrite(&effective_query_str, None)
+                .unwrap_or(effective_query_str)
+        } else {
+            effective_query_str
+        };
+        #[cfg(not(feature = "rdfs-entailment"))]
+        let _ = match_values;
+        let results = match store.query_cancellable(&effective_query_str, Some(&cancel_eval)) {
             Ok(r) => r,
             Err(e) => {
                 // Preserve `From<StoreError> for AppError` so syntax errors
@@ -813,10 +852,13 @@ async fn execute_query(
     // M-1: Apply the configured query timeout to the time-to-first-byte
     // (i.e. parsing + planning + first row). Once the body is streaming, the
     // response is committed and the client controls how long it reads for.
+    // Until then, a timeout or a client that goes away cancels the evaluation.
+    let pending = CancelOnDrop::new(cancel);
     let content_type = tokio::time::timeout(timeout, ct_rx)
         .await
         .map_err(|_| AppError::BadRequest("Query execution timed out".to_string()))?
         .map_err(|_| AppError::Internal("Query task aborted".to_string()))??;
+    pending.disarm();
 
     let body = axum::body::Body::from_stream(receiver_stream(chunk_rx));
     Ok(Response::builder()
@@ -906,6 +948,13 @@ pub(crate) async fn execute_update(
     // H-1: enforce the per-graph ACL on BOTH the write targets and the WHERE/USING
     // read side, and admin-gate variable-graph / SERVICE / all-graph operations.
     let authorized = authorize_update(state, user, &parsed)?;
+    let guarded;
+    let effective_str = if keep_variable_graph_writes_off_system_graphs(&mut parsed) {
+        guarded = parsed.to_string();
+        guarded.as_str()
+    } else {
+        effective_str
+    };
     let (graph_iris, requires_admin) = (authorized.write_iris, authorized.requires_admin);
     // A write into a model version's graph: its licence record stops calling
     // the content unchanged before the write runs.
@@ -916,15 +965,21 @@ pub(crate) async fn execute_update(
     let effective = effective_str.to_string();
     let store = state.store.clone();
     let affected = graph_iris.clone();
-    let ldes_before = {
+    let ldes = {
         let st = state.clone();
         let gs = graph_iris.clone();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
-    let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
+        state,
+        user,
+        crate::commit_log::CommitKind::Sparql,
+        &stamp,
+    );
     // A write whose graphs could not be named before it ran: the model copies
     // a check vouched for are re-checked after it. The re-check runs in the
     // write's own blocking task, right after the write: that task cannot be
@@ -987,22 +1042,27 @@ pub(crate) async fn execute_update(
         // response sees the records it marked.
         let _ = write.await;
     }
+    // What the change log recorded of this write (nothing when it is off).
+    let written = crate::server::write_effects::Written::read(state, &stamp);
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
-    // DELETE DATA) knows its exact quads, so just those documents change;
-    // any other update with known target graphs refreshes exactly those. A
-    // variable-graph / default-graph / admin wildcard update ran unclaimed:
-    // the store's search journal recorded what it touched, and the next
-    // search catches up on it.
+    // DELETE DATA) knows its exact quads, so just those documents change; so
+    // does any update the change log recorded in full; any other update with
+    // known target graphs refreshes exactly those. A variable-graph /
+    // default-graph / admin wildcard update ran unclaimed: the store's search
+    // journal recorded what it touched, and the next search catches up on it.
     #[cfg(feature = "text-search")]
     if let Some(claim) = claim {
         let st = state.clone();
         let graphs = graph_iris.clone();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            match delta {
-                Some((inserted, deleted)) => {
-                    st.text_index_apply_delta(&inserted, &deleted, &graphs)
+            if !w.sync_text_index(&st, &graphs) {
+                match delta {
+                    Some((inserted, deleted)) => {
+                        st.text_index_apply_delta(&inserted, &deleted, &graphs)
+                    }
+                    None => st.refresh_text_index_graphs(&graphs),
                 }
-                None => st.refresh_text_index_graphs(&graphs),
             }
             claim.handled();
         })
@@ -1014,9 +1074,10 @@ pub(crate) async fn execute_update(
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = graph_iris.clone();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -1036,17 +1097,22 @@ pub(crate) async fn execute_update(
     }
 
     // Record the update in the linked-data provenance trail, keyed by the graphs
-    // it touched (so it surfaces on dataset pages). Best-effort.
+    // it touched (so it surfaces on dataset pages), pointing at its rows in the
+    // change log. Best-effort.
     if !graph_iris.is_empty() {
-        let mut rec = crate::commit_log::CommitRecord::new(
+        crate::commit_log::record_stamped(
+            &state.store,
+            &state.base_url,
+            &stamp,
             crate::commit_log::CommitKind::Sparql,
             message.unwrap_or("SPARQL update"),
+            user.map(|u| u.user_id.as_str()),
+            None,
+            graph_iris.clone(),
+            0,
+            0,
+            None,
         );
-        rec.actor_iri = user.map(|u| format!("{}/users/{}", state.base_url, u.user_id));
-        rec.affected_graphs = graph_iris.clone();
-        if let Err(e) = crate::commit_log::insert_commit(&state.store, &state.base_url, &rec) {
-            tracing::warn!("failed to record SPARQL update commit: {e}");
-        }
     }
 
     Ok(with_ack(state, StatusCode::NO_CONTENT.into_response()))
@@ -1309,6 +1375,64 @@ fn authorize_update(
     })
 }
 
+/// Keep a DELETE/INSERT whose template writes a variable graph (an admin's
+/// store-wide rewrite, the only kind [`authorize_update`] lets through) out
+/// of the system-managed statement-provenance graphs: its WHERE clause gains
+/// `FILTER(!BOUND(?g) || !STRSTARTS(STR(?g), "urn:ots:statement-provenance:"))`
+/// for each such variable, so no solution binds one of them (#533). Named
+/// targets are refused before the update runs ([`require_graph_write_for`]);
+/// `CLEAR`/`DROP ALL` and `NAMED`, which wipe the store, wipe these graphs
+/// with everything else. Returns whether `update` changed.
+fn keep_variable_graph_writes_off_system_graphs(update: &mut spargebra::Update) -> bool {
+    use spargebra::algebra::{Expression, Function, GraphPattern};
+    let mut changed = false;
+    for op in &mut update.operations {
+        let GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            pattern,
+            ..
+        } = op
+        else {
+            continue;
+        };
+        let mut vars: Vec<spargebra::term::Variable> = Vec::new();
+        for g in delete
+            .iter()
+            .map(|q| &q.graph_name)
+            .chain(insert.iter().map(|q| &q.graph_name))
+        {
+            if let GraphNamePattern::Variable(v) = g {
+                if !vars.contains(v) {
+                    vars.push(v.clone());
+                }
+            }
+        }
+        for v in vars {
+            let outside = Expression::Not(Box::new(Expression::FunctionCall(
+                Function::StrStarts,
+                vec![
+                    Expression::FunctionCall(Function::Str, vec![Expression::Variable(v.clone())]),
+                    Expression::Literal(spargebra::term::Literal::new_simple_literal(
+                        "urn:ots:statement-provenance:",
+                    )),
+                ],
+            )));
+            let expr = Expression::Or(
+                Box::new(Expression::Not(Box::new(Expression::Bound(v)))),
+                Box::new(outside),
+            );
+            let inner = std::mem::replace(pattern.as_mut(), GraphPattern::Bgp { patterns: vec![] });
+            **pattern = GraphPattern::Filter {
+                expr,
+                inner: Box::new(inner),
+            };
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod update_graph_access_tests {
     use super::analyze_update_graph_access;
@@ -1412,12 +1536,15 @@ async fn sparql_batch_update(
     }
     let mut model_versions = Vec::new();
     let mut writes_unnamed_graphs = false;
-    for stmt in &resolved {
-        let parsed = crate::sparql::parser()
+    for stmt in resolved.iter_mut() {
+        let mut parsed = crate::sparql::parser()
             .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.
         let authorized = authorize_update(&state, Some(&user), &parsed)?;
+        if keep_variable_graph_writes_off_system_graphs(&mut parsed) {
+            *stmt = parsed.to_string();
+        }
         writes_unnamed_graphs |= authorized.writes_unnamed_graphs;
         model_versions.extend(authorized.model_versions);
     }
@@ -1593,6 +1720,18 @@ async fn graph_store_get(
                 ));
             }
         }
+    }
+
+    // JSON-LD has no syntax for RDF 1.2 triple terms: the serializer fails
+    // mid-stream, after the 200 and the headers went out, leaving a truncated
+    // body. Refuse up front instead (delta note §6.3).
+    if matches!(format, super::content_negotiation::GraphFormat::JsonLd)
+        && holds_triple_terms(&state.store, params.graph_iri())
+    {
+        return Err(AppError::NotAcceptable(
+            "this graph holds RDF 1.2 triple terms, which JSON-LD cannot express; ask for Turtle, N-Triples, N-Quads or TriG"
+                .to_string(),
+        ));
     }
 
     // Triple-level security label filtering: when the target graph has labels,
@@ -1885,6 +2024,9 @@ fn require_graph_write_for(
         None => return Ok(None), // default graph — handled by require_auth layer
     };
 
+    // A system-managed graph is written by the server alone, admins included.
+    crate::provenance::refuse_direct_write(iri).map_err(AppError::Forbidden)?;
+
     // Admins bypass graph ACL
     let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
     if !is_admin && !check_graph_permission(user, iri, "write", &state.auth_db) {
@@ -1961,14 +2103,15 @@ async fn graph_store_put(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
 
     let content_type = headers
@@ -1995,27 +2138,33 @@ async fn graph_store_put(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
+    let skolem = skolem_base_for(&state, graph.as_deref());
     let claim = run_store_write(&state, "graph store PUT", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         let claim = store.claim_search_index();
         claim
             .run(|| store.graph_store_put(graph.as_deref(), &data, format))
             .map(|()| claim)
     })
     .await?;
-    sync_text_index_after_graph_write(&state, touched).await;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
+    sync_text_index_after_write(&state, &written, touched).await;
     claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -2025,9 +2174,10 @@ async fn graph_store_put(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store PUT {}",
@@ -2057,14 +2207,15 @@ async fn graph_store_post(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
 
     let content_type = headers
@@ -2075,14 +2226,16 @@ async fn graph_store_post(
     let format = parse_rdf_content_type(content_type)
         .ok_or_else(|| AppError::UnsupportedMediaType(content_type.to_string()))?;
 
-    let data = String::from_utf8(body.to_vec())
+    // Checked in place: copying the body into a `String` held a second copy
+    // of every chunk of a bulk load for the whole write (issue #469).
+    let data = std::str::from_utf8(&body)
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
     validate_on_write(
         &state,
         user.as_deref(),
         params.graph_iri(),
-        &data,
+        data,
         format,
         crate::shacl_studio::gate::WriteMode::Merge,
     )?;
@@ -2091,21 +2244,29 @@ async fn graph_store_post(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
+    let skolem = skolem_base_for(&state, graph.as_deref());
     let (inserted, claim) = run_store_write(&state, "graph store POST", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         let claim = store.claim_search_index();
+        // `body` was checked to be UTF-8 above.
+        let data = std::str::from_utf8(&body).unwrap_or_default();
         claim
-            .run(|| store.graph_store_post_delta(graph.as_deref(), &data, format))
+            .run(|| store.graph_store_post_delta(graph.as_deref(), data, format))
             .map(|inserted| (inserted, claim))
     })
     .await?;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
     // The appended quads are known exactly: index just those documents
-    // instead of re-indexing every literal of the graph.
+    // instead of re-indexing every literal of the graph. A default-graph
+    // merge is exact too when the change log recorded it.
     match touched {
         Some(g) => {
             let st = state.clone();
@@ -2114,14 +2275,15 @@ async fn graph_store_post(
             })
             .await;
         }
-        None => sync_text_index_after_graph_write(&state, None).await,
+        None => sync_text_index_after_write(&state, &written, None).await,
     }
     claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
+            ldes.finish(&st, &w.rows);
             // A merge only adds quads: the entailment graph is extended, not rebuilt.
             crate::entailment::after_additive_write(&st, &ent_graphs);
         })
@@ -2133,9 +2295,10 @@ async fn graph_store_post(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store POST {}",
@@ -2164,22 +2327,25 @@ async fn graph_store_delete(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
     let claim = run_store_write(&state, "graph store DELETE", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
@@ -2189,17 +2355,19 @@ async fn graph_store_delete(
             .map(|()| claim)
     })
     .await?;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
     // Previously nothing invalidated the text index here, so a deleted graph's
     // literals kept turning up in search results until an unrelated write
     // forced a rebuild.
-    sync_text_index_after_graph_write(&state, touched).await;
+    sync_text_index_after_write(&state, &written, touched).await;
     claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -2209,9 +2377,10 @@ async fn graph_store_delete(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store DELETE {}",
@@ -2225,6 +2394,60 @@ async fn graph_store_delete(
         None,
     );
     Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
+}
+
+/// Whether `graph` (the default graph for `None`) holds an RDF 1.2 triple
+/// term. RDF 1.2 reaches one through `rdf:reifies` — a triple term is only
+/// ever an object — so the predicate index answers without a scan.
+pub(crate) fn holds_triple_terms(store: &crate::store::TripleStore, graph: Option<&str>) -> bool {
+    #[cfg(feature = "rdf-12")]
+    {
+        let reifies = oxigraph::model::NamedNodeRef::new_unchecked(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+        );
+        let name = match graph {
+            Some(g) => match oxigraph::model::NamedNodeRef::new(g) {
+                Ok(n) => oxigraph::model::GraphNameRef::NamedNode(n),
+                Err(_) => return false,
+            },
+            None => oxigraph::model::GraphNameRef::DefaultGraph,
+        };
+        store
+            .store()
+            .quads_for_pattern(None, Some(reifies), None, Some(name))
+            .flatten()
+            .any(|q| matches!(q.object, oxigraph::model::Term::Triple(_)))
+    }
+    #[cfg(not(feature = "rdf-12"))]
+    {
+        let _ = (store, graph);
+        false
+    }
+}
+
+/// The Skolem base for RDF written into `graph`, when a dataset holding it
+/// imports with Skolem IRIs (`dataset_settings`, delta note §5.2).
+pub(crate) fn skolem_base_for(state: &AppState, graph: Option<&str>) -> Option<String> {
+    graph
+        .filter(|g| crate::dataset_settings::skolem_dataset_for_graph(&state.auth_db, g))
+        .map(|_| state.base_url.to_string())
+}
+
+/// As [`sync_text_index_after_graph_write`], first trying the exact quads the
+/// change log recorded for the write.
+pub(crate) async fn sync_text_index_after_write(
+    state: &AppState,
+    written: &crate::server::write_effects::Written,
+    graph: Option<String>,
+) {
+    if written.is_exact() {
+        let st = state.clone();
+        let w = written.clone();
+        let graphs: Vec<String> = graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || w.sync_text_index(&st, &graphs)).await;
+        return;
+    }
+    sync_text_index_after_graph_write(state, graph).await;
 }
 
 /// Keep the text index in step with a Graph Store write, writer-pays: refresh
@@ -2423,21 +2646,6 @@ async fn admin_telemetry(
         )),
         Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
         Some(_) => Ok(Json(state.store.telemetry().summary())),
-    }
-}
-
-/// The context the change log stamps on a write's rows: the actor IRI as the
-/// commit trail mints it, and the commit kind. The guard is set inside the
-/// blocking closure that runs the primitive, never across an await.
-fn write_context(
-    state: &AppState,
-    user: Option<&AuthenticatedUser>,
-    kind: crate::commit_log::CommitKind,
-) -> crate::store::changes::WriteContext {
-    crate::store::changes::WriteContext {
-        actor_iri: user.map(|u| format!("{}/users/{}", state.base_url, u.user_id)),
-        commit_iri: None,
-        kind: Some(kind.as_str().to_string()),
     }
 }
 
@@ -3982,6 +4190,43 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
+/// Build the delta versions a `versions=` pin names before the pin is
+/// resolved to graphs (delta note §3.3): their graphs are empty until built.
+/// Only datasets the caller can see are considered — the resolution after
+/// this answers 404 for the rest — and an anonymous caller never builds
+/// (503 with `Retry-After`).
+async fn ensure_pinned_versions_built(
+    state: &AppState,
+    versions: Option<&str>,
+    user: Option<&AuthenticatedUser>,
+) -> Result<(), AppError> {
+    let Some(versions) = versions else {
+        return Ok(());
+    };
+    let uid = user.map(|u| u.user_id.as_str());
+    for (ds_id, v) in parse_versions_map(versions) {
+        if !is_pinned_version(&v) {
+            continue;
+        }
+        let Ok(Some(ds)) = state.auth_db.get_dataset(&ds_id) else {
+            continue;
+        };
+        if !state.auth_db.can_access_dataset(uid, &ds).unwrap_or(false) {
+            continue;
+        }
+        if let Some(record) = crate::dataset_versions::registry::get_version(
+            &state.store,
+            &state.base_url,
+            &ds_id,
+            v.trim(),
+        ) {
+            crate::dataset_versions::materialise::ensure_built(state, &record, uid.is_none())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` that a caller who
 /// cannot write the dataset must not read: those whose SOURCE (live) graph is
 /// flagged `private`.
@@ -4152,21 +4397,17 @@ mod private_snapshot_tests {
         let (state, _) = state_with_version();
         let base = state.base_url.as_str();
         let stray = format!("{base}/dataset/ds1/version/2.0.0/stray");
-        let record = DatasetVersion {
-            dataset_id: "ds1".into(),
-            version: "2.0.0".into(),
-            status: VersionStatus::Draft,
-            graph_iri: format!("{base}/dataset/ds1/version/2.0.0"),
-            snapshot_graphs: vec![stray.clone()],
-            source_map: Vec::new(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            created_by: None,
-            derived_from: None,
-            notes: None,
-            branch: None,
-            conforms_to_model: None,
-            conforms_to_version: None,
-        };
+        let mut record = DatasetVersion::checkpoint(
+            "ds1",
+            "2.0.0",
+            VersionStatus::Draft,
+            format!("{base}/dataset/ds1/version/2.0.0"),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        record.snapshot_graphs = vec![stray.clone()];
         registry::insert_version(&state.store, base, &record).unwrap();
         let private = private_snapshot_graphs(&state, "ds1", "2.0.0").unwrap();
         assert!(private.contains(&stray), "{private:?}");
@@ -4308,11 +4549,17 @@ fn scope_dataset_graphs(
                 continue;
             }
         }
-        // Live data: intersect this dataset's live graphs with the accessible set.
-        let live = state
+        // Live data: intersect this dataset's live graphs with the accessible
+        // set. Its statement-provenance graph is annotations about the data,
+        // not data: left out of the dataset's scope, readable by naming it
+        // (`graph=`; delta note §6.3).
+        let live: Vec<String> = state
             .auth_db
             .list_dataset_graphs(id)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
+            .collect();
         match &accessible {
             None => out.extend(live),
             Some(acc) => out.extend(live.into_iter().filter(|g| acc.contains(g.as_str()))),
@@ -4377,6 +4624,7 @@ pub async fn browse_triples(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseTripleParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     // Cap at 1 000 000 rows to guard against accidental memory exhaustion.
     // The previous 10 000 limit was unnecessarily restrictive for bulk data exports.
     let limit = params.limit.unwrap_or(100).min(1_000_000);
@@ -4950,6 +5198,7 @@ pub async fn browse_facets(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseTripleParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
     let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
 
@@ -5081,6 +5330,7 @@ pub async fn browse_resource(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseResourceParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     let iri = &params.iri;
 
     // Validate IRI parameters
@@ -5728,6 +5978,17 @@ async fn execute_dataset_query(
     // the service's live graphs (dataset access was already checked above, and the
     // version belongs to this dataset). Otherwise use the service graphs, falling
     // back to all dataset graphs so the service works without manual registration.
+    if let Some(v) = version.map(str::trim).filter(|v| is_pinned_version(v)) {
+        if let Some(record) = crate::dataset_versions::registry::get_version(
+            &state.store,
+            &state.base_url,
+            dataset_id,
+            v,
+        ) {
+            crate::dataset_versions::materialise::ensure_built(state, &record, user.is_none())
+                .await?;
+        }
+    }
     let graphs = if let Some(snapshot) = version_snapshot_graphs(state, dataset_id, version)? {
         snapshot
     } else {
@@ -5848,6 +6109,31 @@ async fn execute_dataset_query(
     run_scoped_sparql(state, query, &graph_set, accept).await
 }
 
+/// Cancels a query's evaluation when dropped armed: the request stopped waiting
+/// for its first result (the query timeout, or a client that went away) and
+/// nothing will read the rest. Without it the evaluation ran on to the end on
+/// its blocking thread, taking a core from every query after it.
+struct CancelOnDrop(Option<oxigraph::sparql::CancellationToken>);
+
+impl CancelOnDrop {
+    fn new(token: oxigraph::sparql::CancellationToken) -> Self {
+        Self(Some(token))
+    }
+
+    /// The response is streaming: leave the evaluation alone.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(token) = self.0.take() {
+            token.cancel();
+        }
+    }
+}
+
 /// Execute `query` restricted to `graph_set`, streaming the serialised result.
 ///
 /// This is the shared core behind the dataset-service endpoint and the saved-query
@@ -5880,9 +6166,11 @@ pub(crate) async fn run_scoped_sparql(
     let accept_owned = accept.to_string();
     let (ct_tx, ct_rx) = oneshot::channel::<Result<&'static str, AppError>>();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let cancel = oxigraph::sparql::CancellationToken::new();
+    let cancel_eval = cancel.clone();
 
     tokio::task::spawn_blocking(move || {
-        let results = match store.query(&final_query_str) {
+        let results = match store.query_cancellable(&final_query_str, Some(&cancel_eval)) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ct_tx.send(Err(AppError::from(e)));
@@ -5929,10 +6217,12 @@ pub(crate) async fn run_scoped_sparql(
     // `/run` paths (some anonymously reachable) could run pathological queries
     // unbounded.
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
+    let pending = CancelOnDrop::new(cancel);
     let content_type = tokio::time::timeout(timeout, ct_rx)
         .await
         .map_err(|_| AppError::BadRequest("Query execution timed out".to_string()))?
         .map_err(|_| AppError::Internal("Query task aborted".to_string()))??;
+    pending.disarm();
 
     let body = axum::body::Body::from_stream(receiver_stream(chunk_rx));
     Ok(Response::builder()
@@ -8792,6 +9082,8 @@ pub async fn validate_dataset(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|e| !e.graph_iri.starts_with("urn:system:reports:"))
+        // Statement-provenance annotations are not data (delta note §6.3).
+        .filter(|e| !crate::provenance::is_any_statement_provenance_graph(&e.graph_iri))
         .collect();
     let hidden: std::collections::HashSet<&str> = entries
         .iter()
@@ -9490,7 +9782,7 @@ fn authorize_shapes_graph_write(
 ) -> Result<Option<crate::auth::dataset_graph::GraphClaim>, (StatusCode, String)> {
     use crate::auth::dataset_graph;
     let forbidden = |m: String| (StatusCode::FORBIDDEN, m);
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,
@@ -9712,7 +10004,10 @@ pub async fn infer_dataset(
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| {
+            !g.starts_with("urn:system:reports:")
+                && !crate::provenance::is_any_statement_provenance_graph(g)
+        })
         .collect();
 
     // A dataset with no graphs has nothing to infer over. Running anyway would
@@ -10672,10 +10967,12 @@ pub fn reasoning_routes() -> Router<AppState> {
     Router::new()
         .route("/api/reasoning/materialize", post(reasoning_materialize))
         .route("/api/reasoning/check", post(reasoning_check))
+        .route("/api/reasoning/jobs", get(reasoning_jobs_list))
         .route("/api/reasoning/jobs/:job_id", get(reasoning_job))
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
+        .route("/api/text-search/status", get(text_search_status))
         // Identity policy (owl:sameAs) — per dataset and per organisation.
         .route(
             "/api/datasets/:dataset_id/identity",
@@ -10712,6 +11009,11 @@ struct MaterializeRequest {
     /// dataset's policy (`PUT …/identity`), so this is refused with `dataset`.
     #[serde(default)]
     identity: Option<String>,
+    /// `rdfs` only: also apply `rdfD1`, writing a blank node for each typed
+    /// literal's value (about two triples per literal-valued triple).
+    /// Default `false`.
+    #[serde(default)]
+    rdfd1: bool,
 }
 
 /// `?async=true`: queue the run as a job and answer 202 at once.
@@ -10860,6 +11162,8 @@ pub(crate) fn run_regime(
 pub(crate) struct RegimeOptions {
     /// `owl2-rl`: run eq-ref (`Owl2RLReasoner::with_eq_ref`).
     pub eq_ref: bool,
+    /// `rdfs`: apply rdfD1 (`RdfsMaterializer::with_rdfd1`).
+    pub rdfd1: bool,
 }
 
 /// [`run_regime`] with the reasoner's own error, for a caller that records
@@ -10896,7 +11200,8 @@ pub(crate) fn run_reasoner_with(
             let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
                 &state.store,
                 target
-            ));
+            )
+            .with_rdfd1(options.rdfd1));
             Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-rl")]
@@ -11089,6 +11394,7 @@ async fn run_reasoning_work<F>(
     state: &AppState,
     user: &AuthenticatedUser,
     kind: &'static str,
+    dataset: Option<String>,
     run_async: bool,
     work: F,
 ) -> Result<Response, AppError>
@@ -11096,7 +11402,7 @@ where
     F: FnOnce() -> Result<serde_json::Value, AppError> + Send + 'static,
 {
     if run_async {
-        let id = super::reasoning_jobs::create(&user.user_id, kind);
+        let id = super::reasoning_jobs::create(&user.user_id, kind, dataset);
         let sem = state.expensive_semaphore.clone();
         let job = id.clone();
         tokio::spawn(async move {
@@ -11135,23 +11441,66 @@ async fn reasoning_materialize(
     Query(params): Query<AsyncParam>,
     Json(body): Json<MaterializeRequest>,
 ) -> Result<Response, AppError> {
-    let target = body
-        .target_graph
-        .unwrap_or_else(|| match body.regime.as_str() {
-            "rdfs" => crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string(),
-            "owl2-rl" => crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-el" => crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-ql" => crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-dl" => crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string(),
-            _ => format!("urn:entailment:{}", body.regime),
-        });
+    let job_dataset = body.dataset.clone();
+    // A dataset run with no target writes the dataset's own entailment graph
+    // for the regime, `urn:entailment:<regime>:<dataset>`, which the
+    // dataset's writers may fill (as `PUT …/entailment` and a dataset-scoped
+    // `/api/swrl/execute` do). Otherwise the shared graph of the regime.
+    let dataset_target = match (&body.target_graph, body.dataset.as_deref()) {
+        (None, Some(ds_id)) => {
+            if !crate::entailment::REGIMES.contains(&body.regime.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown reasoning regime: {}",
+                    body.regime
+                )));
+            }
+            let ds = state
+                .auth_db
+                .get_dataset(ds_id)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+            let can_write = user.is_admin()
+                || (user.write_access
+                    && state
+                        .auth_db
+                        .can_write_dataset(&user.user_id, &ds)
+                        .map_err(|e| AppError::Internal(e.to_string()))?);
+            if !can_write {
+                return Err(AppError::Forbidden(format!(
+                    "writing dataset '{ds_id}''s entailment graph needs write access to the \
+                     dataset; pass a target_graph you may write instead"
+                )));
+            }
+            Some(crate::entailment::dataset_entailment_graph(
+                &body.regime,
+                ds_id,
+            ))
+        }
+        _ => None,
+    };
+    let target = match dataset_target.clone() {
+        Some(t) => t,
+        None => body
+            .target_graph
+            .clone()
+            .unwrap_or_else(|| match body.regime.as_str() {
+                "rdfs" => crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string(),
+                "owl2-rl" => crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-el" => crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-ql" => crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-dl" => crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string(),
+                _ => format!("urn:entailment:{}", body.regime),
+            }),
+    };
 
     // Materialization writes derived triples into `target` — previously with NO
     // authorization, so any authenticated caller could write arbitrary (incl.
     // shared entailment / other tenants') graphs. Require write permission on the
     // target graph (admins bypass; server-owned entailment graphs therefore need
-    // an explicit grant or admin).
-    require_graph_write(&state, Some(&user), Some(target.as_str()))?;
+    // an explicit grant or admin). The dataset's own graph was checked above.
+    if dataset_target.is_none() {
+        require_graph_write(&state, Some(&user), Some(target.as_str()))?;
+    }
 
     // The graphs the rules may read. `source_graphs` used to be parsed and then
     // ignored — every regime materialised over the unnamed default graph, so a
@@ -11176,7 +11525,10 @@ async fn reasoning_materialize(
                 .is_some_and(|c| c.eq_ref)
         })
     });
-    let options = RegimeOptions { eq_ref };
+    let options = RegimeOptions {
+        eq_ref,
+        rdfd1: body.rdfd1,
+    };
     let work = move || -> Result<serde_json::Value, AppError> {
         // Entailment graphs are derived data and must be rebuilt from
         // scratch each run. Materialisation only ever INSERTed, so after a
@@ -11223,7 +11575,15 @@ async fn reasoning_materialize(
         }
         Ok(out)
     };
-    run_reasoning_work(&state, &user, "materialize", params.run_async, work).await
+    run_reasoning_work(
+        &state,
+        &user,
+        "materialize",
+        job_dataset,
+        params.run_async,
+        work,
+    )
+    .await
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -11366,7 +11726,8 @@ async fn reasoning_check(
             }
             Ok(out)
         };
-        run_reasoning_work(&state, &user, "check", params.run_async, work).await
+        let job_dataset = body.dataset.clone();
+        run_reasoning_work(&state, &user, "check", job_dataset, params.run_async, work).await
     }
 }
 
@@ -11385,7 +11746,29 @@ async fn reasoning_job(
     }
 }
 
-/// GET /api/reasoning/status — counts of entailed triples per graph.
+#[derive(Debug, Default, serde::Deserialize)]
+struct JobsQuery {
+    /// Only the jobs run over this dataset.
+    dataset: Option<String>,
+}
+
+/// GET /api/reasoning/jobs — the caller's background runs (an admin's view
+/// holds everyone's), newest first; `?dataset=` narrows them to one dataset.
+async fn reasoning_jobs_list(
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(q): Query<JobsQuery>,
+) -> Result<Response, AppError> {
+    let jobs: Vec<serde_json::Value> =
+        super::reasoning_jobs::list(&user.user_id, user.is_admin(), q.dataset.as_deref())
+            .iter()
+            .map(|j| j.to_json())
+            .collect();
+    Ok((StatusCode::OK, Json(serde_json::json!({ "jobs": jobs }))).into_response())
+}
+
+/// GET /api/reasoning/status — counts of entailed triples per shared
+/// entailment graph, and the server's OWL 2 DL backend (`null`: `owl2-dl` is
+/// unavailable).
 async fn reasoning_status(State(state): State<AppState>) -> Result<Response, AppError> {
     let graphs = [
         crate::reasoning::common::RDFS_ENTAILMENT_GRAPH,
@@ -11394,11 +11777,15 @@ async fn reasoning_status(State(state): State<AppState>) -> Result<Response, App
         crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH,
         crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH,
     ];
-    let mut result = serde_json::json!({});
+    let mut counts = serde_json::json!({});
     for g in &graphs {
         let count = crate::reasoning::common::count_graph(&state.store, g).unwrap_or(0);
-        result[*g] = serde_json::json!(count);
+        counts[*g] = serde_json::json!(count);
     }
+    let result = serde_json::json!({
+        "graphs": counts,
+        "dl_backend": state.dl.backend.map(|b| b.as_str()),
+    });
     Ok((StatusCode::OK, Json(result)).into_response())
 }
 
@@ -11406,9 +11793,14 @@ async fn reasoning_status(State(state): State<AppState>) -> Result<Response, App
 struct RewriteRequest {
     query: String,
     regime: Option<String>,
+    /// Read the TBox from this dataset's reasoning sources (as far as the
+    /// caller may read them) instead of every graph the caller may read.
+    #[serde(default)]
+    dataset: Option<String>,
 }
 
 /// POST /api/reasoning/rewrite — debug endpoint: return the rewritten query.
+/// With `dataset` the TBox comes from that dataset's reasoning sources.
 ///
 /// The rewriting spells out the TBox it was computed from (every subclass and
 /// sub-property it unions in), so the TBox is read only from graphs the
@@ -11426,7 +11818,15 @@ async fn reasoning_rewrite(
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
-            let rw = if user.is_admin() {
+            let rw = if let Some(ds) = body.dataset.as_deref() {
+                // The dataset's layer, read-checked as a materialisation's is.
+                let (sources, _) = reasoning_scope(&state, &user, Some(ds), None, None)?;
+                let mut sources = sources.unwrap_or_default();
+                if sources.is_empty() {
+                    sources.push(EMPTY_SCOPE_GRAPH.to_string());
+                }
+                rw.with_sources(sources)
+            } else if user.is_admin() {
                 rw
             } else {
                 let mut readable: Vec<String> = accessible_read_graphs(&state, Some(&user))?
@@ -11477,7 +11877,10 @@ async fn text_search_reindex(
             // reindex could run concurrently with the background auto-sync and the
             // two would delete each other's documents.
             let st = state.clone();
-            let count = tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let started_at = chrono::Utc::now().to_rfc3339();
+            REINDEX_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
+            let result = tokio::task::spawn_blocking(move || {
                 let idx = st.text_index.as_ref().expect("checked above");
                 let _guard = st
                     .text_sync_lock
@@ -11497,9 +11900,22 @@ async fn text_search_reindex(
                 }
                 res
             })
-            .await
-            .map_err(|e| AppError::Internal(format!("reindex task panicked: {e}")))?
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .await;
+            REINDEX_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
+            let result = match result {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(e) => Err(format!("reindex task panicked: {e}")),
+            };
+            let record = ReindexRecord {
+                started_at,
+                finished_at: chrono::Utc::now().to_rfc3339(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                indexed: result.as_ref().ok().copied(),
+                error: result.as_ref().err().cloned(),
+                by: Some(user.user_id.clone()),
+            };
+            *last_reindex().lock().unwrap_or_else(|p| p.into_inner()) = Some(record);
+            let count = result.map_err(AppError::Internal)?;
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({ "indexed": count })),
@@ -11514,6 +11930,74 @@ async fn text_search_reindex(
         })),
     )
         .into_response())
+}
+
+/// The latest full reindex this process ran, for the status endpoint.
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+#[derive(Debug, Clone, serde::Serialize)]
+struct ReindexRecord {
+    started_at: String,
+    finished_at: String,
+    duration_ms: u64,
+    indexed: Option<usize>,
+    error: Option<String>,
+    by: Option<String>,
+}
+
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+static REINDEX_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+fn last_reindex() -> &'static std::sync::Mutex<Option<ReindexRecord>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<ReindexRecord>>> =
+        std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// GET /api/text-search/status — whether the full-text index exists, how many
+/// literals it holds, whether writes are waiting to reach it, and the latest
+/// reindex (its time, count, duration or error). Admin only, like reindex.
+async fn text_search_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Response, AppError> {
+    if !user.is_admin() {
+        return Err(AppError::Forbidden(
+            "Admin access required for the text index status".to_string(),
+        ));
+    }
+    let _ = &state;
+    #[cfg(feature = "text-search")]
+    if let Some(idx) = state.text_index.clone() {
+        let st = state.clone();
+        let (docs, stale, substring) = tokio::task::spawn_blocking(move || {
+            (
+                idx.num_docs(),
+                st.text_index_stale(),
+                idx.substring_pushdown_available(),
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        return Ok(Json(serde_json::json!({
+            "available": true,
+            "documents": docs,
+            "stale": stale,
+            "substring_pushdown": substring,
+            "reindexing": REINDEX_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
+            "last_reindex": last_reindex().lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        }))
+        .into_response());
+    }
+    Ok(Json(serde_json::json!({
+        "available": false,
+        "reason": if cfg!(feature = "text-search") {
+            "the full-text index is not open on this server"
+        } else {
+            "this server was built without the text-search feature"
+        },
+    }))
+    .into_response())
 }
 
 // ─── ShEx validation routes ─────────────────────────────────────────────
@@ -11655,6 +12139,7 @@ async fn shex_validate(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
         .filter(|g| readable.includes(g))
         .collect();
     let scope = crate::shex::GraphScope::named(graphs);
