@@ -349,21 +349,22 @@ pub fn unzip(bytes: &[u8]) -> anyhow::Result<Vec<Entry>> {
     let mut out = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
+        let raw_name = f.name()?.into_owned();
+        // Normalise separators; drop any leading "./".
+        let name = raw_name
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string();
         if f.is_dir() {
             // Kept (as a `/`-terminated name without bytes): a container's
             // layout may consist of empty folders.
-            let name = f
-                .name()
-                .replace('\\', "/")
-                .trim_start_matches("./")
-                .to_string();
             out.push(Entry::dir(&name));
             continue;
         }
         if f.size() > MAX_ENTRY_BYTES {
             anyhow::bail!(
                 "entry {} is {} bytes (limit {MAX_ENTRY_BYTES})",
-                f.name(),
+                raw_name,
                 f.size()
             );
         }
@@ -375,14 +376,8 @@ pub fn unzip(bytes: &[u8]) -> anyhow::Result<Vec<Entry>> {
         // The declared size is the archive's claim; never read past the cap.
         (&mut f).take(MAX_ENTRY_BYTES + 1).read_to_end(&mut buf)?;
         if buf.len() as u64 > MAX_ENTRY_BYTES {
-            anyhow::bail!("entry {} is larger than {MAX_ENTRY_BYTES} bytes", f.name());
+            anyhow::bail!("entry {raw_name} is larger than {MAX_ENTRY_BYTES} bytes");
         }
-        // Normalise separators; drop any leading "./".
-        let name = f
-            .name()
-            .replace('\\', "/")
-            .trim_start_matches("./")
-            .to_string();
         out.push(Entry { name, bytes: buf });
     }
     Ok(out)
@@ -405,8 +400,8 @@ pub fn zip_entries(entries: &[Entry]) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
         let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for e in entries {
             if e.is_dir() {
                 w.add_directory(e.name.trim_end_matches('/'), opts)?;

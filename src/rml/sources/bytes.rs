@@ -134,8 +134,11 @@ fn unzip(data: &[u8], path: &str, cap: u64) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("reading the zip archive {path}: {e}"))?;
     let names: Vec<String> = archive
         .file_names()
+        .map(|n| n.map(|n| n.into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading the zip archive {path}: {e}"))?
+        .into_iter()
         .filter(|n| !n.ends_with('/'))
-        .map(str::to_string)
         .collect();
     let want = pick(&names, path)?.to_string();
     let member = archive
