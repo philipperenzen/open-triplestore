@@ -38,9 +38,6 @@ use crate::store::changes::{self, Materialisation, NetDelta};
 use crate::store::set_hash::SetHash;
 use crate::store::{QuadOp, TripleStore};
 
-pub const DEFAULT_MAX_QUADS: i64 = 2_000_000;
-pub const DEFAULT_TTL_SECS: u64 = 3600;
-
 fn max_quads() -> i64 {
     i64::try_from(crate::config::MATERIALISATION_MAX_QUADS.get()).unwrap_or(i64::MAX)
 }

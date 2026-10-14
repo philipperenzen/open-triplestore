@@ -378,11 +378,10 @@ enum CountChange {
     To(Option<String>, usize),
 }
 
-/// Quads a write's transaction applies once the store default is in effect:
-/// above this a materialisation build commits in several transactions (it
-/// writes graphs nobody reads until it is done); an apply that must be
-/// atomic stays one transaction regardless (delta note §3.4).
-pub const DEFAULT_APPLY_DELTA_TX_MAX_QUADS: usize = 50_000;
+// Quads a write's transaction applies once the store default is in effect:
+// above this a materialisation build commits in several transactions (it
+// writes graphs nobody reads until it is done); an apply that must be
+// atomic stays one transaction regardless (delta note §3.4). (`OTS_APPLY_DELTA_TX_MAX_QUADS`, default 50 000).
 
 /// `OTS_APPLY_DELTA_TX_MAX_QUADS`, or the default.
 pub fn apply_delta_tx_max_quads() -> usize {
