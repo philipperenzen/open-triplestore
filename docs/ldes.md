@@ -46,6 +46,16 @@ and append in the other cannot put a member below a bound a client holds.
 The newest published timestamp is kept on the stream, so it holds even after
 retention removed that member.
 
+How a write is compared depends on the [change log](/docs/versioning). With
+it on, the write's own rows name what changed: their IRI subjects, plus the
+entity a changed blank-node subtree hangs from (walked up at most
+`OTS_LDES_BNODE_DEPTH`, 8, levels) — no graph is scanned. A graph whose rows
+do not carry their quads (a change over the row cap, or one the log could not
+bound), or with more than `OTS_LDES_BNODE_SUBJECTS_MAX` (10 000) blank-node
+subjects in one write, is republished whole. With the log off, every tracked
+graph is indexed before and after the write and the two compared, as
+before.
+
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):
 
@@ -280,8 +290,8 @@ starting point), because members created between the two may never reach this
 mirror.
 
 Outbound requests are subject to the remote allowlist: the stream's origin
-must be listed in `OTS_REMOTE_ALLOWLIST`, a redirect is followed only to a URL
-the allowlist covers too (§3.3: "A client MUST follow redirects"; the URL after
+must be listed in `OTS_LDES_ALLOWLIST`, a redirect is followed only to a URL
+that list covers too (§3.3: "A client MUST follow redirects"; the URL after
 the redirects is the page's base IRI), and each fetch has the usual timeout and
 body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 

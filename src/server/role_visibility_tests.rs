@@ -87,6 +87,7 @@ mod tests {
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
             dl: Default::default(),
+            config: crate::config::current().clone(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -478,11 +479,11 @@ mod tests {
             )
             .unwrap();
 
-        // Unit tests must never reach the network: an empty SEED_IFC_URL makes the
-        // seeder skip the Schependomlaan IFC download (the static demo graphs still
+        // Unit tests must never reach the network: OTS_OFFLINE makes the
+        // seeder skip the IFC downloads (the static demo graphs still
         // seed). Run on the blocking pool exactly like production boot does — the
         // seeder uses block_on internally, which panics on an async worker.
-        std::env::set_var("SEED_IFC_URL", "");
+        std::env::set_var("OTS_OFFLINE", "true");
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
             crate::saved_queries::seed::seed_open_triplestore(&seed_state)
@@ -490,7 +491,7 @@ mod tests {
         .await
         .unwrap();
 
-        // If the demo seed was disabled (SEED_STANDARDS_DEMO=off), there is nothing
+        // If the demo seed was disabled (OTS_SEED_STANDARDS_DEMO_ENABLED=off), there is nothing
         // to assert — don't manufacture a false failure.
         let datasets = state.auth_db.list_datasets().unwrap();
         if datasets.is_empty() {

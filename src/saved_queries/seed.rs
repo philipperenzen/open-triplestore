@@ -16,7 +16,7 @@
 //! Idempotent: skips entirely once the `open-triplestore` organisation exists,
 //! so it never duplicates on restart. Best-effort — a failure loading one graph
 //! or creating one service is logged and skipped without aborting the rest. Opt
-//! out with `SEED_STANDARDS_DEMO=false`.
+//! out with `OTS_SEED_STANDARDS_DEMO_ENABLED=false`.
 
 use std::borrow::Cow;
 
@@ -97,15 +97,7 @@ const DATASET_BRANDS: &[DatasetBrand] = &[
 
 /// Entry point — best-effort, never panics out of startup.
 pub fn seed_open_triplestore(state: &AppState) {
-    let disabled = std::env::var("SEED_STANDARDS_DEMO")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    if disabled {
+    if !crate::config::SEED_STANDARDS_DEMO_ENABLED.get() {
         return;
     }
     // Two seeders can run concurrently on a fresh install: the boot task only
@@ -158,7 +150,7 @@ fn build_bundle() -> Bundle {
         id: "open-triplestore-standards-demo".to_string(),
         // Gating already happens in `seed_open_triplestore` before this bundle
         // is even built; recorded here too so the bundle is self-describing.
-        opt_out_env: Some("SEED_STANDARDS_DEMO".to_string()),
+        opt_out_env: Some("OTS_SEED_STANDARDS_DEMO_ENABLED".to_string()),
         prefixes: Default::default(),
         org: OrgSpec {
             slug: ORG_SLUG.to_string(),
@@ -272,8 +264,8 @@ fn block_on_current_runtime<T>(fut: impl std::future::Future<Output = T>) -> any
 /// and academic purposes", a restriction this open-source demo cannot carry
 /// (and GitHub classifies the repo NOASSERTION). The URL is the Git-LFS media
 /// host — `raw.githubusercontent.com` serves a 133-byte LFS pointer for this
-/// file, not the model. Override with `SEED_IFC_URL`; disable the whole demo
-/// seed with `SEED_STANDARDS_DEMO=false`.
+/// file, not the model. Override with `OTS_SEED_IFC_URL`; `OTS_OFFLINE` skips every
+/// download, and `OTS_SEED_STANDARDS_DEMO_ENABLED=false` the whole demo seed.
 const HEADLINE_IFC_URL: &str = "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades/1807_EP_AR_v18.ifc";
 
 /// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
@@ -319,7 +311,7 @@ struct IfcBuildingSeed {
 /// published), and Esplanades at Maleva 18, Tallinn (authored anchor — the
 /// file's georef rounds to whole arc-minutes). The smaller files come FIRST
 /// so rich IFC buildings appear within seconds of first boot; the headline
-/// Esplanades (which honours `SEED_IFC_URL`) imports last. All carry full BOT
+/// Esplanades (which honours `OTS_SEED_IFC_URL`) imports last. All carry full BOT
 /// topology, property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
@@ -440,8 +432,9 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
         return;
     }
-    // Same network kill-switch as the IFC demo (tests set SEED_IFC_URL="").
-    if std::env::var("SEED_IFC_URL").ok().as_deref().map(str::trim) == Some("") {
+    // No download at startup in an offline deployment (`OTS_OFFLINE`, on
+    // in production; tests set it too).
+    if crate::config::OFFLINE.get() {
         return;
     }
     for (id, filename, url) in STL_LANDMARKS.iter() {
@@ -452,7 +445,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
         let downloaded = block_on_current_runtime(async {
             // Wikimedia's robot policy 403s requests without a descriptive
             // User-Agent — reqwest's default is not accepted.
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .user_agent("open-triplestore-seed/1.0 (https://opentriplestore.org; demo content bootstrap)")
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
@@ -508,14 +501,14 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
         return;
     }
-    // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
-    // tests, which must never reach out to the network). A custom value overrides
-    // only the headline (Esplanades) building.
-    let env_url = std::env::var("SEED_IFC_URL").ok();
-    if env_url.as_deref().map(str::trim) == Some("") {
-        tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
+    // No download at startup in an offline deployment (`OTS_OFFLINE`, on in
+    // production; tests set it too). OTS_SEED_IFC_URL overrides only the headline
+    // (Esplanades) building.
+    if crate::config::OFFLINE.get() {
+        tracing::info!("OTS_OFFLINE is on — skipping the IFC building demos");
         return;
     }
+    let env_url = crate::config::SEED_IFC_URL.get();
     for b in IFC_BUILDINGS.iter() {
         let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
         if state
@@ -526,10 +519,10 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         {
             continue; // already seeded
         }
-        // SEED_IFC_URL overrides only the headline building's source,
+        // OTS_SEED_IFC_URL overrides only the headline building's source,
         // regardless of its position in the list.
         let url = match env_url.as_deref() {
-            Some(u) if b.label == "Esplanades" && !u.trim().is_empty() => u.to_string(),
+            Some(u) if b.label == "Esplanades" => u.to_string(),
             _ => b.url.to_string(),
         };
         tracing::info!(
@@ -537,7 +530,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             b.label
         );
         let downloaded = block_on_current_runtime(async {
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
             let bytes = client
@@ -1061,10 +1054,10 @@ mod tests {
 
     /// Run the demo seed the way production does — on the blocking pool, so the
     /// seeder's `block_on_current_runtime` has a runtime to use and doesn't panic
-    /// on an async worker. An empty
-    /// `SEED_IFC_URL` keeps the seeder off the network (no IFC download).
+    /// on an async worker. `OTS_OFFLINE` keeps the seeder off the network (no
+    /// IFC download).
     async fn run_seed(state: &AppState) {
-        std::env::set_var("SEED_IFC_URL", "");
+        std::env::set_var("OTS_OFFLINE", "true");
         let s = state.clone();
         tokio::task::spawn_blocking(move || seed_open_triplestore(&s))
             .await

@@ -756,7 +756,7 @@ pub async fn delete_doc(
 /// create/update/delete enforce admin in-handler.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/docs", get(list_docs)).route(
-        "/api/docs/:slug",
+        "/api/docs/{slug}",
         get(get_doc)
             .put(create_doc)
             .post(create_doc)

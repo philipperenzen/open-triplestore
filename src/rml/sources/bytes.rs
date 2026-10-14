@@ -9,14 +9,10 @@ use std::io::Read;
 
 use crate::rml::model::{Access, Compression};
 
-const MAX_ENV: &str = "OTS_RML_MAX_SOURCE_BYTES";
+const MAX_ENV: &str = crate::config::RML_MAX_SOURCE_BYTES.name();
 
 fn max_bytes() -> u64 {
-    std::env::var(MAX_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(256 * 1024 * 1024)
+    crate::config::RML_MAX_SOURCE_BYTES.get()
 }
 
 /// Read everything `r` yields, refusing more than `cap` bytes.
@@ -134,8 +130,11 @@ fn unzip(data: &[u8], path: &str, cap: u64) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("reading the zip archive {path}: {e}"))?;
     let names: Vec<String> = archive
         .file_names()
+        .map(|n| n.map(|n| n.into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading the zip archive {path}: {e}"))?
+        .into_iter()
         .filter(|n| !n.ends_with('/'))
-        .map(str::to_string)
         .collect();
     let want = pick(&names, path)?.to_string();
     let member = archive

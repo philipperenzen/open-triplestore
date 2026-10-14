@@ -8,7 +8,7 @@
 //! prefix.cc dataset merged with the LOV catalog prefixes (see [`dataset`]),
 //! overlaid with the prefixes of models/vocabularies registered on this
 //! instance.  The public prefix.cc service is only contacted when the
-//! operator explicitly opts in (`PREFIX_CC_FALLBACK=true`) and a label is
+//! operator explicitly opts in (`OTS_PREFIX_CC_FALLBACK_ENABLED=true`) and a label is
 //! unknown to every local tier — by default the platform makes no third-party
 //! calls for prefix resolution.
 //!
@@ -172,7 +172,7 @@ pub struct PrefixRegistry {
     /// deployment's own statement about its namespaces and must outrank the
     /// bundled prefix.cc/LOV snapshots (see `insert_seeded`).
     seeded: RwLock<PlatformPrefixes>,
-    /// Contact live prefix.cc for unknown labels (PREFIX_CC_FALLBACK=true).
+    /// Contact live prefix.cc for unknown labels (OTS_PREFIX_CC_FALLBACK_ENABLED=true).
     allow_network: bool,
 }
 
@@ -207,7 +207,7 @@ impl PrefixRegistry {
             CacheData::default()
         };
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::builder()
             .timeout(HTTP_TIMEOUT)
             .user_agent(concat!(
                 "open-triplestore/",
@@ -253,7 +253,7 @@ impl PrefixRegistry {
     pub fn empty() -> Self {
         Self {
             cache_path: std::path::PathBuf::new(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client(),
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::empty(),
             platform: RwLock::new(PlatformPrefixes::default()),
@@ -268,7 +268,7 @@ impl PrefixRegistry {
     pub fn bundled_only() -> Self {
         let registry = Self {
             cache_path: std::path::PathBuf::new(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client(),
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),

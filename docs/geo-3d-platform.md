@@ -158,7 +158,7 @@ as exact triples.
 **The lift's own vocabulary** lives at `{base_url}/ns/ifc-lift#`, under the
 instance that serves the lifted graphs so every term is dereferenceable
 there, and ships as the `ifc-lift` seed bundle (`examples/seed-bundles/ifc-lift`;
-opt out with `SEED_IFC_LIFT=false`). The importer derives the namespace from
+opt out with `OTS_SEED_IFC_LIFT_ENABLED=false`). The importer derives the namespace from
 the graph IRI it writes into (`{base_url}/dataset/…` → `{base_url}`; a custom
 target graph → its origin). A test holds the emitter to the ontology: every
 lift-namespace term it produces is declared there.

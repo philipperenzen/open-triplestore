@@ -306,6 +306,38 @@ One commit each, in this order:
    variables of the SELECT expressions before it, which the `Extend` chain
    already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
    suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
+10. **Braces in `REGEX` patterns** (`spareval` `compile_pattern`). SPARQL's
+    `REGEX` takes XPath regular expressions, which are XML Schema 1.0 ones:
+    `{` and `}` are ordinary characters wherever they do not make a quantifier
+    `{n}`, `{n,}` or `{n,m}`. The `regex` crate refuses an unescaped `{` that
+    starts no repetition, so `REGEX(?s, "^({)(.*)(})$")` was an error (the
+    filter dropped every row). Those braces are now escaped before the pattern
+    is compiled. No W3C entry reaches it; the OGC GeoSPARQL validator's S18
+    shape does (through `sh:pattern`, `tests/ogc_geosparql_shacl_roundtrip.rs`),
+    and `regex_braces_are_ordinary_characters` in
+    `tests/sparql_functions_conformance.rs` pins it. Draft:
+    `spareval/UPSTREAM-PR-regex-braces.md`.
+11. **Custom aggregate calls with several arguments** (`spargebra` parser
+    and algebra). SPARQL 1.1 lets a custom aggregate take an argument list
+    (`iriOrFunction` with `ArgList`, §18.5.1 aggregates over a list of
+    expressions); spargebra parsed one expression. `AggregateExpression::FunctionCall`
+    gets `extra_args` (the arguments after the first, empty for the built-ins),
+    which the parser, `Display`, SSE, used-variable lookup and the nested
+    aggregate check all handle. A custom aggregate call is now parsed before
+    `iriOrFunction`, which read `ex:agg(DISTINCT ?x)` as the bare IRI `ex:agg`:
+    every `DISTINCT` custom aggregate call used to be a parse error. GeoSPARQL 1.1's
+    `geof:aggConcaveHull(?geom, targetPercent)` needs it
+    (`tests/geosparql_conformance.rs`, `ogc_req42_agg_concave_hull_*`). Draft:
+    `spargebra/UPSTREAM-PR-custom-aggregate-arguments.md`.
+12. **The extra arguments through the optimizer** (`sparopt` algebra). The same
+    field on sparopt's `AggregateExpression::FunctionCall`, mapped both ways.
+    Draft: `sparopt/UPSTREAM-PR-custom-aggregate-arguments.md`.
+13. **Evaluating them** (`spareval`). `AggregateFunctionAccumulator` gets
+    `accumulate_arguments`, called with every argument's value per solution for
+    a call with several (its default takes exactly one; `false` makes the
+    result unbound), and the evaluator evaluates every argument, under
+    `DISTINCT` de-duplicating argument lists. Draft:
+    `spareval/UPSTREAM-PR-custom-aggregate-arguments.md`.
 
 10. **`EXISTS` patterns are optimized** (`sparopt` optimizer). The join
    reordering and filter pushing passes stopped at expressions, so the pattern of

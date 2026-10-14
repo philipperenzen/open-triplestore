@@ -7,12 +7,12 @@
 //! * every account (role, active state) and organisation (member/team counts),
 //! * **per-app entitlements** — which accounts/roles/teams unlock which client
 //!   app, derived from configurable well-known group slugs
-//!   (`ACCOUNTS_DASHBOARD_APP_GROUPS`, e.g.
+//!   (`OTS_ACCOUNTS_DASHBOARD_APP_GROUPS`, e.g.
 //!   `"validation=data-stewards,forms-design=form-designers"`),
 //! * the store's own LLM request aggregates, merged (fail-soft) with an
 //!   external LLM gateway's usage ledger when
-//!   `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` is set (the Linked Data LLMs
-//!   gateway's `GET /v1/usage`; `ACCOUNTS_DASHBOARD_GATEWAY_KEY` rides along
+//!   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` is set (the Linked Data LLMs
+//!   gateway's `GET /v1/usage`; `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` rides along
 //!   as its bearer when set — resolved through the host's secrets module, so
 //!   it is a reference like `env:NAME` or `file:/path`, and a raw value is
 //!   refused under `OTS_ENV=production`).
@@ -65,7 +65,7 @@ impl Plugin for AccountsDashboardPlugin {
 }
 
 fn gateway_usage_url() -> Option<String> {
-    std::env::var("ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL")
+    std::env::var("OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL")
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_string())
         .filter(|v| !v.is_empty())
@@ -73,7 +73,7 @@ fn gateway_usage_url() -> Option<String> {
 
 /// `"app=group-slug,app2=slug2"` → `[{app, group}]`; malformed pairs skipped.
 fn app_group_map() -> Vec<serde_json::Value> {
-    let raw = std::env::var("ACCOUNTS_DASHBOARD_APP_GROUPS").unwrap_or_default();
+    let raw = std::env::var("OTS_ACCOUNTS_DASHBOARD_APP_GROUPS").unwrap_or_default();
     raw.split(',')
         .filter_map(|pair| {
             let (app, group) = pair.split_once('=')?;
@@ -125,11 +125,11 @@ async fn overview(State(ctx): State<PluginContext>, headers: HeaderMap) -> Respo
     // and the gateway is reported unavailable with the reason, never called.
     let gateway_llm = match gateway_usage_url() {
         None => serde_json::json!({ "configured": false }),
-        Some(base) => match ctx.secrets.env_secret("ACCOUNTS_DASHBOARD_GATEWAY_KEY") {
+        Some(base) => match ctx.secrets.env_secret("OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY") {
             Ok(key) => fetch_gateway_usage(&base, key.as_deref()).await,
             Err(e) => {
-                tracing::warn!("accounts-dashboard: ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}");
-                unavailable(&format!("ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}"))
+                tracing::warn!("accounts-dashboard: OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}");
+                unavailable(&format!("OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}"))
             }
         },
     };
@@ -147,9 +147,17 @@ async fn overview(State(ctx): State<PluginContext>, headers: HeaderMap) -> Respo
     .into_response()
 }
 
+/// reqwest is built without a rustls crypto provider; install ring (the
+/// provider the host uses) before building a client, or the build panics.
+#[allow(clippy::disallowed_methods)] // the plugin's one client construction
+fn http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
+}
+
 async fn fetch_gateway_usage(base: &str, key: Option<&str>) -> serde_json::Value {
     let url = format!("{base}/v1/usage?group_by=user");
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
     if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
         req = req.bearer_auth(key);
@@ -238,11 +246,11 @@ mod tests {
     #[test]
     fn app_group_map_parses_and_skips_malformed() {
         std::env::set_var(
-            "ACCOUNTS_DASHBOARD_APP_GROUPS",
+            "OTS_ACCOUNTS_DASHBOARD_APP_GROUPS",
             "validation=data-stewards, forms-design=form-designers,broken,=x,y=",
         );
         let m = app_group_map();
-        std::env::remove_var("ACCOUNTS_DASHBOARD_APP_GROUPS");
+        std::env::remove_var("OTS_ACCOUNTS_DASHBOARD_APP_GROUPS");
         assert_eq!(m.len(), 2, "{m:?}");
         assert_eq!(m[0]["app"], "validation");
         assert_eq!(m[1]["group"], "form-designers");

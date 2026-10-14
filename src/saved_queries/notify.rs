@@ -4,7 +4,7 @@
 //!
 //! Delivery is best-effort and matches the project's opt-in email model: the
 //! event is always logged (and recorded as a test row by the caller), and an
-//! email is additionally sent when SMTP is configured (`ALERT_SMTP_*`, `alerting`
+//! email is additionally sent when SMTP is configured (`OTS_ALERT_SMTP_*`, `alerting`
 //! feature). The recipient is resolved from the account email(s) on
 //! OpenTripleStore, per the dataset's owner/admins.
 

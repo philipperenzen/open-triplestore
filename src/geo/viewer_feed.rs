@@ -708,7 +708,7 @@ const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
 /// Model file URLs are stored as absolute IRIs (correct linked data — the
 /// importer stamps `base_url` into the RDF at import time). But a *browser*
 /// must not be handed that absolute origin: the value baked in at seed time is
-/// whatever `BASE_URL` was then, so a store seeded with the default
+/// whatever `OTS_BASE_URL` was then, so a store seeded with the default
 /// `http://localhost:7878` serves `http://localhost:7878/api/…/download` to a
 /// phone on the LAN, where `localhost` is the phone. That is the "3D models
 /// fail to load from another device" bug. Two cases are rewritten:
@@ -716,7 +716,7 @@ const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
 ///   1. the URL starts with the configured `base_url` — this deployment,
 ///      whatever host the operator configured; and
 ///   2. its origin is loopback *and* its path is one of our own API routes —
-///      data seeded under an earlier/default `BASE_URL`, which no remote client
+///      data seeded under an earlier/default `OTS_BASE_URL`, which no remote client
 ///      could ever fetch anyway.
 ///
 /// Anything else (a genuinely external `https://raw.githubusercontent.com/…`
@@ -1121,7 +1121,7 @@ mod tests {
             Some("/api/datasets/d/assets/a1/download")
         );
         // 2. Loopback origin on our own route (data seeded under a default
-        //    BASE_URL) → relative, even though it doesn't match `base`.
+        //    OTS_BASE_URL) → relative, even though it doesn't match `base`.
         for url in [
             "http://localhost:7878/api/datasets/d/assets/a1/download",
             "http://127.0.0.1:7878/api/datasets/d/assets/a1/download",

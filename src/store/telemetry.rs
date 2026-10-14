@@ -158,14 +158,9 @@ impl<T> Ring<T> {
     }
 }
 
-/// One query in this many is timed and pushed to the latency ring; every query
-/// is counted. `OTS_TELEMETRY_TIMING_STRIDE` overrides it.
-const DEFAULT_TIMING_STRIDE: usize = 8;
-
-/// Default ring sizes; `OTS_TELEMETRY_QUERY_RING` and
-/// `OTS_TELEMETRY_VALIDATION_RING` override them.
-pub const DEFAULT_QUERY_RING: usize = 8192;
-pub const DEFAULT_VALIDATION_RING: usize = 1024;
+// One query in `OTS_TELEMETRY_TIMING_STRIDE` (default 8) is timed and pushed
+// to the latency ring; every query is counted. The ring sizes are
+// `OTS_TELEMETRY_QUERY_RING` (8192) and `OTS_TELEMETRY_VALIDATION_RING` (1024).
 
 pub struct Telemetry {
     started: Instant,
@@ -196,19 +191,11 @@ impl Default for Telemetry {
     }
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
 impl Telemetry {
     pub fn new() -> Self {
         Self::with_capacity(
-            env_usize("OTS_TELEMETRY_QUERY_RING", DEFAULT_QUERY_RING),
-            env_usize("OTS_TELEMETRY_VALIDATION_RING", DEFAULT_VALIDATION_RING),
+            crate::config::TELEMETRY_QUERY_RING.get(),
+            crate::config::TELEMETRY_VALIDATION_RING.get(),
         )
     }
 
@@ -220,7 +207,7 @@ impl Telemetry {
             query_total: AtomicU64::new(0),
             by_served: std::array::from_fn(|_| AtomicU64::new(0)),
             timing_tick: AtomicU64::new(0),
-            timing_stride: env_usize("OTS_TELEMETRY_TIMING_STRIDE", DEFAULT_TIMING_STRIDE) as u64,
+            timing_stride: crate::config::TELEMETRY_TIMING_STRIDE.get() as u64,
             validation_total: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             last_write_ms: AtomicU64::new(0),

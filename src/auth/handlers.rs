@@ -43,7 +43,7 @@ pub enum RegistrationDecision {
     Closed,
 }
 
-/// Pure decision: `disabled` = OTS_DISABLE_REGISTRATION, `existing_users` =
+/// Pure decision: `disabled` = `OTS_REGISTRATION_ENABLED` is off, `existing_users` =
 /// current account count (the first account always registers — bootstrap),
 /// `guest_toggle` = the runtime guest_self_registration setting.
 pub fn decide_registration(
@@ -72,12 +72,10 @@ const RECOVERY_CODE_COUNT: usize = 10;
 const TOTP_ISSUER: &str = "Open Triplestore";
 
 /// True when password logins require a verified email address
-/// (`OTS_REQUIRE_VERIFIED_EMAIL=1`). Off by default so existing deployments
+/// (`OTS_LOGIN_EMAIL_VERIFICATION_ENABLED=1`). Off by default so existing deployments
 /// and local development keep working without an SMTP relay.
 pub(crate) fn require_verified_email() -> bool {
-    std::env::var("OTS_REQUIRE_VERIFIED_EMAIL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::config::LOGIN_EMAIL_VERIFICATION_ENABLED.get()
 }
 
 // ─── Request / Response types ─────────────────────────────────────────────────
@@ -660,7 +658,7 @@ pub(crate) fn issue_tokens(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let expires_in = jwt_config.access_expiry_minutes * 60;
+    let expires_in = jwt_config.access_expiry_secs;
     Ok((access_token, refresh_token, expires_in))
 }
 
@@ -728,7 +726,8 @@ pub async fn register(
     let email = req.email.trim().to_string();
     validate::validate_email(&email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Operators can disable open self-registration with OTS_DISABLE_REGISTRATION=1
+    // Operators can close open self-registration with OTS_REGISTRATION_ENABLED=false
+    // (the production default; a runtime setting an admin can change)
     // (provision users out-of-band instead). The very FIRST account is still allowed
     // so a fresh instance can be bootstrapped through the UI; thereafter registration
     // is closed. This prevents an attacker on an exposed fresh deployment from
@@ -738,9 +737,8 @@ pub async fn register(
     // toggle `guest_self_registration` (default OFF) may still open a low-privilege
     // path — public registration then creates `guest` accounts (no publish/design/
     // admin rights; client apps decide what guests may fill).
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let registration_disabled =
+        !crate::config::runtime::get(&db, &crate::config::REGISTRATION_ENABLED);
     let existing_users = db
         .count_users()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -995,7 +993,7 @@ pub async fn login(
         return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
 
-    // Optional verified-email gate (OTS_REQUIRE_VERIFIED_EMAIL=1). The caller
+    // Optional verified-email gate (OTS_LOGIN_EMAIL_VERIFICATION_ENABLED=1). The caller
     // has already proven the password, so a specific message is not an
     // enumeration oracle. A fresh link is auto-(re)sent, throttled per account.
     if require_verified_email() && !user.email_verified {
@@ -1663,10 +1661,9 @@ pub async fn auth_features(
     State(db): State<Arc<AuthDb>>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-        && db.count_users().unwrap_or(0) > 0;
+    let registration_disabled =
+        !crate::config::runtime::get(&db, &crate::config::REGISTRATION_ENABLED)
+            && db.count_users().unwrap_or(0) > 0;
     Ok(Json(serde_json::json!({
         "email_delivery": state.mailer.smtp_configured(),
         "require_verified_email": require_verified_email(),
@@ -3380,6 +3377,7 @@ pub async fn delete_organisation(
             .auth_db
             .delete_dataset(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        purge_dataset_versions(&state, dataset_id).await;
     }
 
     // Capture hierarchy before deletion so we can keep graphs consistent and
@@ -3871,7 +3869,7 @@ pub async fn create_dataset(
     let current_user = require_user(user_opt)?;
     // Guests only create datasets where the deployment has granted it
     // (OTS_GUEST_CAPABILITIES); every other role always may.
-    if !current_user.can_create_datasets() {
+    if !current_user.can_create_datasets(&db) {
         return Err((
             StatusCode::FORBIDDEN,
             "This account is not permitted to create datasets".to_string(),
@@ -4376,8 +4374,32 @@ pub async fn delete_dataset(
         .auth_db
         .delete_dataset(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    purge_dataset_versions(&state, &dataset_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deleted dataset's versions go with it: snapshot and built graphs,
+/// validation graphs, registry records, change-log pins. They used to stay
+/// behind — taking disk, holding back the change log's retention, and
+/// showing up for a new dataset that reused the id. Best-effort.
+async fn purge_dataset_versions(state: &AppState, dataset_id: &str) {
+    let version_lock = crate::dataset_versions::lock::dataset(dataset_id);
+    let _held = version_lock.lock().await;
+    let st = state.clone();
+    let id = dataset_id.to_string();
+    match tokio::task::spawn_blocking(move || {
+        crate::dataset_versions::handlers::purge_all_for_dataset(&st, &id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "versions of deleted dataset {dataset_id} not purged: {}",
+            e.message()
+        ),
+        Err(e) => tracing::warn!("versions of deleted dataset {dataset_id} not purged: {e}"),
+    }
 }
 
 // ─── Dataset Graphs handlers ──────────────────────────────────────────────────
@@ -5192,7 +5214,7 @@ fn gate_shapes_graph_link(
              '{dataset_id}'."
         ));
     }
-    dataset_graph::refuse_model_registry_graph(
+    dataset_graph::refuse_reserved_write_target(
         &state.store,
         &state.base_url,
         dataset_id,

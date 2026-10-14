@@ -10,13 +10,13 @@
 //!
 //! Everything is gated by env config and disabled by default, so existing
 //! password/PAT auth is unaffected until an IdP is wired up:
-//! - `OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
-//! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
-//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`;
+//! - `OTS_OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
+//! - `OTS_OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OTS_OIDC_ISSUER` is set; tokens are rejected until it is configured)
+//! - `OTS_OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`;
 //!   capped at `user`, see [`capped_default_role`])
 //! - `OTS_OIDC_IDP_TOKEN_POLICY` — what an IdP token may do (default `session`: read
 //!   and write, but no API-token minting); see [`super::policy::idp_token_policy`]
-//! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
+//! - `OTS_SESSION_AND_API_TOKENS_ENABLED` — keep accepting password-session JWTs + `ots_` PATs (default true)
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,7 +57,7 @@ pub struct AuthExt {
     pub role_claim_map: Option<String>,
     /// Peer instances whose identity assertions are accepted
     /// (`OTS_TRUSTED_ISSUERS`), each verified against its own JWKS with this
-    /// instance's `BASE_URL` as the audience. See `crate::federation`.
+    /// instance's `OTS_BASE_URL` as the audience. See `crate::federation`.
     pub trusted_issuers: Vec<OidcVerifier>,
 }
 
@@ -84,66 +84,30 @@ impl AuthExt {
     }
 
     /// The resource-server settings from the environment. `base_url` is this
-    /// instance's configured public base URL (`--base-url` / `BASE_URL`, as the
+    /// instance's configured public base URL (`--base-url` / `OTS_BASE_URL`, as the
     /// server parsed it), or `None` when only the built-in default applies; it
     /// is the audience federated identity assertions are checked against.
     pub fn from_env_with_base_url(base_url: Option<&str>) -> Self {
-        let issuer = std::env::var("OIDC_ISSUER")
-            .ok()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty());
-        let audience = std::env::var("OIDC_AUDIENCE")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let default_role = std::env::var("OIDC_DEFAULT_ROLE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|raw| {
-                let role = capped_default_role(&raw);
-                if SystemRole::from_str(&raw.trim().to_ascii_lowercase())
-                    .is_some_and(|r| r.is_admin())
-                {
-                    tracing::error!(
-                        "OIDC_DEFAULT_ROLE={raw:?} would make every IdP account an \
-                         administrator; using '{}' instead. Grant admin through \
-                         OIDC_ROLE_CLAIM_MAP or in the UI.",
-                        role.as_str()
-                    );
-                }
-                role.as_str().to_string()
-            })
-            .unwrap_or_else(|| "user".to_string());
-        // Default ON; only "false"/"0" disables (transition safety).
-        let accept_legacy_tokens = std::env::var("ACCEPT_LEGACY_TOKENS")
-            .map(|v| !matches!(v.trim(), "false" | "0"))
-            .unwrap_or(true);
-        let role_claims = std::env::var("OIDC_ROLE_CLAIMS")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                s.split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect()
-            })
-            .unwrap_or_else(default_role_claims);
-        let groups_claim = std::env::var("OIDC_GROUPS_CLAIM")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "groups".to_string());
-        let org_group_prefix = std::env::var("OIDC_ORG_GROUP_PREFIX")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "org:".to_string());
-        let role_claim_map = std::env::var("OIDC_ROLE_CLAIM_MAP")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
+        use crate::config as c;
+        let issuer = c::OIDC_ISSUER
+            .get()
+            .map(|s| s.trim_end_matches('/').to_string());
+        let audience = c::OIDC_AUDIENCE.get();
+        // Only `user` or `guest` validate (an admin default would make every
+        // IdP account an administrator); the cap stays as a second line.
+        let default_role = capped_default_role(&c::OIDC_DEFAULT_ROLE.get())
+            .as_str()
+            .to_string();
+        let accept_legacy_tokens = c::SESSION_AND_API_TOKENS_ENABLED.get();
+        let role_claims = c::OIDC_ROLE_CLAIMS.get();
+        let groups_claim = c::OIDC_GROUPS_CLAIM.get();
+        let org_group_prefix = c::OIDC_ORG_GROUP_PREFIX.get();
+        let role_claim_map = c::OIDC_ROLE_CLAIM_MAP.get();
 
         if issuer.is_some() && audience.is_none() {
             tracing::warn!(
-                "OIDC_ISSUER is set but OIDC_AUDIENCE is not — OIDC bearer-token \
-                 verification will reject all tokens until OIDC_AUDIENCE is configured \
+                "OTS_OIDC_ISSUER is set but OTS_OIDC_AUDIENCE is not — OIDC bearer-token \
+                 verification will reject all tokens until OTS_OIDC_AUDIENCE is configured \
                  (audience validation is mandatory)."
             );
         }
@@ -153,7 +117,7 @@ impl AuthExt {
         let oidc = match issuer {
             Some(iss) if !is_secure_idp_url(&iss) => {
                 tracing::error!(
-                    "OIDC_ISSUER='{iss}' is not https (and not a loopback dev URL) — refusing \
+                    "OTS_OIDC_ISSUER='{iss}' is not https (and not a loopback dev URL) — refusing \
                      to enable OIDC resource-server verification, since IdP key material would \
                      be fetched over cleartext (MITM → token forgery). Configure an https issuer."
                 );
@@ -176,7 +140,7 @@ impl AuthExt {
                 }
                 if base_url.is_none() {
                     tracing::error!(
-                        "OTS_TRUSTED_ISSUERS is set but BASE_URL is not — federated assertions \
+                        "OTS_TRUSTED_ISSUERS is set but OTS_BASE_URL is not — federated assertions \
                          cannot be audience-checked and are refused"
                     );
                 }
@@ -375,7 +339,7 @@ impl OidcVerifier {
         Self {
             issuer,
             audience,
-            http: reqwest::Client::new(),
+            http: crate::http_client::client(),
             cache: RwLock::new(None),
         }
     }
@@ -493,8 +457,8 @@ impl OidcVerifier {
         // disabling the check.
         let aud = self.audience.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
-                "OIDC_AUDIENCE is not configured; refusing to verify IdP-issued token \
-                 (set OIDC_AUDIENCE to this service's expected `aud`)"
+                "OTS_OIDC_AUDIENCE is not configured; refusing to verify IdP-issued token \
+                 (set OTS_OIDC_AUDIENCE to this service's expected `aud`)"
             )
         })?;
         validation.set_audience(&[aud]);
@@ -626,7 +590,7 @@ mod tests {
 
     #[test]
     fn from_env_disabled_by_default() {
-        // No OIDC_* env in the test process → disabled, legacy on.
+        // No OTS_OIDC_* env in the test process → disabled, legacy on.
         let ext = AuthExt::from_env();
         assert!(ext.oidc.is_none());
         assert!(ext.accept_legacy_tokens);
@@ -634,7 +598,7 @@ mod tests {
     }
 
     /// Federated assertions are audience-checked against the base URL the
-    /// server parsed (`--base-url` included), not a second read of `BASE_URL`;
+    /// server parsed (`--base-url` included), not a second read of `OTS_BASE_URL`;
     /// with none configured there is no audience and they are refused.
     #[test]
     fn trusted_issuers_take_the_audience_from_the_passed_base_url() {

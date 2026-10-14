@@ -271,16 +271,13 @@ impl ScanVerdict {
     }
 }
 
-/// Address of the ClamAV daemon (`CLAMAV_ADDR`, `host:port`, INSTREAM protocol).
+/// Address of the ClamAV daemon (`OTS_CLAMAV_ADDR`, `host:port`, INSTREAM protocol).
 /// Unset/empty disables scanning (uploads proceed unscanned → `Skipped`), mirroring
-/// the optional `LLM_GATEWAY_URL` env knob. Read at the upload call-site so the
+/// the optional `OTS_LLM_GATEWAY_URL` env knob. Read at the upload call-site so the
 /// feature stays self-contained behind `asset-clamav` without touching `AppState`.
 #[cfg(feature = "asset-clamav")]
 pub fn clamav_addr() -> String {
-    std::env::var("CLAMAV_ADDR")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    crate::config::CLAMAV_ADDR.get().unwrap_or_default()
 }
 
 /// Scan asset bytes for malware via a ClamAV daemon at `clamd_addr` (host:port,
@@ -841,7 +838,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             w.start_file("a.txt", opts).unwrap();
             w.write_all(b"hello").unwrap();

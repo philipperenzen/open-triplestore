@@ -350,7 +350,7 @@ pub async fn create_data_model(
     // ownership model: `can_write_ontology` already lets users version their
     // own models, and the import wizard suggests registering model files here —
     // advice a non-admin could not follow.)
-    if !user.can_create_datasets() {
+    if !user.can_create_datasets(&state.auth_db) {
         return Err(AppError::Unauthorized(
             "This account is not permitted to create data models".to_string(),
         ));

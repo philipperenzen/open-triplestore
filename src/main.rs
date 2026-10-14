@@ -14,10 +14,13 @@ mod auth;
 mod backup;
 mod catalog;
 mod commit_log;
+mod config;
 mod conformance;
 mod containers;
 mod data_models;
+mod dataset_changes;
 mod dataset_rules;
+mod dataset_settings;
 mod dataset_versions;
 mod dcat;
 mod docs;
@@ -26,6 +29,7 @@ mod entailment;
 mod federation;
 mod feedback;
 mod geo;
+mod http_client;
 mod ifc;
 mod imports;
 mod jsonld;
@@ -65,6 +69,7 @@ mod shex;
 mod sources;
 mod sparql;
 mod spec_import;
+mod statement_provenance;
 mod storage;
 mod store;
 mod svc_registry;
@@ -81,18 +86,6 @@ mod vocab_search;
 #[command(about = "A modern RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support")]
 #[command(version)]
 struct Cli {
-    /// Storage directory for persistent data
-    #[arg(short, long, default_value = "./data")]
-    data_dir: PathBuf,
-
-    /// HTTP port to listen on
-    #[arg(short, long, default_value_t = 7878)]
-    port: u16,
-
-    /// Bind address
-    #[arg(short, long, default_value = "0.0.0.0")]
-    bind: String,
-
     /// Load an RDF file on startup (Turtle, N-Triples, RDF/XML, N-Quads, TriG)
     #[arg(long)]
     load: Option<PathBuf>,
@@ -101,128 +94,40 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: String,
 
-    /// JWT signing secret (random if not provided)
-    #[arg(long, env = "JWT_SECRET")]
-    jwt_secret: Option<String>,
-
-    /// Path to the SQLite identity database
-    #[arg(long, env = "AUTH_DB_PATH")]
-    db_path: Option<PathBuf>,
-
-    /// S3-compatible endpoint URL (e.g. http://localhost:7070, the compose stack's S3 gateway)
-    #[arg(long, env = "S3_ENDPOINT")]
-    s3_endpoint: Option<String>,
-
-    /// S3 bucket name
-    #[arg(long, env = "S3_BUCKET", default_value = "triplestore-assets")]
-    s3_bucket: String,
-
-    /// S3 access key
-    #[arg(long, env = "S3_ACCESS_KEY")]
-    s3_access_key: Option<String>,
-
-    /// S3 secret key
-    #[arg(long, env = "S3_SECRET_KEY")]
-    s3_secret_key: Option<String>,
-
-    /// S3 region
-    #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
-    s3_region: String,
-
-    /// Access token expiry in minutes
-    #[arg(long, env = "ACCESS_TOKEN_EXPIRY_MINUTES", default_value_t = 30)]
-    access_token_expiry_minutes: u64,
-
-    /// Refresh token expiry in days
-    #[arg(long, env = "REFRESH_TOKEN_EXPIRY_DAYS", default_value_t = 30)]
-    refresh_token_expiry_days: u64,
-
     /// Promote an existing user to super_admin and exit
     #[arg(long)]
     promote_super_admin: Option<String>,
 
-    /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
+    /// Restore the store + identity DB from a backup id (in OTS_BACKUP_DIR, default
     /// {data-dir}/backups), REPLACING current data, then exit. For an encrypted
-    /// backup, set BACKUP_DECRYPT_IDENTITY_PATH to your `age-keygen` identity
+    /// backup, set OTS_BACKUP_DECRYPTION_IDENTITY_PATH to your `age-keygen` identity
     /// file — the server stores only the recipient, never the identity.
     #[arg(long, value_name = "BACKUP_ID")]
     restore: Option<String>,
+    // Every other flag is a setting from the configuration registry
+    // (`src/config/registry.rs`), added by [`settings_args`] and validated
+    // with the environment by `Config::load`.
+}
 
-    /// Allowed CORS origins, comma-separated (e.g. "https://app.example.com,https://admin.example.com").
-    /// If empty, same-origin only.
-    #[arg(long, env = "CORS_ORIGINS", default_value = "")]
-    cors_origins: String,
-
-    /// Base URL for linked data IRIs (e.g. https://example.com)
-    #[arg(long, env = "BASE_URL", default_value = "http://localhost:7878")]
-    base_url: String,
-
-    /// Enable cross-app service discovery (opt-in). When set, self-register with the registry at
-    /// LD_REGISTRY_URL so siblings can resolve this store, and let the web UI resolve siblings too.
-    /// Off by default — a missing registry is fail-soft either way; this just makes it explicit.
-    #[arg(long, env = "LD_DISCOVERY", default_value = "false", value_parser = parse_lenient_bool)]
-    discovery: bool,
-
-    /// service-registry base URL, used only when --discovery/LD_DISCOVERY is set. Fail-soft:
-    /// if it's unreachable the triplestore runs exactly as before.
-    #[arg(long, env = "LD_REGISTRY_URL", default_value = "http://localhost:8500")]
-    registry_url: String,
-
-    /// Bearer token for the service registry (only needed when it binds a non-loopback host).
-    #[arg(long, env = "LD_REGISTRY_TOKEN", default_value = "")]
-    registry_token: String,
-
-    /// Comma-separated list of trusted reverse-proxy CIDRs whose X-Forwarded-For headers
-    /// are believed when deriving the client IP for rate limiting, the audit log and the
-    /// guest LLM budget (H-2). Empty = no proxy trust; direct TCP IP is used.
-    /// Example: "10.0.0.0/8,172.16.0.0/12"
-    #[arg(long, env = "TRUSTED_PROXY_CIDRS", default_value = "")]
-    trusted_proxy_cidrs: String,
-
-    /// SPARQL query and update execution timeout in seconds (M-1 / W4-21).
-    #[arg(long, env = "SPARQL_QUERY_TIMEOUT_SECS", default_value_t = 30)]
-    query_timeout_secs: u64,
-
-    /// Write-path execution timeout in seconds for Graph Store PUT/POST/DELETE and
-    /// data-model/dataset DELETE/PATCH. Separate from (and larger than) the query
-    /// timeout so a stuck write fails fast without starving reads, while ordinary
-    /// writes have generous headroom. Bulk import (`/api/import/bulk`) is
-    /// intentionally uncapped — large IFC/CityJSON loads legitimately run for minutes.
-    #[arg(long, env = "WRITE_TIMEOUT_SECS", default_value_t = 120)]
-    write_timeout_secs: u64,
-
-    /// Issue auth cookies with the `Secure` attribute (HTTPS-only transport).
-    /// Enable in production behind TLS; leave off for plain-HTTP local development.
-    #[arg(long, env = "SECURE_COOKIES", default_value_t = false)]
-    secure_cookies: bool,
-
-    /// Serve the bundled web UI (frontend SPA) at `/`. On by default; set to
-    /// `false` (or pass `--serve-frontend false`) for a headless, API-only server
-    /// — SPARQL, Graph Store and the REST API are unaffected either way.
-    #[arg(long, env = "SERVE_FRONTEND", default_value_t = true, action = clap::ArgAction::Set)]
-    serve_frontend: bool,
-
-    /// Directory for the Tantivy full-text index (default: {data_dir}/tantivy)
-    #[cfg(feature = "text-search")]
-    #[arg(long, env = "TEXT_SEARCH_DIR")]
-    text_search_dir: Option<PathBuf>,
-
-    /// Directory of seed bundles to load at boot (each a subdirectory with a
-    /// `manifest.toml` + RDF payload files — see docs/plugins.md). Idempotent,
-    /// fail-soft, and per-bundle opt-out-able; unset by default (no extra
-    /// bundles loaded). This is how a downstream operator adds org-owned
-    /// datasets without patching source: mount a directory here (e.g. a Docker
-    /// volume) instead of forking.
-    #[arg(long, env = "SEED_DIR")]
-    seed_dir: Option<PathBuf>,
-
-    /// Opt-in fallback to the next free port when `--port`/`-p` is already in
-    /// use, instead of refusing to start. The advertised base URL and service-
-    /// registry self-registration are rewritten to the port actually bound.
-    /// Off by default — existing deployments that rely on "refuse to start on
-    /// a busy port" see no behavior change.
-    #[arg(long, env = "PORT_FALLBACK", default_value_t = false, value_parser = parse_lenient_bool)]
-    port_fallback: bool,
+/// One flag per registry setting that has one. A flag wins over the
+/// environment; its value goes through the same parser.
+fn settings_args(mut cmd: clap::Command) -> clap::Command {
+    for spec in config::SPECS {
+        let Some(long) = spec.cli else { continue };
+        let mut arg = clap::Arg::new(spec.name)
+            .long(long)
+            .value_name("VALUE")
+            .help(format!("{} [env: {}]", spec.doc, spec.name));
+        if let Some(c) = spec.short {
+            arg = arg.short(c);
+        }
+        if matches!(spec.kind, config::Kind::Bool) {
+            // `--secure-cookies` alone means true; `--secure-cookies=false` works too.
+            arg = arg.num_args(0..=1).default_missing_value("true");
+        }
+        cmd = cmd.arg(arg);
+    }
+    cmd
 }
 
 /// Best-effort terminal width (columns); 80 when stdout is not a tty.
@@ -305,31 +210,46 @@ fn print_banner() {
     println!();
 }
 
-/// Parse a lenient boolean for opt-in flags: accepts 1/true/yes/on and 0/false/no/off
-/// (case-insensitive), so both `LD_DISCOVERY=1` and `LD_DISCOVERY=true` work.
-fn parse_lenient_bool(s: &str) -> Result<bool, String> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "" | "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(format!(
-            "expected a boolean (true/false/1/0/yes/no/on/off), got {other:?}"
-        )),
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    // First, before anything can open a TLS connection: ring as the rustls
+    // provider (see http_client.rs for why it must be installed explicitly).
+    http_client::install_crypto_provider();
+    let matches = settings_args(<Cli as clap::CommandFactory>::command()).get_matches();
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    // Whether the operator set the base URL (`--base-url` or `BASE_URL`), as
-    // opposed to the built-in default: federated identity assertions are only
-    // audience-checked against a base URL somebody configured.
-    let base_url_configured =
-        matches.value_source("base_url") != Some(clap::parser::ValueSource::DefaultValue);
+    // Every setting, from the flags and the environment, validated together:
+    // any problem — a number that does not parse, an unknown enum value, a
+    // boolean spelled some other way, a retired name — stops the start, and
+    // all of them are reported at once.
+    let cli_settings: std::collections::HashMap<String, String> = config::SPECS
+        .iter()
+        .filter(|s| s.cli.is_some())
+        .filter_map(|s| {
+            matches
+                .get_one::<String>(s.name)
+                .map(|v| (s.name.to_string(), v.clone()))
+        })
+        .collect();
+    let settings = match config::Config::load(&|name| std::env::var(name).ok(), &cli_settings) {
+        Ok(c) => Arc::new(c),
+        Err(errors) => {
+            eprintln!(
+                "Refusing to start: {} configuration error{}:",
+                errors.len(),
+                if errors.len() == 1 { "" } else { "s" }
+            );
+            for e in &errors {
+                eprintln!("  {e}");
+            }
+            std::process::exit(2);
+        }
+    };
+    config::install(settings.clone());
+    let data_dir = config::DATA_DIR.get();
     // Where backups live, read once: the restore path, store auto-recovery and
-    // the backup subsystem all use this value (an empty BACKUP_DIR means unset).
-    let backup_dir = server::default_backup_dir(&cli.data_dir);
+    // the backup subsystem all use this value (an empty OTS_BACKUP_DIR means unset).
+    let backup_dir = server::default_backup_dir(&data_dir);
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -340,33 +260,47 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     print_banner();
+    // The effective configuration: the profile, and every setting that is not
+    // at its built-in default, with where it came from. Secrets are redacted.
+    info!(
+        "configuration: {} profile",
+        if settings.production() {
+            "production"
+        } else {
+            "development"
+        }
+    );
+    for d in settings.describe() {
+        if d.source == config::Source::Default {
+            continue;
+        }
+        info!(
+            "  {} = {} ({})",
+            d.name,
+            d.value.as_deref().unwrap_or("(unset)"),
+            d.source.as_str()
+        );
+    }
+    for name in config::unknown_names(std::env::vars().map(|(k, _)| k)) {
+        tracing::warn!("{name} is set but is not a setting this version reads (a typo?)");
+    }
 
     info!("Starting open-triplestore v{}", env!("CARGO_PKG_VERSION"));
 
-    // The catalogue settings are read per request; refuse a value that would
-    // silently publish under another profile or with a dropped field.
-    if let Err(e) = dcat::catalog::check_env() {
-        anyhow::bail!("Refusing to start: invalid catalogue settings: {e}");
-    }
-
     // Create data directory if it doesn't exist
-    std::fs::create_dir_all(&cli.data_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
 
     // Handle --restore: rebuild the store + identity DB from a backup, then exit.
     // Runs before the identity DB is opened so its SQLite file can be replaced.
     if let Some(ref id) = cli.restore {
-        let target_sqlite = cli
-            .db_path
-            .clone()
-            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        let target_sqlite = config::AUTH_DB_PATH
+            .get()
+            .unwrap_or_else(|| data_dir.join("auth.db"));
         // Only needed for an age-encrypted backup; the server never holds this
         // identity, so restoring one is an explicit operator action.
-        let identity = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from);
+        let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
         info!("Restoring backup {id} from {}…", backup_dir.display());
-        let store = store::TripleStore::open(&cli.data_dir)?;
+        let store = store::TripleStore::open(&data_dir)?;
         let manifest =
             backup::restore_backup(&backup_dir, id, &store, &target_sqlite, identity.as_deref())?;
         info!(
@@ -380,25 +314,18 @@ async fn main() -> anyhow::Result<()> {
     // runs now, like --restore, before the identity DB and the store open.
     // Not for --promote-super-admin, which must work beside a live server.
     if cli.promote_super_admin.is_none() {
-        let target_sqlite = cli
-            .db_path
-            .clone()
-            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
-        let identity = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from);
-        backup::apply_pending_restore(
-            &backup_dir,
-            &cli.data_dir,
-            &target_sqlite,
-            identity.as_deref(),
-        );
+        let target_sqlite = config::AUTH_DB_PATH
+            .get()
+            .unwrap_or_else(|| data_dir.join("auth.db"));
+        let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
+        backup::apply_pending_restore(&backup_dir, &data_dir, &target_sqlite, identity.as_deref());
     }
 
     // Initialize the auth database (SQLite) — needed by --promote-super-admin and the server.
     // Opened before the RocksDB store so admin operations can run while the server is live.
-    let db_path = cli.db_path.unwrap_or_else(|| cli.data_dir.join("auth.db"));
+    let db_path = config::AUTH_DB_PATH
+        .get()
+        .unwrap_or_else(|| data_dir.join("auth.db"));
     let auth_db = Arc::new(auth::db::AuthDb::open(&db_path)?);
 
     // Handle --promote-super-admin: only needs the auth DB, exits immediately.
@@ -417,8 +344,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the store, auto-recovering from RocksDB corruption (e.g. an
     // unclean shutdown that left "SST file is ahead of WALs") so the service comes
     // back instead of crash-looping. See store::recovery.
-    let store = store::recovery::open_store_with_recovery(&cli.data_dir, &backup_dir)?;
-    info!("Store opened at {:?}", cli.data_dir);
+    let store = store::recovery::open_store_with_recovery(&data_dir, &backup_dir)?;
+    info!("Store opened at {:?}", data_dir);
 
     // Load initial data if specified
     if let Some(ref load_path) = cli.load {
@@ -429,31 +356,29 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize the prefix registry: bundled prefix.cc/LOV snapshot +
     // persisted lookup cache.  Live prefix.cc is only contacted when the
-    // operator opts in with PREFIX_CC_FALLBACK=true.
-    let prefix_cc_fallback = std::env::var("PREFIX_CC_FALLBACK")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false);
+    // operator opts in with OTS_PREFIX_CC_FALLBACK_ENABLED=true.
+    let prefix_cc_fallback = config::PREFIX_CC_FALLBACK_ENABLED.get();
     let prefix_registry = Arc::new(prefixes::PrefixRegistry::open(
-        cli.data_dir.join("prefix_cache.json"),
+        data_dir.join("prefix_cache.json"),
         prefix_cc_fallback,
     )?);
     info!(
         "Prefix registry ready ({} bundled prefixes, cache at {:?}, prefix.cc fallback {})",
         prefix_registry.dataset_len(),
-        cli.data_dir.join("prefix_cache.json"),
+        data_dir.join("prefix_cache.json"),
         if prefix_cc_fallback { "on" } else { "off" }
     );
 
     // Initialize JWT config — prefer explicit secret, then file-backed persistent secret,
     // then a newly-generated secret written to disk so tokens survive restarts.
-    let jwt_secret_path = cli.data_dir.join("jwt_secret");
+    let jwt_secret_path = data_dir.join("jwt_secret");
     // Track where the secret came from so a weak-secret failure can name the exact input to fix.
     // An auto-generated secret is 64 random chars and can never be weak, so reaching the weak
     // check below always means the value was explicitly configured (env/CLI or the on-disk file).
     // A configured secret goes through the secrets module: a reference
     // (env:/file:/vault:) resolves, a raw value is refused in the production
-    // posture and warned about once in development — as S3_SECRET_KEY is.
-    let (jwt_secret, jwt_secret_from_file) = if let Some(s) = cli.jwt_secret {
+    // posture and warned about once in development — as OTS_S3_SECRET_KEY is.
+    let (jwt_secret, jwt_secret_from_file) = if let Some(s) = config::JWT_SECRET.get() {
         (auth::jwt::configured_jwt_secret(&s)?, false)
     } else {
         match std::fs::read_to_string(&jwt_secret_path) {
@@ -471,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(e) = std::fs::write(&jwt_secret_path, &secret) {
                     tracing::warn!(
                         "JWT secret auto-generated but could not be saved to {:?}: {}. \
-                        Tokens will be invalidated on restart. Set JWT_SECRET env var for production.",
+                        Tokens will be invalidated on restart. Set OTS_JWT_SECRET env var for production.",
                         jwt_secret_path, e
                     );
                 } else {
@@ -502,8 +427,8 @@ async fn main() -> anyhow::Result<()> {
                 path = jwt_secret_path.display(),
             )
         } else {
-            "It came from the JWT_SECRET environment variable (or --jwt-secret). Set it to a strong, \
-             unique value — e.g. `export JWT_SECRET=$(openssl rand -hex 32)` — or unset it to have \
+            "It came from the OTS_JWT_SECRET environment variable (or --jwt-secret). Set it to a strong, \
+             unique value — e.g. `export OTS_JWT_SECRET=$(openssl rand -hex 32)` — or unset it to have \
              one generated automatically."
                 .to_string()
         };
@@ -512,54 +437,50 @@ async fn main() -> anyhow::Result<()> {
              value, so every session token would be forgeable. {how_to_fix}"
         );
     }
-    let jwt_config = Arc::new(auth::jwt::JwtConfig::new(
+    let jwt_config = Arc::new(auth::jwt::JwtConfig::with_expiry(
         jwt_secret,
-        cli.access_token_expiry_minutes,
-        cli.refresh_token_expiry_days,
+        config::ACCESS_TOKEN_EXPIRY.get(),
+        config::REFRESH_TOKEN_EXPIRY.get(),
     ));
 
     // The service-registry bearer, likewise: a reference resolves here, a raw
     // value is refused under OTS_ENV=production.
-    let registry_token = match cli.registry_token.trim() {
-        "" => String::new(),
-        v => secrets::resolve_configured("LD_REGISTRY_TOKEN", v)
-            .map_err(|e| anyhow::anyhow!("LD_REGISTRY_TOKEN: {e}"))?
+    let registry_token = match config::REGISTRY_TOKEN.get() {
+        None => String::new(),
+        Some(v) => secrets::resolve_configured("OTS_REGISTRY_TOKEN", &v)
+            .map_err(|e| anyhow::anyhow!("OTS_REGISTRY_TOKEN: {e}"))?
             .expose()
             .to_string(),
     };
 
     // Initialize asset storage — S3 if configured, local filesystem otherwise
-    let object_store = if let Some(endpoint) = cli.s3_endpoint {
-        let access_key = cli.s3_access_key.unwrap_or_default();
+    let object_store = if let Some(endpoint) = config::S3_ENDPOINT.get() {
+        let access_key = config::S3_ACCESS_KEY.get().unwrap_or_default();
+        let bucket = config::S3_BUCKET.get();
         // A secret reference (env:/file:/vault:) is resolved here; a raw value
         // is refused in the production posture and warned about elsewhere.
-        let secret_key = match cli
-            .s3_secret_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            Some(v) => secrets::resolve_configured("S3_SECRET_KEY", v)
-                .map_err(|e| anyhow::anyhow!("S3_SECRET_KEY: {e}"))?
+        let secret_key = match config::S3_SECRET_KEY.get() {
+            Some(v) => secrets::resolve_configured("OTS_S3_SECRET_KEY", &v)
+                .map_err(|e| anyhow::anyhow!("OTS_S3_SECRET_KEY: {e}"))?
                 .expose()
                 .to_string(),
             None => String::new(),
         };
         let obj_store = storage::ObjectStore::new(
             &endpoint,
-            &cli.s3_bucket,
+            &bucket,
             &access_key,
             &secret_key,
-            &cli.s3_region,
+            &config::S3_REGION.get(),
         )
         .await?;
         info!(
             "Asset storage: S3 (endpoint={}, bucket={})",
-            endpoint, cli.s3_bucket
+            endpoint, bucket
         );
         Arc::new(obj_store)
     } else {
-        let assets_dir = cli.data_dir.join("assets");
+        let assets_dir = data_dir.join("assets");
         let obj_store = storage::ObjectStore::local(assets_dir.clone())?;
         info!("Asset storage: local filesystem ({:?})", assets_dir);
         Arc::new(obj_store)
@@ -569,9 +490,9 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "text-search")]
     let text_index = {
         use std::sync::Arc;
-        let tantivy_dir = cli
-            .text_search_dir
-            .unwrap_or_else(|| cli.data_dir.join("tantivy"));
+        let tantivy_dir = config::TEXT_SEARCH_DIR
+            .get()
+            .unwrap_or_else(|| data_dir.join("tantivy"));
         match text_search::TextIndex::open(&tantivy_dir) {
             Ok(idx) => {
                 info!("Text search index opened at {:?}", tantivy_dir);
@@ -587,32 +508,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Parse trusted proxy CIDRs (H-2)
-    let trusted_cidrs: Vec<ipnet::IpNet> = cli
-        .trusted_proxy_cidrs
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<ipnet::IpNet>().ok())
-        .collect();
-    if !trusted_cidrs.is_empty() {
-        info!("Trusting XFF headers from {} CIDR(s)", trusted_cidrs.len());
-    }
-
     // Start the HTTP server
-    let addr = format!("{}:{}", cli.bind, cli.port);
+    let addr = format!("{}:{}", config::BIND.get(), config::PORT.get());
     info!("SPARQL endpoint available at http://{}/sparql", addr);
     info!("Graph Store Protocol at http://{}/store", addr);
     info!("API at http://{}/api", addr);
     info!("Service description at http://{}/", addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY); self-registration is
+    // Cross-app service discovery is opt-in (OTS_DISCOVERY_ENABLED); self-registration is
     // handled inside `server::run`, AFTER the listener is bound, so that when
     // `--port-fallback` moves the bind off the requested port the registry sees
     // the base URL rewritten to the port actually in use, not the stale one.
-    if !cli.discovery {
+    if !config::DISCOVERY_ENABLED.get() {
         info!(
-            "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
+            "service discovery disabled (set OTS_DISCOVERY_ENABLED=true to self-register with the registry)"
         );
     }
 
@@ -622,28 +531,17 @@ async fn main() -> anyhow::Result<()> {
         auth_db,
         jwt_config,
         object_store,
-        &cli.base_url,
-        base_url_configured,
+        settings,
         &addr,
-        &cli.cors_origins,
-        trusted_cidrs,
-        cli.query_timeout_secs,
-        cli.write_timeout_secs,
-        cli.secure_cookies,
-        cli.serve_frontend,
-        cli.seed_dir,
-        cli.port_fallback,
-        cli.discovery,
-        cli.registry_url,
         registry_token,
-        cli.data_dir.clone(),
+        data_dir.clone(),
         db_path.clone(),
         backup_dir,
         #[cfg(feature = "text-search")]
         text_index,
         #[cfg(feature = "vocab-search")]
         Some(Arc::new(vocab_search::index::VocabSearchEngine::new(
-            cli.data_dir.clone(),
+            data_dir.clone(),
         ))),
     )
     .await?;

@@ -1014,7 +1014,7 @@ pub const SAML_MAX_CLOCK_SKEW_SECONDS: u32 = 600;
 #[serde(default)]
 pub struct SamlConfig {
     /// The store's entity ID towards this IdP. Default: the provider's SP
-    /// metadata URL, `{BASE_URL}/api/auth/saml/{slug}/metadata`.
+    /// metadata URL, `{OTS_BASE_URL}/api/auth/saml/{slug}/metadata`.
     pub sp_entity_id: Option<String>,
     /// Where the IdP metadata was imported from (https), kept for re-import.
     pub idp_metadata_url: Option<String>,
@@ -1149,7 +1149,7 @@ impl SamlConfig {
 impl OauthProvider {
     /// Whether a browser sign-in can start from this provider, i.e. whether the
     /// login page should offer it. An OIDC entry needs a client ID: the
-    /// `env-oidc` entry that `OIDC_ISSUER` creates has none (it only anchors
+    /// `env-oidc` entry that `OTS_OIDC_ISSUER` creates has none (it only anchors
     /// resource-server accounts), nor does an OIDC entry saved without one. A
     /// SAML entry needs an SSO URL to send the AuthnRequest to, and a build with
     /// the `saml` feature.

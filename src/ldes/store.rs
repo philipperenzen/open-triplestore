@@ -87,6 +87,11 @@ pub fn tracked(db: &AuthDb, graphs: &[String]) -> anyhow::Result<Vec<(String, St
     )?;
     let mut out = Vec::new();
     for g in graphs {
+        // Statement-provenance annotations are about members, not members:
+        // their IRI reifiers would otherwise become entities (delta note §6.3).
+        if crate::provenance::is_any_statement_provenance_graph(g) {
+            continue;
+        }
         let rows = stmt.query_map(params![g], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -711,10 +716,7 @@ pub fn prune(
 /// Sweep at most this often per dataset from the write path (a prune scans
 /// the dataset's member log); `OTS_LDES_SWEEP_INTERVAL_SECS` overrides.
 fn sweep_interval_secs() -> u64 {
-    std::env::var("OTS_LDES_SWEEP_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(60)
+    crate::config::LDES_SWEEP_INTERVAL.get().as_secs()
 }
 
 fn last_sweeps() -> &'static Mutex<HashMap<String, Instant>> {

@@ -126,7 +126,7 @@ impl SidecarBackend {
         let wait = self.timeout + (self.timeout / 4).min(Duration::from_secs(5));
         let seconds = self.timeout.as_secs();
         let fut = async move {
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .timeout(wait)
                 .build()
                 .map_err(|e| ReasoningError::Backend {

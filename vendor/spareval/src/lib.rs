@@ -899,6 +899,25 @@ pub(crate) type CustomAggregateFunctionRegistry = HashMap<
 /// See [`QueryEvaluator::with_custom_aggregate_function`] for an example.
 pub trait AggregateFunctionAccumulator {
     fn accumulate(&mut self, element: Term);
+
+    /// Accumulates one solution of a call with more than one argument
+    /// (`ex:agg(?x, 0.5)`): the value of every argument, in order. It is
+    /// called instead of [`accumulate`](Self::accumulate) for such a call.
+    ///
+    /// Returns `false` when the aggregate does not take these arguments; its
+    /// result is then unbound, as for an argument that does not evaluate. The
+    /// default takes exactly one argument.
+    fn accumulate_arguments(&mut self, arguments: Vec<Term>) -> bool {
+        let mut arguments = arguments.into_iter();
+        match (arguments.next(), arguments.next()) {
+            (Some(first), None) => {
+                self.accumulate(first);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn finish(&mut self) -> Option<Term>;
 }
 

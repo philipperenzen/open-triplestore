@@ -179,8 +179,15 @@ validation after writes that a cross-graph path depends on.
   typed `sh:PropertyShape`, without a `sh:path`; a shape with more than one
   `sh:path`; a path that is not a well-formed SHACL property path (a literal, a
   blank node that is no path, a sequence or alternative with a member that is
-  no path); and a SPARQL target (`sh:target [ sh:select … ]`) that does not
-  parse, does not project `?this`, or errors when it runs.
+  no path); a SPARQL target (`sh:target [ sh:select … ]`) that does not
+  parse, does not project `?this`, or errors when it runs; and, since
+  2026-10-06, a `sh:pattern` that is not a regular expression the engine
+  evaluates, or `sh:flags` that SPARQL `REGEX` does not have (it used to pass
+  every value).
+- **`sh:pattern` is an XPath regular expression**, as SPARQL `REGEX` reads it:
+  XML Schema 1.0 syntax, where `{` and `}` outside a quantifier are ordinary
+  characters (`^({)(.*)(})$` matches a braced string), plus XPath's anchors,
+  reluctant quantifiers and flags.
 
 ### Literal forms
 
@@ -446,6 +453,8 @@ Impact — *what data a shape graph is applied to* — is the reverse binding lo
 ### Pipelines & targets
 
 A pipeline is a saved, runnable validation. Its scope is a set of **targets** — any mix of datasets, graphs, and shape graphs — plus composed shape graphs, a severity threshold, and triggers (manual, on-write, cron). When `gate_writes` is set, writes covered by the pipeline are gated. See `POST /api/shacl/pipelines`; the request body's `targets` is an array of `{ "kind": "dataset"|"graph"|"shapegraph", "id": "…" }`.
+
+**Run on write** (`trigger_on_write`) needs the [change log](/docs/versioning) (`OTS_CHANGE_CAPTURE_ENABLED=on`): a few seconds after a write to one of the pipeline's data graphs the pipeline runs, recorded as `triggered_by: "write"`. When it can, the run covers only the nodes the write touched — the subjects of the changed statements, the nodes they point at, and the nodes pointing at them — and merges the result into the pipeline's last report, which then says what a full run would. It runs in full instead when there is no earlier report, the pipeline's shapes changed, the shapes use SPARQL constraints or targets, the pipeline infers, the change log could not carry the write's quads, or more than `OTS_STUDIO_INCREMENTAL_MAX` (10 000) nodes were touched. Like a scheduled run it reads with its creator's authority. With capture off the trigger does nothing.
 
 A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
 

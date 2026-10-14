@@ -453,7 +453,7 @@ fn unreachable<E: std::error::Error + 'static>(e: &E) -> Unreachable {
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!("open-triplestore-raft/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .build()

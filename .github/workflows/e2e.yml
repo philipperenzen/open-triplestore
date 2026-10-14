@@ -49,10 +49,10 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -84,20 +84,21 @@ jobs:
         working-directory: frontend
         env:
           CI: 'true'
-          JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
+          OTS_JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
           # Reuse the binary built above instead of `cargo run` (faster startup).
           OTS_BACKEND_CMD: ../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn
           # Keep the boot seed chain short on the 2-core runner: skip the
           # standard-vocabulary registry seed (55+ versions incl. the 66k-triple
           # IMBOR vocabulaire — minutes in a debug build, and its store/SQLite
-          # writes contend with the tests' own imports) and the one-off LOV
-          # corpus download. No e2e spec depends on either; the demo datasets
-          # and saved queries the specs use are seeded regardless.
-          SEED_STANDARD_VOCABS: 'false'
-          VOCAB_CORPUS_URL: ''
+          # writes contend with the tests' own imports) and, through
+          # OTS_OFFLINE, every startup download (the LOV corpus, the demo IFC
+          # models). No e2e spec depends on either; the demo datasets and saved
+          # queries the specs use are seeded regardless.
+          OTS_SEED_STANDARD_VOCABS_ENABLED: 'false'
+          OTS_OFFLINE: 'true'
         run: npm run e2e
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: playwright-report

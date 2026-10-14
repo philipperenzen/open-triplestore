@@ -110,27 +110,15 @@ pub(crate) struct Registry {
 
 impl Registry {
     /// The designation in `OTS_SPARQL_FUNCTION_GRAPHS` (comma-separated),
-    /// read once per process. An entry that may not be designated is ignored
-    /// with a warning.
+    /// read once per process. The configuration registry refuses an entry
+    /// that may not be designated (only an admin can write those graphs).
     pub(crate) fn from_env() -> Self {
         static FROM_ENV: OnceLock<Vec<String>> = OnceLock::new();
         let graphs = FROM_ENV.get_or_init(|| {
-            let raw = std::env::var("OTS_SPARQL_FUNCTION_GRAPHS").unwrap_or_default();
-            raw.split(',')
-                .map(str::trim)
-                .filter(|g| !g.is_empty())
-                .filter(|g| {
-                    let ok = is_designatable_graph(g);
-                    if !ok {
-                        warn!(
-                            "OTS_SPARQL_FUNCTION_GRAPHS: <{g}> ignored: a function graph must \
-                             be <{DESIGNATED_GRAPH}> or start with {DESIGNATED_GRAPH}:, which \
-                             only an admin can write"
-                        );
-                    }
-                    ok
-                })
-                .map(str::to_string)
+            crate::config::SPARQL_FUNCTION_GRAPHS
+                .get()
+                .into_iter()
+                .filter(|g| is_designatable_graph(g))
                 .collect()
         });
         Self {

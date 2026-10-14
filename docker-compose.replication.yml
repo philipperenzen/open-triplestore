@@ -4,7 +4,7 @@
 # the leader records every write in its change log and the follower tails
 # it, keeping a read-only copy that is one network round trip behind. The
 # file is independent of docker-compose.yml on purpose — no S3 gateway, no mail,
-# no LLM — so it starts with one secret. Both nodes share JWT_SECRET: a
+# no LLM — so it starts with one secret. Both nodes share OTS_JWT_SECRET: a
 # session or API token minted on the leader is then valid on the follower,
 # whose identity database is a copy of the leader's.
 #
@@ -15,7 +15,7 @@
 # docs/operations.md under "Try it".
 #
 #   cp .env.example .env
-#   printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+#   printf 'OTS_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 #   docker compose -f docker-compose.replication.yml up -d leader
 #   # register the first user (it becomes super_admin) and mint the token:
 #   curl -s -X POST localhost:7878/api/auth/register -H 'Content-Type: application/json' \
@@ -58,17 +58,15 @@ services:
       - leader_data:/data
     environment:
       - RUST_LOG=info
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
-      - AUTH_DB_PATH=/data/auth.db
-      - BASE_URL=${LEADER_BASE_URL:-http://localhost:7878}
+      - OTS_JWT_SECRET=${OTS_JWT_SECRET:?OTS_JWT_SECRET must be set (no default) — see .env.example}
+      - OTS_AUTH_DB_PATH=/data/auth.db
+      - OTS_BASE_URL=${LEADER_BASE_URL:-http://localhost:7878}
       # The first boot seeds the same demo organisation as any install —
       # IFC buildings, files and all: downloads from GitHub and a few
-      # minutes of lifting. For an offline or quicker stack, uncomment the
-      # next line on both services: an empty SEED_IFC_URL leaves the IFC
-      # building demos out. (It is not a .env variable: an unset one must
-      # stay unset, and compose cannot pass "unset" through a default.)
-      # - SEED_IFC_URL=
-      # The leader keeps change capture on whatever OTS_CHANGE_CAPTURE says
+      # minutes of lifting. For an offline or quicker stack, set
+      # OTS_OFFLINE=true on both services (or in .env): no download at startup.
+      # - OTS_OFFLINE=true
+      # The leader keeps change capture on whatever OTS_CHANGE_CAPTURE_ENABLED says
       # (docs/versioning.md, "Change log") and serves its manifest, its rows
       # and whole graphs to followers under an admin token.
       - OTS_REPLICATION_ROLE=leader
@@ -85,10 +83,10 @@ services:
     environment:
       - RUST_LOG=info
       # The same secret as the leader: tokens issued there validate here.
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
-      - AUTH_DB_PATH=/data/auth.db
-      - BASE_URL=${FOLLOWER_BASE_URL:-http://localhost:7879}
-      # - SEED_IFC_URL=
+      - OTS_JWT_SECRET=${OTS_JWT_SECRET:?OTS_JWT_SECRET must be set (no default) — see .env.example}
+      - OTS_AUTH_DB_PATH=/data/auth.db
+      - OTS_BASE_URL=${FOLLOWER_BASE_URL:-http://localhost:7879}
+      # - OTS_OFFLINE=true
       # A follower's store is read-only: every write answers 503 and names
       # the leader. Reads, SPARQL, the web UI and SHACL validation all work.
       - OTS_REPLICATION_ROLE=follower

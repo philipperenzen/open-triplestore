@@ -39,7 +39,7 @@ Compose has no insecure defaults; it won't start until the secrets exist.
 ```powershell
 Copy-Item .env.example .env
 function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
-Add-Content .env "JWT_SECRET=$(New-Secret 32)"
+Add-Content .env "OTS_JWT_SECRET=$(New-Secret 32)"
 Add-Content .env "S3_GATEWAY_ACCESS_KEY=$(New-Secret 8)"
 Add-Content .env "S3_GATEWAY_SECRET_KEY=$(New-Secret 24)"
 ```
@@ -146,7 +146,7 @@ WSL2 forwards `localhost` automatically.
 
 If a process running inside a Docker/WSL container needs to reach a server on the
 Windows host (e.g. the optional service registry or an LLM gateway), use
-`host.docker.internal` — already the default for `LD_REGISTRY_URL` in
+`host.docker.internal` — already the default for `OTS_REGISTRY_URL` in
 [`docker-compose.yml`](../docker-compose.yml). It resolves on Docker Desktop for
 Windows out of the box.
 
@@ -264,7 +264,7 @@ curl.exe -X POST http://localhost:7878/sparql `
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Invoke-WebRequest : Cannot bind parameter 'Headers'` | You used `curl` (the alias) with `-H` | Use `curl.exe` |
-| `required variable JWT_SECRET is missing a value` | No `.env` for `docker compose` | Create `.env` (see Option 1, step 2) |
+| `required variable OTS_JWT_SECRET is missing a value` | No `.env` for `docker compose` | Create `.env` (see Option 1, step 2) |
 | `/bin/bash^M: bad interpreter` in WSL | A script got CRLF endings | Pull latest (the repo's `.gitattributes` pins scripts to LF); or `dos2unix <file>` |
 | `make: *** … Error 127` under Git Bash | `make` not installed, or `docker-compose` (v1) missing | The `Makefile` targets assume a Unix shell + Docker Compose v2; run them in WSL |
 | Docker build can't reach `host.docker.internal` | Not on Docker Desktop | It's Docker-Desktop-only; on plain Linux use the host IP |

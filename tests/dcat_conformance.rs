@@ -183,21 +183,21 @@ fn version(
     derived_from: Option<&str>,
     notes: Option<&str>,
 ) -> open_triplestore::dataset_versions::models::DatasetVersion {
-    open_triplestore::dataset_versions::models::DatasetVersion {
-        dataset_id: ds.into(),
-        version: v.into(),
+    let mut record = open_triplestore::dataset_versions::models::DatasetVersion::checkpoint(
+        ds,
+        v,
         status,
-        graph_iri: format!("{BASE}/dataset/{ds}/version/{v}"),
-        snapshot_graphs: vec![],
-        source_map: vec![],
-        created_at: created.into(),
-        created_by: None,
-        derived_from: derived_from.map(str::to_string),
-        notes: notes.map(str::to_string),
-        branch: None,
-        conforms_to_model: Some("census-model".into()),
-        conforms_to_version: Some("1.0.0".into()),
-    }
+        format!("{BASE}/dataset/{ds}/version/{v}"),
+        vec![],
+        None,
+        notes.map(str::to_string),
+        None,
+    );
+    record.created_at = created.into();
+    record.derived_from = derived_from.map(str::to_string);
+    record.conforms_to_model = Some("census-model".into());
+    record.conforms_to_version = Some("1.0.0".into());
+    record
 }
 
 // DCAT 3 §11: a released version is a dcat:Dataset of its own, linked from the

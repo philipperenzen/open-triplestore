@@ -4,7 +4,8 @@
 //! unconditionally (an SSRF mitigation, but also no federation at all). This
 //! handler is registered as the evaluator's default service handler: it
 //! forwards the SERVICE pattern as a stand-alone SELECT to the named endpoint
-//! — only if `crate::remote::is_allowed` says so — with the module's timeout
+//! — only if `crate::remote::is_allowed` says so for `OTS_SERVICE_ALLOWLIST`
+//! — with the module's timeout
 //! and body limit, and hands the solutions back to the local evaluator, which
 //! joins them with the rest of the query.
 //!
@@ -298,10 +299,12 @@ impl AllowlistedServiceHandler {
             return Err(self.budget.deadline_exceeded());
         }
         // `SERVICE <urn:source:id>` names a registered virtual datasource:
-        // its endpoint and its account stand in, and the allowlist applies
-        // to the endpoint exactly as to a URL written out. A source the
-        // caller may not use resolves to nothing, and its IRI then fails the
-        // allowlist like any IRI that names no source.
+        // its endpoint and its account stand in, and the datasource
+        // allowlist (`OTS_SOURCES_ALLOWLIST`) applies to the endpoint. A URL
+        // written out goes through the federation allowlist
+        // (`OTS_SERVICE_ALLOWLIST`). A source the caller may not use resolves
+        // to nothing, and its IRI then fails the federation allowlist like
+        // any IRI that names no source.
         let resolved = match crate::sources::virtual_source::resolve(
             service_name.as_str(),
             self.source_caller.as_deref(),
@@ -319,8 +322,17 @@ impl AllowlistedServiceHandler {
             .as_ref()
             .map(|r| r.endpoint.as_str())
             .unwrap_or_else(|| service_name.as_str());
-        if !crate::remote::is_allowed(endpoint) {
-            return Err(crate::remote::RemoteError::NotAllowed(endpoint.to_string()).into());
+        let purpose = if resolved.is_some() {
+            crate::remote::Purpose::Sources
+        } else {
+            crate::remote::Purpose::Service
+        };
+        if !crate::remote::is_allowed(purpose, endpoint) {
+            return Err(crate::remote::RemoteError::NotAllowed {
+                url: endpoint.to_string(),
+                purpose,
+            }
+            .into());
         }
         self.budget.admit(endpoint)?;
         let bearer = crate::federation::assertion_for_identity(endpoint, self.identity.as_ref());
@@ -335,6 +347,7 @@ impl AllowlistedServiceHandler {
             },
         };
         let body = crate::remote::post_sparql_blocking_within(
+            purpose,
             endpoint,
             query,
             "application/sparql-results+json",

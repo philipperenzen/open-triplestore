@@ -17,7 +17,7 @@
 //! `TripleStore` holding that block's data. The endpoint IRIs are replaced by
 //! the listeners' URLs **in memory** — in the query, in the local and remote
 //! data and in the expected results — so the files on disk stay byte-identical
-//! to upstream. Only the listeners are on `OTS_REMOTE_ALLOWLIST`, so an
+//! to upstream. Only the listeners are on `OTS_SERVICE_ALLOWLIST`, so an
 //! endpoint the suite expects to fail (`http://invalid.endpoint.org/sparql`)
 //! is refused, as any endpoint outside the allowlist is. Each listener
 //! evaluates through `TripleStore` too, so a nested `SERVICE` inside a remote
@@ -537,7 +537,7 @@ fn w3c_sparql11_federation_suites() {
         .map(|(iri, ep)| (iri.clone(), ep.url.clone()))
         .collect();
     std::env::set_var(
-        "OTS_REMOTE_ALLOWLIST",
+        "OTS_SERVICE_ALLOWLIST",
         map.values().cloned().collect::<Vec<_>>().join(","),
     );
 

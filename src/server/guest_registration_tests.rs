@@ -5,7 +5,7 @@
 //! individually-deactivated guests untouched), the ON-sweep (exactly the
 //! toggled-off guests come back), and the features flag the register UI reads.
 //!
-//! The OTS_DISABLE_REGISTRATION env branch itself is covered by the pure
+//! The OTS_REGISTRATION_ENABLED branch itself is covered by the pure
 //! [`decide_registration`] matrix — no test mutates process env (tests run in
 //! parallel; env is process-global).
 

@@ -259,14 +259,22 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         SecurityRequirement::new("bearer_auth", Vec::<String>::new())
     }
 
-    /// Convert an axum path (`/a/:id/*rest`) to OpenAPI (`/a/{id}/{rest}`) and
-    /// return the collected path-parameter names.
+    /// Convert a route path to OpenAPI (`/a/{id}/{rest}`) and return the
+    /// collected path-parameter names. The mounts below spell parameters
+    /// `:id` / `*rest`, the router's (axum 0.8) `{id}` / `{*rest}`; both work.
     fn convert_path(axum: &str) -> (String, Vec<String>) {
         let mut names = Vec::new();
         let segs: Vec<String> = axum
             .split('/')
             .map(|s| {
-                if let Some(n) = s.strip_prefix(':') {
+                let braced = s
+                    .strip_prefix('{')
+                    .and_then(|s| s.strip_suffix('}'))
+                    .map(|s| s.strip_prefix('*').unwrap_or(s));
+                if let Some(n) = braced {
+                    names.push(n.to_string());
+                    format!("{{{n}}}")
+                } else if let Some(n) = s.strip_prefix(':') {
                     names.push(n.to_string());
                     format!("{{{n}}}")
                 } else if let Some(n) = s.strip_prefix('*') {
@@ -1091,7 +1099,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     }
     mount(paths, "/api/datasets/:dataset_id/containers/import", vec![
         (M::Post, ob("Import", "Import a linked-document container",
-            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_MB` (512 MB). See docs/containers.md.",
+            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_BYTES` (512 MiB). See docs/containers.md.",
             vec![qp("profile", false, "Container profile; `icdd` (default: detected)"),
                  qp("strict", false, "`true`: refuse (422) a container the validator finds a violation in; nothing is stored")],
             zip_body(),
@@ -1687,10 +1695,6 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/datasets/:dataset_id/versions/:ver/diff/:other", vec![
         (M::Get, o("Versions", "Diff two versions", "What changed from `ver` to `other` (another version, or `live` for the current graphs): per-graph `added` / `removed` counts as JSON, or with `?format=rdf-patch` (or `Accept: application/rdf-patch`) an RDF Patch that turns `ver` into `other` — `PD` / `PA` rows for the prefix-table changes when both sides recorded a table, then `D` / `A` quads against the live graph names, blank nodes by the store's ids. A diff to a version has a name-based `H id`, and its `H prev` names the diff from the version cut before `ver` to `ver`, so consecutive diffs chain. Graphs a non-writer may not read are left out.",
             vec![], vec![("200", "JSON counts or `application/rdf-patch`"), ("404", "Dataset or version not found")], false)),
-    ]);
-    mount(paths, "/api/datasets/:dataset_id/patch", vec![
-        (M::Post, o("Versions", "Apply an RDF Patch", "Apply an RDF Patch (`application/rdf-patch`) to the dataset, atomically, as one commit: `A` / `D` quads must name a registered graph (triples go to the registered graph `?graph=` names, else 400), the SHACL write gates run over each touched graph's future contents (422 with the report), blank nodes name the store's own nodes, and `PA` / `PD` rows change the dataset's prefix table. Not journaled in the dataset's patch log; append to `…/log` for that. Response: `{applied, id, aborted, transactions, added, removed, graphs}`.",
-            vec![], vec![("200", "Applied (or nothing to apply)"), ("400", "Invalid patch, or a graph the dataset does not hold"), ("401", "Authentication required"), ("403", "Write access required"), ("415", "Not an RDF Patch"), ("422", "A SHACL write gate refused it")], true)),
     ]);
     mount(paths, "/api/datasets/:dataset_id/prefixes", vec![
         (M::Get, o("Datasets", "Dataset prefix table", "The dataset's own prefixes, `[{label, namespace, updated_by, updated_at}]` by label: part of its data, changed by an applied RDF Patch's `PA` / `PD` rows, recorded with each version and restored with it, and declared by the dataset's Turtle and TriG exports ahead of the prefix registry. The label may be empty (the default prefix `:`).",
@@ -2581,7 +2585,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Datasets",
                 "Sync a remote event stream",
-                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_REMOTE_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_LDES_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
                 vec![],
                 json_body(
                     ObjectBuilder::new()
@@ -4323,7 +4327,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Install vocabulary",
-                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
+                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with OTS_VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
                 vec![],
                 vec![
                     ("200", "Install outcome"),
@@ -6404,6 +6408,223 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
     mount(
         paths,
+        "/api/admin/changes/stats",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log statistics",
+                "Size accounting for the change log and the delta versions built on it: rows and payload bytes per dataset, live builds of delta versions and the quads they hold, checkpoints and deltas per dataset, rows of graphs no dataset holds, store-scoped rows, and the pins and cursors holding retention back, with their owners.",
+                vec![],
+                vec![
+                    ("200", "Statistics"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/versions/sweep",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Sweep orphaned versions",
+                "Purge what deleted datasets and interrupted operations left behind: every version of a dataset that no longer exists (graphs, registry records, change-log pins), version graphs no registry record names, pins of versions the registry no longer holds, and builds of delta versions past their time-to-live.",
+                vec![],
+                vec![
+                    ("200", "`{purged_datasets, orphan_graphs_dropped, pins_released, builds_dropped}`"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "The dataset's change feed",
+                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
+                vec![
+                    qp("since", false, "Return rows with seq above this (default 0)."),
+                    qp("limit", false, "Rows per page, 1-5000 (default 500)."),
+                    qp("wait_ms", false, "Long-poll up to this many milliseconds (at most 30000) when nothing is new."),
+                ],
+                vec![("200", "Rows in commit order"), ("404", "Dataset not found")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/:seq",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "One change as an RDF Patch",
+                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`.",
+                vec![],
+                vec![
+                    ("200", "The patch"),
+                    ("404", "Not a change of this dataset, or not readable"),
+                    ("409", "The row carries no quads (`extent` counts or unknown)"),
+                    ("410", "Retention removed the change"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/:seq/inverse",
+        vec![(
+            M::Get,
+            o(
+                "Versions",
+                "The patch that undoes one change",
+                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch.",
+                vec![],
+                vec![
+                    ("200", "The patch"),
+                    ("404", "Not a change of this dataset, or not readable"),
+                    ("409", "The row carries no quads"),
+                    ("410", "Retention removed the change"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/changes/cursors/:name",
+        vec![
+            (
+                M::Put,
+                ob(
+                    "Versions",
+                    "Set a feed cursor",
+                    "Keep a reader's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("seq", ObjectBuilder::new().schema_type(Type::Integer))
+                            .required("seq"),
+                        json!({ "seq": 42 }),
+                    ),
+                    vec![
+                        ("200", "The cursor"),
+                        ("400", "Invalid name or seq beyond the log"),
+                        ("401", "Authentication required"),
+                        ("403", "Someone else's cursor"),
+                        ("409", "Change capture is off"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Versions",
+                    "Delete a feed cursor",
+                    "Drop a cursor; its owner or an admin.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "Someone else's cursor"),
+                        ("404", "No such cursor"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/settings",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Versions",
+                    "Dataset settings",
+                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, which needs change capture).",
+                    vec![],
+                    vec![("200", "The settings"), ("404", "Dataset not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Put,
+                ob(
+                    "Versions",
+                    "Change dataset settings",
+                    "Set `skolem` and/or `provenance`; a field left out keeps its value. Dataset writers only.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("skolem", ObjectBuilder::new().schema_type(Type::Boolean))
+                            .property("provenance", ObjectBuilder::new().schema_type(Type::String)),
+                        json!({ "provenance": "minimal" }),
+                    ),
+                    vec![
+                        ("200", "The settings"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Dataset not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/patch",
+        vec![(
+            M::Post,
+            ob(
+                "Versions",
+                "Apply an RDF Patch",
+                "Apply an RDF Patch (`application/rdf-patch`) to the dataset, atomically, as one commit recorded in the change log: `A` / `D` quads must name a registered graph (triples go to the registered graph `?graph=` names, else 400), `H base-digest` makes the apply conditional on the set hash of the graphs the rows name (412), the SHACL write gates run over each touched graph's future contents (422 with the report), blank nodes name the store's own nodes, RDF 1.2 triple terms `<<( s p o )>>` are accepted as objects, and `PA` / `PD` rows change the dataset's prefix table. The repair layer's `?if-base-commit=` / `?if-base-sequence=` preconditions apply (409). Not journaled in the dataset's patch log; append to `…/log` for that. Response: `{applied, id, aborted, transactions, added, removed, graphs, seq}` — `added` / `removed` are the net change, `seq` the write's last change-log sequence number when the log recorded it.",
+                vec![],
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/rdf-patch",
+                        ContentBuilder::new()
+                            .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
+                            .example(Some(json!(
+                                "TX .\nD <http://e/s> <http://e/p> \"old\" <urn:g> .\nA <http://e/s> <http://e/p> \"new\" <urn:g> .\nTC ."
+                            )))
+                            .build(),
+                    )
+                    .build(),
+                vec![
+                    ("200", "Applied (or `applied: false` for TA / no rows)"),
+                    ("400", "Invalid patch, or a graph the dataset does not hold"),
+                    ("401", "Authentication required"),
+                    ("403", "Write access required"),
+                    ("409", "An `if-base-*` precondition does not hold"),
+                    ("412", "H base-digest does not match the graphs"),
+                    ("415", "Not an RDF Patch"),
+                    ("422", "A SHACL write gate refused it"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/replication/status",
         vec![(
             M::Get,
@@ -6651,7 +6872,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "Create backup",
-                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `BACKUP_ENCRYPT=true`). With `BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
+                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `OTS_BACKUP_ENCRYPTION_ENABLED=true`). With `OTS_BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
                     vec![],
                     vec![("200", "The new backup's manifest and `s3`"), ("403", "super_admin role required"), ("500", "The backup failed"), ("503", "Backups are not configured")],
                     true,
@@ -6686,7 +6907,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Backup status",
-                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_hours, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
+                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_secs, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
                 vec![],
                 vec![("200", "Backup status"), ("403", "super_admin role required")],
                 true,
@@ -6701,7 +6922,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Stage a restore",
-                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `BACKUP_DECRYPT_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
+                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
                 vec![],
                 vec![
                     ("200", "`{id, requested_by, requested_at}`"),
@@ -6907,6 +7128,24 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![qp("since", false, "Only usage after this timestamp"), qp("limit", false, "Max rows")],
             vec![("200", "Array of usage rows"), ("401", "Authentication required"), ("403", "super_admin required")], true)),
     ]);
+    mount(paths, "/api/admin/config", vec![
+        (M::Get, o("Admin", "Effective configuration",
+            "Every setting the server reads, with its effective value, its default, its kind and where the value came from (`cli`, `env`, `file`, `profile` or `default`). Secret values are redacted; a secret given as a reference (`env:`, `file:`, `vault:`) shows the reference.",
+            vec![], vec![("200", "The profile and every setting"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings", vec![
+        (M::Get, o("Admin", "Runtime settings",
+            "The settings an administrator can change without a restart (self-registration, guest capabilities, embed framing, AI budgets, OIDC token policies), each with its effective value, the configured value it overrides (environment, profile or default) and whether an override is set.",
+            vec![], vec![("200", "The runtime settings"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings/:name", vec![
+        (M::Put, ob("Admin", "Change a runtime setting",
+            "Override a runtime setting, validated exactly as its environment variable would be, or remove the override with `{\"value\": null}` so the configured value applies again. Audit-logged as `setting_changed`.",
+            vec![pp("name")], json_body(ObjectBuilder::new()
+                .property("value", ObjectBuilder::new().schema_type(Type::String).description(Some("The new value; null removes the override."))),
+                json!({"value": "false"})),
+            vec![("200", "The setting after the change"), ("400", "The value does not validate"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No runtime setting of that name")], true)),
+    ]);
     mount(paths, "/api/admin/settings/guest-registration", vec![
         (M::Get, o("Admin", "Guest registration setting",
             "Whether guest self-registration is on, with the current guest counts.",
@@ -6996,9 +7235,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured, and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
+                "Reachability of the LLM gateway, whether OTS_LLM_GATEWAY_URL is configured (unset: the AI features are off and nothing is probed), why an unreachable gateway failed, whether this caller may use AI at all, the request budgets (0 = refused, null = unlimited), and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
-                vec![("200", "{ gateway, configured, reachable, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
+                vec![("200", "{ gateway, configured, reachable, unreachable_reason, available_to_caller, rate_limit_per_min, rate_limit_anon_per_min, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,
             ),
         )],
@@ -7770,7 +8009,7 @@ mod tests {
         }
     }
 
-    /// `/a/:id/*rest` and `/a/{id}/{rest}` both become `/a/{}/{}`: the parity
+    /// `/a/:id/*rest` and `/a/{id}/{*rest}` both become `/a/{}/{}`: the parity
     /// check is about which operations exist, not what a parameter is called.
     fn shape(path: &str) -> String {
         path.split('/')

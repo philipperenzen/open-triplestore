@@ -14,6 +14,108 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Runtime settings, editable under Admin → Settings.** Self-registration
+  (`OTS_REGISTRATION_ENABLED`), guest capabilities, embed framing, the AI
+  budgets and the OIDC token policies can be changed without a restart, on the
+  new `/admin/settings` page or with `PUT /api/admin/settings/{name}`
+  (`GET /api/admin/settings` lists them). The environment variable stays the
+  default: an override is stored in `app_settings` only when an administrator
+  sets one, is validated like the variable, applies on the next request (on
+  followers too), is audit-logged as `setting_changed`, and **Reset** removes
+  it. The page also shows the effective configuration of every setting with its
+  source, `admin` for an override.
+- **One configuration registry, validated at startup.** Every setting the
+  server reads is declared once (`src/config/registry.rs`) with its kind,
+  default, flag and documentation, and read through a typed key. The server
+  validates every setting together before it starts and refuses to start on
+  any problem, listing all of them: a number that does not parse or is out of
+  range, a boolean that is not `true/false/1/0/yes/no/on/off` (any case), an
+  unknown choice, a malformed secret reference, an outbound allowlist entry
+  that is not an absolute http(s) URL, settings that need each other (a
+  follower without a leader URL, `OTS_DL_BACKEND=sidecar` without
+  `OTS_REASONER_URL`, `OTS_OIDC_ISSUER` without `OTS_OIDC_AUDIENCE`). Nothing falls
+  back to a default silently any more. The parsed configuration is carried in
+  `AppState`, and the command-line flags are generated from the registry.
+- **`GET /api/admin/config`** (admin only): every setting with its effective
+  value, default, kind, documentation and source (`cli`, `env`, `file`,
+  `profile` or `default`). Secret values are redacted; a secret given as a
+  reference shows the reference.
+- **`geof:aggConcaveHull(?geom, targetPercent)`** (GeoSPARQL 1.1 §10.10): the
+  aggregate takes its target, a constant or an expression of the group key,
+  from 0 (the most concave hull) to 1 (the convex hull); 0.5 without it, as
+  before. A group whose solutions disagree on the target, or a target outside
+  0..1, is unbound (#525). This needs custom aggregate calls with several
+  arguments, which the vendored SPARQL crates now parse, optimise and evaluate
+  (`vendor/README.md`, changes 11–13; `AggregateFunctionAccumulator` gains
+  `accumulate_arguments`). The other five GeoSPARQL aggregates take one
+  argument; a second makes their result unbound.
+- **D-entailment by value under every regime, and `rdfD1` on request.**
+  Under `?entailment=` (and `entailment_dataset=` with a regime) a literal
+  constant in a triple pattern matches every literal of the same value:
+  `"010"^^xsd:integer`, `"10"^^xsd:integer` and `"10.0"^^xsd:decimal` match
+  one another, `"1E400"^^xsd:double` matches `"INF"^^xsd:double`, while
+  `"1"^^xsd:integer` and `"1"^^xsd:double` do not (disjoint value spaces).
+  Strings and booleans are matched through a `VALUES` table of their forms,
+  other values through the server's `sameValue` function
+  (`https://open-triplestore.org/def/function/rdf/sameValue`). The RDFS
+  materialiser applies `rdfD1` when asked (`"rdfd1": true` on
+  `POST /api/reasoning/materialize`, `RdfsMaterializer::with_rdfd1`): one blank
+  node per data value, typed with its datatypes, takes the literal's place in
+  a copy of each triple. `RdfsMaterializer::with_recognized_datatypes` sets
+  the `D` of a run. Every W3C RDF 1.1 Semantics case now passes
+  (`docs/conformance/entailment.md`).
+- **Delta versions.** With change capture on (`OTS_CHANGE_CAPTURE=on`), a
+  dataset's first version is a checkpoint (a copy, as before) and the next
+  ones are deltas: a base checkpoint, a range of the change log and a content
+  hash — nothing copied when the version is cut. A delta reads like a
+  checkpoint: its graphs are built on first read (never for an anonymous
+  caller, who gets `503` with `Retry-After`; `507` over
+  `OTS_MATERIALISATION_MAX_QUADS`), dropped again after
+  `OTS_MATERIALISATION_TTL_SECS`, and verified against the content hash when
+  the version is published, which makes it physical. A cut is a checkpoint
+  when capture is off, the version is Published, `"checkpoint": true` asks
+  for one, a graph is shared with another dataset, no anchored checkpoint
+  covers the graphs, the chain since it is broken, or the chain has grown
+  (`OTS_CHECKPOINT_EVERY`, `OTS_CHECKPOINT_FRACTION`); the response says why.
+  Diffs and branch `ahead`/`behind` between versions on one chain come from
+  the change log (`"source": "chain"`), branches copy nothing, a restore
+  applies the chain's inverse in one transaction across all graphs when it
+  can (`"tier": 1`), and a checkpoint a delta chains from is never deleted or
+  collected. Version records gain `kind`, `base_version`, `patch_range`,
+  `anchor`, `content_hash`, `quad_count`, `change_count`, `chain_broken`,
+  `materialised`. See docs/versioning.md, "Delta versions".
+- **A dataset's change feed.** `GET /api/datasets/:id/changes` lists the
+  change-log rows of the dataset's graphs the caller may read;
+  `…/changes/:seq` serves one change as an RDF Patch and `…/inverse` the patch
+  that undoes it; `PUT`/`DELETE …/changes/cursors/:name` keeps a reader's
+  position (pinning retention). `GET /api/admin/changes/stats` accounts for
+  the log per dataset. A commit whose write the log recorded carries
+  `seq_from`/`seq_to` and `net_added`/`net_removed`.
+- **RDF Patch:** RDF 1.2 triple terms (`<<( s p o )>>` as an object, an
+  extension: the format has no syntax for them, and a change or version diff
+  that holds one must carry it), inverse patches (`H prev`), change headers
+  (`H seq`, `H epoch`, `H commit`), and `H base-digest`, which makes an apply
+  conditional on the graphs' content (`412`). A patch applies through the same
+  engine primitive as version restores and builds (`apply_quad_ops`), recorded
+  in the change log under one commit; the response adds the write's `seq`.
+  A patch-log version entry over a delta version is rendered from the change
+  log between the two versions it compares, or from the versions once built.
+- **Statement provenance (opt-in).** `PUT /api/datasets/:id/settings` with
+  `{"provenance": "minimal" | "full"}`: every change to the dataset's
+  statements is annotated in RDF 1.2 in `urn:ots:statement-provenance:<id>` —
+  a named reifier per statement, an event per change with its operation,
+  change-log sequence number and commit (`full` adds actor and time). The
+  graph is no reasoning premise, never gated, no LDES member, not part of a
+  version by default, and out of the dataset's browse scope.
+- **Skolem IRIs on import (opt-in).** `{"skolem": true}` gives blank nodes
+  imported into the dataset's graphs durable, content-derived IRIs, so a
+  re-import changes nothing.
+- **Write-triggered validation pipelines.** `trigger_on_write` — stored but
+  never read until now — runs the pipeline after a write to its data graphs
+  (with change capture on), over only the nodes the write touched when it can,
+  merged into its last report.
+- **`POST /api/admin/versions/sweep`** purges what deleted datasets left
+  behind: their versions, unreferenced version graphs, stale change-log pins.
 - **Web UI for the exchange formats and maintenance tasks that were API-only.**
   The dataset page has an **Exchange** section: the LDES stream's settings
   (publishing, members per page, polling interval, retention policy, with the
@@ -748,14 +850,251 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compose never passes on. Documented settings that compose does not forward
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
+### Changed (breaking)
+
+Configuration (no aliases: every renamed or removed name below **stops the
+start** with the name to use instead, so an old `.env` is never silently
+ignored):
+
+- **Every setting is `OTS_…`, and every switch ends in `_ENABLED`.** The
+  renames, which apply to the command line's environment names, `.env`,
+  compose and the docs alike:
+
+  | Old | New |
+  |---|---|
+  | `ACCEPT_LEGACY_TOKENS` | `OTS_SESSION_AND_API_TOKENS_ENABLED` |
+  | `ACCESS_TOKEN_EXPIRY_SECS` | `OTS_ACCESS_TOKEN_EXPIRY_SECS` |
+  | `ACCOUNTS_DASHBOARD_APP_GROUPS` | `OTS_ACCOUNTS_DASHBOARD_APP_GROUPS` |
+  | `ACCOUNTS_DASHBOARD_GATEWAY_KEY` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` |
+  | `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` |
+  | `ALERT_SMTP_FROM` | `OTS_ALERT_SMTP_FROM` |
+  | `ALERT_SMTP_HOST` | `OTS_ALERT_SMTP_HOST` |
+  | `ALERT_SMTP_PASS` | `OTS_ALERT_SMTP_PASSWORD` |
+  | `ALERT_SMTP_PORT` | `OTS_ALERT_SMTP_PORT` |
+  | `ALERT_SMTP_TLS` | `OTS_ALERT_SMTP_TLS` |
+  | `ALERT_SMTP_TO` | `OTS_ALERT_SMTP_TO` |
+  | `ALERT_SMTP_USER` | `OTS_ALERT_SMTP_USERNAME` |
+  | `ALERT_WEBHOOK_URL` | `OTS_ALERT_WEBHOOK_URL` |
+  | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS` |
+  | `AUTH_DB_PATH` | `OTS_AUTH_DB_PATH` |
+  | `BACKUP_DECRYPT_IDENTITY_PATH` | `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` |
+  | `BACKUP_DIR` | `OTS_BACKUP_DIR` |
+  | `BACKUP_ENCRYPT` | `OTS_BACKUP_ENCRYPTION_ENABLED` |
+  | `BACKUP_ENCRYPT_KEY_PATH` | `OTS_BACKUP_ENCRYPTION_KEY_PATH` |
+  | `BACKUP_RETENTION_COUNT` | `OTS_BACKUP_RETENTION_COUNT` |
+  | `BACKUP_S3_ENABLED` | `OTS_BACKUP_S3_ENABLED` |
+  | `BACKUP_SCHEDULE_SECS` | `OTS_BACKUP_SCHEDULE_SECS` |
+  | `BASE_URL` | `OTS_BASE_URL` |
+  | `CATALOG_CONTACT_EMAIL` | `OTS_CATALOG_CONTACT_EMAIL` |
+  | `CATALOG_CONTACT_NAME` | `OTS_CATALOG_CONTACT_NAME` |
+  | `CATALOG_DESCRIPTION` | `OTS_CATALOG_DESCRIPTION` |
+  | `CATALOG_LANGUAGE` | `OTS_CATALOG_LANGUAGE` |
+  | `CATALOG_LICENSE` | `OTS_CATALOG_LICENSE` |
+  | `CATALOG_PUBLISHER_IDENTIFIER` | `OTS_CATALOG_PUBLISHER_IDENTIFIER` |
+  | `CATALOG_PUBLISHER_NAME` | `OTS_CATALOG_PUBLISHER_NAME` |
+  | `CATALOG_PUBLISHER_TYPE` | `OTS_CATALOG_PUBLISHER_TYPE` |
+  | `CATALOG_PUBLISHER_URI` | `OTS_CATALOG_PUBLISHER_URI` |
+  | `CATALOG_TITLE` | `OTS_CATALOG_TITLE` |
+  | `CLAMAV_ADDR` | `OTS_CLAMAV_ADDR` |
+  | `CORS_ORIGINS` | `OTS_CORS_ORIGINS` |
+  | `DCAT_PROFILE` | `OTS_DCAT_PROFILE` |
+  | `EMBED_FRAME_ANCESTORS` | `OTS_EMBED_FRAME_ANCESTORS` |
+  | `ENDPOINT_ACL_ENFORCE` | `OTS_ENDPOINT_ACL_ENABLED` |
+  | `JWT_SECRET` | `OTS_JWT_SECRET` |
+  | `LDP_ROOT_ACL` | `OTS_LDP_ROOT_ACL` |
+  | `LD_DISCOVERY` | `OTS_DISCOVERY_ENABLED` |
+  | `LD_REGISTRY_TOKEN` | `OTS_REGISTRY_TOKEN` |
+  | `LD_REGISTRY_URL` | `OTS_REGISTRY_URL` |
+  | `LLM_ANONYMOUS_ENABLED` | `OTS_LLM_ANONYMOUS_ENABLED` |
+  | `LLM_API_KEY` | `OTS_LLM_API_KEY` |
+  | `LLM_CHAT_MAX_ROUNDS` | `OTS_LLM_CHAT_MAX_ROUNDS` |
+  | `LLM_CHAT_MODEL` | `OTS_LLM_CHAT_MODEL` |
+  | `LLM_CHAT_QUERY_MAX_SECS` | `OTS_LLM_CHAT_QUERY_MAX_SECS` |
+  | `LLM_CHAT_TOOLS` | `OTS_LLM_CHAT_TOOLS` |
+  | `LLM_CONTEXT_TOKENS` | `OTS_LLM_CONTEXT_TOKENS` |
+  | `LLM_GATEWAY_URL` | `OTS_LLM_GATEWAY_URL` |
+  | `LLM_GUARD_BLOCKLIST` | `OTS_LLM_GUARD_BLOCKLIST` |
+  | `LLM_GUARD_INJECTION_ACTION` | `OTS_LLM_GUARD_INJECTION_ACTION` |
+  | `LLM_GUARD_MAX_MESSAGES` | `OTS_LLM_GUARD_MAX_MESSAGES` |
+  | `LLM_GUARD_MAX_MESSAGE_CHARS` | `OTS_LLM_GUARD_MAX_MESSAGE_CHARS` |
+  | `LLM_GUARD_MAX_TOTAL_CHARS` | `OTS_LLM_GUARD_MAX_TOTAL_CHARS` |
+  | `LLM_LOG_PREVIEW_ENABLED` | `OTS_LLM_LOG_PREVIEW_ENABLED` |
+  | `LLM_LOG_RETENTION_DAYS` | `OTS_LLM_LOG_RETENTION_DAYS` |
+  | `LLM_MODEL` | `OTS_LLM_MODEL` |
+  | `LLM_RATE_LIMIT_ANON_PER_MIN` | `OTS_LLM_RATE_LIMIT_ANON_PER_MIN` |
+  | `LLM_RATE_LIMIT_PER_MIN` | `OTS_LLM_RATE_LIMIT_PER_MIN` |
+  | `LLM_SHACL_MODEL` | `OTS_LLM_SHACL_MODEL` |
+  | `LLM_SPARQL_MODEL` | `OTS_LLM_SPARQL_MODEL` |
+  | `LLM_TIMEOUT_SECS` | `OTS_LLM_TIMEOUT_SECS` |
+  | `OAUTH_CLIENTS_JSON` | `OTS_OAUTH_CLIENTS_JSON` |
+  | `OIDC_AUDIENCE` | `OTS_OIDC_AUDIENCE` |
+  | `OIDC_DEFAULT_ROLE` | `OTS_OIDC_DEFAULT_ROLE` |
+  | `OIDC_GROUPS_CLAIM` | `OTS_OIDC_GROUPS_CLAIM` |
+  | `OIDC_ISSUER` | `OTS_OIDC_ISSUER` |
+  | `OIDC_ORG_GROUP_PREFIX` | `OTS_OIDC_ORG_GROUP_PREFIX` |
+  | `OIDC_ROLE_CLAIMS` | `OTS_OIDC_ROLE_CLAIMS` |
+  | `OIDC_ROLE_CLAIM_MAP` | `OTS_OIDC_ROLE_CLAIM_MAP` |
+  | `OTS_CHANGE_CAPTURE` | `OTS_CHANGE_CAPTURE_ENABLED` |
+  | `OTS_COLUMNAR_QUERY` | `OTS_COLUMNAR_QUERY_ENABLED` |
+  | `OTS_GEOSPARQL_QUERY_REWRITE` | `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED` |
+  | `OTS_OIDC_SESSION_POLICY` | `OTS_OIDC_PROVIDER_TOKEN_POLICY` |
+  | `OTS_OIDC_WRITE_SCOPES` | `OTS_OIDC_PROVIDER_WRITE_SCOPES` |
+  | `OTS_PARALLEL_QUERY` | `OTS_PARALLEL_QUERY_ENABLED` |
+  | `OTS_QUERY_CACHE` | `OTS_QUERY_CACHE_ENABLED` |
+  | `OTS_REQUIRE_VERIFIED_EMAIL` | `OTS_LOGIN_EMAIL_VERIFICATION_ENABLED` |
+  | `PORT_FALLBACK` | `OTS_PORT_FALLBACK_ENABLED` |
+  | `PREFIX_CC_FALLBACK` | `OTS_PREFIX_CC_FALLBACK_ENABLED` |
+  | `PUBLIC_BASE_URL` | `OTS_PUBLIC_BASE_URL` |
+  | `REFRESH_TOKEN_EXPIRY_DAYS` | `OTS_REFRESH_TOKEN_EXPIRY_DAYS` |
+  | `S3_ACCESS_KEY` | `OTS_S3_ACCESS_KEY` |
+  | `S3_BUCKET` | `OTS_S3_BUCKET` |
+  | `S3_ENDPOINT` | `OTS_S3_ENDPOINT` |
+  | `S3_REGION` | `OTS_S3_REGION` |
+  | `S3_SECRET_KEY` | `OTS_S3_SECRET_KEY` |
+  | `SECURE_COOKIES` | `OTS_SECURE_COOKIES_ENABLED` |
+  | `SEED_DIR` | `OTS_SEED_DIR` |
+  | `SEED_IFC_URL` | `OTS_SEED_IFC_URL` |
+  | `SEED_STANDARDS_DEMO` | `OTS_SEED_STANDARDS_DEMO_ENABLED` |
+  | `SEED_STANDARD_VOCABS` | `OTS_SEED_STANDARD_VOCABS_ENABLED` |
+  | `SERVE_FRONTEND` | `OTS_FRONTEND_ENABLED` |
+  | `SMTP_FROM` | `OTS_SMTP_FROM` |
+  | `SMTP_HOST` | `OTS_SMTP_HOST` |
+  | `SMTP_PASSWORD` | `OTS_SMTP_PASSWORD` |
+  | `SMTP_PORT` | `OTS_SMTP_PORT` |
+  | `SMTP_TLS` | `OTS_SMTP_TLS` |
+  | `SMTP_USERNAME` | `OTS_SMTP_USERNAME` |
+  | `SPARQL_QUERY_TIMEOUT_SECS` | `OTS_SPARQL_QUERY_TIMEOUT_SECS` |
+  | `STORE_AUTO_RECOVER` | `OTS_STORE_AUTO_RECOVER_ENABLED` |
+  | `TEXT_SEARCH_DIR` | `OTS_TEXT_SEARCH_DIR` |
+  | `TRUSTED_PROXY_CIDRS` | `OTS_TRUSTED_PROXY_CIDRS` |
+  | `VALIDATION_API_URL` | `OTS_VALIDATION_API_URL` |
+  | `VOCAB_CORPUS_PATH` | `OTS_VOCAB_CORPUS_PATH` |
+  | `VOCAB_CORPUS_SHA256` | `OTS_VOCAB_CORPUS_SHA256` |
+  | `VOCAB_CORPUS_URL` | `OTS_VOCAB_CORPUS_URL` |
+  | `VOCAB_LOCAL_METRICS` | `OTS_VOCAB_LOCAL_METRICS_ENABLED` |
+  | `WRITE_TIMEOUT_SECS` | `OTS_WRITE_TIMEOUT_SECS` |
+  | `RATE_LIMIT_DISABLED=true` | `OTS_RATE_LIMIT_ENABLED=false` (opposite sense) |
+  | `OTS_DISABLE_REGISTRATION=true` | `OTS_REGISTRATION_ENABLED=false` (opposite sense) |
+  | `LLM_LOG_PREVIEW_DISABLED=true` | `OTS_LLM_LOG_PREVIEW_ENABLED=false` (opposite sense) |
+  | `SEED_BUNDLE_<ID>` (a bundle's derived opt-out) | `OTS_SEED_BUNDLE_<ID>_ENABLED` |
+
+  `ACCEPT_LEGACY_TOKENS` is now `OTS_SESSION_AND_API_TOKENS_ENABLED`, which
+  says what it covers (this store's own session and `ots_` API tokens), and
+  `OTS_OIDC_SESSION_POLICY` / `OTS_OIDC_WRITE_SCOPES` are
+  `OTS_OIDC_PROVIDER_TOKEN_POLICY` / `OTS_OIDC_PROVIDER_WRITE_SCOPES`, the
+  counterparts of `OTS_OIDC_IDP_TOKEN_POLICY` / `OTS_OIDC_IDP_WRITE_SCOPES`.
+  The example seed bundles' opt-out variables are `OTS_SEED_<NAME>_ENABLED`.
+  The secrets module's own Vault variables (`VAULT_ADDR`, `VAULT_TOKEN`, …)
+  and `RUST_LOG` keep their ecosystem names.
+- The storage directory, port and bind address have environment variables:
+  `OTS_DATA_DIR`, `OTS_PORT` and `OTS_BIND` (flags `-d`, `-p`, `-b`).
+- `OTS_EMBED_FRAME_ANCESTORS` takes only `'none'` (with its quotes) to turn
+  embedding off; a bare `none` stops the start.
+- `LLM_TIMEOUT_SECONDS` → `OTS_LLM_TIMEOUT_SECS`.
+- `BACKUP_SCHEDULE_HOURS` → `OTS_BACKUP_SCHEDULE_SECS` (seconds; default
+  `86400`, at least 60). The unit rule is now `_MS`, `_SECS` or `_DAYS` for a
+  duration and `_BYTES` for a size.
+- `ACCESS_TOKEN_EXPIRY_MINUTES` → `OTS_ACCESS_TOKEN_EXPIRY_SECS` (default
+  `1800`); the flag is `--access-token-expiry-secs`.
+- `OTS_MAX_UPLOAD_MB` → `OTS_MAX_UPLOAD_BYTES` (bytes; `512MiB` is accepted).
+- `SMTP_STARTTLS` is removed: set `OTS_SMTP_TLS=starttls|implicit|none`.
+  `OTS_EXTERNAL_REASONER` and `OTS_EXTERNAL_REASONER_BIN` now stop the start
+  (they were removed in favour of `OTS_DL_BACKEND=konclude`).
+- Booleans accept exactly `true/false`, `1/0`, `yes/no`, `on/off` (any case)
+  everywhere; `OTS_SECURE_COOKIES_ENABLED=yes` and `OTS_REGISTRATION_ENABLED=off`
+  now work, and `OTS_SECURE_COOKIES_ENABLED=maybe` stops the start instead of
+  being ignored.
+  `--secure-cookies`, `--port-fallback` and `--discovery` take an optional
+  value (`--secure-cookies=false`).
+- Aliases are gone: `OTS_OIDC_*_POLICY=legacy` (use `full`),
+  `OTS_REMOTE_AUTH=forward|identity` (use `assert`), `OTS_DCAT_PROFILE=dcat3`,
+  `dcat_ap`, `dcatapnl` and the like (use `dcat`, `dcat-ap`, `dcat-ap-nl`),
+  `OTS_SMTP_TLS=off|plain|tls|smtps`, `OTS_REPLICATION_ROLE=primary|replica`,
+  `OTS_LLM_CHAT_TOOLS=0|false|none` (use `off`), and the hyphenated guest
+  capabilities `create-datasets` / `api-tokens`.
+- Values that used to be clamped or dropped now stop the start:
+  `OTS_LLM_CHAT_MAX_ROUNDS` outside 1–8, `OTS_LLM_CHAT_QUERY_MAX_SECS` outside 5–600,
+  `OTS_PARALLEL_QUERY_SHARDS` outside 1–16, `OTS_LDES_RETRIES` above 16, an
+  unknown `OTS_GUEST_CAPABILITIES` word, `OTS_OIDC_DEFAULT_ROLE=admin` (it was
+  capped to `user`), a non-https `OTS_OIDC_ISSUER` (OIDC used to be disabled), an
+  invalid `OTS_TRUSTED_PROXY_CIDRS`, `OTS_CORS_ORIGINS` or `OTS_REMOTE_ALLOWLIST`
+  entry, a function graph `OTS_SPARQL_FUNCTION_GRAPHS` may not name, and
+  invalid `OTS_OAUTH_CLIENTS_JSON`.
+- Empty means unset for every setting, so `OTS_EMBED_FRAME_ANCESTORS=` gives the
+  default; disable embedding with `'none'`.
+- `OTS_REPLICATION_ROLE=cluster` now configures the Raft member from the
+  environment (the role was parsed as `none`, so the cluster settings were
+  never read), and `OTS_REPLICATION_CLUSTER_SECRET` goes through the secrets
+  module (a raw value is refused under `OTS_ENV=production`).
+- A seed bundle's opt-out variable that is not a boolean skips the bundle with
+  an error, and its `password_env` goes through the secrets module.
+- **Production profile.** `OTS_ENV=production` now hardens the defaults:
+  secure cookies on, self-registration closed (`OTS_REGISTRATION_ENABLED`
+  defaults to `false`; the first account can still register), `OTS_LDP_ROOT_ACL`
+  defaults to `owners`, `OTS_EMBED_FRAME_ANCESTORS` to `'none'`,
+  `OTS_SEED_STANDARDS_DEMO_ENABLED` to `false`, `OTS_OIDC_PROVIDER_TOKEN_POLICY` to `scoped`, and
+  `OTS_STORE_AUTO_RECOVER_ENABLED` to `false` (a corrupt store fails the start instead of
+  coming back empty). Each can be set explicitly. Production refuses to start
+  with `OTS_SECURE_COOKIES_ENABLED=false`, `OTS_RATE_LIMIT_ENABLED=false`, `*` in
+  `OTS_CORS_ORIGINS`, or a raw value in any secret setting.
+- `OTS_SECURE_COOKIES_ENABLED` defaults to on whenever `OTS_BASE_URL` is https, in every
+  profile; set it to `false` explicitly for plain-HTTP development behind an
+  https base URL.
+- The startup log lists the profile and every setting not at its built-in
+  default, with its source (secrets redacted).
+- `docker-compose.yml` passes `OTS_S3_SECRET_KEY=env:S3_GATEWAY_SECRET_KEY` (a
+  reference) and forwards `S3_GATEWAY_SECRET_KEY`, so the production profile can
+  start under compose once `OTS_JWT_SECRET` is a reference too.
+- **One outbound allowlist per purpose.** `OTS_REMOTE_ALLOWLIST` is retired
+  (setting it stops the start) and split into `OTS_SERVICE_ALLOWLIST` (SPARQL
+  `SERVICE`, which any query user can trigger), `OTS_LDES_ALLOWLIST` (LDES
+  client sync), `OTS_SOURCES_ALLOWLIST` (SQL and SPARQL datasources, including
+  `SERVICE <urn:source:…>`) and `OTS_JSONLD_CONTEXT_ALLOWLIST` (remote JSON-LD
+  contexts). There is no shared fallback: a host allowlisted for an admin's
+  LDES sync is no longer a `SERVICE` target for every query user. Redirects
+  are checked against the same purpose's list.
+- **`OTS_OFFLINE`** (on in production) stops every startup download: the LOV
+  corpus and the demo IFC and STL models. It replaces the empty-value kill
+  switches `SEED_IFC_URL=` and `VOCAB_CORPUS_URL=` (an empty
+  `OTS_SEED_IFC_URL` or `OTS_VOCAB_CORPUS_URL` now means the default, like
+  every other setting).
+- **LLM budgets: `0` turns AI off, `unlimited` lifts the limit.**
+  `OTS_LLM_RATE_LIMIT_PER_MIN=0` / `OTS_LLM_RATE_LIMIT_ANON_PER_MIN=0` used to mean
+  "no limit"; they now refuse AI to that kind of caller (`403`). The new
+  `OTS_LLM_ANONYMOUS_ENABLED` (default on, off in production) turns AI off for
+  anonymous callers. `/api/llm/health` reports `0` for off and `null` for
+  unlimited, plus `available_to_caller`.
+- **No built-in LLM gateway.** With `OTS_LLM_GATEWAY_URL` unset the AI features
+  are off: nothing is probed (the server used to probe `127.0.0.1:8000`) and
+  AI requests answer `503` naming the setting. `/api/llm/health` reports
+  `gateway: null`, and for a configured but unreachable gateway (the compose
+  default without `--profile llm`) the probe's error as
+  `unreachable_reason`. In compose, `OTS_LLM_GATEWAY_URL=` (empty) in `.env` now
+  turns the AI features off.
+
 ### Changed
+- With change capture on, a write adjusts the graph-count index by its known
+  delta instead of rescanning the graph; the full-text index, entailment and
+  LDES take the write's own change-log rows instead of rescanning graphs.
+- `CLEAR`, `DROP`, `CREATE` and `LOAD` of a named graph are bounded to that
+  graph: the count index recounts it alone, and the change log records it
+  exactly instead of as a store-wide unknown change.
+- A streamed load of a multi-graph file, with change capture on, records exact
+  rows per graph instead of one store-wide unknown row (which broke every
+  version chain on every boot that seeded such a file).
+- A change log kept from an earlier run stays readable while capture is off,
+  and the next run that records starts a new epoch.
+- Deleting a dataset (or its organisation) deletes its versions.
+- Version operations on one dataset are serialised: two concurrent creates of
+  one label make one version and a `400`. A pipeline's auto-versions and
+  validate-and-commit no longer overwrite a version cut in the same second.
 
 - **The compose stack's S3 asset store is Versity S3 Gateway, not MinIO.**
   MinIO no longer publishes community images: `quay.io/minio/minio:latest`
   has no manifest, the old release tags answer "unauthorized" and the Docker
   Hub tags are gone, so a fresh `docker compose up` could not start the asset
   store. The `minio` service is replaced by `s3-gateway`: Versity S3 Gateway
-  (Apache-2.0), pinned as `versity/versitygw:v1.8.0` by tag and digest, serving
+  (Apache-2.0), pinned as `versity/versitygw:v1.9.0` by tag and digest (the version CI tests against), serving
   the `s3_gateway_data` volume through its POSIX backend on port 7070, with
   object metadata in extended attributes (a host bind mount without xattr
   support needs `--sidecar`; see the comment in `docker-compose.yml`). It
@@ -765,7 +1104,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   / `S3_GATEWAY_SECRET_KEY`, `MINIO_BIND` → `S3_GATEWAY_BIND`, `MINIO_PORT`
   → `S3_GATEWAY_PORT` (default 7070, was 9000), `MINIO_IMAGE` →
   `S3_GATEWAY_IMAGE`, and `MINIO_CONSOLE_PORT` is gone. Existing installs
-  rename those lines in `.env`. The assets in the old `minio_data` volume
+  rename those lines in `.env`. These are compose variables only: the server
+  still reads the store's settings as `OTS_S3_*`, and compose sets
+  `OTS_S3_ENDPOINT=http://s3-gateway:7070`, `OTS_S3_ACCESS_KEY` from
+  `S3_GATEWAY_ACCESS_KEY` and `OTS_S3_SECRET_KEY=env:S3_GATEWAY_SECRET_KEY`. The assets in the old `minio_data` volume
   are not carried over: MinIO's on-disk format is its own. To keep them,
   copy them across with an S3 client before switching.
 
@@ -898,6 +1240,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and SKOS use every triple and OWL 2 DL refuses input outside its profile,
   so they never report `ignored`. See `docs/reasoning.md`.
 
+- **Every dependency is on its latest release** (one consolidated update in
+  place of the Dependabot PRs). Rust majors: axum 0.8, tower_governor 0.8,
+  reqwest 0.13, rusqlite 0.40 (r2d2_sqlite 0.35), tiberius 0.13, utoipa 6,
+  geo 0.33, nom 8, zip 9, parry3d-f64 0.31, tokio-postgres-rustls 0.14,
+  criterion 0.8, lopdf 0.45, kamadak-exif 0.6; frontend: three 0.186,
+  web-ifc 0.0.78, Playwright 1.64 and the rest. `oxiri` stays on 0.2 with the
+  vendored Oxigraph crates (#541) and TypeScript on 6.0 until typescript-eslint
+  supports 7 (#540). What operators notice:
+  - **Outbound HTTPS trusts the operating system's certificate store**
+    (reqwest 0.13's platform verifier) instead of a bundled copy of the
+    Mozilla roots, so a CA installed on the host or in the image (the Docker
+    image ships `ca-certificates`) is honoured for remote SPARQL, JSON-LD
+    contexts, IdP metadata, webhooks and the LLM gateway.
+  - **rustls runs on ring everywhere.** The server installs ring as the
+    process-wide crypto provider at start; the SQL Server connector
+    (tiberius 0.13) moved from rustls 0.21 to 0.23, which retires three
+    rustls-webpki advisories.
+
 - **RML / R2RML and JSON-LD 1.1 are graded Full; the Standards Score is 28
   of 28** (`docs/standards.md` footnotes 9 and 13,
   `docs/triplestore-comparison.md`). Each row had kept one deliberate
@@ -943,6 +1303,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   literal is ill-typed (JSON-LD 1.1 §10.2), and no JSON-LD download could hold
   it. An RML run that would generate one reports a data error. See
   `docs/datatypes.md`.
+
+- **`geof:getSRID` and `geof:geometryType` return `xsd:anyURI` literals**, as
+  their GeoSPARQL 1.1 signatures give (§10.9.39, §10.9.18), instead of IRIs
+  (#510). `FILTER(geof:getSRID(?g) = <http://…/CRS84>)` no longer matches; compare
+  with `"http://…/CRS84"^^xsd:anyURI`, or with `STR()` on both sides.
+  `geof:transform` takes the result as its target as before.
+- **Lexical forms take no whitespace normalization.** The OWL 2 / RDFS
+  datatype map reads a literal's lexical form as written, as RDF 1.1 does:
+  `" 3 "^^xsd:int`, `" false"^^xsd:boolean` and `" abc "^^xsd:token` are
+  ill-typed (an inconsistency for RDFS and the OWL 2 reasoners), where the
+  XML Schema whitespace facet used to be applied first. `rdf:XMLLiteral`
+  lexical forms are checked: content that is not well-balanced,
+  namespace-well-formed XML (`"<"`) is ill-typed.
+- **A `sh:pattern` the engine cannot evaluate fails the shapes graph.** A
+  pattern that is not a regular expression, or `sh:flags` that SPARQL `REGEX`
+  does not have, used to make every value pass; the shapes graph is now
+  refused at load, naming the shape (422 from a gate).
+- **Rubric sweep of the graded rows (2026-10-06).** Every known failure of the
+  vendored suites is classified under the Full rubric and the rest are filed:
+  #504 (RDF 1.2, waiting on w3c/rdf-xml#97), #505 and #506 (OWL 2 DL test
+  defects and a HermiT limit), #507 and #508 (SHACL test defects), #509
+  (GeoSPARQL DGGS) and #510 (GeoSPARQL `getSRID` / `geometryType` return type,
+  since fixed, above). No grade changed by the sweep.
+  The W3C OWL 2 DL runner takes its per-check budget from
+  `OTS_TEST_W3C_OWL2_TIMEOUT_SECS`.
 
 - **Standards Score recounted once for the second merge train: 26 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
@@ -1985,6 +2370,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- **Braces in `REGEX` and `sh:pattern`.** XPath regular expressions are XML
+  Schema 1.0 ones, where `{` and `}` outside a quantifier are ordinary
+  characters; the engine refused them, so `REGEX(?s, "^({)(.*)(})$")` was an
+  error and the OGC GeoSPARQL validator's S18 shape passed a GML literal given
+  as GeoJSON. Both the SHACL engine and the vendored SPARQL evaluator now
+  escape them before compiling (`vendor/README.md`, change 10); the OGC
+  validator corpus matches its oracle on all 48 examples.
+- `POST /api/datasets/:id/patch` answered `500` to an anonymous caller; it
+  is `401`.
+- Graph Store `GET` as JSON-LD of a graph holding RDF 1.2 triple terms
+  answered `200` and then broke off the body; it is `406` before any byte.
+- A `source` commit read back from the commit trail as `data-model`.
+- Validate-and-commit without a `graph` committed into the dataset's first
+  registered graph, and replaced it — which could be the dataset's
+  property-states graph. It now skips the graphs the server keeps for the
+  dataset's history.
 
 - **A query that timed out kept running** (#468). `/sparql`, the dataset
   service endpoints and saved queries answered "Query execution timed out"
@@ -2654,6 +3055,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **The statement-provenance graph is system-managed.** Only the server's
+  change-log consumer writes `urn:ots:statement-provenance:<id>`. SPARQL
+  Update, the Graph Store, RDF Patch and patch-log appends, imports,
+  validate-and-commit, restores and RML/LDES targets refuse it with `403`, for
+  admins too, and no dataset may register it; an admin's variable-graph
+  `DELETE`/`INSERT` skips it. Before, any writer of the dataset could forge or
+  erase its statement history (#533).
 - **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
   DOMPurify up to 3.4.15 could leave event handlers armed in a removed
   subtree, or return markup that runs on reparse, in `IN_PLACE` mode

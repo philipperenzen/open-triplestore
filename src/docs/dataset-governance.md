@@ -85,5 +85,5 @@ pipeline → Derived data**):
 - **Validation results**: serialise the `sh:ValidationReport` to RDF and write to
   a report graph, a chosen graph, or a new version — or keep run-history only.
 
-All of the above is idempotent and re-seeded on every boot; `SEED_STANDARDS_DEMO=false`
+All of the above is idempotent and re-seeded on every boot; `OTS_SEED_STANDARDS_DEMO_ENABLED=false`
 disables the demo-org seed (the governance model + standards shapes still seed).

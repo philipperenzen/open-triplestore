@@ -121,7 +121,7 @@ describe('AdminOperations', () => {
     await findByText('Not replicating');
     expect(container.textContent).toContain('Off');
     expect(container.textContent).toContain('×2.5–4');
-    expect(container.textContent).toContain('OTS_CHANGE_CAPTURE=on');
+    expect(container.textContent).toContain('OTS_CHANGE_CAPTURE_ENABLED=on');
     expect(container.textContent).toContain('No consumer has bookmarked this log yet.');
     unmount();
   });

@@ -39,13 +39,11 @@ const MEMORY_DIVISOR: u64 = 8;
 /// `OTS_REPAIR_MAX_QUADS`, else the memory-derived default (§5.4): never
 /// clamped upwards, so a small container gets a small cap.
 pub fn max_quads() -> usize {
-    if let Some(n) = std::env::var("OTS_REPAIR_MAX_QUADS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-    {
-        return n;
-    }
+    crate::config::REPAIR_MAX_QUADS.get()
+}
+
+/// The memory-derived default of [`max_quads`].
+pub fn default_max_quads() -> usize {
     match crate::store::parallel_mirror::detect_memory_limit_bytes() {
         Some(bytes) => (bytes / MEMORY_DIVISOR / BYTES_PER_QUAD) as usize,
         None => FALLBACK_MAX_QUADS,
@@ -179,7 +177,11 @@ pub fn resolve(input: ResolveInput<'_>) -> Result<Premises, String> {
         ..Premises::default()
     };
     for e in entries {
-        if e.graph_iri.starts_with("urn:system:reports:") {
+        // Reports and statement-provenance annotations are about the data,
+        // not data a rule may read or repair.
+        if e.graph_iri.starts_with("urn:system:reports:")
+            || crate::provenance::is_any_statement_provenance_graph(&e.graph_iri)
+        {
             continue;
         }
         if let Some(scope) = scope_graphs {

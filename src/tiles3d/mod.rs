@@ -218,11 +218,11 @@ fn with_gltf_copyright(glb: Vec<u8>, copyright: &str) -> Vec<u8> {
 pub fn tiles3d_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/datasets/:dataset_id/3dtiles/tileset.json",
+            "/api/datasets/{dataset_id}/3dtiles/tileset.json",
             get(tileset_json),
         )
         .route(
-            "/api/datasets/:dataset_id/3dtiles/content.glb",
+            "/api/datasets/{dataset_id}/3dtiles/content.glb",
             get(content_glb),
         )
 }
@@ -721,18 +721,15 @@ fn footprint_triangles(body: &str) -> Vec<[(f64, f64, f64); 3]> {
 
 /// Default for [`max_features`]. One GLB of 10 000 LoD2 buildings is in the
 /// order of 100–150 MB, about what a browser loads as a single tile.
-pub const DEFAULT_MAX_FEATURES: usize = 10_000;
+#[cfg(test)]
+const DEFAULT_MAX_FEATURES: usize = 10_000;
 
 /// How many features one tileset carries: `OTS_TILES3D_MAX_FEATURES`, or
-/// [`DEFAULT_MAX_FEATURES`] when unset or not a positive integer. The cap
+/// 10 000 when unset. The cap
 /// stands in for tiling: past it the content is truncated (and says so), not
 /// refused.
 pub fn max_features() -> usize {
-    std::env::var("OTS_TILES3D_MAX_FEATURES")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_FEATURES)
+    crate::config::TILES3D_MAX_FEATURES.get()
 }
 
 /// A cut the cap made: `served` of `total` meshable features, cap `cap`.

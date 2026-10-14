@@ -15,7 +15,7 @@
 #     the object-type library (RDFS/SHACL) next to it.
 
 id = "nen2660-imbor"
-opt_out_env = "SEED_NEN2660_IMBOR"
+opt_out_env = "OTS_SEED_NEN2660_IMBOR_ENABLED"
 
 [organisation]
 slug = "nl-standards"

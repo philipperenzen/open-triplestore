@@ -387,7 +387,10 @@ pub(crate) fn is_standard_ontology(name: &str) -> bool {
 /// them at <https://standards.iso.org/iso/21597/-1/ed-1/en/>; this repository
 /// does not carry them. Returns the files found and a note per file missing.
 pub fn operator_ontologies() -> (Vec<Entry>, Vec<String>) {
-    let dir = std::env::var(ONTOLOGY_DIR_ENV).unwrap_or_default();
+    let dir = crate::config::ICDD_ONTOLOGY_DIR
+        .get()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let dir = dir.trim();
     if dir.is_empty() {
         return (

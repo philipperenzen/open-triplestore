@@ -22,7 +22,7 @@ pub fn spawn_registrar(self_url: String, registry_url: String, token: String) {
     let base = registry_url.trim_end_matches('/').to_string();
     info!("service-registry: self-registering as '{SERVICE_NAME}' -> {self_url} (registry {base})");
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client();
         let url = format!("{base}/register");
         let mut last = post(&client, &url, &token, &self_url).await;
         report(&url, None, &last);
@@ -83,7 +83,7 @@ fn report(url: &str, prev: Option<&Outcome>, now: &Outcome) {
         }
         Outcome::Rejected(status) if warn_on(prev, now) => {
             let hint = if *status == 401 || *status == 403 {
-                " — check LD_REGISTRY_TOKEN"
+                " — check OTS_REGISTRY_TOKEN"
             } else {
                 ""
             };
@@ -130,7 +130,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client();
         let base = format!("http://{addr}");
         assert_eq!(
             post(&client, &format!("{base}/register"), "", "http://s").await,

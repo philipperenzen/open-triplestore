@@ -17,9 +17,9 @@ When a backup directory is configured, super admins can create, list, verify and
 
 ## Rate limiting
 
-Requests are rate-limited per client IP, with stricter quotas on authentication endpoints to resist brute-force attacks and separate quotas for query, import and map/3D viewer traffic (viewer feed, geo stats, public asset downloads, 3D Tiles). When running behind a reverse proxy, configure the trusted proxy ranges (`TRUSTED_PROXY_CIDRS`) so limits apply per real client IP rather than the proxy's own address. The same client IP is recorded in the audit log and keys the guest budget on the AI endpoints; `X-Forwarded-For` from any peer outside those ranges is ignored.
+Requests are rate-limited per client IP, with stricter quotas on authentication endpoints to resist brute-force attacks and separate quotas for query, import and map/3D viewer traffic (viewer feed, geo stats, public asset downloads, 3D Tiles). When running behind a reverse proxy, configure the trusted proxy ranges (`OTS_TRUSTED_PROXY_CIDRS`) so limits apply per real client IP rather than the proxy's own address. The same client IP is recorded in the audit log and keys the guest budget on the AI endpoints; `X-Forwarded-For` from any peer outside those ranges is ignored.
 
-For trusted/internal deployments or automated test harnesses that drive many requests from a single IP, the limiter can be switched off with `RATE_LIMIT_DISABLED=true` (see [administration.md](administration.md)). It is secure by default — leave it unset on any public server.
+For trusted/internal deployments or automated test harnesses that drive many requests from a single IP, the limiter can be switched off with `OTS_RATE_LIMIT_ENABLED=false` (see [administration.md](administration.md)). It is secure by default, and `OTS_ENV=production` refuses to start with it.
 
 ## Serving under a path prefix
 
@@ -44,10 +44,10 @@ The reverse proxy in front strips the prefix, so the server itself still sees
    with one of the app's own paths (`/api`, `/sparql`, `/datasets`, `/embed`, …)
    is refused, because the UI could no longer tell its own paths from prefixed
    ones.
-2. **`BASE_URL`** includes the prefix: `BASE_URL=https://example.org/ots`. IRIs
+2. **`OTS_BASE_URL`** includes the prefix: `OTS_BASE_URL=https://example.org/ots`. IRIs
    are minted under it (`https://example.org/ots/resource/…`) and dereference
    through the proxy. It is also the base of the links in emails, of the OIDC
-   callback the server registers (`{BASE_URL}/api/auth/oauth/{slug}/callback`:
+   callback the server registers (`{OTS_BASE_URL}/api/auth/oauth/{slug}/callback`:
    this is the redirect URI to enter at the identity provider), and of the
    issuer when the instance is an [OpenID provider](oidc-provider.md).
 3. **The proxy** strips the prefix and sends `X-Forwarded-Prefix: /ots`. The
@@ -73,7 +73,7 @@ location /ots/ {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_http_version 1.1;
     proxy_buffering    off;                     # streamed answers (assistant chat, exports)
-    client_max_body_size 1024m;                 # bulk import (OTS_MAX_UPLOAD_MB)
+    client_max_body_size 1024m;                 # bulk import (OTS_MAX_UPLOAD_BYTES)
 }
 ```
 
@@ -84,7 +84,7 @@ services:
   triplestore:
     image: open-triplestore:ots          # built with --build-arg OTS_BASE_PATH=/ots/
     environment:
-      BASE_URL: https://example.org/ots
+      OTS_BASE_URL: https://example.org/ots
     labels:
       - traefik.enable=true
       - traefik.http.routers.ots.rule=Host(`example.org`) && PathPrefix(`/ots`)
@@ -97,7 +97,7 @@ services:
       - traefik.http.services.ots.loadbalancer.server.port=7878
 ```
 
-Set `TRUSTED_PROXY_CIDRS` to the proxy's address as well, so rate limits apply
+Set `OTS_TRUSTED_PROXY_CIDRS` to the proxy's address as well, so rate limits apply
 per client rather than to the proxy as a whole (see [Rate limiting](#rate-limiting)). An existing root deployment needs none of this:
 without `OTS_BASE_PATH` the UI is built for `/`, and without the header the
 cookies keep their root paths.
@@ -159,7 +159,7 @@ timeout out.
 
 [`docker-compose.replication.yml`](../docker-compose.replication.yml) is a
 stand-alone stack — a leader on port 7878 and a hot follower on 7879, one
-shared `JWT_SECRET`, separate data volumes, nothing else — that shows
+shared `OTS_JWT_SECRET`, separate data volumes, nothing else — that shows
 every piece of this chapter in a few minutes. The follower needs an
 admin API token minted on the leader, so the stack comes up in two steps.
 
@@ -167,7 +167,7 @@ admin API token minted on the leader, so the stack comes up in two steps.
 
 ```bash
 cp .env.example .env
-printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+printf 'OTS_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 docker compose -f docker-compose.replication.yml up -d leader
 
 # The first registered user is the super_admin; the reply carries an access token.
@@ -204,8 +204,9 @@ leader also goes on seeding for several minutes after it is up —
 vocabularies, shapes, the demo datasets, and the IFC buildings it
 downloads and lifts; a follower started during that applies the seed's
 rows as they land, at the same pace, and `applied_rows` climbs until the
-seed is done. Uncommenting `SEED_IFC_URL=` on both services in the compose
-file leaves the IFC demos out, for a quicker, offline stack.
+seed is done. Setting `OTS_OFFLINE=true` on both services (the compose file
+has the line commented out) leaves the IFC demos out, for a quicker, offline
+stack.
 
 **3. A write on the leader shows up on the follower.** Capture is on
 because the leader role turns it on; the follower applies the row within a
@@ -247,7 +248,7 @@ wait for the follower to apply it.
 ### How it works
 
 **The leader** sets `OTS_REPLICATION_ROLE=leader`, which turns change
-capture on whatever `OTS_CHANGE_CAPTURE` says — capture is off by default
+capture on whatever `OTS_CHANGE_CAPTURE_ENABLED` says — capture is off by default
 elsewhere, and a leader without it has nothing for a follower to read. It
 serves three things a follower reads, all under an admin token:
 
@@ -486,7 +487,7 @@ model. Three things to know:
 - **Not the follower's own change log.** Applying a delta does not produce
   a row on the follower; a follower is not a leader for further followers.
   (Capture is off by default, and a follower is no exception unless
-  `OTS_CHANGE_CAPTURE=on`: a follower's log would only hold the graphs it
+  `OTS_CHANGE_CAPTURE_ENABLED=on`: a follower's log would only hold the graphs it
   fetched whole, a partial log.)
 - **At boot, a follower logs the seed's refusals.** The boot-time seed (the
   Studio shapes, the bundled demo data) writes to the store; on a follower
@@ -516,7 +517,7 @@ answers `429`, the follower waits the `Retry-After` out and sends the same
 request again — bounded to eight waits of at most 30 s each — so a
 bootstrap of many graphs proceeds at the limiter's sustained rate rather
 than restarting from the first graph. A leader whose only clients are its
-followers can lift the limit (`RATE_LIMIT_DISABLED`, or trusted proxy
+followers can lift the limit (`OTS_RATE_LIMIT_ENABLED=false`, or trusted proxy
 ranges so the limit applies per real client) and let a bootstrap run at
 full speed.
 

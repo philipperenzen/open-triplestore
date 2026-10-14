@@ -19,7 +19,7 @@ use nom::{
     combinator::{map, map_res, opt},
     multi::many0,
     sequence::{delimited, pair, preceded},
-    IResult,
+    IResult, Parser,
 };
 use std::fmt::Write;
 
@@ -319,13 +319,13 @@ fn prefixed_name(input: &str) -> IResult<&str, String> {
 
 /// Parse an IRI in angle brackets: `<http://...>`
 fn iri_ref(input: &str) -> IResult<&str, String> {
-    let (input, iri) = delimited(char('<'), take_while(|c| c != '>'), char('>'))(input)?;
+    let (input, iri) = delimited(char('<'), take_while(|c| c != '>'), char('>')).parse(input)?;
     Ok((input, iri.to_string()))
 }
 
 /// Parse either a prefixed name or a full IRI
 fn iri_or_prefixed(input: &str) -> IResult<&str, String> {
-    alt((iri_ref, prefixed_name))(input)
+    alt((iri_ref, prefixed_name)).parse(input)
 }
 
 /// Parse a PREFIX declaration
@@ -391,14 +391,15 @@ fn quoted_string(input: &str) -> IResult<&str, String> {
 fn cardinality(input: &str) -> IResult<&str, (Option<usize>, Option<usize>)> {
     let (input, _) = char('[')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, min) = opt(map_res(digit1, |s: &str| s.parse::<usize>()))(input)?;
+    let (input, min) = opt(map_res(digit1, |s: &str| s.parse::<usize>())).parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("..")(input)?;
     let (input, _) = multispace0(input)?;
     let (input, max) = alt((
         map(char('*'), |_| None),
         map(map_res(digit1, |s: &str| s.parse::<usize>()), Some),
-    ))(input)?;
+    ))
+    .parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(']')(input)?;
     Ok((input, (min, max)))
@@ -426,10 +427,11 @@ fn node_constraint_kw(input: &str) -> IResult<&str, NodeConstraint> {
     let (input, kw) = alt((
         tag_no_case::<&str, &str, nom::error::Error<&str>>("nodeKind"),
         tag_no_case("class"),
-    ))(input)?;
+    ))
+    .parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, val) = iri_or_prefixed(input)?;
-    let (input, _) = opt(pair(multispace0, alt((char(';'), char('.')))))(input)?;
+    let (input, _) = opt(pair(multispace0, alt((char(';'), char('.'))))).parse(input)?;
     let (input, _) = ws_comments(input)?;
     let nc = match kw.to_lowercase().as_str() {
         "class" => NodeConstraint::Class(val),
@@ -449,7 +451,8 @@ fn shape_body_item(input: &str) -> IResult<&str, ShapeBodyItem> {
     alt((
         map(node_constraint_kw, ShapeBodyItem::Node),
         map(property_constraint, ShapeBodyItem::Property),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a property constraint inside a shape body
@@ -474,7 +477,7 @@ fn property_constraint(input: &str) -> IResult<&str, PropertyDecl> {
     };
 
     // Parse optional datatype / nodeKind / shapeRef
-    let (mut input, dt_or_ref) = opt(iri_or_prefixed)(input)?;
+    let (mut input, dt_or_ref) = opt(iri_or_prefixed).parse(input)?;
     if let Some(ref val) = dt_or_ref {
         match val.as_str() {
             "IRI" | "BlankNode" | "Literal" | "BlankNodeOrIRI" | "BlankNodeOrLiteral"
@@ -573,7 +576,7 @@ fn property_constraint(input: &str) -> IResult<&str, PropertyDecl> {
     }
 
     // Consume optional semicolon or period
-    let (input, _) = opt(pair(multispace0, alt((char(';'), char('.')))))(input)?;
+    let (input, _) = opt(pair(multispace0, alt((char(';'), char('.'))))).parse(input)?;
     let (input, _) = ws_comments(input)?;
 
     Ok((input, prop))
@@ -588,12 +591,13 @@ fn shape_decl(input: &str) -> IResult<&str, ShapeDecl> {
     let (input, _) = multispace0(input)?;
 
     // Optional -> TargetClass
-    let (input, target) = opt(preceded(pair(tag("->"), multispace0), iri_or_prefixed))(input)?;
+    let (input, target) =
+        opt(preceded(pair(tag("->"), multispace0), iri_or_prefixed)).parse(input)?;
 
     let (input, _) = multispace0(input)?;
 
     // Optional "closed" keyword
-    let (input, closed) = opt(tag_no_case("closed"))(input)?;
+    let (input, closed) = opt(tag_no_case("closed")).parse(input)?;
     let is_closed = closed.is_some();
     let (input, _) = multispace0(input)?;
 
@@ -602,7 +606,7 @@ fn shape_decl(input: &str) -> IResult<&str, ShapeDecl> {
     let (input, _) = ws_comments(input)?;
 
     // Parse body items: node-level constraints (class, nodeKind) and property constraints
-    let (input, items) = many0(shape_body_item)(input)?;
+    let (input, items) = many0(shape_body_item).parse(input)?;
     let mut node_constraints = Vec::new();
     let mut properties = Vec::new();
     for item in items {
@@ -631,9 +635,9 @@ fn shape_decl(input: &str) -> IResult<&str, ShapeDecl> {
 /// Parse a complete SHACLC document
 fn parse_shaclc(input: &str) -> IResult<&str, ShaclcDoc> {
     let (input, _) = ws_comments(input)?;
-    let (input, prefixes) = many0(prefix_decl)(input)?;
-    let (input, imports) = many0(imports_decl)(input)?;
-    let (input, shapes) = many0(shape_decl)(input)?;
+    let (input, prefixes) = many0(prefix_decl).parse(input)?;
+    let (input, imports) = many0(imports_decl).parse(input)?;
+    let (input, shapes) = many0(shape_decl).parse(input)?;
     let (input, _) = ws_comments(input)?;
     Ok((
         input,

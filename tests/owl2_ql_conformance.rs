@@ -1102,11 +1102,13 @@ fn test_ql_disjoint_data_properties_by_value() {
          ex:a ex:min 1 ; ex:max \"1.0\"^^xsd:decimal .",
     );
     assert!(m.contains("ql-prp-disjoint"), "{m}");
-    // Strings too, through a sub-property: a token collapses its spaces.
+    // Strings too, through a sub-property: an xsd:token is the string it
+    // writes. (" Ann " is no xsd:token: lexical spaces take no whitespace
+    // normalization in RDF.)
     let m = inconsistency(
         "[] a owl:AllDisjointProperties ; owl:members ( ex:first ex:last ) . \
          ex:given rdfs:subPropertyOf ex:first . \
-         ex:a ex:given \"Ann\" ; ex:last \" Ann \"^^xsd:token .",
+         ex:a ex:given \"Ann\" ; ex:last \"Ann\"^^xsd:token .",
     );
     assert!(m.contains("ql-prp-disjoint"), "{m}");
     // Different values, or the same value on different subjects, are fine.

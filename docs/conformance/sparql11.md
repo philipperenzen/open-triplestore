@@ -101,7 +101,7 @@ per endpoint IRI, a SPARQL endpoint over a `TripleStore` loaded with that
 block's data, and replaces the IRIs by the listeners' URLs in memory: in the
 query, in the local and remote data and in the expected results. The files on
 disk stay byte-identical to upstream. Only the listeners are on
-`OTS_REMOTE_ALLOWLIST`, so the endpoint the suite expects to fail
+`OTS_SERVICE_ALLOWLIST`, so the endpoint the suite expects to fail
 (`http://invalid.endpoint.org/sparql`, under `SERVICE SILENT`) is refused by
 the allowlist, never contacted. The listeners evaluate through `TripleStore`
 as well, so a `SERVICE` nested inside a remote pattern is federated again

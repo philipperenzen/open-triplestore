@@ -6,7 +6,7 @@
 //! 1. **Input guard** — size caps, a configurable phrase blocklist, and
 //!    prompt-injection heuristics on what the user typed. The heuristics flag
 //!    imperative override phrases ("ignore previous instructions", "reveal your
-//!    system prompt", …) — `LLM_GUARD_INJECTION_ACTION` decides whether a hit
+//!    system prompt", …) — `OTS_LLM_GUARD_INJECTION_ACTION` decides whether a hit
 //!    blocks the request (default) or just logs it.
 //! 2. **Per-principal rate limit** — a sliding 60s window per user (or per IP
 //!    for guests), separate from the global per-IP governor, because one chat
@@ -19,7 +19,7 @@
 //! Every LLM-backed request lands one row in `llm_request_log` (status
 //! ok|error|blocked, latency, time-to-first-token, sizes, the guard flag that
 //! fired). Message contents are NOT stored — only a short question preview,
-//! and `LLM_LOG_PREVIEW_DISABLED=1` turns that off too.
+//! and `OTS_LLM_LOG_PREVIEW_ENABLED=false` turns that off too.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -47,65 +47,98 @@ pub enum InjectionAction {
 }
 
 pub struct GuardConfig {
-    /// Per-message character cap (`LLM_GUARD_MAX_MESSAGE_CHARS`, default 8000).
+    /// Per-message character cap (`OTS_LLM_GUARD_MAX_MESSAGE_CHARS`, default 8000).
     pub max_message_chars: usize,
-    /// Conversation length cap (`LLM_GUARD_MAX_MESSAGES`, default 40).
+    /// Conversation length cap (`OTS_LLM_GUARD_MAX_MESSAGES`, default 40).
     pub max_messages: usize,
-    /// Whole-conversation character cap (`LLM_GUARD_MAX_TOTAL_CHARS`, default 64000).
+    /// Whole-conversation character cap (`OTS_LLM_GUARD_MAX_TOTAL_CHARS`, default 64000).
     pub max_total_chars: usize,
-    /// What an injection-heuristic hit does (`LLM_GUARD_INJECTION_ACTION`:
+    /// What an injection-heuristic hit does (`OTS_LLM_GUARD_INJECTION_ACTION`:
     /// off | flag | block, default block).
     pub injection_action: InjectionAction,
-    /// Case-insensitive phrases that always block (`LLM_GUARD_BLOCKLIST`,
+    /// Case-insensitive phrases that always block (`OTS_LLM_GUARD_BLOCKLIST`,
     /// comma-separated, empty by default).
     pub blocklist: Vec<String>,
-    /// LLM requests per principal per minute (`LLM_RATE_LIMIT_PER_MIN`,
-    /// default 20; 0 disables).
-    pub rate_per_min: u32,
-    /// LLM requests per minute for ANONYMOUS callers, keyed by client IP
-    /// (`LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; 0 disables). Guests share a
-    /// GPU with everyone else and have no account to attribute cost to, so
-    /// their budget is deliberately tighter than a signed-in user's.
-    pub rate_per_min_anon: u32,
 }
 
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
+/// The AI request budgets, read per request: they are runtime settings an
+/// administrator can change without a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// LLM requests per signed-in principal per minute
+    /// (`OTS_LLM_RATE_LIMIT_PER_MIN`, default 20).
+    pub per_min: Budget,
+    /// LLM requests per minute for ANONYMOUS callers, keyed by client IP
+    /// (`OTS_LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; refused outright when
+    /// `OTS_LLM_ANONYMOUS_ENABLED` is off). Guests share a GPU with everyone else
+    /// and have no account to attribute cost to, so their budget is
+    /// deliberately tighter than a signed-in user's.
+    pub per_min_anon: Budget,
+}
+
+/// The budgets in force now.
+pub fn budgets(db: &crate::auth::db::AuthDb) -> Budgets {
+    use crate::config::{self as c, runtime};
+    Budgets {
+        per_min: Budget::parse(&runtime::get(db, &c::LLM_RATE_LIMIT_PER_MIN)),
+        per_min_anon: if runtime::get(db, &c::LLM_ANONYMOUS_ENABLED) {
+            Budget::parse(&runtime::get(db, &c::LLM_RATE_LIMIT_ANON_PER_MIN))
+        } else {
+            Budget::Refused
+        },
+    }
+}
+
+/// An LLM request budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    /// No AI for this kind of caller (`0`).
+    Refused,
+    /// At most this many requests per minute.
+    PerMinute(u32),
+    /// No limit (`unlimited`).
+    Unlimited,
+}
+
+impl Budget {
+    /// A validated budget setting: a count, `0` or `unlimited`.
+    pub fn parse(v: &str) -> Budget {
+        if v.eq_ignore_ascii_case("unlimited") {
+            return Budget::Unlimited;
+        }
+        match v.trim().parse::<u32>() {
+            Ok(0) | Err(_) => Budget::Refused,
+            Ok(n) => Budget::PerMinute(n),
+        }
+    }
+
+    /// The per-minute limit, `None` for unlimited (`Some(0)`: refused).
+    pub fn per_minute(self) -> Option<u32> {
+        match self {
+            Budget::Refused => Some(0),
+            Budget::PerMinute(n) => Some(n),
+            Budget::Unlimited => None,
+        }
+    }
 }
 
 pub fn config() -> &'static GuardConfig {
+    use crate::config as c;
     static CONFIG: OnceLock<GuardConfig> = OnceLock::new();
     CONFIG.get_or_init(|| GuardConfig {
-        max_message_chars: env_usize("LLM_GUARD_MAX_MESSAGE_CHARS", 8_000),
-        max_messages: env_usize("LLM_GUARD_MAX_MESSAGES", 40),
-        max_total_chars: env_usize("LLM_GUARD_MAX_TOTAL_CHARS", 64_000),
-        injection_action: match std::env::var("LLM_GUARD_INJECTION_ACTION")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        max_message_chars: c::LLM_GUARD_MAX_MESSAGE_CHARS.get(),
+        max_messages: c::LLM_GUARD_MAX_MESSAGES.get(),
+        max_total_chars: c::LLM_GUARD_MAX_TOTAL_CHARS.get(),
+        injection_action: match c::LLM_GUARD_INJECTION_ACTION.get().as_str() {
             "off" => InjectionAction::Off,
             "flag" => InjectionAction::Flag,
             _ => InjectionAction::Block,
         },
-        blocklist: std::env::var("LLM_GUARD_BLOCKLIST")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
+        blocklist: c::LLM_GUARD_BLOCKLIST
+            .get()
+            .into_iter()
+            .map(|s| s.to_lowercase())
             .collect(),
-        rate_per_min: std::env::var("LLM_RATE_LIMIT_PER_MIN")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(20),
-        rate_per_min_anon: std::env::var("LLM_RATE_LIMIT_ANON_PER_MIN")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(5),
     })
 }
 
@@ -292,14 +325,24 @@ fn rate_buckets() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
     BUCKETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Why [`check_rate_with`] turned a request away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateRefusal {
+    /// The budget is `0`: no AI for this kind of caller.
+    Refused,
+    /// Over budget; retry after this many seconds.
+    RetryAfter(u64),
+}
+
 /// Count this request against `key` (user id, or `ip:<addr>` for guests) with
-/// an explicit per-minute budget — callers pass the anonymous budget for guests
-/// and the signed-in budget for users. Returns the suggested Retry-After
-/// seconds when over budget.
-pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
-    if limit == 0 {
-        return Ok(());
-    }
+/// an explicit budget — callers pass the anonymous budget for guests and the
+/// signed-in budget for users.
+pub fn check_rate_with(key: &str, budget: Budget) -> Result<(), RateRefusal> {
+    let limit = match budget {
+        Budget::Unlimited => return Ok(()),
+        Budget::Refused => return Err(RateRefusal::Refused),
+        Budget::PerMinute(n) => n,
+    };
     let window = Duration::from_secs(60);
     let now = Instant::now();
     let mut buckets = rate_buckets().lock().unwrap();
@@ -310,7 +353,7 @@ pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
     if hits.len() >= limit as usize {
         let oldest = hits.iter().min().copied().unwrap_or(now);
         let retry = window.saturating_sub(now.duration_since(oldest)).as_secs() + 1;
-        return Err(retry);
+        return Err(RateRefusal::RetryAfter(retry));
     }
     hits.push(now);
     Ok(())
@@ -318,19 +361,13 @@ pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
 
 // ─── Request log ─────────────────────────────────────────────────────────────
 
-/// Keep log rows for this many days (`LLM_LOG_RETENTION_DAYS`, default 90).
+/// Keep log rows for this many days (`OTS_LLM_LOG_RETENTION_DAYS`, default 90).
 fn retention_days() -> i64 {
-    std::env::var("LLM_LOG_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(90)
+    crate::config::LLM_LOG_RETENTION_DAYS.get() as i64
 }
 
 fn preview_enabled() -> bool {
-    !matches!(
-        std::env::var("LLM_LOG_PREVIEW_DISABLED").as_deref(),
-        Ok("1") | Ok("true")
-    )
+    crate::config::LLM_LOG_PREVIEW_ENABLED.get()
 }
 
 /// A short preview of the question for the admin log — or None when previews
@@ -639,20 +676,35 @@ mod tests {
     fn rate_limit_sliding_window() {
         // Key is test-unique: the bucket map is process-global.
         let key = "test-rate-user";
-        let limit = config().rate_per_min;
-        for _ in 0..limit {
+        let limit = Budget::PerMinute(20);
+        for _ in 0..20 {
             assert!(check_rate_with(key, limit).is_ok());
         }
-        let retry = check_rate_with(key, limit).expect_err("over budget must be rejected");
-        assert!((1..=61).contains(&retry));
-        // The anonymous budget is a separate, tighter default.
-        assert!(config().rate_per_min_anon <= limit);
-        let anon_key = "test-rate-anon-ip";
-        let anon = config().rate_per_min_anon;
-        for _ in 0..anon {
-            assert!(check_rate_with(anon_key, anon).is_ok());
+        match check_rate_with(key, limit) {
+            Err(RateRefusal::RetryAfter(retry)) => assert!((1..=61).contains(&retry)),
+            other => panic!("over budget must be rejected: {other:?}"),
         }
-        assert!(check_rate_with(anon_key, anon).is_err());
+        let anon_key = "test-rate-anon-ip";
+        for _ in 0..5 {
+            assert!(check_rate_with(anon_key, Budget::PerMinute(5)).is_ok());
+        }
+        assert!(check_rate_with(anon_key, Budget::PerMinute(5)).is_err());
+    }
+
+    #[test]
+    fn zero_refuses_and_unlimited_never_limits() {
+        assert_eq!(Budget::parse("0"), Budget::Refused);
+        assert_eq!(Budget::parse("unlimited"), Budget::Unlimited);
+        assert_eq!(Budget::parse("UNLIMITED"), Budget::Unlimited);
+        assert_eq!(Budget::parse("7"), Budget::PerMinute(7));
+        assert_eq!(
+            check_rate_with("test-rate-refused", Budget::Refused),
+            Err(RateRefusal::Refused),
+            "0 means no AI, not no limit"
+        );
+        for _ in 0..1000 {
+            assert!(check_rate_with("test-rate-unlimited", Budget::Unlimited).is_ok());
+        }
     }
 
     #[test]

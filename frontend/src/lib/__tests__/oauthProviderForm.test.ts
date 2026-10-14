@@ -54,7 +54,7 @@ vi.mock('../api.js', () => api);
 
 import AdminSecurity from '../../pages/AdminSecurity.svelte';
 
-/** The row `ensure_env_provider` creates for OIDC_ISSUER: no client ID. */
+/** The row `ensure_env_provider` creates for OTS_OIDC_ISSUER: no client ID. */
 const ENV_OIDC: OauthProvider = {
   id: 'p-env',
   name: 'Environment OIDC',

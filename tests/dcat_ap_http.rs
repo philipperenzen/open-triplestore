@@ -1,4 +1,4 @@
-//! DCAT-AP-NL catalogue (7.2): under `DCAT_PROFILE=dcat-ap-nl` the served
+//! DCAT-AP-NL catalogue (7.2): under `OTS_DCAT_PROFILE=dcat-ap-nl` the served
 //! catalogue satisfies SEMIC's published DCAT-AP 3.0.1 shapes (validated
 //! through a SHACL Studio pipeline over the served document; the Geonovum
 //! DCAT-AP-NL 3 shapes are checked in `tests/dcat_conformance.rs`), is
@@ -6,7 +6,7 @@
 //! named-graph data in its VoID statistics, and cannot be corrupted by hostile
 //! metadata.
 //!
-//! Own binary: `DCAT_PROFILE` and `CATALOG_*` are process-wide.
+//! Own binary: `OTS_DCAT_PROFILE` and `OTS_CATALOG_*` are process-wide.
 
 mod common;
 
@@ -113,11 +113,11 @@ fn ask(s: &TripleStore, q: &str) -> bool {
 
 #[tokio::test]
 async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata() {
-    std::env::set_var("DCAT_PROFILE", "dcat-ap-nl");
-    std::env::set_var("CATALOG_PUBLISHER_NAME", "Gemeente Voorbeeld");
-    std::env::set_var("CATALOG_PUBLISHER_IDENTIFIER", "00000001234567890000");
+    std::env::set_var("OTS_DCAT_PROFILE", "dcat-ap-nl");
+    std::env::set_var("OTS_CATALOG_PUBLISHER_NAME", "Gemeente Voorbeeld");
+    std::env::set_var("OTS_CATALOG_PUBLISHER_IDENTIFIER", "00000001234567890000");
     std::env::set_var(
-        "CATALOG_LICENSE",
+        "OTS_CATALOG_LICENSE",
         "http://creativecommons.org/publicdomain/zero/1.0/",
     );
     let (state, token) = admin_state();

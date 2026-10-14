@@ -19,7 +19,7 @@
 # Source: https://www.w3.org/TR/vocab-dqv/ (ns http://www.w3.org/ns/dqv#)
 
 id = "dqv-quality"
-opt_out_env = "SEED_DQV_QUALITY"
+opt_out_env = "OTS_SEED_DQV_QUALITY_ENABLED"
 
 [organisation]
 slug = "dqv-quality"

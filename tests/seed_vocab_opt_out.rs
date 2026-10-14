@@ -1,4 +1,4 @@
-//! `SEED_STANDARD_VOCABS=false` stops seeding, not the licence duties on a
+//! `OTS_SEED_STANDARD_VOCABS_ENABLED=false` stops seeding, not the licence duties on a
 //! copy an earlier start seeded of a vocabulary whose licence allows no
 //! altered copies: IMBOR is still checked, and repaired, on every start.
 //!
@@ -12,7 +12,7 @@ use open_triplestore::data_models::{content_digest, registry, seed_vocab, vocab_
 #[test]
 fn seeding_off_still_verifies_and_repairs_imbor() {
     let state = test_state();
-    std::env::remove_var("SEED_STANDARD_VOCABS");
+    std::env::remove_var("OTS_SEED_STANDARD_VOCABS_ENABLED");
     seed_vocab::seed_standard_vocabularies(&state);
     let base = state.base_url.to_string();
     let graph = registry::version_record_iri(&base, "imbor", "2025");
@@ -25,9 +25,9 @@ fn seeding_off_still_verifies_and_repairs_imbor() {
         ))
         .unwrap();
 
-    std::env::set_var("SEED_STANDARD_VOCABS", "false");
+    std::env::set_var("OTS_SEED_STANDARD_VOCABS_ENABLED", "false");
     assert_eq!(seed_vocab::seed_standard_vocabularies(&state), 0);
-    std::env::remove_var("SEED_STANDARD_VOCABS");
+    std::env::remove_var("OTS_SEED_STANDARD_VOCABS_ENABLED");
 
     let stored = content_digest::graph_triples(&state.store, &graph).unwrap();
     let file = content_digest::as_stored(&content_digest::quads_as_triples(

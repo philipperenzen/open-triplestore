@@ -44,21 +44,21 @@ fn overloaded() -> ApiErr {
 /// The repair routes (mounted with `require_auth` and the endpoint ACL).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/datasets/:dataset_id/repair", post(repair_dataset))
+        .route("/api/datasets/{dataset_id}/repair", post(repair_dataset))
         .route(
-            "/api/datasets/:dataset_id/repair/proposals",
+            "/api/datasets/{dataset_id}/repair/proposals",
             get(list_proposals),
         )
         .route(
-            "/api/datasets/:dataset_id/repair/proposals/:proposal_id",
+            "/api/datasets/{dataset_id}/repair/proposals/{proposal_id}",
             get(get_proposal),
         )
         .route(
-            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/apply",
+            "/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/apply",
             post(super::apply::apply_proposal),
         )
         .route(
-            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/reject",
+            "/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/reject",
             post(reject_proposal),
         )
 }
@@ -405,7 +405,10 @@ fn dataset_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, Api
         .list_dataset_graphs(dataset_id)
         .map_err(e500)?
         .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| {
+            !g.starts_with("urn:system:reports:")
+                && !crate::provenance::is_any_statement_provenance_graph(g)
+        })
         .collect())
 }
 

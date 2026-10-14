@@ -169,7 +169,7 @@ async fn every_documented_endpoint_enforces_the_level_it_documents() {
     // applies), and the table is longer than its burst. A 429 would say nothing
     // about auth, so the limiter is taken out of the picture rather than worked
     // around with sleeps.
-    std::env::set_var("RATE_LIMIT_DISABLED", "1");
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
 
     let (state, _reader_token) = documented_state();
     let app = test_app(state);
@@ -221,7 +221,7 @@ async fn every_documented_endpoint_enforces_the_level_it_documents() {
 /// answered `200`, because it sat behind the admin-gated sources router.
 #[tokio::test]
 async fn public_model_rows_answer_anonymously_for_a_seeded_vocabulary() {
-    std::env::set_var("RATE_LIMIT_DISABLED", "1");
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
 
     let (state, _reader_token) = documented_state();
     open_triplestore::data_models::seed_vocab::seed_standard_vocabularies(&state);
@@ -263,7 +263,7 @@ async fn public_model_rows_answer_anonymously_for_a_seeded_vocabulary() {
 
 #[tokio::test]
 async fn admin_rows_refuse_an_ordinary_token() {
-    std::env::set_var("RATE_LIMIT_DISABLED", "1");
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
 
     let (state, reader_token) = documented_state();
     let app = test_app(state);

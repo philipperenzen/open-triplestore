@@ -3,7 +3,7 @@
 //! The rate limiter, the audit log and the LLM guard's anonymous budget all
 //! need to know who is calling. `X-Forwarded-For` and `X-Real-IP` are plain
 //! request headers that any client can set, so they are believed only when
-//! the TCP peer is one of the reverse proxies listed in `TRUSTED_PROXY_CIDRS`.
+//! the TCP peer is one of the reverse proxies listed in `OTS_TRUSTED_PROXY_CIDRS`.
 //! Otherwise the TCP peer address is the client.
 
 use std::convert::Infallible;
@@ -16,7 +16,7 @@ use axum::http::{Extensions, HeaderMap};
 use ipnet::IpNet;
 
 /// The reverse proxies whose forwarded-for headers are believed
-/// (`TRUSTED_PROXY_CIDRS`). Empty means no proxy: the TCP peer is the client.
+/// (`OTS_TRUSTED_PROXY_CIDRS`). Empty means no proxy: the TCP peer is the client.
 #[derive(Clone, Debug, Default)]
 pub struct TrustedProxies(Arc<Vec<IpNet>>);
 
@@ -94,7 +94,6 @@ impl ClientIp {
     }
 }
 
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for ClientIp
 where
     TrustedProxies: FromRef<S>,

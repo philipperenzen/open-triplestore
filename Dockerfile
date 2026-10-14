@@ -186,8 +186,8 @@ RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/
 # drops the rest, LOV's metadata graph included (the server embeds its own
 # catalog). The list ships next to the corpus as its manifest.
 # Best-effort: when the download fails the image still builds — the server can
-# fetch the full corpus itself at boot (VOCAB_CORPUS_URL) or an operator can
-# supply one (VOCAB_CORPUS_PATH, or {data_dir}/vocab/lov.nq.gz).
+# fetch the full corpus itself at boot (OTS_VOCAB_CORPUS_URL) or an operator can
+# supply one (OTS_VOCAB_CORPUS_PATH, or {data_dir}/vocab/lov.nq.gz).
 # Set --build-arg LOV_CORPUS_URL= (empty) to skip the bake entirely.
 FROM debian:bookworm-slim AS lovcorpus
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -210,7 +210,7 @@ RUN mkdir -p /corpus && \
     else \
         echo "WARNING: LOV corpus not baked (download failed or disabled)." \
              "Term search covers platform vocabularies only until the server" \
-             "downloads the corpus at boot (VOCAB_CORPUS_URL)."; \
+             "downloads the corpus at boot (OTS_VOCAB_CORPUS_URL)."; \
         rm -f /corpus/lov.nq.gz; \
     fi; \
     rm -f /tmp/lov-full.nq.gz /tmp/lov-full.nq /tmp/lov.nq

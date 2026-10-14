@@ -479,8 +479,8 @@ const SAML_FAILED: &str = "{\"error\":\"SAML sign-in failed\"}";
 
 /// The `saml_state` cookie. The IdP returns the browser to the ACS with a
 /// cross-site POST, which only a `SameSite=None; Secure` cookie accompanies, so
-/// it is that whenever `BASE_URL` is https — whatever `SECURE_COOKIES` says.
-/// On a loopback http `BASE_URL` (local development; [`super::saml::check_transport`]
+/// it is that whenever `OTS_BASE_URL` is https — whatever `OTS_SECURE_COOKIES_ENABLED` says.
+/// On a loopback http `OTS_BASE_URL` (local development; [`super::saml::check_transport`]
 /// refuses any other http one) it stays `Lax`, which works when the IdP is
 /// same-site.
 fn saml_state_cookie(value: &str, max_age: u32, https: bool) -> String {
@@ -997,7 +997,9 @@ pub async fn admin_create_saml_key(
     State(state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
-    body: Option<Json<SamlKeyCreate>>,
+    // `Result(..).ok()`, not `Option<Json<_>>`: axum 0.8's optional Json
+    // rejects a JSON content type with an empty body; an absent body is fine.
+    body: Result<Json<SamlKeyCreate>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let provider = match saml_provider_by_id(&state, &id) {
         Ok(p) => p,

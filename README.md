@@ -46,10 +46,10 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
        ![Open Triplestore web UI](docs/assets/demo.gif)
      Run locally with only the bundled (neutral) sample data:
        # macOS / Linux / WSL:
-       JWT_SECRET=$(openssl rand -hex 32) \
+       OTS_JWT_SECRET=$(openssl rand -hex 32) \
          cargo run --release -- --port 7878 --data-dir ./demo-data --load examples/standards-demo.ttl
        # Windows PowerShell:
-       $env:JWT_SECRET = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+       $env:OTS_JWT_SECRET = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
        cargo run --release -- --port 7878 --data-dir .\demo-data --load examples\standards-demo.ttl
      then open http://localhost:7878/ and register the first user (it becomes super_admin). -->
 
@@ -70,7 +70,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
-| **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
+| **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_SERVICE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
 | **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML (documented profile), GeoJSON and KML literals (`asWKT`, `asGML`, `asGeoJSON`, `asKML`), CRS transform for the built-in CRS set, the RDFS Entailment and Query Rewrite extensions. every GeoSPARQL 1.1 query function and all six spatial aggregates. GeoSPARQL 1.0 graded Full; 1.1 Full for every conformance class but the optional DGGS class ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 EL** | Native EL++ saturation engine for the whole profile: classification, realization and the property closure, with nominals, `hasSelf`, keys, equality and the EL datatypes; axioms outside the profile are reported ([docs](docs/owl2-el.md)) |
 | **OWL 2 DL** | Backend chosen with `OTS_DL_BACKEND`: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`, checked in CI against the W3C OWL 2 DL test cases), `konclude`, or `native` RL + DL-syntax rules, sound but incomplete; OWL 2 DL profile check; `POST /api/reasoning/check` for consistency, entailment, satisfiability; background runs ([docs](docs/owl2-dl.md)) |
@@ -88,7 +88,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **DCAT catalog** | W3C DCAT 3 catalog at `/.well-known/void` — per-dataset distributions, versions, data services, VoID statistics, PROV-O provenance; optional DCAT-AP 3 / DCAT-AP-NL 3 profiles ([grades & gaps](docs/standards.md)) |
 | **RML mapping** | [RML-Core / RML-IO](https://w3id.org/rml/core/spec), legacy RML and R2RML — CSV (with CSVW dialects), JSON and JSON Lines (RFC 9535 JSONPath), XML (XPath), compressed or not, and SQL datasources → RDF, with joins across sources |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
-| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
+| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `OTS_LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
 | **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: a catalogue of ~900 vocabularies, each with its licence status (the licence the vocabulary declares or, where it names none, its publisher's published terms); term search and one-click offline install into the registry for those whose licence lets the image ship them (install also works for the others from a dump you supply, privately); CLARIAH-style vocabulary recommender ([docs](docs/vocabulary-search.md)) |
 | **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
@@ -126,7 +126,7 @@ secret):
 ```bash
 # macOS · Linux · WSL · Git Bash
 cp .env.example .env
-printf 'JWT_SECRET=%s\n'            "$(openssl rand -hex 32)" >> .env
+printf 'OTS_JWT_SECRET=%s\n'        "$(openssl rand -hex 32)" >> .env
 printf 'S3_GATEWAY_ACCESS_KEY=%s\n' "$(openssl rand -hex 8)"  >> .env
 printf 'S3_GATEWAY_SECRET_KEY=%s\n' "$(openssl rand -hex 24)" >> .env
 ```
@@ -135,7 +135,7 @@ printf 'S3_GATEWAY_SECRET_KEY=%s\n' "$(openssl rand -hex 24)" >> .env
 # Windows PowerShell — no OpenSSL required
 Copy-Item .env.example .env
 function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
-Add-Content .env "JWT_SECRET=$(New-Secret 32)"
+Add-Content .env "OTS_JWT_SECRET=$(New-Secret 32)"
 Add-Content .env "S3_GATEWAY_ACCESS_KEY=$(New-Secret 8)"
 Add-Content .env "S3_GATEWAY_SECRET_KEY=$(New-Secret 24)"
 ```
@@ -158,25 +158,25 @@ docker compose --profile llm up -d                                              
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llm up -d   # NVIDIA GPU
 ```
 
-The first start downloads the model (~5 GB); AI features turn on once it is ready (check `GET /api/llm/health`). Prefer a hosted model? Skip the `llm` profile and point `LLM_GATEWAY_URL` (+ `LLM_API_KEY`) at your endpoint, with `LLM_MODEL` for the model name. The NVIDIA GPU path needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+The first start downloads the model (~5 GB); AI features turn on once it is ready (check `GET /api/llm/health`). Prefer a hosted model? Skip the `llm` profile and point `OTS_LLM_GATEWAY_URL` (+ `OTS_LLM_API_KEY`) at your endpoint, with `OTS_LLM_MODEL` for the model name. The NVIDIA GPU path needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 On an NVIDIA GPU the bundled [vLLM](https://docs.vllm.ai) profile serves faster under load — its automatic prefix caching reuses the chat's shared system prompt across turns and users for near-instant first tokens:
 
 ```bash
 docker compose --profile llm-vllm up -d   # then set in .env:
-# LLM_GATEWAY_URL=http://vllm:8000
-# LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+# OTS_LLM_GATEWAY_URL=http://vllm:8000
+# OTS_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
 ```
 
 **Optional — outbound email.** Account mail (verification links, password resets) is written to the server log until SMTP is configured. The stack bundles a send-only Postfix relay; enable it and point the store at it in `.env`:
 
 ```bash
 docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
-# SMTP_HOST=mail
-# SMTP_TLS=none
-# SMTP_FROM=Open Triplestore <no-reply@example.org>
+# OTS_SMTP_HOST=mail
+# OTS_SMTP_TLS=none
+# OTS_SMTP_FROM=Open Triplestore <no-reply@example.org>
 # MAIL_SENDER_DOMAINS=example.org
-# BASE_URL=https://your-public-origin
+# OTS_BASE_URL=https://your-public-origin
 ```
 
 Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
@@ -220,17 +220,20 @@ cargo build --release
 > **[Windows guide](docs/windows.md)**.
 
 ```
-Options:
-  -d, --data-dir  <PATH>      Storage directory         [default: ./data]
-  -p, --port      <PORT>      HTTP port                 [default: 7878]
-  -b, --bind      <ADDR>      Bind address              [default: 0.0.0.0]
+Options (each setting flag also reads its environment variable):
+  -d, --data-dir  <PATH>      Storage directory         [default: ./data]   [env: OTS_DATA_DIR]
+  -p, --port      <PORT>      HTTP port                 [default: 7878]     [env: OTS_PORT]
+  -b, --bind      <ADDR>      Bind address              [default: 0.0.0.0]  [env: OTS_BIND]
       --load      <FILE>      Load RDF file on startup
       --log-level <LEVEL>     Log level                 [default: info]
-      --serve-frontend <BOOL> Serve the bundled web UI  [default: true]
-      --access-token-expiry-minutes <N>  JWT access token TTL  [default: 30]
-      --refresh-token-expiry-days   <N>  Refresh token TTL     [default: 30]
+      --serve-frontend <BOOL> Serve the bundled web UI  [default: true]     [env: OTS_FRONTEND_ENABLED]
+      --access-token-expiry-secs  <N>  JWT access token TTL  [default: 1800]  [env: OTS_ACCESS_TOKEN_EXPIRY_SECS]
+      --refresh-token-expiry-days <N>  Refresh token TTL     [default: 30]    [env: OTS_REFRESH_TOKEN_EXPIRY_DAYS]
       --promote-super-admin <USERNAME>   Promote user and exit
 ```
+
+Every setting is an `OTS_…` environment variable, validated at startup; see
+[docs/administration.md](docs/administration.md#environment-variables).
 
 ### Verify
 
@@ -325,14 +328,14 @@ Pair this with `make watch` for a hot-reloading backend (see the
 
 Cross-app discovery is **off by default** — the web UI talks to its own backend directly, so you
 need nothing else to run it. Turn it on to resolve sibling apps (and self-register the backend)
-through a service registry. It is an explicit opt-in via `LD_DISCOVERY`:
+through a service registry. It is an explicit opt-in via `OTS_DISCOVERY_ENABLED`:
 
 ```bash
-LD_DISCOVERY=1 npm run dev               # frontend: mount the /registry proxy (dev server)
-LD_DISCOVERY=true docker compose up -d   # backend: self-register (or set LD_DISCOVERY in .env)
+OTS_DISCOVERY_ENABLED=1 npm run dev               # frontend: mount the /registry proxy (dev server)
+OTS_DISCOVERY_ENABLED=true docker compose up -d   # backend: self-register (or set OTS_DISCOVERY_ENABLED in .env)
 ```
 
-When enabled, point `LD_REGISTRY_URL` at your registry (default `http://localhost:8500`). When off,
+When enabled, point `OTS_REGISTRY_URL` at your registry (default `http://localhost:8500`). When off,
 the dev server makes no registry calls — so a registry that isn't running can't print
 `[vite] http proxy error: /resolve` / `/events`.
 
@@ -492,7 +495,7 @@ SELECT ?name ?knows WHERE {
 }
 ```
 
-No network is involved; set `PREFIX_CC_FALLBACK=true` to additionally consult
+No network is involved; set `OTS_PREFIX_CC_FALLBACK_ENABLED=true` to additionally consult
 the live prefix.cc for labels the local tiers don't know (cached in
 `{data-dir}/prefix_cache.json`). Lookup API: `GET /api/prefixes?q=…`,
 `/api/prefixes/{label}`, `/api/prefixes/reverse?uri=…` — see
@@ -725,7 +728,7 @@ See [docs/shacl.md](docs/shacl.md) for the full SHACL guide.
 
 ## DCAT 3 Catalog
 
-The `/.well-known/void` endpoint returns a **W3C DCAT 3** catalog (optionally under the DCAT-AP 3 or DCAT-AP-NL 3 profile, `DCAT_PROFILE`) including:
+The `/.well-known/void` endpoint returns a **W3C DCAT 3** catalog (optionally under the DCAT-AP 3 or DCAT-AP-NL 3 profile, `OTS_DCAT_PROFILE`) including:
 
 - `dcat:Catalog` with all registered datasets the caller may see
 - Per-dataset `dcat:Dataset` with distributions (SPARQL endpoint, Graph Store, per-graph downloads, LDES, OGC API), temporal coverage and update frequency
@@ -905,7 +908,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 28 |  |
 | buildingSMART IDS 1.0 | `tests/buildingsmart_ids_conformance.rs` | **buildingSMART IDS test corpus**, fetched at a pinned commit and SHA-256 checked (not in the repository) | 2 | runs in CI as a development and regression ratchet; no score is published, and the results are not a buildingSMART certification; known gaps in `docs/conformance/ids.md` |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI) | 18 |  |
-| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 192 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 195 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 15 |  |
@@ -929,7 +932,7 @@ licence policy allows no performance claims on a subset.
 | ShEx 2.1 | `tests/shextest_conformance.rs` | **vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven) | 6 | 1917 corpus cases: 1795 pass, 0 known failures, 122 runner-side skips (floor ≥1795 asserted) |
 | SPARQL 1.2 / RDF 1.2 | `tests/sparql12_conformance.rs` | spec-derived | 27 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
-| SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
+| SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 10 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 28 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 33 |  |
@@ -947,7 +950,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1268 conformance tests across 44 suites; a further 864 tests in 110 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
+1272 conformance tests across 44 suites; a further 907 tests in 115 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

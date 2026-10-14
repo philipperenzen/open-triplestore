@@ -151,7 +151,7 @@ limit for most stores' indexes, so both scales measure the in-memory regime.
   SHACL runs, 60 s per concurrency level.
 - **Same settle time.** 60 s between the end of the load and the first query,
   for every store.
-- **No result caches.** Open Triplestore runs with `OTS_QUERY_CACHE=off` and
+- **No result caches.** Open Triplestore runs with `OTS_QUERY_CACHE_ENABLED=off` and
   QLever with `-c 0GB`; the others have no query-result cache. Open
   Triplestore's per-IP rate limiter is off, its demo seed and vocabulary
   download are off. Nothing else is tuned.

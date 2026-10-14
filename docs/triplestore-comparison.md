@@ -246,7 +246,7 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > ³ Open Triplestore: *Full* in [`docs/standards.md`](standards.md) since 2026-10-03, graded against the Candidate Recommendations of 2026-04-07. Triple terms, reifiers, annotations and base direction parse, store, query and serialize, and the W3C RDF 1.2 syntax suites run in CI (vendored, unscored); every entry passes, non-canonical numbers included now that the store keeps literals as written, except four `rdf:XMLLiteral` entries blocked on the open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97), which the project's Full rubric does not count against the grade ([`docs/conformance/rdf12.md`](conformance/rdf12.md)). Oxigraph stores numerics in canonical form.
 > ⁴ The "W3C SPARQL 1.1 Tests" row was retired for every system on 2026-10-03, by owner decision: the W3C test-suite licence (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims on a subset of a suite, so the row could not be graded for Open Triplestore, and a row only the other systems could fill skewed the count. Open Triplestore still runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query, update and federation sections of the W3C suite (`docs/conformance/sparql11.md`). Measured comparisons with other stores are in [Performance comparison](performance-comparison.md).
 > ⁵ Full in [`docs/standards.md`](standards.md), deny-by-default (footnote 3 there): `SERVICE`
->   reaches only the endpoints an operator lists in `OTS_REMOTE_ALLOWLIST`, and a refused, failed
+>   reaches only the endpoints an operator lists in `OTS_SERVICE_ALLOWLIST`, and a refused, failed
 >   or over-cap call is a failed invocation (an error, or the empty solution under `SILENT`).
 >   `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation
 >   sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
@@ -262,7 +262,7 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 >   but not released).
 > ²⁰ Full in [`docs/standards.md`](standards.md) since 2026-10-06 (Partial from 2026-10-03; until
 >   then the cell marked feature presence). Remote `@context`s resolve — bundled W3C contexts
->   offline, others from `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections
+>   offline, others from `OTS_JSONLD_CONTEXT_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections
 >   run as a regression ratchet (no published score) with every evaluated entry passing. The
 >   serialiser in the vendored JSON-LD processor follows the fromRdf algorithm: well-formed lists
 >   become `@list` (their nodes' `rdf:type rdf:List` dropped, as the algorithm says) and
@@ -289,7 +289,8 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 | **SWRL** | ✅¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 > ⁷ RDFS entailment (RDF 1.1 Semantics: `rdfD2`, `rdfs1`–`rdfs13` and the axiomatic triples in
->   one fixed point, datatype clashes reported; the infinite `rdf:_n` axioms bounded by the data,
+>   one fixed point, datatype clashes reported, `rdfD1` on request, equal values written
+>   differently matched at query time; the infinite `rdf:_n` axioms bounded by the data,
 >   decision D11), graded Full in [`docs/standards.md`](standards.md) (footnote 14 there), in the
 >   default `full` build (feature `rdfs-entailment`). See
 >   [`docs/rdfs-entailment.md`](rdfs-entailment.md).
@@ -441,6 +442,19 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > N-Quads/TriG, is ungraded feature presence. The per-change recounts written while the
 > branches were open counted from baselines that no longer held and are replaced by this one.
 
+> **Rubric sweep, 2026-10-06 (no recount needed).** Every graded row of the
+> Open Triplestore column was checked against the Full rubric of `docs/standards.md`: each
+> known failure, skip and divergence list of the vendored suites was classified as a test-suite
+> defect, an open external specification issue, an external engine limit, or a gap in this
+> project's code, and each of the last kind was fixed or filed. Fixed: the RDF 1.1 Semantics
+> cases (D-entailment by value, `rdfD1`, lexical spaces without whitespace normalization,
+> `rdf:XMLLiteral` checks; none fails now) and the OGC GeoSPARQL validator's S18 example
+> (braces in `REGEX` / `sh:pattern`). Filed: [#504](https://github.com/philipperenzen/open-triplestore/issues/504) (RDF 1.2, w3c/rdf-xml#97),
+> [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
+> [#508](https://github.com/philipperenzen/open-triplestore/issues/508) (SHACL test defects), [#509](https://github.com/philipperenzen/open-triplestore/issues/509) (GeoSPARQL DGGS scope) and [#510](https://github.com/philipperenzen/open-triplestore/issues/510)
+> (GeoSPARQL `getSRID` / `geometryType` return type; since fixed, both now return the
+> `xsd:anyURI` literals their signatures give). No grade changed.
+>
 > Open Triplestore recounted on 2026-10-13 (round 3, card K1), 26 → **28 of 28**: JSON-LD 1.1
 > and RML follow their new Full grades in `docs/standards.md`. JSON-LD's serialiser now runs the
 > fromRdf list and JSON-literal conversions, and the store refuses an `rdf:JSON` literal that
@@ -522,7 +536,7 @@ loader for initial loading — it is another ~7× faster again.
 > tolerance for that reason — so read these as a band, not a point.
 
 Both figures are with the per-quad [change log](versioning.md#change-log) **off**, which is the
-shipped default. Turning it on (`OTS_CHANGE_CAPTURE=on`, for replication, history or audits)
+shipped default. Turning it on (`OTS_CHANGE_CAPTURE_ENABLED=on`, for replication, history or audits)
 costs a ground write 4–13 % and a `WHERE` update ×2.5–4 — see
 [versioning.md](versioning.md#what-it-costs).
 (`insert/sparql_update/single_triple`, `insert/sparql_update_batch/10_triples`.)
@@ -826,7 +840,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 > these are development results, not an OGC compliance test or certification.
 > ³ The GeoSPARQL Query Rewrite Extension (the RIF rules, all 24 sf/eh/rcc8 relations) rewrites
 > relation patterns in queries and update `WHERE` clauses, on by default
-> (`OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
+> (`OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
 
 ### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 

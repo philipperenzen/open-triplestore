@@ -42,7 +42,7 @@
   <table id="orgs"><thead><tr><th>Slug</th><th>Name</th><th>Members</th><th>Teams</th></tr></thead><tbody></tbody></table>
 
   <h2>Per-app entitlements</h2>
-  <p class="muted">Membership of these well-known teams unlocks the app (configured via <code>ACCOUNTS_DASHBOARD_APP_GROUPS</code>; admins always qualify).</p>
+  <p class="muted">Membership of these well-known teams unlocks the app (configured via <code>OTS_ACCOUNTS_DASHBOARD_APP_GROUPS</code>; admins always qualify).</p>
   <table id="apps"><thead><tr><th>App capability</th><th>Unlocking team</th></tr></thead><tbody></tbody></table>
 
   <h2>LLM usage</h2>
@@ -113,7 +113,7 @@ async function load() {
   const gw = o.llm.gateway || {};
   const note = document.getElementById('gwnote');
   const gwt = document.getElementById('llmgw');
-  if (!gw.configured) { note.textContent = 'No external gateway configured (ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL).'; }
+  if (!gw.configured) { note.textContent = 'No external gateway configured (OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL).'; }
   else if (!gw.available) { note.textContent = 'Gateway ledger unavailable: ' + (gw.reason || 'unknown'); }
   else {
     const usage = gw.usage || {};

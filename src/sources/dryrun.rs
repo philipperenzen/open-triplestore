@@ -47,8 +47,6 @@ use super::{connector, mappings, registry, runs};
 
 /// Every scratch graph a dry-run writes starts with this.
 pub const SCRATCH_PREFIX: &str = "urn:dryrun:";
-const TTL_ENV: &str = "OTS_DRYRUN_TTL_SECS";
-const DEFAULT_TTL_SECS: u64 = 15 * 60;
 const DEFAULT_SAMPLE: usize = 20;
 /// Focus nodes listed per finding; the rest are counted.
 const FOCUS_NODES_LISTED: usize = 20;
@@ -56,12 +54,7 @@ const FOCUS_NODES_LISTED: usize = 20;
 const ENTITIES_LISTED: usize = 500;
 
 fn ttl() -> Duration {
-    Duration::from_secs(
-        std::env::var(TTL_ENV)
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DEFAULT_TTL_SECS),
-    )
+    crate::config::DRYRUN_TTL.get()
 }
 
 pub fn scratch_graph_iri(id: &str) -> String {
@@ -770,7 +763,7 @@ pub async fn dry_run(
 }
 
 pub fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route("/api/sources/:id/dry-run", axum::routing::post(dry_run))
+    axum::Router::new().route("/api/sources/{id}/dry-run", axum::routing::post(dry_run))
 }
 
 #[cfg(test)]

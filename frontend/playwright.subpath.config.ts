@@ -44,7 +44,7 @@ export default defineConfig({
       // Nothing listens here: a request the base-aware preview proxy should
       // have kept on the SPA (or that the spec failed to answer) errors out.
       OTS_BACKEND_URL: 'http://127.0.0.1:9',
-      LD_DISCOVERY: '',
+      OTS_DISCOVERY_ENABLED: '',
     },
   },
 });

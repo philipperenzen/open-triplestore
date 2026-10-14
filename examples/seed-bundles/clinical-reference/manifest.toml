@@ -11,7 +11,7 @@
 # Loaded by tests/clinical_bundle_e2e.rs on every CI run.
 
 id = "clinical-reference"
-opt_out_env = "SEED_CLINICAL_REFERENCE"
+opt_out_env = "OTS_SEED_CLINICAL_REFERENCE_ENABLED"
 
 [organisation]
 slug = "clinical-reference"
