@@ -48,14 +48,14 @@ applies.
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
 | DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Full¹⁷ — DCAT 3 catalogue: DCAT 3 §11 versions, data services with `dcat:servesDataset`, temporal coverage, update frequency, DCAT range typing; `DCAT_PROFILE` adds the AP/AP-NL properties (identifiers, language, file types, catalogue records). CI validates it against SEMIC's DCAT-AP 3.0.1 shapes and Geonovum's DCAT-AP-NL 3 shapes. See [dcat.md](dcat.md). |
 | VoID | Dataset statistics, partitions and linksets | Full¹⁷ — per dataset, over the graphs the caller may read: statistics, class and property partitions, vocabularies, example resources, features, data dumps, SPARQL endpoint; linkset-role graphs as `void:Linkset`s; store-wide counts only, never partitions. See [dcat.md](dcat.md#void-statistics). |
-| RML / R2RML | RML-Core / RML-IO, legacy RML and R2RML: CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
+| RML / R2RML | RML-Core / RML-IO, legacy RML and R2RML: CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Full⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication (this store as the service provider) | Full¹⁸ — Web Browser SSO started here (HTTP-Redirect AuthnRequest, optionally signed) or at the IdP (off by default, replay cache), HTTP-POST response; signatures SHA-256 or stronger; encrypted assertions; IdP metadata import with several signing certificates; SP key rollover; persistent NameID and attribute mapping; Single Logout in both directions. In the published image (`saml` feature), not in `full`. See [auth.md](auth.md#saml-20). |
 | ShEx 2.1 | Shape Expressions: ShExC, ShExJ, ShExR, ShapeMap | Full¹⁶ — see [shex.md](shex.md). |
 | SWRL | Horn-clause rules | Full¹⁵ — every atom (class expressions via the regime, data ranges natively), all §8 built-ins with binding, six syntaxes, rules stored with a dataset. See [swrl.md](swrl.md). |
 | SPARQL + full-text search (Tantivy) | A feature, not a standard: the `ft:search` / `text:search` magic property and `CONTAINS` / `STRSTARTS` push-down | Full¹¹ |
 | SKOS | Simple Knowledge Organization System: SKOS-aware inferencing and integrity checking | Full¹² |
-| JSON-LD 1.1 | JSON-based RDF syntax: parsing (toRdf), serialisation (fromRdf), remote contexts | Partial¹³ |
+| JSON-LD 1.1 | JSON-based RDF syntax: parsing (toRdf), serialisation (fromRdf), remote contexts | Full¹³ |
 
 ## Conformance test suites
 
@@ -84,13 +84,13 @@ checks every file's SHA-256 ([conformance/ids.md](conformance/ids.md)).
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 27 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 28 |  |
 | buildingSMART IDS 1.0 | `tests/buildingsmart_ids_conformance.rs` | **buildingSMART IDS test corpus**, fetched at a pinned commit and SHA-256 checked (not in the repository) | 2 | runs in CI as a development and regression ratchet; no score is published, and the results are not a buildingSMART certification; known gaps in `docs/conformance/ids.md` |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI) | 18 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 192 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
-| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 14 |  |
+| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 15 |  |
 | OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
 | OWL 2 DL | `tests/owl2_dl_conformance.rs` | spec-derived (+ live tests against the reasoner sidecar) | 76 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
@@ -99,7 +99,7 @@ checks every file's SHA-256 ([conformance/ids.md](conformance/ids.md)).
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 50 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 51 |  |
 | RML-Core | `tests/rml_core_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven) | 2 | 76 corpus cases: 75 pass, 1 known failure, 0 runner-side skips (floor ≥70 asserted) |
 | RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
 | RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
@@ -123,13 +123,13 @@ checks every file's SHA-256 ([conformance/ids.md](conformance/ids.md)).
 | RDF 1.1 Semantics (RDF/RDFS entailment) | `tests/w3c_rdf_mt_manifests.rs` | **vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 120 pass, 0 known failures, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
 | SHACL Compact Syntax | `tests/w3c_shaclc_conformance.rs` | **vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip) | 2 | 32 corpus cases: 32 pass, 0 known failures, 0 runner-side skips (floor ≥32 asserted) |
-| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 126 |  |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 131 |  |
 | SPARQL 1.1 Entailment Regimes | `tests/w3c_sparql11_entailment_manifests.rs` | **vendored W3C test-suite subset** (entailment section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1260 conformance tests across 44 suites; a further 855 tests in 109 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
+1268 conformance tests across 44 suites; a further 903 tests in 115 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring. The buildingSMART IDS corpus (CC BY-ND 4.0) is downloaded at a pinned commit too; its results are development results, not a buildingSMART certification.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -390,23 +390,44 @@ behavior and will flip green when the limitation is resolved.
    expression maps, `rml:URI` / `rml:UnsafeIRI` / `rml:UnsafeURI`, blank-node
    term maps without an expression, `rml:baseIRI`; joins on every source, and
    a join-less reference joins a row to itself (R2RML §8). Terms follow R2RML
-   §7.3, §7.4, §10.2 and §11 (IRI-safe templates, natural datatypes and
-   lexical forms, blank nodes per value and graph, union graph maps), a
+   §7.3, §7.4, §10.2, §10.3 and §11 (IRI-safe templates, natural datatypes and
+   lexical forms — a datatype override included, so a value its datatype does
+   not accept is a data error — blank nodes per value and graph, union graph maps), a
    non-conforming mapping is refused at parse naming the construct, and a data
    error aborts the run naming the rows unless the run opts into skipping and
    reporting them. A datasource mapping version frozen before these rules keeps
-   the old term rules. Cases that do not pass, each listed with its reason in
-   its runner: R2RMLTC0002f (a regular SQL identifier is matched as the
-   database reports its columns, not case-folded as SQL 2008 would), R2RMLTC0018a
-   on SQLite and MySQL (neither returns `CHAR` values padded), RMLTC0027b (its
-   expected output holds IRIs with spaces, which RDF does not allow) and
-   RMLSTC0009a (the suite's manifest expects an error its own description and
-   expected output do not); the RML-IO SPARQL-endpoint and D2RQ cases map
-   through registered datasources and are not run.
-   Graded *Partial* under the project's Full rubric (2026-10-03): R2RMLTC0002f
-   is a deliberate deviation, which the rubric does not accept as a remaining
-   failure; R2RMLTC0018a is a limit of the database engines, and RMLTC0027b and
-   RMLSTC0009a are defects in the test suites.
+   the old term rules. Column and table names are SQL identifiers resolved by
+   SQL 2008's rules as each engine applies them (R2RML §5 and §3): a regular
+   name stands for its folded form — upper case under SQL 2008, lower case on
+   PostgreSQL (and, for a column, SQL 2008's upper case), compared without regard to
+   case on SQLite and MySQL, by collation on SQL Server — a delimited one for
+   its text, and a name that is not one identifier is refused
+   ([sources.md](sources.md#relational-logical-sources)). MySQL sessions set
+   `PAD_CHAR_TO_FULL_LENGTH`, so `CHAR` values come back padded as SQL defines
+   them. Cases that do not pass, each listed with its reason and issue in its
+   runner ([conformance/rml.md](conformance/rml.md)): R2RMLTC0002f on SQLite
+   and MySQL, which compare names without regard to case and do not record
+   which were declared delimited (engine limit,
+   [#511](https://github.com/philipperenzen/open-triplestore/issues/511));
+   R2RMLTC0018a on SQLite, which has no fixed-length `CHAR` (engine limit,
+   [#512](https://github.com/philipperenzen/open-triplestore/issues/512));
+   R2RMLTC0002d, 0003b, 0011a, 0014b and 0014c on PostgreSQL, which name
+   mixed-case delimited aliases with regular identifiers, against §5 and
+   against R2RMLTC0002f (test-suite defect,
+   [#513](https://github.com/philipperenzen/open-triplestore/issues/513));
+   RMLTC0027b, whose expected output holds an IRI with a space, which RML-Core's
+   term generation rules make a data error (test-suite defect,
+   [#514](https://github.com/philipperenzen/open-triplestore/issues/514));
+   RMLSTC0009a, whose manifest expects an error its own description and
+   expected output do not (test-suite defect,
+   [#515](https://github.com/philipperenzen/open-triplestore/issues/515));
+   and five legacy rml-test-cases whose expectations RML-IO and R2RML §7.4
+   superseded (test-suite defect,
+   [#516](https://github.com/philipperenzen/open-triplestore/issues/516)).
+   The RML-IO SPARQL-endpoint and D2RQ cases map through registered
+   datasources and are not run. Regraded *Full* on 2026-10-06 under the
+   project's Full rubric (was Partial: R2RMLTC0002f, matched as the database
+   reports its columns rather than case-folded, was a deliberate deviation).
    **Not implemented:** RML-FNML (new-vocabulary functions; the legacy
    `fnml:functionValue` with this store's own functions works), RML-CC
    (collections and containers), RML-LV (logical views), RML-star and RML-IO
@@ -483,23 +504,34 @@ behavior and will flip green when the limitation is resolved.
     context named by IRI failed): the bundled W3C contexts of ActivityStreams,
     CSVW, LDP and ODRL offline, other URLs only when `OTS_REMOTE_ALLOWLIST`
     covers them, size-capped and cached ([formats.md](formats.md#json-ld-remote-contexts)).
-    Graded *Partial* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
+    Graded *Full* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
     which run as a regression ratchet with no published score
-    ([conformance/jsonld.md](conformance/jsonld.md)). Every `toRdf` entry
-    the runner evaluates passes since the JSON-LD processor is patched in
-    the vendored Oxigraph fork (`vendor/oxjsonld/`, 2026-10-03: base-IRI dot
-    segments, an invalid `@base`, type-scoped contexts in type maps, the
-    `rdfDirection` option). Three `fromRdf` entries fail on purpose, because
-    the serialiser writes every stored quad as it is: it does not fold a
-    list whose nodes carry `rdf:type rdf:List` into `@list` (the algorithm
-    drops those quads) and does not refuse an `rdf:JSON` literal that is not
-    valid JSON (the algorithm aborts the whole serialisation). A JSON-LD
-    upload keeps `@direction` as an RDF 1.2 directional language-tagged
-    string, where a JSON-LD 1.1 processor without `rdfDirection` drops it;
-    the runner sets the option each test names. `expandContext`,
-    `useNativeTypes` / `useRdfType`, generalized RDF and the JSON-LD 1.0
-    processing mode are not offered. The three `fromRdf` failures are deliberate
-    deviations, which keep the row Partial under the Full rubric above.
+    ([conformance/jsonld.md](conformance/jsonld.md)); every evaluated entry
+    of both passes, with no known failure. The JSON-LD processor is patched
+    in the vendored Oxigraph fork (`vendor/oxjsonld/`): base-IRI dot
+    segments, an invalid `@base`, type-scoped contexts in type maps and the
+    `rdfDirection` option (2026-10-03), and since 2026-10-06 the
+    serialiser follows the fromRdf algorithm where it used to write every
+    quad as it is: a well-formed list becomes `@list` and its nodes go, with
+    the `rdf:type rdf:List` quads the algorithm drops (entailed by
+    `rdf:first rdfs:domain rdf:List`; a list node with any other property
+    stays a node object with every quad), and an `rdf:JSON` literal becomes
+    its `@json` value — written typed with its text when that text is not
+    the canonical form `@json` reads back as, so the literal round-trips
+    exactly. An `rdf:JSON` literal that is not JSON is ill-typed: the
+    serialiser refuses it (`invalid JSON literal`), and the store refuses it
+    with a 400 on every write path — uploads and imports, SPARQL UPDATE,
+    the Graph Store Protocol, LDP and RDF Patch
+    ([datatypes.md](datatypes.md#other--custom-datatypes)) — so a download
+    never meets one. Regraded Full on 2026-10-06 (was Partial: the three
+    `fromRdf` entries `0016`, `js08` and `js09` failed on purpose). A
+    JSON-LD upload keeps `@direction` as an RDF 1.2 directional
+    language-tagged string, the `rdf-12` processor's own setting, where a
+    JSON-LD 1.1 processor without `rdfDirection` drops it; the runner sets
+    the option each test names. `expandContext`, `useNativeTypes` /
+    `useRdfType`, generalized RDF and the JSON-LD 1.0 processing mode are
+    options the processor does not offer; the runner counts the entries
+    that need them as skipped by design.
 
 14. **RDFS:** the RDF 1.1 Semantics patterns `rdfD2` and `rdfs1`–`rdfs13` with the RDF and RDFS
     axiomatic triples, in one fixed-point loop, and datatype clashes reported as

@@ -87,6 +87,11 @@ pub fn tracked(db: &AuthDb, graphs: &[String]) -> anyhow::Result<Vec<(String, St
     )?;
     let mut out = Vec::new();
     for g in graphs {
+        // Statement-provenance annotations are about members, not members:
+        // their IRI reifiers would otherwise become entities (delta note §6.3).
+        if crate::provenance::is_any_statement_provenance_graph(g) {
+            continue;
+        }
         let rows = stmt.query_map(params![g], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -955,6 +960,117 @@ pub fn save_sync_run(
     }
     tx.commit()?;
     Ok(())
+}
+
+// ─── Sync jobs ──────────────────────────────────────────────────────────────
+
+/// One `(dataset, source)` sync as the admin UI lists it: where it reads,
+/// where it writes, its bookmark, and how its latest run went.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncJob {
+    pub dataset_id: String,
+    pub source_url: String,
+    /// The graph the latest run wrote; `None` for a sync recorded before jobs
+    /// kept it.
+    pub graph_iri: Option<String>,
+    pub created_by: Option<String>,
+    /// The newest member timestamp applied (the bookmark).
+    pub last_timestamp: Option<String>,
+    pub members_applied: u64,
+    /// When a run last finished successfully.
+    pub synced_at: Option<String>,
+    /// When a run last finished, successfully or not.
+    pub last_run_at: Option<String>,
+    /// `ok` or `error`; `None` before the first recorded run.
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    /// The latest successful run's report (`SyncReport` as JSON).
+    pub last_report: Option<serde_json::Value>,
+}
+
+/// Record how a sync run ended. A success stores its report and clears the
+/// error; a failure keeps the previous report and bookmark (the next run
+/// resumes from them) and stores the error. The row is created when the run
+/// is the job's first.
+pub fn record_sync_outcome(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    graph_iri: &str,
+    user_id: &str,
+    outcome: Result<&serde_json::Value, &str>,
+) -> anyhow::Result<()> {
+    let conn = db.pool().get()?;
+    let now = Utc::now().to_rfc3339();
+    let (status, error, report) = match outcome {
+        Ok(r) => ("ok", None, Some(serde_json::to_string(r)?)),
+        Err(e) => ("error", Some(e.to_string()), None),
+    };
+    conn.execute(
+        "INSERT INTO ldes_sync_state \
+           (dataset_id, source_url, graph_iri, created_by, last_run_at, last_status, last_error, last_report) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         ON CONFLICT(dataset_id, source_url) DO UPDATE SET \
+           graph_iri = excluded.graph_iri, \
+           created_by = COALESCE(ldes_sync_state.created_by, excluded.created_by), \
+           last_run_at = excluded.last_run_at, \
+           last_status = excluded.last_status, \
+           last_error = excluded.last_error, \
+           last_report = COALESCE(excluded.last_report, ldes_sync_state.last_report)",
+        params![dataset_id, source_url, graph_iri, user_id, now, status, error, report],
+    )?;
+    Ok(())
+}
+
+/// Every sync job, most recently run first.
+pub fn sync_jobs(db: &AuthDb) -> anyhow::Result<Vec<SyncJob>> {
+    let conn = db.pool().get()?;
+    let mut stmt = conn.prepare(
+        "SELECT dataset_id, source_url, graph_iri, created_by, last_timestamp, members_applied, \
+                synced_at, last_run_at, last_status, last_error, last_report \
+         FROM ldes_sync_state \
+         ORDER BY COALESCE(last_run_at, synced_at) DESC, dataset_id, source_url",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(SyncJob {
+                dataset_id: r.get(0)?,
+                source_url: r.get(1)?,
+                graph_iri: r.get(2)?,
+                created_by: r.get(3)?,
+                last_timestamp: r.get(4)?,
+                members_applied: r.get::<_, i64>(5)?.max(0) as u64,
+                synced_at: r.get(6)?,
+                last_run_at: r.get(7)?,
+                last_status: r.get(8)?,
+                last_error: r.get(9)?,
+                last_report: r
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Forget a sync job and everything its client state remembers (bookmark,
+/// pages, applied versions). The mirrored graph is left as it is; a later
+/// sync from the same source starts from the beginning of the stream.
+pub fn forget_sync(db: &AuthDb, dataset_id: &str, source_url: &str) -> anyhow::Result<bool> {
+    let mut conn = db.pool().get()?;
+    let tx = conn.transaction()?;
+    let n = tx.execute(
+        "DELETE FROM ldes_sync_state WHERE dataset_id = ?1 AND source_url = ?2",
+        params![dataset_id, source_url],
+    )?;
+    for table in ["ldes_sync_pages", "ldes_sync_entities"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE dataset_id = ?1 AND source_url = ?2"),
+            params![dataset_id, source_url],
+        )?;
+    }
+    tx.commit()?;
+    Ok(n > 0)
 }
 
 #[cfg(test)]

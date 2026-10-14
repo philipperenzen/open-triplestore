@@ -61,6 +61,9 @@ pub fn prepare_run(
     provided: &HashMap<String, String>,
     req: &VersionRequest,
 ) -> Result<PreparedRun, AppError> {
+    // An anonymous caller never builds a delta version, so the default
+    // resolution passes over one that is not built (pinning it answers 503).
+    let anonymous = user_id.is_none();
     let sparql = query
         .sparql
         .clone()
@@ -69,9 +72,15 @@ pub fn prepare_run(
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let (graphs, version_label, is_live) = match query.scope {
-        QueryScope::Dataset => {
-            resolve_dataset_scope(state, sq_store, &query.id, &query.owner_id, user_id, req)?
-        }
+        QueryScope::Dataset => resolve_dataset_scope(
+            state,
+            sq_store,
+            &query.id,
+            &query.owner_id,
+            user_id,
+            req,
+            anonymous,
+        )?,
         QueryScope::Organisation | QueryScope::Group => {
             (resolve_owner_union(state, query, user_id)?, None, true)
         }
@@ -179,6 +188,7 @@ fn resolve_dataset_scope(
     dataset_id: &str,
     user_id: Option<&str>,
     req: &VersionRequest,
+    skip_unbuilt: bool,
 ) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
     let base = state.base_url.as_str();
     // Private-graph visibility follows write access, as on the dataset-service
@@ -203,9 +213,14 @@ fn resolve_dataset_scope(
                 false,
             ))
         }
-        VersionRequest::Default => {
-            resolve_default_scope(state, sq_store, query_id, dataset_id, can_write)
-        }
+        VersionRequest::Default => resolve_default_scope(
+            state,
+            sq_store,
+            query_id,
+            dataset_id,
+            can_write,
+            skip_unbuilt,
+        ),
     }
 }
 
@@ -218,9 +233,23 @@ fn resolve_default_scope(
     query_id: &str,
     dataset_id: &str,
     can_write: bool,
+    skip_unbuilt: bool,
 ) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
     let base = state.base_url.as_str();
-    let versions = registry::list_versions(&state.store, base, dataset_id);
+    let built = |v: &crate::dataset_versions::models::DatasetVersion| {
+        !skip_unbuilt
+            || !v.is_delta()
+            || state
+                .store
+                .changes()
+                .materialisation(&v.graph_iri)
+                .is_some()
+    };
+    let versions: Vec<crate::dataset_versions::models::DatasetVersion> =
+        registry::list_versions(&state.store, base, dataset_id)
+            .into_iter()
+            .filter(|v| built(v))
+            .collect();
     // Most recent version (newest first) with a passing recorded test.
     for v in &versions {
         if let Some(t) = sq_store

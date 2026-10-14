@@ -87,6 +87,9 @@ required-features = ["rocksdb"]
 [dependencies.dashmap]
 version = ">=5.4, <7.0"
 
+[dependencies.json-event-parser]
+version = "0.2.3"
+
 [dependencies.oxiri]
 version = "0.2.11"
 

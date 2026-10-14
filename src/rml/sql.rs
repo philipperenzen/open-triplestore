@@ -335,10 +335,10 @@ pub struct RowFilter {
 impl RowFilter {
     /// Whether this filter can be applied to `source` at all.
     fn applies_to(&self, source: &LogicalSource) -> bool {
-        source
-            .table_name
-            .as_deref()
-            .is_some_and(|t| source.query.is_none() && self.tables.contains(t))
+        source.query.is_none()
+            && source
+                .catalogue_table()
+                .is_some_and(|t| self.tables.contains(&t))
     }
 
     /// A SQL string literal. A cursor is a `MAX()` of a timestamp or id column,
@@ -942,7 +942,7 @@ fn run_relational(
     let mut gen = TermGen::new(mapping.semantics, format!("r{}_", sanitise_label(run_id)));
     let mut outcome = SqlOutcome::default();
 
-    check_relational_columns(mapping, conn, quote)?;
+    let mapping = &prepare_relational(mapping, conn, quote)?;
     let unique_keys = collect_unique_keys(mapping, conn)?;
     let mut plans: HashMap<String, TmPlan> = HashMap::new();
     for tm in &mapping.triples_maps {
@@ -1112,25 +1112,94 @@ pub(crate) fn apply_own_nulls(gen: &TermGen, source: &LogicalSource, row: &mut R
     }
 }
 
-/// Check every triples map's columns against what its own logical source
-/// returns, for the connectors that can describe a query without running it.
-pub(crate) fn check_relational_columns(
+/// `mapping` ready to run against the database behind `conn`: every SQL
+/// identifier it writes resolved by the connection's rules, and each triples
+/// map's columns checked against what its logical source returns.
+///
+/// R2RML §5: a column or table name is an SQL identifier, compared by SQL's
+/// rules — a regular `Name` stands for `NAME` under SQL 2008 (`name` on
+/// PostgreSQL) and is not the delimited `"Name"`. The mapping keeps names as
+/// written until here, because only the connection knows its dialect
+/// ([`IdentifierRules`](ots_plugin_api::sources::IdentifierRules)): each
+/// relational logical source learns the rules (its `rr:tableName` is folded
+/// by them), and each column name is replaced by the column of its logical
+/// table it names — the name the result set reports, which is what a row is
+/// keyed by. A connector that cannot describe a query gets the name the
+/// identifier stands for. A name that is not an SQL identifier, or names two
+/// columns, is refused; one that names no column is refused by the column
+/// check (R2RML §6), naming the columns there are.
+pub(crate) fn prepare_relational(
     mapping: &RmlMapping,
     conn: &mut dyn SourceConnection,
     quote: &dyn Fn(&str) -> String,
-) -> Result<(), String> {
-    for tm in &mapping.triples_maps {
+) -> Result<RmlMapping, String> {
+    let rules = conn
+        .identifier_rules()
+        .map_err(|e| format!("reading the datasource's identifier rules: {e}"))?;
+    let mut resolved = mapping.clone();
+    let is_sql =
+        |tm: &TriplesMap| tm.logical_source.reference_formulation == ReferenceFormulation::Sql;
+    for tm in resolved.triples_maps.iter_mut().filter(|tm| is_sql(tm)) {
+        tm.logical_source.identifiers = Some(rules);
+    }
+    // What each relational logical source returns, where the connector can
+    // say without reading a row.
+    let mut columns: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    for tm in resolved.triples_maps.iter().filter(|tm| is_sql(tm)) {
         let Some(sql) = tm.logical_source.sql(quote) else {
             continue;
         };
-        let columns = conn
+        let described = conn
             .columns(&sql)
             .map_err(|e| format!("reading the logical source of <{}>: {e}", tm.iri))?;
-        if let Some(columns) = columns {
-            check_columns(mapping, tm, &columns)?;
+        columns.insert(tm.iri.clone(), described);
+    }
+    let errors: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let resolve = |of: &str, written: &str| -> String {
+        let described = columns.get(of).and_then(Option::as_deref);
+        super::sqlident::resolve_column(written, &rules, described).unwrap_or_else(|e| {
+            let e = format!("TriplesMap <{of}>: {e}");
+            if !errors.borrow().contains(&e) {
+                errors.borrow_mut().push(e);
+            }
+            written.to_string()
+        })
+    };
+    let relational: std::collections::HashSet<String> = resolved
+        .triples_maps
+        .iter()
+        .filter(|tm| is_sql(tm))
+        .map(|tm| tm.iri.clone())
+        .collect();
+    for tm in &mut resolved.triples_maps {
+        let iri = tm.iri.clone();
+        let own_is_sql = relational.contains(&iri);
+        let own = |c: &str| {
+            if own_is_sql {
+                resolve(&iri, c)
+            } else {
+                c.to_string()
+            }
+        };
+        let parent = |p: &str, c: &str| {
+            if relational.contains(p) {
+                resolve(p, c)
+            } else {
+                c.to_string()
+            }
+        };
+        super::parser::rewrite_columns(tm, &own, &parent);
+    }
+    let errors = errors.into_inner();
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    for tm in &resolved.triples_maps {
+        if let Some(Some(described)) = columns.get(&tm.iri) {
+            check_columns(&resolved, tm, described)?;
         }
     }
-    Ok(())
+    Ok(resolved)
 }
 
 pub(crate) fn index_key(r: &RefObjectMap) -> RefKey {

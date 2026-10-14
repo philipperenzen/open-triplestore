@@ -185,6 +185,9 @@ impl GraphDelta {
 #[derive(Debug)]
 pub struct Intent {
     txn: String,
+    /// The primitive that opened it; rows for graphs it discovered while
+    /// running carry the same origin.
+    origin: &'static str,
     /// `(graph, row id, count before the write)` for the targets known at
     /// entry; a `None` graph key is the default graph.
     rows: Vec<(Option<String>, i64, Option<usize>)>,
@@ -227,9 +230,42 @@ pub struct Cursor {
     pub updated_at: String,
 }
 
+/// A retention pin: rows at or above `seq` are kept while it lives. A delta
+/// version pins the rows of its range; unlike a cursor a pin never expires.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Pin {
+    pub name: String,
+    pub seq: i64,
+    pub owner: Option<String>,
+    pub created_at: String,
+}
+
+/// Whether a run of rows can be replayed: see [`ChangeLog::chain`].
+#[derive(Debug, Clone)]
+pub struct Chain {
+    /// Every row of the range is present, committed with its full payload,
+    /// in the expected epoch, and no store-scoped row falls inside it.
+    pub intact: bool,
+    /// Why not, when not.
+    pub reason: Option<String>,
+    /// The rows of the range for the graphs asked about, in commit order.
+    pub rows: Vec<ChangeRow>,
+}
+
+impl Chain {
+    /// `added_n + removed_n` over the range.
+    pub fn change_count(&self) -> i64 {
+        self.rows.iter().map(|r| r.added_n + r.removed_n).sum()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Status {
+    /// Whether writes are recorded.
     pub enabled: bool,
+    /// Whether the log can be read (recording, or kept from an earlier run
+    /// while capture is off).
+    pub readable: bool,
     pub epoch: String,
     pub next_seq: i64,
     pub rows: i64,
@@ -239,6 +275,11 @@ pub struct Status {
     pub oldest_seq: Option<i64>,
     pub newest_seq: Option<i64>,
     pub cursors: Vec<Cursor>,
+    /// Retention pins (delta versions' ranges).
+    pub pins: Vec<Pin>,
+    /// The highest sequence number retention has deleted from a graph a
+    /// chain can cover: a range starting below it may have lost rows.
+    pub max_deleted_seq: i64,
     pub max_scan: usize,
     pub max_payload: usize,
     pub retention_days: u64,
@@ -319,6 +360,10 @@ fn claim() -> bool {
 
 pub struct ChangeLog {
     conn: Option<Mutex<Connection>>,
+    /// Whether writes are recorded. A log opened while capture is off but
+    /// whose file exists from an earlier run is *readable* (delta versions
+    /// resolve through its rows) without recording anything.
+    recording: bool,
     epoch: String,
     /// The next sequence number. Handed out under `section`; persisted in
     /// `meta` before a sweep (which may empty the table) and by the open-time
@@ -367,6 +412,7 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_changes_seq ON changes(seq);
     CREATE INDEX IF NOT EXISTS idx_changes_state ON changes(state);
     CREATE INDEX IF NOT EXISTS idx_changes_graph ON changes(graph_iri, seq);
+    CREATE INDEX IF NOT EXISTS idx_changes_commit ON changes(commit_iri);
     CREATE TABLE IF NOT EXISTS graph_state (
         graph_key TEXT PRIMARY KEY,
         last_seq INTEGER,
@@ -379,7 +425,64 @@ const SCHEMA: &str = "
         expires_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS pins (
+        name TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL,
+        owner TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS materialisations (
+        version_iri TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL,
+        graphs TEXT NOT NULL,
+        quads INTEGER NOT NULL,
+        built_at TEXT NOT NULL,
+        last_used TEXT NOT NULL
+    );
 ";
+
+/// A delta version's built snapshot graphs (delta note §3.3): live until
+/// unused for `OTS_MATERIALISATION_TTL_SECS`, then dropped by the sweep.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Materialisation {
+    pub version_iri: String,
+    pub dataset_id: String,
+    pub graphs: Vec<String>,
+    pub quads: i64,
+    pub built_at: String,
+    pub last_used: String,
+}
+
+fn materialisation_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<Materialisation> {
+    let graphs: String = r.get(2)?;
+    Ok(Materialisation {
+        version_iri: r.get(0)?,
+        dataset_id: r.get(1)?,
+        graphs: serde_json::from_str(&graphs).unwrap_or_default(),
+        quads: r.get(3)?,
+        built_at: r.get(4)?,
+        last_used: r.get(5)?,
+    })
+}
+
+/// Rows of these graphs are never part of a chain (a version's own snapshot
+/// graphs, a restore's staging graph): retention drops them after a day
+/// regardless of pins, and their deletion does not count as a gap.
+fn is_ephemeral_graph(graph: &str) -> bool {
+    graph.starts_with("urn:ots:restore:") || is_version_snapshot_graph(graph)
+}
+
+/// `{base}/dataset/{id}/version/{ver}/…` — a version's snapshot (or
+/// materialisation) graph, which no chain covers.
+pub fn is_version_snapshot_graph(graph: &str) -> bool {
+    graph
+        .split_once("/dataset/")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .is_some_and(|(_, rest)| rest.starts_with("version/"))
+}
+
+/// Hours after which rows of [`is_ephemeral_graph`] graphs are dropped.
+const EPHEMERAL_HOURS: i64 = 24;
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -443,18 +546,27 @@ impl ChangeLog {
             crate::config::CHANGE_CAPTURE.get()
         };
         if !on {
+            // A log an earlier run wrote stays readable — delta versions
+            // resolve through its rows — but records nothing, and the gap is
+            // remembered: the next run that records starts a new epoch, so
+            // no chain is ever applied across writes the log did not see.
+            if let Some(dir) = dir {
+                if dir.join("changes").join("changes.db").exists() {
+                    return Self::open_at(Some(dir), false);
+                }
+            }
             return Ok(Self::disabled());
         }
-        Self::open_at(dir)
+        Self::open_at(dir, true)
     }
 
     /// An in-memory log that is on regardless of the environment (the
     /// builder, tests).
     pub fn in_memory() -> Result<Self, StoreError> {
-        Self::open_at(None)
+        Self::open_at(None, true)
     }
 
-    fn open_at(dir: Option<&Path>) -> Result<Self, StoreError> {
+    fn open_at(dir: Option<&Path>, recording: bool) -> Result<Self, StoreError> {
         let (conn, path) = match dir {
             Some(dir) => {
                 let sub = dir.join("changes");
@@ -500,8 +612,40 @@ impl ChangeLog {
                 r.get(0)
             })
             .map_err(sql_err)?;
+        let gap: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key = 'capture_gap'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(sql_err)?
+            > 0;
+        let epoch = if !recording {
+            // Writes of this run go unrecorded.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('capture_gap', ?1)",
+                params![now()],
+            )
+            .map_err(sql_err)?;
+            epoch
+        } else if gap {
+            // An earlier run wrote without recording: a new epoch, so no
+            // chain from before it is ever extended across the gap.
+            let fresh = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'epoch'",
+                params![fresh],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM meta WHERE key = 'capture_gap'", [])
+                .map_err(sql_err)?;
+            fresh
+        } else {
+            epoch
+        };
         Ok(Self {
             conn: Some(Mutex::new(conn)),
+            recording,
             epoch,
             next_seq: AtomicI64::new(meta_next.max(max_seq + 1)),
             section: Mutex::new(()),
@@ -520,6 +664,7 @@ impl ChangeLog {
     pub fn disabled() -> Self {
         Self {
             conn: None,
+            recording: false,
             epoch: String::new(),
             next_seq: AtomicI64::new(0),
             section: Mutex::new(()),
@@ -541,7 +686,14 @@ impl ChangeLog {
         self
     }
 
+    /// Whether writes are recorded.
     pub fn enabled(&self) -> bool {
+        self.conn.is_some() && self.recording
+    }
+
+    /// Whether the log can be read: recording, or kept readable from an
+    /// earlier run while capture is off.
+    pub fn readable(&self) -> bool {
         self.conn.is_some()
     }
 
@@ -588,6 +740,9 @@ impl ChangeLog {
         }) {
             return None;
         }
+        if !self.recording {
+            return None;
+        }
         let conn = self.lock()?;
         if !claim() {
             return None;
@@ -624,6 +779,7 @@ impl ChangeLog {
         }
         Some(Intent {
             txn,
+            origin,
             rows,
             store_row,
         })
@@ -730,8 +886,8 @@ impl ChangeLog {
             if tx
                 .execute(
                     "INSERT INTO changes (epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, state, created_at) \
-                     VALUES (?1, ?2, 'graph', ?3, 'late', ?4, ?5, ?6, 'unknown', 'pending', ?7)",
-                    params![self.epoch, intent.txn, delta.graph, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
+                     VALUES (?1, ?2, 'graph', ?3, ?4, ?5, ?6, ?7, 'unknown', 'pending', ?8)",
+                    params![self.epoch, intent.txn, delta.graph, intent.origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
                 )
                 .is_err()
             {
@@ -896,6 +1052,114 @@ impl ChangeLog {
             .unwrap_or_default()
     }
 
+    /// Rows above `after` for any of `graphs` — plus every store-scoped row,
+    /// which bears on every graph — in commit order. `with_payload: false`
+    /// leaves the quads out (a listing that only needs counts never decodes
+    /// a blob).
+    pub fn rows_after_in_graphs(
+        &self,
+        after: i64,
+        limit: usize,
+        graphs: &[String],
+        with_payload: bool,
+    ) -> Vec<ChangeRow> {
+        let Some(conn) = self.lock() else {
+            return Vec::new();
+        };
+        let blobs = if with_payload {
+            "added, removed"
+        } else {
+            "NULL, NULL"
+        };
+        let placeholders = (0..graphs.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let graph_clause = if graphs.is_empty() {
+            "scope = 'store'".to_string()
+        } else {
+            format!("(graph_iri IN ({placeholders}) OR scope = 'store')")
+        };
+        let sql = format!(
+            "SELECT row, seq, epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, \
+                    {blobs}, added_n, removed_n, post_count, has_bnode, state, created_at \
+             FROM changes WHERE seq > ?1 AND {graph_clause} ORDER BY seq LIMIT ?2"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let limit = limit as i64;
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&after, &limit];
+        for g in graphs {
+            values.push(g);
+        }
+        stmt.query_map(values.as_slice(), row_from_sql)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Rows, payload bytes and pins, per graph: what the admin statistics
+    /// add up per dataset. `(graph or None for store-scoped, rows, bytes)`.
+    pub fn usage_by_graph(&self) -> Vec<(Option<String>, i64, i64)> {
+        let Some(conn) = self.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT graph_iri, COUNT(*), COALESCE(SUM(COALESCE(LENGTH(added), 0) + COALESCE(LENGTH(removed), 0)), 0) \
+             FROM changes GROUP BY graph_iri",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// The sequenced rows a write stamped with `commit_iri` (through its
+    /// [`WriteContext`]), in commit order — how a handler reads back exactly
+    /// what its own write changed once the primitive has returned.
+    pub fn rows_for_commit(&self, commit_iri: &str) -> Vec<ChangeRow> {
+        let Some(conn) = self.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT row, seq, epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, \
+                    added, removed, added_n, removed_n, post_count, has_bnode, state, created_at \
+             FROM changes WHERE commit_iri = ?1 AND seq IS NOT NULL ORDER BY seq",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![commit_iri], row_from_sql)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remember the first commit that points into the sequence: commits
+    /// recorded before it carry no `ver:seqTo` and are ordered by time, the
+    /// ones after it by sequence (delta note §7).
+    pub fn note_first_seq_commit(&self, commit_iri: &str) {
+        if let Some(conn) = self.lock() {
+            let _ = exec(
+                &conn,
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('first_seq_commit', ?1)",
+                params![commit_iri],
+            );
+        }
+    }
+
+    /// See [`Self::note_first_seq_commit`].
+    pub fn first_seq_commit(&self) -> Option<String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'first_seq_commit'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
     /// One row by sequence number.
     pub fn row(&self, seq: i64) -> Option<ChangeRow> {
         let conn = self.lock()?;
@@ -920,10 +1184,23 @@ impl ChangeLog {
         (self.next_seq.load(Ordering::Relaxed) - 1).max(0)
     }
 
+    /// The last sequence number handed out, read inside the sequence
+    /// section: no write is between its data commit and its sequence number
+    /// at that moment, so the store holds exactly the rows at or below the
+    /// answer. A version cut is anchored here.
+    pub fn head_seq(&self) -> i64 {
+        if self.conn.is_none() {
+            return 0;
+        }
+        let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        (self.next_seq.load(Ordering::Relaxed) - 1).max(0)
+    }
+
     pub fn status(&self) -> Status {
         let Some(conn) = self.lock() else {
             return Status {
                 enabled: false,
+                readable: false,
                 epoch: String::new(),
                 next_seq: 0,
                 rows: 0,
@@ -933,6 +1210,8 @@ impl ChangeLog {
                 oldest_seq: None,
                 newest_seq: None,
                 cursors: Vec::new(),
+                pins: Vec::new(),
+                max_deleted_seq: 0,
                 max_scan: 0,
                 max_payload: 0,
                 retention_days: 0,
@@ -954,13 +1233,16 @@ impl ChangeLog {
             })
             .unwrap_or((None, None));
         let cursors = cursors_of(&conn);
+        let pins = pins_of(&conn);
+        let max_deleted_seq = meta_i64(&conn, "max_deleted_seq");
         let size_bytes = self
             .path
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len());
         Status {
-            enabled: true,
+            enabled: self.recording,
+            readable: true,
             epoch: self.epoch.clone(),
             next_seq,
             rows: conn
@@ -972,6 +1254,8 @@ impl ChangeLog {
             oldest_seq: oldest,
             newest_seq: newest,
             cursors,
+            pins,
+            max_deleted_seq,
             max_scan: self.max_scan,
             max_payload: self.max_payload,
             retention_days: self.retention_days,
@@ -1032,9 +1316,12 @@ impl ChangeLog {
 
     // ── Retention ───────────────────────────────────────────────────────────
 
-    /// Delete rows older than the retention window that no live cursor pins:
-    /// payloads first, then the rows. Expired cursors stop pinning. Returns
-    /// the number of rows deleted.
+    /// Delete rows older than the retention window that no live cursor or
+    /// pin keeps. Expired cursors stop pinning; pins do not expire. Rows of a
+    /// version's own snapshot graphs and of restore staging graphs, which no
+    /// chain covers, go after a day regardless. The highest sequence number
+    /// deleted from any other graph is remembered, so a range that reaches
+    /// below it is known to have holes. Returns the number of rows deleted.
     pub fn sweep(&self) -> Result<usize, StoreError> {
         let Some(conn) = self.lock() else {
             return Ok(0);
@@ -1047,15 +1334,63 @@ impl ChangeLog {
         );
         conn.execute("DELETE FROM cursors WHERE expires_at < ?1", params![now_s])
             .map_err(sql_err)?;
-        let lowest_pin: Option<i64> = conn
-            .query_row("SELECT MIN(seq) FROM cursors", [], |r| r.get(0))
+
+        // Snapshot and staging graphs: a day, pins or not.
+        let day = (chrono::Utc::now() - chrono::Duration::hours(EPHEMERAL_HOURS)).to_rfc3339();
+        let ephemeral: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT row, graph_iri FROM changes WHERE state != 'pending' AND created_at < ?1 \
+                     AND (graph_iri LIKE 'urn:ots:restore:%' OR graph_iri LIKE '%/version/%')",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![day], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(sql_err)?;
+            rows.flatten()
+                .filter(|(_, g)| is_ephemeral_graph(g))
+                .map(|(row, _)| row)
+                .collect()
+        };
+        let mut deleted = 0usize;
+        for row in &ephemeral {
+            deleted += conn
+                .execute("DELETE FROM changes WHERE row = ?1", params![row])
+                .map_err(sql_err)?;
+        }
+
+        let lowest: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(seq) FROM (SELECT seq FROM cursors UNION ALL SELECT seq FROM pins)",
+                [],
+                |r| r.get(0),
+            )
             .map_err(sql_err)?;
         let cutoff =
             (chrono::Utc::now() - chrono::Duration::days(self.retention_days as i64)).to_rfc3339();
-        // Rows a cursor still needs are never touched; below the lowest pin,
-        // age decides.
-        let pin = lowest_pin.unwrap_or(i64::MAX);
-        let deleted = conn
+        // Rows a cursor or pin still needs are never touched; below the
+        // lowest one, age decides.
+        let pin = lowest.unwrap_or(i64::MAX);
+        let highest: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(seq) FROM changes WHERE state != 'pending' AND created_at < ?1 \
+                 AND seq < ?2",
+                params![cutoff, pin],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        if let Some(h) = highest {
+            if h > meta_i64(&conn, "max_deleted_seq") {
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('max_deleted_seq', ?1)",
+                    params![h.to_string()],
+                )
+                .map_err(sql_err)?;
+            }
+        }
+        deleted += conn
             .execute(
                 "DELETE FROM changes WHERE state != 'pending' AND created_at < ?1 \
                  AND (seq IS NULL OR seq < ?2)",
@@ -1063,6 +1398,254 @@ impl ChangeLog {
             )
             .map_err(sql_err)?;
         Ok(deleted)
+    }
+
+    /// The highest sequence number retention deleted from a graph a chain
+    /// can cover (0 when nothing was). See [`Self::chain`].
+    pub fn max_deleted_seq(&self) -> i64 {
+        self.lock()
+            .map(|c| meta_i64(&c, "max_deleted_seq"))
+            .unwrap_or(0)
+    }
+
+    // ── Pins ────────────────────────────────────────────────────────────────
+
+    /// Keep every row at or above `seq` while the pin lives — a delta
+    /// version's range, which a sweep must never cut. Replaces a pin of the
+    /// same name. Unlike a cursor a pin does not expire: its owner removes
+    /// it ([`Self::delete_pin`]).
+    pub fn set_pin(&self, name: &str, seq: i64, owner: Option<&str>) -> Result<(), StoreError> {
+        let Some(conn) = self.lock() else {
+            return Ok(());
+        };
+        conn.execute(
+            "INSERT INTO pins (name, seq, owner, created_at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(name) DO UPDATE SET seq = excluded.seq, owner = excluded.owner",
+            params![name, seq, owner, now()],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    pub fn delete_pin(&self, name: &str) -> bool {
+        self.lock()
+            .and_then(|c| {
+                c.execute("DELETE FROM pins WHERE name = ?1", params![name])
+                    .ok()
+            })
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    pub fn pins(&self) -> Vec<Pin> {
+        self.lock().map(|c| pins_of(&c)).unwrap_or_default()
+    }
+
+    // ── Materialisations ────────────────────────────────────────────────────
+
+    pub fn materialisation(&self, version_iri: &str) -> Option<Materialisation> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT version_iri, dataset_id, graphs, quads, built_at, last_used \
+             FROM materialisations WHERE version_iri = ?1",
+            params![version_iri],
+            materialisation_from_sql,
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Record a finished build. Written last: until it exists the build's
+    /// graphs are unobservable, so a build may commit in several
+    /// transactions (delta note §3.4).
+    pub fn put_materialisation(&self, m: &Materialisation) -> Result<(), StoreError> {
+        let Some(conn) = self.lock() else {
+            return Err(StoreError::Other("the change log is off".into()));
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO materialisations (version_iri, dataset_id, graphs, quads, built_at, last_used) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                m.version_iri,
+                m.dataset_id,
+                serde_json::to_string(&m.graphs).unwrap_or_else(|_| "[]".into()),
+                m.quads,
+                m.built_at,
+                m.last_used
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// A read used the build: its time-to-live starts again.
+    pub fn touch_materialisation(&self, version_iri: &str) {
+        if let Some(conn) = self.lock() {
+            let _ = exec(
+                &conn,
+                "UPDATE materialisations SET last_used = ?2 WHERE version_iri = ?1",
+                params![version_iri, now()],
+            );
+        }
+    }
+
+    pub fn delete_materialisation(&self, version_iri: &str) -> bool {
+        self.lock()
+            .and_then(|c| {
+                c.execute(
+                    "DELETE FROM materialisations WHERE version_iri = ?1",
+                    params![version_iri],
+                )
+                .ok()
+            })
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    /// Every live build; with `unused_since`, only those not used since then.
+    pub fn materialisations(&self, unused_since: Option<&str>) -> Vec<Materialisation> {
+        let Some(conn) = self.lock() else {
+            return Vec::new();
+        };
+        let (sql, cutoff) = match unused_since {
+            Some(c) => (
+                "SELECT version_iri, dataset_id, graphs, quads, built_at, last_used \
+                 FROM materialisations WHERE last_used < ?1 ORDER BY last_used",
+                c.to_string(),
+            ),
+            None => (
+                "SELECT version_iri, dataset_id, graphs, quads, built_at, last_used \
+                 FROM materialisations WHERE ?1 = ?1 ORDER BY last_used",
+                String::new(),
+            ),
+        };
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![cutoff], materialisation_from_sql)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    // ── Chains ──────────────────────────────────────────────────────────────
+
+    /// The rows `from < seq <= to` that bear on `graphs` — each graph's own
+    /// rows and every store-scoped row — in commit order, with a verdict on
+    /// whether they can be replayed: the range must not reach below what
+    /// retention deleted, every row must be committed with its full payload
+    /// and belong to `epoch`, and no store-scoped row (a write whose targets
+    /// were unknown) may fall inside it. An empty range is intact.
+    pub fn chain(&self, graphs: &[String], epoch: &str, from: i64, to: i64) -> Chain {
+        let broken = |reason: String, rows: Vec<ChangeRow>| Chain {
+            intact: false,
+            reason: Some(reason),
+            rows,
+        };
+        let Some(conn) = self.lock() else {
+            return broken("the change log is not available".into(), Vec::new());
+        };
+        if to <= from {
+            return Chain {
+                intact: true,
+                reason: None,
+                rows: Vec::new(),
+            };
+        }
+        let deleted = meta_i64(&conn, "max_deleted_seq");
+        if from < deleted {
+            return broken(
+                format!("retention removed rows up to sequence {deleted}"),
+                Vec::new(),
+            );
+        }
+        let placeholders = (0..graphs.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let graph_clause = if graphs.is_empty() {
+            "scope = 'store'".to_string()
+        } else {
+            format!("(graph_iri IN ({placeholders}) OR scope = 'store')")
+        };
+        let sql = format!(
+            "SELECT row, seq, epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, \
+                    added, removed, added_n, removed_n, post_count, has_bnode, state, created_at \
+             FROM changes WHERE seq > ?1 AND seq <= ?2 AND {graph_clause} ORDER BY seq"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return broken("the change log could not be read".into(), Vec::new());
+        };
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
+        for g in graphs {
+            values.push(g);
+        }
+        let rows: Vec<ChangeRow> = stmt
+            .query_map(values.as_slice(), row_from_sql)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        for r in &rows {
+            let seq = r.seq.unwrap_or_default();
+            let reason = if r.scope == "store" {
+                Some(format!(
+                    "sequence {seq} is a write whose graphs were not known ({})",
+                    r.origin
+                ))
+            } else if r.epoch != epoch {
+                Some(format!("sequence {seq} belongs to another epoch"))
+            } else if r.state != State::Committed || r.extent == Extent::Unknown {
+                Some(format!(
+                    "sequence {seq} changed <{}> in a way the log could not record ({})",
+                    r.graph_iri.as_deref().unwrap_or("default graph"),
+                    r.origin
+                ))
+            } else if r.extent == Extent::Counts {
+                Some(format!(
+                    "sequence {seq} changed <{}> by more quads than a row carries",
+                    r.graph_iri.as_deref().unwrap_or("default graph"),
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return broken(reason, rows);
+            }
+        }
+        Chain {
+            intact: true,
+            reason: None,
+            rows,
+        }
+    }
+
+    /// Whether any row in `(from, to]` touches `graphs` (or is
+    /// store-scoped) — the optimistic check that a copy taken between two
+    /// reads of [`Self::head_seq`] saw no concurrent write.
+    pub fn touched(&self, graphs: &[String], from: i64, to: i64) -> bool {
+        if to <= from {
+            return false;
+        }
+        let Some(conn) = self.lock() else {
+            return true;
+        };
+        let placeholders = (0..graphs.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let graph_clause = if graphs.is_empty() {
+            "scope = 'store'".to_string()
+        } else {
+            format!("(graph_iri IN ({placeholders}) OR scope = 'store')")
+        };
+        let sql =
+            format!("SELECT COUNT(*) FROM changes WHERE seq > ?1 AND seq <= ?2 AND {graph_clause}");
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&from, &to];
+        for g in graphs {
+            values.push(g);
+        }
+        conn.query_row(&sql, values.as_slice(), |r| r.get::<_, i64>(0))
+            .map(|n| n > 0)
+            .unwrap_or(true)
     }
 
     // ── Open-time repair ────────────────────────────────────────────────────
@@ -1372,6 +1955,100 @@ fn cursor_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<Cursor> {
     })
 }
 
+fn pins_of(conn: &Connection) -> Vec<Pin> {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT name, seq, owner, created_at FROM pins ORDER BY seq, name")
+    else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| {
+        Ok(Pin {
+            name: r.get(0)?,
+            seq: r.get(1)?,
+            owner: r.get(2)?,
+            created_at: r.get(3)?,
+        })
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// An integer `meta` value; 0 when absent or unreadable.
+fn meta_i64(conn: &Connection, key: &str) -> i64 {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0)
+}
+
+/// The net effect of `rows` applied in commit order, per graph (`None` is
+/// the default graph): a quad added and later removed — or removed and
+/// later re-added — cancels out. Rows are exact net deltas, so applying the
+/// fold to the state before the first row gives the state after the last.
+pub fn fold_rows(rows: &[ChangeRow]) -> std::collections::BTreeMap<Option<String>, NetDelta> {
+    let mut state: HashMap<Quad, bool> = HashMap::new();
+    for r in rows {
+        for q in decode_text(r.removed.as_deref()) {
+            match state.get(&q) {
+                Some(true) => {
+                    state.remove(&q);
+                }
+                _ => {
+                    state.insert(q, false);
+                }
+            }
+        }
+        for q in decode_text(r.added.as_deref()) {
+            match state.get(&q) {
+                Some(false) => {
+                    state.remove(&q);
+                }
+                _ => {
+                    state.insert(q, true);
+                }
+            }
+        }
+    }
+    let mut out: std::collections::BTreeMap<Option<String>, NetDelta> =
+        std::collections::BTreeMap::new();
+    for (q, added) in state {
+        let g = match &q.graph_name {
+            oxigraph::model::GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        };
+        let e = out.entry(g).or_default();
+        if added {
+            e.added.push(q);
+        } else {
+            e.removed.push(q);
+        }
+    }
+    out
+}
+
+/// One graph's share of a fold: what the range added and removed, net.
+#[derive(Debug, Clone, Default)]
+pub struct NetDelta {
+    pub added: Vec<Quad>,
+    pub removed: Vec<Quad>,
+}
+
+impl NetDelta {
+    /// The delta that undoes this one.
+    pub fn inverse(self) -> NetDelta {
+        NetDelta {
+            added: self.removed,
+            removed: self.added,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
 fn cursors_of(conn: &Connection) -> Vec<Cursor> {
     let Ok(mut stmt) =
         conn.prepare("SELECT name, seq, owner, expires_at, updated_at FROM cursors ORDER BY name")
@@ -1513,9 +2190,10 @@ mod tests {
 
     #[test]
     fn a_payload_over_the_cap_keeps_exact_counts_and_drops_the_quads() {
-        std::env::set_var("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", "2");
-        let log = log();
-        std::env::remove_var("OTS_CHANGE_CAPTURE_MAX_PAYLOAD");
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.max_payload = 2;
         let intent = log.begin("test", Some(&[None]), &|_| Some(0)).unwrap();
         leave_write();
         let big = (0..3).map(|i| q(i, None)).collect();
@@ -1616,9 +2294,10 @@ mod tests {
 
     #[test]
     fn retention_deletes_only_below_the_lowest_live_cursor() {
-        std::env::set_var("OTS_CHANGE_RETENTION_DAYS", "0");
-        let log = log();
-        std::env::remove_var("OTS_CHANGE_RETENTION_DAYS");
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.retention_days = 0;
         for i in 0..5 {
             let intent = log.begin("test", Some(&[None]), &|_| Some(0)).unwrap();
             leave_write();
@@ -1699,6 +2378,205 @@ mod tests {
         let (added, removed) = diff_quads(&before, &after);
         assert_eq!(added, vec![q(3, None)]);
         assert_eq!(removed, vec![q(1, None)]);
+    }
+
+    fn write(log: &ChangeLog, g: &str, added: Vec<Quad>, removed: Vec<Quad>) {
+        let target = vec![Some(g.to_string())];
+        let intent = log.begin("test", Some(&target), &|_| Some(10)).unwrap();
+        leave_write();
+        log.commit_with::<()>(
+            Some(intent),
+            vec![GraphDelta::full(Some(g.to_string()), added, removed)],
+            || Ok(()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_log_reopened_with_capture_off_is_readable_and_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_epoch = {
+            let log = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+            write(&log, "http://g/a", vec![q(1, Some("http://g/a"))], vec![]);
+            log.epoch().to_string()
+        };
+        let off = ChangeLog::open_at(Some(dir.path()), false).unwrap();
+        assert!(!off.enabled(), "capture off records nothing");
+        assert!(off.readable(), "but the earlier rows stay readable");
+        assert_eq!(
+            off.epoch(),
+            first_epoch,
+            "reading does not change the epoch"
+        );
+        assert!(off.begin("test", Some(&[None]), &|_| None).is_none());
+        assert_eq!(off.rows_after(0, 10).len(), 1);
+        assert!(!off.status().enabled && off.status().readable);
+        drop(off);
+        // Writes of the off run went unrecorded: the next recording run must
+        // not extend any chain across them.
+        let on = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        assert_ne!(on.epoch(), first_epoch, "a capture gap starts a new epoch");
+        drop(on);
+        let again = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        let epoch_after_gap = again.epoch().to_string();
+        drop(again);
+        let still = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        assert_eq!(still.epoch(), epoch_after_gap, "the gap is consumed once");
+    }
+
+    #[test]
+    fn head_seq_is_the_last_committed_sequence() {
+        let log = log();
+        assert_eq!(log.head_seq(), 0);
+        write(&log, "http://g/a", vec![q(1, Some("http://g/a"))], vec![]);
+        write(&log, "http://g/a", vec![q(2, Some("http://g/a"))], vec![]);
+        assert_eq!(log.head_seq(), 2);
+        assert_eq!(ChangeLog::disabled().head_seq(), 0);
+    }
+
+    #[test]
+    fn a_pin_keeps_its_range_and_retention_remembers_what_it_cut() {
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.retention_days = 0;
+        for i in 0..5 {
+            write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        log.set_pin("version:http://x/v1", 4, Some("ds1")).unwrap();
+        assert_eq!(log.sweep().unwrap(), 3, "seq 1-3 are below the pin");
+        assert_eq!(log.max_deleted_seq(), 3);
+        assert_eq!(log.rows_after(0, 10).len(), 2);
+        assert_eq!(log.status().pins.len(), 1);
+        // A range that reaches below what was cut has holes; one above it
+        // does not.
+        let epoch = log.epoch().to_string();
+        let g = vec!["http://g/a".to_string()];
+        assert!(!log.chain(&g, &epoch, 2, 5).intact);
+        assert!(log.chain(&g, &epoch, 3, 5).intact);
+        assert!(log.delete_pin("version:http://x/v1"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(log.sweep().unwrap(), 2);
+        assert_eq!(log.max_deleted_seq(), 5);
+    }
+
+    #[test]
+    fn snapshot_and_staging_rows_go_after_a_day_without_counting_as_a_gap() {
+        let log = log();
+        let snap = "http://x/dataset/ds1/version/1.0.0/people";
+        write(&log, snap, vec![q(1, Some(snap))], vec![]);
+        write(
+            &log,
+            "urn:ots:restore:abc",
+            vec![q(2, Some("urn:ots:restore:abc"))],
+            vec![],
+        );
+        write(&log, "http://g/a", vec![q(3, Some("http://g/a"))], vec![]);
+        {
+            // Two days old: past the day snapshot rows get, well inside the
+            // 90-day retention every other row gets.
+            let two_days = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+            let conn = log.lock().unwrap();
+            conn.execute("UPDATE changes SET created_at = ?1", params![two_days])
+                .unwrap();
+        }
+        // Retention is 90 days: only the snapshot and staging rows go.
+        assert_eq!(log.sweep().unwrap(), 2);
+        let left = log.rows_after(0, 10);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].graph_iri.as_deref(), Some("http://g/a"));
+        assert_eq!(log.max_deleted_seq(), 0, "no chain-relevant row was cut");
+        assert!(is_version_snapshot_graph(snap));
+        assert!(!is_version_snapshot_graph(
+            "http://x/dataset/ds1/graphs/version"
+        ));
+        assert!(!is_version_snapshot_graph("http://x/data/version/1"));
+    }
+
+    #[test]
+    fn a_chain_is_intact_only_with_full_committed_rows_in_its_epoch() {
+        let log = log();
+        let a = "http://g/a";
+        let epoch = log.epoch().to_string();
+        let graphs = vec![a.to_string()];
+        write(&log, a, vec![q(1, Some(a))], vec![]);
+        write(
+            &log,
+            "http://g/other",
+            vec![q(2, Some("http://g/other"))],
+            vec![],
+        );
+        write(&log, a, vec![q(3, Some(a))], vec![q(1, Some(a))]);
+        let chain = log.chain(&graphs, &epoch, 0, 3);
+        assert!(chain.intact, "{:?}", chain.reason);
+        assert_eq!(chain.rows.len(), 2, "only the covered graph's rows");
+        assert_eq!(chain.change_count(), 3);
+        assert!(!log.chain(&graphs, "another-epoch", 0, 3).intact);
+        assert!(log.chain(&graphs, &epoch, 3, 3).intact, "an empty range");
+
+        // A row over the payload cap carries counts only: no chain crosses it.
+        let target = vec![Some(a.to_string())];
+        let intent = log.begin("test", Some(&target), &|_| Some(10)).unwrap();
+        leave_write();
+        log.commit_with::<()>(
+            Some(intent),
+            vec![GraphDelta::counts(Some(a.to_string()), 5, 0, None)],
+            || Ok(()),
+        )
+        .unwrap();
+        let counts = log.chain(&graphs, &epoch, 0, 4);
+        assert!(!counts.intact);
+        assert!(counts.reason.unwrap().contains("more quads"));
+
+        // A store-scoped row breaks every chain it falls in.
+        let intent = log.begin("update", None, &|_| None).unwrap();
+        leave_write();
+        log.commit_unknown::<()>(Some(intent), None, || Ok(()))
+            .unwrap();
+        let store_scoped = log.chain(&graphs, &epoch, 4, 5);
+        assert!(!store_scoped.intact);
+        assert!(
+            log.touched(&graphs, 4, 5),
+            "a store-scoped row touches every graph"
+        );
+        assert!(!log.touched(&["http://g/none".to_string()], 0, 3));
+        assert!(log.touched(&graphs, 0, 1));
+    }
+
+    #[test]
+    fn a_fold_cancels_what_a_later_row_undid() {
+        let log = log();
+        let a = "http://g/a";
+        write(&log, a, vec![q(1, Some(a)), q(2, Some(a))], vec![]);
+        write(&log, a, vec![], vec![q(1, Some(a)), q(9, Some(a))]);
+        write(&log, a, vec![q(9, Some(a))], vec![]);
+        let rows = log.rows_after(0, 10);
+        let fold = fold_rows(&rows);
+        let net = &fold[&Some(a.to_string())];
+        assert_eq!(net.added, vec![q(2, Some(a))], "q1 came and went");
+        assert!(net.removed.is_empty(), "q9 went and came back");
+        let inverse = net.clone().inverse();
+        assert_eq!(inverse.removed, vec![q(2, Some(a))]);
+        assert_eq!(net.added.len() + net.removed.len(), 1);
+    }
+
+    #[test]
+    fn a_commit_reads_back_its_own_rows() {
+        let log = log();
+        {
+            let _ctx = WriteContextGuard::set(WriteContext {
+                actor_iri: None,
+                commit_iri: Some("http://ex/commit/1".into()),
+                kind: Some("sparql".into()),
+            });
+            write(&log, "http://g/a", vec![q(1, Some("http://g/a"))], vec![]);
+        }
+        write(&log, "http://g/a", vec![q(2, Some("http://g/a"))], vec![]);
+        let mine = log.rows_for_commit("http://ex/commit/1");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].seq, Some(1));
+        assert!(log.rows_for_commit("http://ex/commit/none").is_empty());
     }
 
     #[test]

@@ -8,7 +8,7 @@ fixes for defects the W3C JSON-LD 1.1 API test suite exposes (third section).
 
 | Directory | Crate | Upstream (repository `oxigraph/oxigraph`) | Changes |
 | --- | --- | --- | --- |
-| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes |
+| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes; SPARQL UPDATE refuses ill-typed `rdf:JSON` literals |
 | `spareval/` | `spareval` 0.2.7 | `lib/spareval` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | triple terms are rebuilt without reading their literals as values; SPARQL 1.1 conformance fixes 1–5 |
 | `spargebra/` | `spargebra` 0.4.7 | `lib/spargebra` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 6 |
 | `sparopt/` | `sparopt` 0.3.7 | `lib/sparopt` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 1 |
@@ -83,6 +83,16 @@ triple term could not be found by its own constant, and a join between a reifier
 its asserted triple depended on join order. It now goes through `Term`, which keeps
 the literal (`internalize_triple_term`, `encode_triple`, `put_pattern_value`).
 
+**`oxigraph/src/sparql/update.rs`** and **`error.rs`**: SPARQL UPDATE refuses to
+insert an ill-typed `rdf:JSON` literal — one whose lexical form is not a JSON text
+(JSON-LD 1.1 §10.2, RFC 8259 §2) — with the new
+`UpdateEvaluationError::IllTypedLiteral`, before the operation writes anything
+(`INSERT DATA`, the instantiated `INSERT` template of `DELETE/INSERT`, `LOAD`).
+The store refuses such literals on every other write path itself
+(`src/store/literals.rs`, the same `json-event-parser` check); this is the one
+path whose inserted quads only the evaluator knows. Draft:
+`oxigraph/UPSTREAM-PR-json-literals.md`.
+
 What does not change:
 
 - The on-disk format. No new `EncodedTerm` variant, no new type byte. Data written by
@@ -105,6 +115,42 @@ residual: a triple term written as a constant *inside an expression*
 (`sameTerm(?t, <<( :a :b "05"^^xsd:integer )>>)`) is still built from values by
 spareval's expression evaluator, so `sameTerm` against a stored triple term with a
 non-canonical literal is false. Graph patterns are not affected.
+
+11. **A correlated `EXISTS` becomes a hash semi-join** (`spareval` evaluator).
+   When the pattern only uses the outer bindings to restrict its own solutions
+   (checked on the plan: every shared variable bound in all its solutions, and
+   read by a `FILTER` or `OPTIONAL` only where that operator binds it), the
+   evaluator also evaluates the pattern once, standalone (hash joins, no lateral
+   probes), into a hash table on the shared variables, interleaved with the
+   per-row evaluations once those took 5 ms, so the work stays within about twice
+   the better plan's, and answers every later row with one lookup. Bounded at 2^21 keys; off without optimizations and on
+   `wasm32-unknown-unknown`. Draft: `spareval/UPSTREAM-PR-exists-semi-join.md`.
+
+12. **A merged default graph streams when one graph matches** (`spareval`
+   dataset). The default `internal_triples_for_pattern` of change 2 kept a hash
+   set of every match of every pattern over a multi-graph default graph. It now
+   drops the graphs with no match first (one probe each) and streams the matches
+   untouched when only one graph is left — a dataset service whose default graph
+   is a data graph plus its shapes graph, in the store comparison. Draft:
+   `spareval/UPSTREAM-PR-merged-default-graph-single-match.md`.
+
+13. **A configured parser is cheap to clone** (`spargebra` parser). The custom
+   aggregate set is shared (`Arc`) between clones, so `opengraph::sparql_parser`
+   keeps one parser with the GeoSPARQL aggregates and hands out clones instead
+   of rebuilding it per query (issue #527: about 0.35 µs per query once six
+   aggregates were declared). The `SELECT`-variable-reuse check of change 9 no
+   longer copies the in-scope variable set. Draft:
+   `spargebra/UPSTREAM-PR-cheap-parser-clone.md`.
+
+14. **The RocksDB path of a merged default graph** (`oxigraph` storage and
+   `DatasetView`). Backport of the `oxigraph` half of upstream #1920, left out
+   of change 2: `quads_for_pattern_in_union` merges the per-graph scans, which
+   share a triple order, and deduplicates by key instead of a hash set of every
+   match; once one scan is left (or there is one graph) it is streamed without
+   keys. The memory backend keeps the hash set, after dropping graphs with no
+   match. With change 2's hash set, `COUNT(*)` over a 3.5M-triple data graph
+   merged with its shapes graph took 4.4 s in the store comparison (1.7 s before
+   change 2 deduplicated). Draft: `oxigraph/UPSTREAM-PR-merged-union-streaming.md`.
 
 ### Verifying the fork
 
@@ -261,6 +307,15 @@ One commit each, in this order:
    already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
    suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
 
+10. **`EXISTS` patterns are optimized** (`sparopt` optimizer). The join
+   reordering and filter pushing passes stopped at expressions, so the pattern of
+   an `EXISTS` kept its written order, its joins were cartesian products and its
+   filters stayed on top; evaluated once per outer row, a correlated
+   `FILTER NOT EXISTS { ?r :reviewFor ?p ; :rating ?x }` read every `:rating`
+   triple for each row (store comparison F10, issue #471). A last pass now
+   reorders each `EXISTS` pattern knowing which variables the outer pattern
+   binds, and `Optimizer::optimize_for_standalone_evaluation` plans one with no
+   input. Draft: `sparopt/UPSTREAM-PR-exists-join-order.md`.
 ### Verifying the fork
 
 The fork diff is every commit after the one that added this directory. To see it
@@ -337,3 +392,24 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    `JsonLdParser` directly with the option each test names (absent = `null`).
    W3C json-ld-api toRdf `di02`, `di04`–`di06`, and the non-normative
    `di09`–`di12` that the runner used to skip.
+
+5. **`rdf:JSON` literals are serialized as `@json` values, and an invalid one
+   is an error** (`src/from_rdf.rs`, RDF to Object Conversion step 2.4;
+   `UPSTREAM-PR-5-json-literals.md`). A literal whose lexical form is the
+   canonical (JCS) form of its JSON value is written `{"@type": "@json",
+   "@value": <the value>}`; one in another form (`"{ \"a\" : 1 }"`) keeps it,
+   typed `rdf:JSON`, because `@json` reads back as the canonical form, which is
+   another literal. A lexical form that is not JSON fails the serialization with
+   `invalid JSON literal`. W3C json-ld-api fromRdf `js08`, `js09`.
+
+6. **Well-formed RDF collections become `@list`** (`src/from_rdf.rs`,
+   `ListState` / `ListConversion`, Serialize RDF as JSON-LD steps 5.7.6–5.7.8
+   and 6.4; `UPSTREAM-PR-6-list-conversion.md`). The streaming writer holds back
+   the quads a list conversion can rewrite or drop — those whose object is a
+   blank node or `rdf:nil`, and the `rdf:first`, `rdf:rest` and
+   `rdf:type rdf:List` quads of blank nodes — and converts at `finish`; every
+   other quad is written as it arrives. A list node's `rdf:type rdf:List` goes
+   with it, as the algorithm says (the triple is entailed by the RDF Schema
+   axiom `rdf:first rdfs:domain rdf:List`); a list node with any other property,
+   used twice, or used in two graphs stays a node object with every quad.
+   `finish` now returns `io::Result`. W3C json-ld-api fromRdf `0016`.

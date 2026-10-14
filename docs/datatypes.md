@@ -298,6 +298,19 @@ because it is outside the XSD value space, two such literals are equal only when
 | `rdf:JSON` | an embedded JSON value |
 | *your own IRI* | a domain-specific lexical format you define and validate |
 
+**`rdf:JSON` must hold JSON.** Its lexical space is the JSON grammar (JSON-LD 1.1
+§10.2, RFC 8259): one JSON value, whitespace around it allowed. A literal whose
+text is not JSON, such as `"bareword"^^rdf:JSON` or `"[{]"^^rdf:JSON`, is
+ill-typed, and the store refuses it with **400** on every write path — uploads
+and imports, SPARQL UPDATE (constants and computed values such as
+`STRDT("…", rdf:JSON)` alike), the Graph Store Protocol, LDP and RDF Patch —
+writing nothing of the request. It is the one datatype checked this way,
+because no JSON-LD download could hold such a literal: the JSON-LD
+serialisation algorithm aborts on it. A JSON-LD download writes an `rdf:JSON`
+literal as its JSON value (`"@type": "@json"`) when the text is in the
+canonical form JSON-LD itself writes, and as the typed text otherwise, so the
+literal reads back exactly as stored.
+
 <details>
 <summary>▸ View example — a custom datatype</summary>
 

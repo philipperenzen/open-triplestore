@@ -613,3 +613,49 @@ async fn ldp_direct_container_without_membership_config_is_rejected() {
         "the error names the missing property and the constraints doc: {body}"
     );
 }
+
+/// An `rdf:JSON` literal that is not JSON is ill-typed: LDP refuses it with a
+/// 400 on POST, PUT and PATCH, as every write path does.
+#[tokio::test]
+async fn ldp_refuses_an_ill_typed_json_literal() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let bad = "<http://example.org/x> <http://example.org/p> \
+               \"bareword\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> .";
+    let (st, _, text) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        Some(&token),
+        &[("Content-Type", "text/turtle"), ("Slug", "j")],
+        bad,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "POST: {text}");
+    assert!(text.contains("ill-typed"), "{text}");
+    let (st, _, text) = send(
+        &app,
+        Method::PUT,
+        "/ldp/json1",
+        Some(&token),
+        &[("Content-Type", "text/turtle")],
+        bad,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "PUT: {text}");
+
+    let (st, _) = post_member(&app, &token, "m").await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (st, _, text) = send(
+        &app,
+        Method::PATCH,
+        "/ldp/c1/m",
+        Some(&token),
+        &[("Content-Type", "application/sparql-update")],
+        "INSERT DATA { <http://example.org/x> <http://example.org/q> \
+         \"[{]\"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON> }",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "PATCH: {text}");
+    assert!(text.contains("ill-typed"), "{text}");
+}

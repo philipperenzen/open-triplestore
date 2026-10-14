@@ -76,6 +76,10 @@ pub fn importer(id: &str) -> Option<&'static dyn SpecImporter> {
 pub struct ExportedSpec {
     pub document: String,
     pub specification_count: usize,
+    /// How many of those specifications were written back unchanged from the
+    /// document an import recorded (a lossless re-export); the rest were
+    /// translated from the shapes.
+    pub verbatim_specifications: usize,
     /// Constraints, paths and targets with no counterpart in the target
     /// format. Never empty by accident: an exporter that drops something
     /// records it here, and one that can express nothing at all errors.
@@ -255,7 +259,7 @@ pub async fn import_spec(
     Path(format): Path<String>,
     Query(q): Query<ImportQuery>,
     body: Bytes,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let imp = importer(&format).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -272,9 +276,25 @@ pub async fn import_spec(
     if body.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "empty body".to_string()));
     }
-    let shapes = imp
-        .import(&body)
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, format!("{format}: {e}")))?;
+    let shapes = match imp.import(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            // A refusal that lists its problems answers them as JSON, so a
+            // client can show the audit report item by item.
+            if let Some(r) = e.downcast_ref::<ids::IdsRefusal>() {
+                return Ok((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": format!("{format}: {r}"),
+                        "stage": r.stage,
+                        "problems": r.problems,
+                    })),
+                )
+                    .into_response());
+            }
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, format!("{format}: {e}")));
+        }
+    };
     let shape_graph = if q.create {
         let name = q.name.clone().unwrap_or_else(|| shapes.title.clone());
         let (owner_type, owner_id) =
@@ -308,5 +328,6 @@ pub async fn import_spec(
             shapes,
             shape_graph,
         }),
-    ))
+    )
+        .into_response())
 }

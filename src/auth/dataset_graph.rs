@@ -75,7 +75,8 @@ pub fn graph_held_by_model_registry(store: &TripleStore, base_url: &str, graph_i
 /// True iff `graph_iri` is one of the graphs the server keeps for `dataset_id`
 /// outside its namespace: its DCAT metadata and validation-report graphs, its
 /// assets graph (`{base}/datasets/{id}/assets`, plural), its property-states
-/// graph and its entailment graphs (`urn:entailment:{regime}:{id}`).
+/// and statement-provenance graphs and its entailment graphs
+/// (`urn:entailment:{regime}:{id}`).
 pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
     graph_iri == dataset_metadata_graph_iri(dataset_id)
         || graph_iri == dataset_reports_graph_iri(dataset_id)
@@ -83,6 +84,7 @@ pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &st
         || graph_iri
             == crate::server::routes::assets_graph_iri(base_url.trim_end_matches('/'), dataset_id)
         || graph_iri == crate::property_states::states_graph(dataset_id)
+        || crate::provenance::is_statement_provenance_graph(dataset_id, graph_iri)
         || graph_iri
             .strip_prefix("urn:entailment:")
             .and_then(|rest| rest.split_once(':'))
@@ -394,7 +396,7 @@ pub fn gate_dataset_graph_target(
              '{dataset_id}'."
         ));
     }
-    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    refuse_reserved_write_target(store, base_url, dataset_id, graph_iri)?;
     let registered = db.dataset_has_graph(dataset_id, graph_iri).map_err(|e| {
         format!("Could not check whether graph <{graph_iri}> belongs to '{dataset_id}': {e}")
     })?;
@@ -451,7 +453,7 @@ pub fn authorize_dataset_write_target(
     graph_iri: &str,
     is_admin: bool,
 ) -> Result<(), String> {
-    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    refuse_reserved_write_target(store, base_url, dataset_id, graph_iri)?;
     if is_admin {
         return Ok(());
     }
@@ -465,17 +467,20 @@ pub fn authorize_dataset_write_target(
     Ok(())
 }
 
-/// `Err(message)` when `graph_iri` is a model-registry graph
-/// ([`graph_held_by_model_registry`]; fails closed). For a write into a graph
-/// that is already registered to the dataset, where the registration gate
-/// ([`gate_dataset_graph_target`]) no longer runs: a registration made before
-/// registry graphs were refused must not become a way to overwrite one.
-pub fn refuse_model_registry_graph(
+/// `Err(message)` when `graph_iri` is a graph no dataset-scoped write may
+/// target, admins included: a system-managed statement-provenance graph
+/// ([`crate::provenance::refuse_direct_write`]) or a model-registry graph
+/// ([`graph_held_by_model_registry`]; fails closed). Also for a write into a
+/// graph that is already registered to the dataset, where the registration
+/// gate ([`gate_dataset_graph_target`]) no longer runs: a registration made
+/// before these graphs were refused must not become a way to overwrite one.
+pub fn refuse_reserved_write_target(
     store: &TripleStore,
     base_url: &str,
     dataset_id: &str,
     graph_iri: &str,
 ) -> Result<(), String> {
+    crate::provenance::refuse_direct_write(graph_iri)?;
     if graph_held_by_model_registry(store, base_url, graph_iri) {
         return Err(format!(
             "Target graph <{graph_iri}> belongs to the model registry, so it cannot be a graph of \

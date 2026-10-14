@@ -127,6 +127,7 @@ pub(crate) fn validate_entailed(
     shapes_graph: &str,
     data_graphs: &[String],
     regimes: &Regimes,
+    focus: Option<&std::collections::HashSet<oxigraph::model::Term>>,
 ) -> Result<ValidationReport, String> {
     let scratch = TripleStore::in_memory()
         .map_err(|e| format!("entailment: cannot create the run's store: {e}"))?;
@@ -185,7 +186,7 @@ pub(crate) fn validate_entailed(
 
     let mut graphs = run_graphs;
     graphs.push(inferences);
-    let (mut report, _) = super::engine::validate_graphs(&scratch, shapes_graph, &graphs)?;
+    let (mut report, _) = super::engine::validate_graphs(&scratch, shapes_graph, &graphs, focus)?;
     if let Some(metrics) = report.metrics.as_mut() {
         // The inferences graph is the run's, not one of the caller's graphs.
         metrics.graphs = metrics.graphs.saturating_sub(1);

@@ -99,36 +99,78 @@ fn copy_graph(store: &TripleStore, from: &str, to: &str) -> Result<usize, StoreE
     Ok(copied)
 }
 
-pub fn snapshot_graphs(
-    store: &TripleStore,
+/// The snapshot graph each source graph of a version maps to:
+/// `{base}/dataset/{id}/version/{ver}/{slug}`. Deterministic — the same for a
+/// checkpoint that copies into them now and a delta that builds them later
+/// (delta note §3.1).
+pub fn mapping(
     base_url: &str,
     dataset_id: &str,
     version: &str,
     source_graphs: &[String],
-) -> Result<Vec<GraphMapping>, StoreError> {
+) -> Vec<GraphMapping> {
     let ver_iri = version_iri(base_url, dataset_id, version);
     let mut used: HashMap<String, usize> = HashMap::new();
+    source_graphs
+        .iter()
+        .map(|src| {
+            let suffix = unique_suffix(&mut used, &slugify_last_segment(src));
+            GraphMapping::new(format!("{ver_iri}/{suffix}"), src.clone())
+        })
+        .collect()
+}
 
-    let mut mappings: Vec<GraphMapping> = Vec::new();
-    for src in source_graphs {
-        let suffix = unique_suffix(&mut used, &slugify_last_segment(src));
-        let snap = format!("{ver_iri}/{suffix}");
-        mappings.push(GraphMapping {
-            snapshot_graph: snap,
-            source_graph: src.clone(),
-        });
-    }
-
-    // Clear snapshot targets first (idempotent on retry).
+/// Copy each mapping's source graph into its snapshot graph (cleared first,
+/// idempotent on retry), recording per graph the set hash of the content —
+/// under the source graph — and its quad count.
+pub fn copy_into(store: &TripleStore, mappings: &mut [GraphMapping]) -> Result<(), StoreError> {
     let snap_iris: Vec<String> = mappings.iter().map(|m| m.snapshot_graph.clone()).collect();
     let snap_refs: Vec<&str> = snap_iris.iter().map(|s| s.as_str()).collect();
     store.bulk_delete_graphs(&snap_refs)?;
-
-    // Copy each source graph into its snapshot graph, streaming.
-    for m in &mappings {
-        copy_graph(store, &m.source_graph, &m.snapshot_graph)?;
+    for m in mappings.iter_mut() {
+        let (n, hash) =
+            copy_graph_hashed(store, &m.source_graph, &m.snapshot_graph, &m.source_graph)?;
+        m.quad_count = Some(n as i64);
+        m.content_hash = Some(hash.to_hex());
     }
-    Ok(mappings)
+    Ok(())
+}
+
+/// As [`copy_graph`], hashing every copied quad under `hash_as` on the way.
+pub fn copy_graph_hashed(
+    store: &TripleStore,
+    from: &str,
+    to: &str,
+    hash_as: &str,
+) -> Result<(usize, crate::store::set_hash::SetHash), StoreError> {
+    const BATCH: usize = 50_000;
+    let target = GraphName::NamedNode(
+        NamedNode::new(to).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
+    );
+    let src =
+        NamedNodeRef::new(from).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?;
+    let affected = vec![to.to_string()];
+    let mut hash = crate::store::set_hash::SetHash::new();
+    let mut batch: Vec<Quad> = Vec::with_capacity(BATCH);
+    let mut copied = 0usize;
+    for q in store
+        .store()
+        .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(src)))
+    {
+        let q = q?;
+        hash.add_quad(&q, Some(hash_as));
+        batch.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
+        if batch.len() >= BATCH {
+            copied += batch.len();
+            store.bulk_insert_quads(std::mem::take(&mut batch), &affected)?;
+            batch.reserve(BATCH);
+        }
+    }
+    if !batch.is_empty() {
+        copied += batch.len();
+        store.bulk_insert_quads(batch, &affected)?;
+    }
+    Ok((copied, hash))
 }
 
 /// Clone an existing version's snapshot graphs into a new version (used for
@@ -148,10 +190,11 @@ pub fn clone_version(
     for m in source_map {
         let suffix = unique_suffix(&mut used, &slugify_last_segment(&m.snapshot_graph));
         let snap = format!("{ver_iri}/{suffix}");
-        new_map.push(GraphMapping {
-            snapshot_graph: snap,
-            source_graph: m.source_graph.clone(),
-        });
+        // The same content as the version it clones: its hash and count too.
+        let mut cloned = GraphMapping::new(snap, m.source_graph.clone());
+        cloned.content_hash = m.content_hash.clone();
+        cloned.quad_count = m.quad_count;
+        new_map.push(cloned);
     }
 
     let new_iris: Vec<String> = new_map.iter().map(|m| m.snapshot_graph.clone()).collect();
@@ -222,7 +265,8 @@ mod tests {
         put(&store, live, "http://x/c", "http://x/p", "http://x/d");
 
         // Snapshot the live graph into version 1.0.0.
-        let map = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut map = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut map).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(map[0].source_graph, live);
         assert!(map[0]
@@ -245,7 +289,8 @@ mod tests {
         let live = "http://x/g/data";
         put(&store, live, "http://x/a", "http://x/p", "http://x/b");
 
-        let v1 = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut v1 = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut v1).unwrap();
         let branch = clone_version(&store, base, "ds1", &v1, "1.0.0-feature").unwrap();
         assert_eq!(branch.len(), 1);
         // Branch keeps the same source target for restore.
@@ -256,7 +301,7 @@ mod tests {
 
     #[test]
     fn unique_suffix_skips_reserved_and_taken_names() {
-        let mut used = HashMap::new();
+        let mut used: HashMap<String, usize> = HashMap::new();
         let got: Vec<String> = ["a", "a-1", "a", "validation", "validation", "validation-1"]
             .into_iter()
             .map(|base| unique_suffix(&mut used, base))
@@ -284,7 +329,8 @@ mod tests {
         let live = "http://x/g/validation";
         put(&store, live, "http://x/a", "http://x/p", "http://x/b");
 
-        let map = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut map = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut map).unwrap();
         assert_eq!(
             map[0].snapshot_graph,
             "http://x/dataset/ds1/version/1.0.0/validation-1"
@@ -294,10 +340,10 @@ mod tests {
 
         // Branching a version cut before the name was reserved, whose snapshot
         // took it, moves the branch's copy aside as well.
-        let legacy = [GraphMapping {
-            snapshot_graph: version_validation_graph(base, "ds1", "0.9.0"),
-            source_graph: live.to_string(),
-        }];
+        let legacy = [GraphMapping::new(
+            version_validation_graph(base, "ds1", "0.9.0"),
+            live.to_string(),
+        )];
         let branch = clone_version(&store, base, "ds1", &legacy, "0.9.0-b").unwrap();
         assert_eq!(
             branch[0].snapshot_graph,
