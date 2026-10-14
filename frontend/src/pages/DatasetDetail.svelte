@@ -79,6 +79,7 @@
   import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
   import Select from '../components/Select.svelte';
   import PartialRunNote from '../components/PartialRunNote.svelte';
+  import DatasetExchange from '../components/exchange/DatasetExchange.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
   import { findTheme, findAdmsStatus, findFrequency } from '../lib/vocab/themes';
 
@@ -1261,6 +1262,7 @@
     { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
     { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
     { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'exchange', label: $i18nT('components.exchange.navLabel') },
     { id: 'identity', label: $i18nT('components.identityPolicy.navLabel'), visible: $isAuthenticated },
     { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
   ]} />
@@ -1979,6 +1981,18 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- Exchange formats: event stream, containers, CityJSON, IDS check. -->
+{#if dataset}
+  <DatasetExchange
+    datasetId={id}
+    datasetName={dataset.name || ''}
+    {canWrite}
+    authenticated={$isAuthenticated}
+    {graphs}
+    on:changed={fetchGraphs}
+  />
 {/if}
 
 <!-- Identity policy (owl:sameAs) for reasoning — every identity route needs a

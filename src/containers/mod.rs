@@ -550,6 +550,37 @@ pub async fn validate_container(
     Ok(Json(validate_blocking(prof, entries).await?))
 }
 
+/// GET /api/containers/profiles — the container profiles this server reads
+/// and writes, and for ICDD whether the operator configured the ISO ontology
+/// files (`OTS_ICDD_ONTOLOGY_DIR`) an export needs to be Part 1-conformant.
+/// Reports file names only, never the directory, so any signed-in user can
+/// see why an export carries the `ontology-resource-missing` warning.
+pub async fn list_profiles() -> Json<serde_json::Value> {
+    let list: Vec<serde_json::Value> = profiles()
+        .iter()
+        .map(|p| {
+            let mut j = serde_json::json!({ "id": p.id(), "label": p.label() });
+            if p.id() == "icdd" {
+                let set = std::env::var(icdd::ONTOLOGY_DIR_ENV).is_ok_and(|v| !v.trim().is_empty());
+                let (files, _) = icdd::operator_ontologies();
+                let missing: Vec<&str> = icdd::PART1_ONTOLOGIES
+                    .iter()
+                    .copied()
+                    .filter(|n| !files.iter().any(|f| f.name.eq_ignore_ascii_case(n)))
+                    .collect();
+                j["ontology_resources"] = serde_json::json!({
+                    "env": icdd::ONTOLOGY_DIR_ENV,
+                    "configured": set,
+                    "complete": missing.is_empty(),
+                    "missing": missing,
+                });
+            }
+            j
+        })
+        .collect();
+    Json(serde_json::json!({ "profiles": list }))
+}
+
 /// One stored asset: its id, content type and URL.
 struct StoredAsset {
     id: String,
