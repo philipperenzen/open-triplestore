@@ -16,7 +16,7 @@ use rml_corpus::*;
 
 /// Empirical baseline: 29 pass / 1 known-fail / 2 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("RMLSTC0009a", "the manifest says hasError true, but the suite's descriptions.csv says no error is expected and the case ships the output of reading the quoted header \"id\",\"name\",\"age\" as RFC 4180 does — the output this engine produces"),
+    ("RMLSTC0009a", "test-suite defect (#515): the manifest says hasError true, but the suite's descriptions.csv says no error is expected and the case ships the output of reading the quoted header \"id\",\"name\",\"age\" as RFC 4180 does — the output this engine produces"),
 ];
 
 /// Cases the runner does not run: they need a service, not a file.
