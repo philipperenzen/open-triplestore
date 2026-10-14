@@ -2212,9 +2212,10 @@ mod tests {
 
     #[test]
     fn a_payload_over_the_cap_keeps_exact_counts_and_drops_the_quads() {
-        std::env::set_var("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", "2");
-        let log = log();
-        std::env::remove_var("OTS_CHANGE_CAPTURE_MAX_PAYLOAD");
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.max_payload = 2;
         let intent = log.begin("test", Some(&[None]), &|_| Some(0)).unwrap();
         leave_write();
         let big = (0..3).map(|i| q(i, None)).collect();
@@ -2315,9 +2316,10 @@ mod tests {
 
     #[test]
     fn retention_deletes_only_below_the_lowest_live_cursor() {
-        std::env::set_var("OTS_CHANGE_RETENTION_DAYS", "0");
-        let log = log();
-        std::env::remove_var("OTS_CHANGE_RETENTION_DAYS");
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.retention_days = 0;
         for i in 0..5 {
             let intent = log.begin("test", Some(&[None]), &|_| Some(0)).unwrap();
             leave_write();
@@ -2456,9 +2458,10 @@ mod tests {
 
     #[test]
     fn a_pin_keeps_its_range_and_retention_remembers_what_it_cut() {
-        std::env::set_var("OTS_CHANGE_RETENTION_DAYS", "0");
-        let log = log();
-        std::env::remove_var("OTS_CHANGE_RETENTION_DAYS");
+        // Set on the log, not through the process-wide environment, which
+        // other tests in this binary read concurrently.
+        let mut log = log();
+        log.retention_days = 0;
         for i in 0..5 {
             write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
         }
