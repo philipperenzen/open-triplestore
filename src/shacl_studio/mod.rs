@@ -13,6 +13,8 @@
 //!   draft-from-data shape inducer.
 //! * [`manifest`] — the form-manifest contract publisher (no in-app forms).
 //! * [`gate`] — write-gating helper called by the on-write hook.
+//! * [`gate_focus`] — the nodes a merge or a delta can affect, and what they
+//!   read, so a gate need not copy the whole graph.
 //! * [`cron`] — minimal 5-field cron matcher for the scheduler.
 //! * [`scheduler`] — background task firing due pipelines.
 //! * [`registration`] — idempotent adoption of dataset shapes graphs into the
@@ -28,6 +30,7 @@ pub mod catalog;
 pub mod cron;
 pub mod exec;
 pub mod gate;
+pub(crate) mod gate_focus;
 pub mod handlers;
 pub mod introspect;
 pub mod manifest;

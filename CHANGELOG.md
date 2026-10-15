@@ -34,6 +34,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A SHACL write gate no longer copies the whole graph before a merge**
+  (#534). A Graph Store `POST`, an RDF Patch or a repair apply into a gated
+  graph copied the whole graph into the gate's sandbox before validating (a
+  `POST` serialised it to Turtle and parsed it back), so a 1 000-quad `POST`
+  into a 9M-quad graph paid for all nine million. The gate now stages the
+  write's triples plus what the nodes the write can affect read — found from
+  the shapes: the targets it adds or removes, and the nodes that reach a
+  changed triple through a path, `sh:class`, `sh:node`,
+  `sh:qualifiedValueShape` or `sh:closed` — and validates those nodes; at
+  20 000 assets a 999-quad `POST` went from 6.6 s to 0.2 s. Shapes whose reach
+  no path bounds (SPARQL constraints and targets, SHACL-AF components and
+  expressions, recursive shapes, `sh:entailment`), a write that changes
+  `rdfs:subClassOf`, a write to a graph holding the gate's own shapes, and a
+  reach larger than the graph still copy the whole graph. The verdict and
+  report are a full validation's for every node the write can affect, so a
+  graph that conformed before the write is judged exactly as before; a
+  violation already in the graph, on a node the write cannot affect, no
+  longer refuses it. `PUT` is unchanged.
 - **A demo content refresh no longer deletes files an operator added to the
   demo dataset.** When the recorded demo content version was behind, the
   refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
