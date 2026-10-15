@@ -20,16 +20,22 @@
 //! passes. Each gate is evaluated once per write; the incoming data is staged
 //! once and the shape graphs are copied once.
 //!
+//! A replace (`PUT`, an import) stages its payload, which is the whole future
+//! graph. A merge (`POST`) or a delta (RDF Patch, a repair apply) stages the
+//! write's additions plus only what the nodes it can affect read from the
+//! live graph, and validates those nodes (`gate_focus`); when that
+//! cannot be bounded it stages the whole live graph, as every merge used to.
+//!
 //! A datasource run stages its candidate graph in the store before the graph
 //! joins its dataset, so [`discover_gates_joining`] finds the gates of the
 //! dataset it is about to join, and [`evaluate_every_gate`] runs them all over
 //! the candidate where it lies, in the same order, reporting every gate's
 //! verdict rather than stopping at the first refusal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxigraph::io::RdfFormat;
-use oxigraph::model::{GraphName, NamedNode, Quad};
+use oxigraph::model::{GraphName, NamedNode, Quad, Term};
 
 use crate::auth::db::AuthDb;
 use crate::auth::middleware::AuthenticatedUser;
@@ -134,7 +140,8 @@ pub enum WriteMode {
 }
 
 /// Copy the target graph's current contents into the throwaway store, so a
-/// merge is validated against the state the write will actually produce.
+/// merge whose reach cannot be bounded is validated against the state the
+/// write will actually produce.
 fn seed_existing_graph(
     main_store: &TripleStore,
     temp: &TripleStore,
@@ -199,6 +206,74 @@ pub fn check_write_gates(
     mode: WriteMode,
     on_dataset_gate: Option<DatasetGateHook<'_>>,
 ) -> Result<(), ValidationReport> {
+    let body = Body { data, format, mode };
+    write_gates(
+        ctx,
+        graph_iri,
+        body,
+        on_dataset_gate,
+        true,
+        &mut Staging::default(),
+    )
+}
+
+/// A Graph Store body and how it is applied.
+struct Body<'a> {
+    data: &'a str,
+    format: RdfFormat,
+    mode: WriteMode,
+}
+
+/// What a gate staged in its sandbox: which nodes it validates, and how much
+/// of the written graph it holds.
+#[derive(Debug, Default)]
+struct Staging {
+    /// The nodes the gates validate; `None` validates every target, the whole
+    /// future graph being staged.
+    focus: Option<HashSet<Term>>,
+    /// Why a merge or a delta staged the whole live graph.
+    whole_because: Option<String>,
+    /// Quads of the written graph the sandbox held.
+    data_quads: usize,
+}
+
+impl Staging {
+    /// Count what the sandbox holds of `graph_iri`, and log it.
+    fn record(&mut self, temp: &TripleStore, graph_iri: &str) {
+        self.data_quads = temp.graph_count_cached(Some(graph_iri)).unwrap_or(0);
+        match (&self.focus, &self.whole_because) {
+            (Some(focus), _) => tracing::debug!(
+                "shacl gate: <{graph_iri}>: {} focus node(s) over {} staged quad(s)",
+                focus.len(),
+                self.data_quads
+            ),
+            (None, Some(why)) => tracing::debug!(
+                "shacl gate: <{graph_iri}>: staged the whole graph ({} quads): {why}",
+                self.data_quads
+            ),
+            (None, None) => {}
+        }
+    }
+}
+
+/// A write as quads: what it adds and what it removes (disjoint, all in the
+/// written graph).
+#[derive(Clone, Copy)]
+struct Delta<'a> {
+    adds: &'a [Quad],
+    removes: &'a [Quad],
+}
+
+/// [`check_write_gates`]; `focus_allowed: false` stages the whole live graph
+/// for a merge, as every merge used to (the tests' reference).
+fn write_gates(
+    ctx: GateContext<'_>,
+    graph_iri: &str,
+    body: Body<'_>,
+    on_dataset_gate: Option<DatasetGateHook<'_>>,
+    focus_allowed: bool,
+    staging: &mut Staging,
+) -> Result<(), ValidationReport> {
     let GateContext {
         main_store,
         auth_db,
@@ -219,20 +294,235 @@ pub fn check_write_gates(
     // Build a temp store: the graph's future contents + the shapes (copied from
     // the live store).
     let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
-    if mode == WriteMode::Merge {
-        seed_existing_graph(main_store, &temp, graph_iri)?;
-    }
-    if temp.load_str(data, format, Some(graph_iri)).is_err() {
+    if temp
+        .load_str(body.data, body.format, Some(graph_iri))
+        .is_err()
+    {
         // Malformed data — let the normal write path surface the parse error.
         // Safe to pass: the write itself will fail on the same parse.
         return Ok(());
     }
+    // The payload as parsed: a merge's additions.
+    let adds = match body.mode {
+        WriteMode::Replace => Vec::new(),
+        WriteMode::Merge => temp
+            .quads_for_graph(graph_ref(graph_iri)?.as_ref().into())
+            .map_err(|e| gate_error(format!("reading the staged payload: {e}")))?,
+    };
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
+    if body.mode == WriteMode::Merge {
+        let write = Delta {
+            adds: &adds,
+            removes: &[],
+        };
+        stage_future(
+            main_store,
+            &temp,
+            graph_iri,
+            &needed_graphs,
+            write,
+            focus_allowed,
+            staging,
+        )?;
+    }
+    staging.record(&temp, graph_iri);
 
-    evaluate_gates(&temp, studio, &gates, graph_iri, on_dataset_gate).map_err(|refusal| {
+    evaluate_gates(
+        &temp,
+        studio,
+        &gates,
+        graph_iri,
+        on_dataset_gate,
+        staging.focus.as_ref(),
+    )
+    .map_err(|refusal| {
         let (report, shapes) = *refusal;
         report_for_writer(auth_db, writer, report, &shapes)
     })
+}
+
+/// The write gates of `graph_iri` over what it would hold after `rows` —
+/// each an addition (`true`) or a removal, applied in order, so the last row
+/// on a quad wins — as an RDF Patch or a repair apply writes it: the gates a
+/// Graph Store write to the same graph passes, in the same order. Rows in
+/// other graphs are ignored. `Err` carries the first refusal's report, as the
+/// writer may see it; a failed gate lookup refuses.
+pub fn check_delta_gates<'q>(
+    ctx: GateContext<'_>,
+    graph_iri: &str,
+    rows: impl IntoIterator<Item = (bool, &'q Quad)>,
+) -> Result<(), ValidationReport> {
+    delta_gates(ctx, graph_iri, rows, true, &mut Staging::default())
+}
+
+/// [`check_delta_gates`]; `focus_allowed: false` stages the whole future
+/// graph, as every delta used to (the tests' reference).
+fn delta_gates<'q>(
+    ctx: GateContext<'_>,
+    graph_iri: &str,
+    rows: impl IntoIterator<Item = (bool, &'q Quad)>,
+    focus_allowed: bool,
+    staging: &mut Staging,
+) -> Result<(), ValidationReport> {
+    let GateContext {
+        main_store,
+        auth_db,
+        studio,
+        base_url,
+        writer,
+    } = ctx;
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri)?;
+    if gates.is_empty() {
+        return Ok(());
+    }
+    let needed_graphs = needed_shape_graphs(studio, &gates)?;
+    let graph = GraphName::NamedNode(graph_ref(graph_iri)?);
+
+    // The net effect on each quad: the last row wins.
+    let mut net: HashMap<&Quad, bool> = HashMap::new();
+    for (add, q) in rows {
+        if q.graph_name == graph {
+            net.insert(q, add);
+        }
+    }
+    let (adds, removes): (Vec<Quad>, Vec<Quad>) = {
+        let (a, r): (Vec<_>, Vec<_>) = net.into_iter().partition(|(_, add)| *add);
+        (
+            a.into_iter().map(|(q, _)| q.clone()).collect(),
+            r.into_iter().map(|(q, _)| q.clone()).collect(),
+        )
+    };
+
+    let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
+    copy_shape_graphs(main_store, &temp, &needed_graphs)?;
+    if !adds.is_empty() {
+        temp.bulk_insert_quads(adds.clone(), &[graph_iri.to_string()])
+            .map_err(|e| gate_error(format!("staging the incoming quads: {e}")))?;
+    }
+    let write = Delta {
+        adds: &adds,
+        removes: &removes,
+    };
+    stage_future(
+        main_store,
+        &temp,
+        graph_iri,
+        &needed_graphs,
+        write,
+        focus_allowed,
+        staging,
+    )?;
+    staging.record(&temp, graph_iri);
+
+    evaluate_gates(
+        &temp,
+        studio,
+        &gates,
+        graph_iri,
+        None,
+        staging.focus.as_ref(),
+    )
+    .map_err(|refusal| {
+        let (report, shapes) = *refusal;
+        report_for_writer(auth_db, writer, report, &shapes)
+    })
+}
+
+/// `graph_iri` as a node; `Err` refuses the write.
+fn graph_ref(graph_iri: &str) -> Result<NamedNode, ValidationReport> {
+    NamedNode::new(graph_iri).map_err(|e| {
+        gate_error(format!(
+            "target graph <{graph_iri}> is not a valid IRI: {e}"
+        ))
+    })
+}
+
+/// Stage the rest of a merge's or a delta's future graph in `temp`, which
+/// holds the shapes and the write's additions, and record in `staging` which
+/// nodes to validate: the nodes the write can affect, with the triples they
+/// read ([`super::gate_focus`]); or, when that cannot be bounded, every
+/// target, with the whole live graph less the write's removals, as before.
+fn stage_future(
+    main_store: &TripleStore,
+    temp: &TripleStore,
+    graph_iri: &str,
+    needed_graphs: &BTreeSet<String>,
+    write: Delta<'_>,
+    focus_allowed: bool,
+    staging: &mut Staging,
+) -> Result<(), ValidationReport> {
+    use super::gate_focus::{self, Plan};
+    let plan = if !focus_allowed {
+        Plan::Whole("the whole graph was asked for".to_string())
+    } else if needed_graphs.contains(graph_iri) {
+        // The write changes a gate's own shapes, which reach every target.
+        Plan::Whole("the written graph holds a gate's shapes".to_string())
+    } else {
+        match gate_shapes(temp, needed_graphs) {
+            Err(why) => Plan::Whole(why),
+            Ok(shapes) => gate_focus::plan(
+                main_store,
+                &graph_ref(graph_iri)?,
+                &shapes,
+                write.adds,
+                write.removes,
+            )
+            .map_err(gate_error)?,
+        }
+    };
+    match plan {
+        Plan::Focused {
+            focus,
+            neighbourhood,
+        } => {
+            if !neighbourhood.is_empty() {
+                temp.bulk_insert_quads(neighbourhood, &[graph_iri.to_string()])
+                    .map_err(|e| gate_error(format!("staging the graph's neighbourhood: {e}")))?;
+            }
+            staging.focus = Some(focus);
+        }
+        Plan::Whole(why) => {
+            staging.whole_because = Some(why);
+            if write.removes.is_empty() {
+                seed_existing_graph(main_store, temp, graph_iri)?;
+            } else {
+                let removed: HashSet<&Quad> = write.removes.iter().collect();
+                let rest: Vec<Quad> = main_store
+                    .quads_for_graph(graph_ref(graph_iri)?.as_ref().into())
+                    .map_err(|e| gate_error(format!("reading existing graph <{graph_iri}>: {e}")))?
+                    .into_iter()
+                    .filter(|q| !removed.contains(q))
+                    .collect();
+                if !rest.is_empty() {
+                    temp.bulk_insert_quads(rest, &[graph_iri.to_string()])
+                        .map_err(|e| {
+                            gate_error(format!("staging existing graph <{graph_iri}>: {e}"))
+                        })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every shape the gates validate against, as the engine loads them; `Err`
+/// says why the write's reach cannot be planned. A shapes graph that declares
+/// an entailment regime validates inferred triples no plan bounds; one that
+/// fails to load fails the gate when it is evaluated.
+fn gate_shapes(
+    temp: &TripleStore,
+    needed_graphs: &BTreeSet<String>,
+) -> Result<Vec<crate::shacl::shapes::Shape>, String> {
+    let mut shapes = Vec::new();
+    for g in needed_graphs {
+        match crate::shacl::entailment::declared_regimes(temp, g) {
+            Ok(r) if r.is_empty() => {}
+            Ok(_) => return Err(format!("shapes graph <{g}> declares sh:entailment")),
+            Err(e) => return Err(e),
+        }
+        shapes.extend(crate::shacl::engine::load_shapes(temp, g)?);
+    }
+    Ok(shapes)
 }
 
 /// Cheap pre-check for bulk import: does *any* gate apply to writes into
@@ -303,7 +593,7 @@ pub fn check_import_gates(
         .map_err(|e| gate_error(format!("staging the incoming quads: {e}")))?;
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
-    evaluate_gates(&temp, studio, &gates, graph_iri, None).map_err(|refusal| {
+    evaluate_gates(&temp, studio, &gates, graph_iri, None, None).map_err(|refusal| {
         let (report, shapes) = *refusal;
         report_for_writer(auth_db, writer, report, &shapes)
     })
@@ -601,14 +891,16 @@ fn copy_shape_graphs(
 }
 
 /// Run every gate source against the prepared temp store, in the module's
-/// order. Returns the first failing gate's report, with the shape graphs that
-/// gate validated against.
+/// order — over `focus` only when given (a focused sandbox), else over every
+/// target. Returns the first failing gate's report, with the shape graphs
+/// that gate validated against.
 fn evaluate_gates(
     temp: &TripleStore,
     studio: &ShaclStudioStore,
     gates: &GateSet,
     graph_iri: &str,
     on_dataset_gate: Option<DatasetGateHook<'_>>,
+    focus: Option<&HashSet<Term>>,
 ) -> Result<(), Refusal> {
     let mut refused = None;
     each_gate(
@@ -617,6 +909,7 @@ fn evaluate_gates(
         gates,
         graph_iri,
         on_dataset_gate,
+        focus,
         &mut |verdict| {
             if verdict.refuses {
                 refused = Some(refusal(verdict.report, verdict.shape_graphs));
@@ -645,15 +938,24 @@ pub fn evaluate_every_gate(
     graph_iri: &str,
 ) -> Result<Vec<GateVerdict>, ValidationReport> {
     let mut verdicts = Vec::new();
-    each_gate(store, studio, gates, graph_iri, None, &mut |verdict| {
-        verdicts.push(verdict);
-        true
-    })?;
+    each_gate(
+        store,
+        studio,
+        gates,
+        graph_iri,
+        None,
+        None,
+        &mut |verdict| {
+            verdicts.push(verdict);
+            true
+        },
+    )?;
     Ok(verdicts)
 }
 
 /// Evaluate `gates` against `graph_iri` as `store` holds it, in the module's
-/// order, handing each gate's verdict to `visit` until it returns `false`.
+/// order — over `focus` only when given (a focused sandbox), else over every
+/// target — handing each gate's verdict to `visit` until it returns `false`.
 /// `Err` is a gate that could not be evaluated.
 fn each_gate(
     store: &TripleStore,
@@ -661,6 +963,7 @@ fn each_gate(
     gates: &GateSet,
     graph_iri: &str,
     on_dataset_gate: Option<DatasetGateHook<'_>>,
+    focus: Option<&HashSet<Term>>,
     visit: &mut dyn FnMut(GateVerdict) -> bool,
 ) -> Result<(), ValidationReport> {
     let data_graphs = [graph_iri.to_string()];
@@ -676,12 +979,12 @@ fn each_gate(
         let shape_graphs = pipeline_shape_graphs(studio, p)?;
         // A `_ => {}` arm used to swallow an engine error, so it read as a
         // pass and the gate quietly stopped gating.
-        let outcome = super::run::run_validation(
+        let outcome = super::run::run_gate_validation(
             store,
             &shape_graphs,
             &data_graphs,
             p.severity_threshold,
-            false,
+            focus,
         )
         .map_err(|e| gate_error(format!("pipeline '{}': {e}", p.id)))?;
         let verdict = GateVerdict {
@@ -698,12 +1001,12 @@ fn each_gate(
     // Binding gates — enforced at the default Violation threshold.
     if !gates.binding_graphs.is_empty() {
         let shape_graphs: Vec<String> = gates.binding_graphs.iter().cloned().collect();
-        let outcome = super::run::run_validation(
+        let outcome = super::run::run_gate_validation(
             store,
             &shape_graphs,
             &data_graphs,
             SeverityThreshold::Violation,
-            false,
+            focus,
         )
         .map_err(|e| gate_error(format!("validation-layer binding: {e}")))?;
         let verdict = GateVerdict {
@@ -727,8 +1030,11 @@ fn each_gate(
     {
         // `if let Ok(..)` dropped the error case, so a failing engine run meant
         // "no violations" and the write sailed through ungated.
-        let report = crate::shacl::validate(store, shapes_graph, &data_graphs)
-            .map_err(|e| gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")))?;
+        let report = match focus {
+            Some(focus) => crate::shacl::validate_focused(store, shapes_graph, &data_graphs, focus),
+            None => crate::shacl::validate(store, shapes_graph, &data_graphs),
+        }
+        .map_err(|e| gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")))?;
         if let Some(hook) = on_dataset_gate {
             hook(dataset_id, shapes_graph, &report);
         }
@@ -1616,5 +1922,735 @@ mod tests {
         assert!(s.contains("f0") && s.contains("f1"), "{s}");
         assert!(!s.contains("f2"), "truncated: {s}");
         assert!(s.contains("and 2 more"), "{s}");
+    }
+
+    // ─── Focused gates (#534) ─────────────────────────────────────────────────
+
+    const PREFIXES: &str = "@prefix ex: <http://example.org/> .\n\
+        @prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n";
+    const DIFF_SHAPES: &str = "urn:shapes:diff";
+
+    /// A write the differential test gates.
+    enum Write {
+        /// A Graph Store `POST` of this Turtle.
+        Post(&'static str),
+        /// An RDF Patch: these triples removed, then these added.
+        Patch {
+            remove: &'static str,
+            add: &'static str,
+        },
+    }
+
+    /// The triples of a Turtle snippet, in the data graph.
+    fn triples(ttl: &str) -> Vec<Quad> {
+        let s = TripleStore::in_memory().unwrap();
+        s.load_str(
+            &format!("{PREFIXES}{ttl}"),
+            RdfFormat::Turtle,
+            Some(DATA_GRAPH),
+        )
+        .unwrap();
+        s.quads_for_graph(NamedNode::new(DATA_GRAPH).unwrap().as_ref().into())
+            .unwrap()
+    }
+
+    /// A store whose data graph holds `base`, gated by `shapes` in all three
+    /// ways: a gating pipeline, a validation-layer binding and the owning
+    /// dataset's `shacl_on_write` shapes graph.
+    fn gated(shapes: &str, base: &str) -> (TripleStore, AuthDb, ShaclStudioStore) {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        auth.create_user(CREATOR, CREATOR, "u@t.com", "hash", SystemRole::Admin)
+            .unwrap();
+        let studio = ShaclStudioStore::new(auth.pool());
+        store
+            .load_str(
+                &format!("{PREFIXES}{shapes}"),
+                RdfFormat::Turtle,
+                Some(DIFF_SHAPES),
+            )
+            .unwrap();
+        store
+            .load_str(
+                &format!("{PREFIXES}{base}"),
+                RdfFormat::Turtle,
+                Some(DATA_GRAPH),
+            )
+            .unwrap();
+        let set = studio
+            .create_shape_graph(
+                "diff",
+                None,
+                OwnerType::User,
+                CREATOR,
+                Visibility::Private,
+                DIFF_SHAPES,
+                &[],
+                ShapeSource::Manual,
+                None,
+            )
+            .unwrap();
+        let mut p = pipe(vec![graph_target(DATA_GRAPH)], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id];
+        studio.insert_pipeline(&p).unwrap();
+        bindings::add_binding(&store, DATA_GRAPH, DIFF_SHAPES).unwrap();
+        auth.create_dataset(
+            "d1",
+            "D1",
+            None,
+            OwnerType::User,
+            CREATOR,
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        auth.add_dataset_graph("d1", DATA_GRAPH).unwrap();
+        auth.update_dataset_shacl("d1", true, Some(DIFF_SHAPES))
+            .unwrap();
+        (store, auth, studio)
+    }
+
+    /// The gates' verdict on `write` and what they staged; `focus_allowed:
+    /// false` stages the whole graph, the reference.
+    fn gate_on(
+        store: &TripleStore,
+        auth: &AuthDb,
+        studio: &ShaclStudioStore,
+        write: &Write,
+        focus_allowed: bool,
+    ) -> (Result<(), ValidationReport>, Staging) {
+        let c = ctx(store, auth, studio, "http://x");
+        let mut staging = Staging::default();
+        let verdict = match write {
+            Write::Post(ttl) => {
+                let data = format!("{PREFIXES}{ttl}");
+                let body = Body {
+                    data: &data,
+                    format: RdfFormat::Turtle,
+                    mode: WriteMode::Merge,
+                };
+                write_gates(c, DATA_GRAPH, body, None, focus_allowed, &mut staging)
+            }
+            Write::Patch { remove, add } => {
+                let (removed, added) = (triples(remove), triples(add));
+                let rows = removed
+                    .iter()
+                    .map(|q| (false, q))
+                    .chain(added.iter().map(|q| (true, q)));
+                delta_gates(c, DATA_GRAPH, rows, focus_allowed, &mut staging)
+            }
+        };
+        (verdict, staging)
+    }
+
+    /// What a full validation of the data graph says after `write`, computed
+    /// without the gate: the base and the write applied in a store of their
+    /// own.
+    fn after(shapes: &str, base: &str, write: &Write) -> ValidationReport {
+        let mut future: HashSet<Quad> = triples(base).into_iter().collect();
+        match write {
+            Write::Post(ttl) => future.extend(triples(ttl)),
+            Write::Patch { remove, add } => {
+                for q in triples(remove) {
+                    future.remove(&q);
+                }
+                future.extend(triples(add));
+            }
+        }
+        let s = TripleStore::in_memory().unwrap();
+        s.load_str(
+            &format!("{PREFIXES}{shapes}"),
+            RdfFormat::Turtle,
+            Some(DIFF_SHAPES),
+        )
+        .unwrap();
+        s.bulk_insert_quads(future.into_iter().collect(), &[DATA_GRAPH.to_string()])
+            .unwrap();
+        crate::shacl::validate(&s, DIFF_SHAPES, &[DATA_GRAPH.to_string()]).unwrap()
+    }
+
+    /// `s` with every blank-node label dropped: two parses of one document
+    /// label its blank nodes differently.
+    fn unlabelled(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find("_:") {
+            out.push_str(&rest[..i + 2]);
+            rest = rest[i + 2..]
+                .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Results as comparable keys, sorted.
+    fn result_keys<'r>(results: impl IntoIterator<Item = &'r ValidationResult>) -> Vec<String> {
+        let mut k: Vec<String> = results
+            .into_iter()
+            .map(|r| {
+                unlabelled(&format!(
+                    "{} | {:?} | {:?} | {} | {}",
+                    r.focus_node, r.path, r.value, r.source_constraint, r.source_shape
+                ))
+            })
+            .collect();
+        k.sort();
+        k
+    }
+
+    fn results_of(verdict: &Result<(), ValidationReport>) -> Vec<String> {
+        match verdict {
+            Ok(()) => Vec::new(),
+            Err(report) => result_keys(&report.results),
+        }
+    }
+
+    /// One case of the differential test: `write` on a graph holding `base`
+    /// (which conforms), gated by `shapes`.
+    struct Case {
+        name: &'static str,
+        shapes: &'static str,
+        base: &'static str,
+        write: Write,
+        refused: bool,
+        focused: bool,
+    }
+
+    /// Gate `case` with the whole graph staged and with the focused sandbox,
+    /// and hold both to a full validation of the graph after the write.
+    fn differential(case: &Case) {
+        let name = case.name;
+        let (store, auth, studio) = gated(case.shapes, case.base);
+        let base = crate::shacl::validate(&store, DIFF_SHAPES, &[DATA_GRAPH.to_string()]).unwrap();
+        assert!(
+            base.conforms,
+            "{name}: the base conforms: {:?}",
+            base.results
+        );
+        let reference = after(case.shapes, case.base, &case.write);
+
+        let (whole, whole_staging) = gate_on(&store, &auth, &studio, &case.write, false);
+        let (focused, staging) = gate_on(&store, &auth, &studio, &case.write, true);
+
+        assert_eq!(
+            whole.is_err(),
+            case.refused,
+            "{name}: {:?}",
+            results_of(&whole)
+        );
+        assert_eq!(
+            whole.is_err(),
+            !reference.conforms,
+            "{name}: the whole-graph gate refuses exactly when the graph after the write \
+             does not conform"
+        );
+        assert!(whole_staging.focus.is_none(), "{name}");
+        assert_eq!(
+            staging.focus.is_some(),
+            case.focused,
+            "{name}: focused? (whole because {:?})",
+            staging.whole_because
+        );
+        assert_eq!(
+            focused.is_err(),
+            whole.is_err(),
+            "{name}: the focused gate refuses exactly when the whole-graph gate does: {:?}",
+            results_of(&focused)
+        );
+        assert_eq!(
+            results_of(&whole),
+            result_keys(&reference.results),
+            "{name}: the whole-graph gate reports what a full validation reports"
+        );
+        assert_eq!(
+            results_of(&focused),
+            results_of(&whole),
+            "{name}: the focused gate reports what the whole-graph gate reports"
+        );
+        // Whatever the verdict, a focused run reports exactly what a full
+        // validation says about its focus nodes.
+        if let Some(focus) = &staging.focus {
+            let names: HashSet<String> = focus
+                .iter()
+                .map(crate::shacl::constraints::display_term)
+                .collect();
+            assert_eq!(
+                results_of(&focused),
+                result_keys(
+                    reference
+                        .results
+                        .iter()
+                        .filter(|r| names.contains(&r.focus_node))
+                ),
+                "{name}"
+            );
+            assert!(
+                staging.data_quads <= whole_staging.data_quads,
+                "{name}: the focused sandbox holds no more than the whole graph ({} > {})",
+                staging.data_quads,
+                whole_staging.data_quads
+            );
+        }
+    }
+
+    const S_PERSON: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Person ; \
+        sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:maxCount 1 ] .";
+    const B_PERSON: &str =
+        "ex:p1 a ex:Person ; ex:name \"Ada\" . ex:p2 a ex:Person ; ex:name \"Bob\" .";
+    const S_AGENT: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Agent ; \
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] .";
+    const B_AGENT: &str = "ex:Person rdfs:subClassOf ex:Agent . \
+        ex:p1 a ex:Person ; ex:name \"Ada\" . ex:r1 a ex:Robot .";
+    const S_HQ: &str = "ex:S a sh:NodeShape ; sh:targetNode ex:hq ; \
+        sh:property [ sh:path ex:employs ; sh:minCount 1 ; sh:class ex:Person ] .";
+    const B_HQ: &str = "ex:hq ex:employs ex:p1 . ex:p1 a ex:Person .";
+    const S_SUBJECTS: &str = "ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:manages ; \
+        sh:property [ sh:path ex:email ; sh:minCount 1 ] .";
+    const B_SUBJECTS: &str = "ex:m1 ex:manages ex:t1 ; ex:email \"m@example.org\" .";
+    const S_OBJECTS: &str = "ex:S a sh:NodeShape ; sh:targetObjectsOf ex:manages ; \
+        sh:property [ sh:path ex:label ; sh:minCount 1 ] .";
+    const B_OBJECTS: &str = "ex:m1 ex:manages ex:t1 . ex:t1 ex:label \"T\" .";
+    const S_INVERSE: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Team ; \
+        sh:property [ sh:path [ sh:inversePath ex:memberOf ] ; sh:minCount 1 ; sh:maxCount 2 ] .";
+    const B_INVERSE: &str = "ex:t1 a ex:Team . ex:a ex:memberOf ex:t1 . ex:b ex:memberOf ex:t1 .";
+    const S_SEQUENCE: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Order ; \
+        sh:property [ sh:path ( ex:customer ex:country ) ; sh:minCount 1 ; sh:in ( \"NL\" \"BE\" ) ] .";
+    const B_SEQUENCE: &str = "ex:o1 a ex:Order ; ex:customer ex:c1 . ex:c1 ex:country \"NL\" .";
+    const S_CLASS: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Book ; \
+        sh:property [ sh:path ex:author ; sh:class ex:Person ] .";
+    const B_CLASS: &str = "ex:Writer rdfs:subClassOf ex:Person . \
+        ex:b1 a ex:Book ; ex:author ex:x . ex:x a ex:Person .";
+    const S_NODE: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Site ; \
+        sh:property [ sh:path ex:address ; sh:node ex:AddressShape ] . \
+        ex:AddressShape a sh:NodeShape ; sh:property [ sh:path ex:city ; sh:minCount 1 ] .";
+    const B_NODE: &str = "ex:s1 a ex:Site ; ex:address ex:a1 . ex:a1 ex:city \"Delft\" .";
+    const S_QUALIFIED: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Car ; \
+        sh:property [ sh:path ex:wheel ; sh:qualifiedMinCount 2 ; \
+          sh:qualifiedValueShape [ sh:class ex:Wheel ; sh:property [ sh:path ex:size ; sh:minCount 1 ] ] ] .";
+    const B_QUALIFIED: &str = "ex:c1 a ex:Car ; ex:wheel ex:w1 , ex:w2 . \
+        ex:w1 a ex:Wheel ; ex:size 17 . ex:w2 a ex:Wheel ; ex:size 17 .";
+    const S_CLOSED: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Point ; sh:closed true ; \
+        sh:ignoredProperties ( rdf:type ) ; sh:property [ sh:path ex:x ] , [ sh:path ex:y ] .";
+    const B_CLOSED: &str = "ex:pt a ex:Point ; ex:x 1 ; ex:y 2 .";
+    const S_CHAIN: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Part ; \
+        sh:property [ sh:path [ sh:oneOrMorePath ex:partOf ] ; sh:maxCount 3 ] .";
+    const B_CHAIN: &str = "ex:a a ex:Part ; ex:partOf ex:b . ex:b ex:partOf ex:c .";
+    const S_EQUALS: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:P ; \
+        sh:property [ sh:path ex:a ; sh:equals ex:b ] .";
+    const B_EQUALS: &str = "ex:p a ex:P ; ex:a 1 ; ex:b 1 .";
+    const S_SPARQL: &str = "ex:S a sh:NodeShape ; sh:targetClass ex:Person ; sh:sparql [ \
+        sh:select \"SELECT $this WHERE { $this <http://example.org/age> ?a . FILTER(?a < 0) }\" ] .";
+    const B_SPARQL: &str = "ex:p1 a ex:Person ; ex:age 3 .";
+
+    fn case(
+        name: &'static str,
+        shapes: &'static str,
+        base: &'static str,
+        write: Write,
+        refused: bool,
+        focused: bool,
+    ) -> Case {
+        Case {
+            name,
+            shapes,
+            base,
+            write,
+            refused,
+            focused,
+        }
+    }
+
+    fn post(ttl: &'static str) -> Write {
+        Write::Post(ttl)
+    }
+
+    fn patch(remove: &'static str, add: &'static str) -> Write {
+        Write::Patch { remove, add }
+    }
+
+    /// The focused gate against the whole-graph gate, and both against a full
+    /// validation of the graph after the write, over the shape constructs
+    /// whose results depend on triples about other nodes. Each base conforms,
+    /// as a graph every write of which passed its gates does.
+    #[test]
+    fn the_focused_gate_refuses_exactly_when_the_whole_graph_gate_does() {
+        let cases = [
+            case(
+                "targetClass: a second name on an existing subject",
+                S_PERSON,
+                B_PERSON,
+                post("ex:p1 ex:name \"Eve\" ."),
+                true,
+                true,
+            ),
+            case(
+                "targetClass: a new instance without a name",
+                S_PERSON,
+                B_PERSON,
+                post("ex:p3 a ex:Person ."),
+                true,
+                true,
+            ),
+            case(
+                "targetClass: a new instance with a name",
+                S_PERSON,
+                B_PERSON,
+                post("ex:p3 a ex:Person ; ex:name \"Cy\" ."),
+                false,
+                true,
+            ),
+            case(
+                "patch: deleting an existing subject's only name",
+                S_PERSON,
+                B_PERSON,
+                patch("ex:p2 ex:name \"Bob\" .", ""),
+                true,
+                true,
+            ),
+            case(
+                "patch: replacing a name",
+                S_PERSON,
+                B_PERSON,
+                patch("ex:p2 ex:name \"Bob\" .", "ex:p2 ex:name \"Bo\" ."),
+                false,
+                true,
+            ),
+            case(
+                "patch: deleting a target's type with its name",
+                S_PERSON,
+                B_PERSON,
+                patch("ex:p2 a ex:Person ; ex:name \"Bob\" .", ""),
+                false,
+                true,
+            ),
+            case(
+                "targetClass through rdfs:subClassOf: a new instance of the subclass",
+                S_AGENT,
+                B_AGENT,
+                post("ex:p9 a ex:Person ."),
+                true,
+                true,
+            ),
+            case(
+                "a new rdfs:subClassOf makes existing nodes targets: staged whole",
+                S_AGENT,
+                B_AGENT,
+                post("ex:Robot rdfs:subClassOf ex:Agent ."),
+                true,
+                false,
+            ),
+            case(
+                "targetNode: deleting a value node's type",
+                S_HQ,
+                B_HQ,
+                patch("ex:p1 a ex:Person .", ""),
+                true,
+                true,
+            ),
+            case(
+                "targetNode: a value node without the class",
+                S_HQ,
+                B_HQ,
+                post("ex:hq ex:employs ex:p2 ."),
+                true,
+                true,
+            ),
+            case(
+                "targetNode: a value node typed by the same payload",
+                S_HQ,
+                B_HQ,
+                post("ex:hq ex:employs ex:p2 . ex:p2 a ex:Person ."),
+                false,
+                true,
+            ),
+            case(
+                "targetSubjectsOf: a new subject",
+                S_SUBJECTS,
+                B_SUBJECTS,
+                post("ex:m2 ex:manages ex:t1 ."),
+                true,
+                true,
+            ),
+            case(
+                "targetSubjectsOf: deleting the email",
+                S_SUBJECTS,
+                B_SUBJECTS,
+                patch("ex:m1 ex:email \"m@example.org\" .", ""),
+                true,
+                true,
+            ),
+            case(
+                "targetObjectsOf: a new object",
+                S_OBJECTS,
+                B_OBJECTS,
+                post("ex:m1 ex:manages ex:t2 ."),
+                true,
+                true,
+            ),
+            case(
+                "targetObjectsOf: a new object with its label",
+                S_OBJECTS,
+                B_OBJECTS,
+                post("ex:m1 ex:manages ex:t2 . ex:t2 ex:label \"U\" ."),
+                false,
+                true,
+            ),
+            case(
+                "inverse path: a third member",
+                S_INVERSE,
+                B_INVERSE,
+                post("ex:c ex:memberOf ex:t1 ."),
+                true,
+                true,
+            ),
+            case(
+                "inverse path: deleting every member",
+                S_INVERSE,
+                B_INVERSE,
+                patch("ex:a ex:memberOf ex:t1 . ex:b ex:memberOf ex:t1 .", ""),
+                true,
+                true,
+            ),
+            case(
+                "inverse path: moving one member",
+                S_INVERSE,
+                B_INVERSE,
+                patch("ex:a ex:memberOf ex:t1 .", "ex:a ex:memberOf ex:t2 ."),
+                false,
+                true,
+            ),
+            case(
+                "sequence path: a second value two hops away",
+                S_SEQUENCE,
+                B_SEQUENCE,
+                post("ex:c1 ex:country \"DE\" ."),
+                true,
+                true,
+            ),
+            case(
+                "sequence path: deleting the value",
+                S_SEQUENCE,
+                B_SEQUENCE,
+                patch("ex:c1 ex:country \"NL\" .", ""),
+                true,
+                true,
+            ),
+            case(
+                "sequence path: replacing the value",
+                S_SEQUENCE,
+                B_SEQUENCE,
+                patch("ex:c1 ex:country \"NL\" .", "ex:c1 ex:country \"BE\" ."),
+                false,
+                true,
+            ),
+            case(
+                "sh:class: a value node whose type the payload adds",
+                S_CLASS,
+                B_CLASS,
+                post("ex:b1 ex:author ex:y . ex:y a ex:Writer ."),
+                false,
+                true,
+            ),
+            case(
+                "sh:class: a value node without a type",
+                S_CLASS,
+                B_CLASS,
+                post("ex:b1 ex:author ex:z ."),
+                true,
+                true,
+            ),
+            case(
+                "sh:class: deleting a value node's type",
+                S_CLASS,
+                B_CLASS,
+                patch("ex:x a ex:Person .", ""),
+                true,
+                true,
+            ),
+            case(
+                "sh:node: deleting a property of the referred node",
+                S_NODE,
+                B_NODE,
+                patch("ex:a1 ex:city \"Delft\" .", ""),
+                true,
+                true,
+            ),
+            case(
+                "sh:node: a new target referring to a node that does not conform",
+                S_NODE,
+                B_NODE,
+                post("ex:s2 a ex:Site ; ex:address [ ex:zip \"2611\" ] ."),
+                true,
+                true,
+            ),
+            case(
+                "sh:qualifiedValueShape: a value node loses its class",
+                S_QUALIFIED,
+                B_QUALIFIED,
+                patch("ex:w1 a ex:Wheel .", ""),
+                true,
+                true,
+            ),
+            case(
+                "sh:qualifiedValueShape: a value node loses a nested property",
+                S_QUALIFIED,
+                B_QUALIFIED,
+                patch("ex:w2 ex:size 17 .", ""),
+                true,
+                true,
+            ),
+            case(
+                "sh:qualifiedValueShape: one more conforming value",
+                S_QUALIFIED,
+                B_QUALIFIED,
+                post("ex:c1 ex:wheel ex:w3 . ex:w3 a ex:Wheel ; ex:size 18 ."),
+                false,
+                true,
+            ),
+            case(
+                "sh:closed: a property the shape does not allow",
+                S_CLOSED,
+                B_CLOSED,
+                post("ex:pt ex:z 3 ."),
+                true,
+                true,
+            ),
+            case(
+                "sh:closed: an allowed property",
+                S_CLOSED,
+                B_CLOSED,
+                post("ex:pt ex:x 5 ."),
+                false,
+                true,
+            ),
+            case(
+                "sh:oneOrMorePath: the chain above a target grows",
+                S_CHAIN,
+                B_CHAIN,
+                post("ex:c ex:partOf ex:d . ex:d ex:partOf ex:e ."),
+                true,
+                true,
+            ),
+            case(
+                "sh:equals: a value of the other property",
+                S_EQUALS,
+                B_EQUALS,
+                post("ex:p ex:b 2 ."),
+                true,
+                true,
+            ),
+            case(
+                "a SPARQL constraint: staged whole",
+                S_SPARQL,
+                B_SPARQL,
+                post("ex:p1 ex:age -1 ."),
+                true,
+                false,
+            ),
+            case(
+                "a SPARQL constraint: staged whole, conforming",
+                S_SPARQL,
+                B_SPARQL,
+                post("ex:p1 ex:name \"Ada\" ."),
+                false,
+                false,
+            ),
+        ];
+        for c in &cases {
+            differential(c);
+        }
+    }
+
+    /// The one difference from copying the whole graph, by design: a
+    /// violation the graph already holds, on a node the write cannot affect,
+    /// no longer refuses the write. The full-copy gate refused every merge
+    /// into such a graph (written through SPARQL Update, or before the gate
+    /// or its shapes existed) until all of it was repaired; the focused gate
+    /// refuses a write only for the nodes it can affect, and reports what a
+    /// full validation says about those.
+    #[test]
+    fn a_violation_the_write_cannot_affect_does_not_refuse_it() {
+        let base = "ex:p1 a ex:Person ; ex:name \"Ada\" . ex:bad a ex:Person .";
+        let (store, auth, studio) = gated(S_PERSON, base);
+        let gate =
+            |write: &Write, focus_allowed| gate_on(&store, &auth, &studio, write, focus_allowed).0;
+
+        let unrelated = post("ex:p1 ex:nickname \"A\" .");
+        assert!(
+            gate(&unrelated, false).is_err(),
+            "the whole graph does not conform"
+        );
+        assert!(
+            gate(&unrelated, true).is_ok(),
+            "the write affects ex:p1 only"
+        );
+
+        let bad_too = post("ex:p3 a ex:Person .");
+        let whole = results_of(&gate(&bad_too, false));
+        let focused = results_of(&gate(&bad_too, true));
+        assert_eq!(whole.len(), 2, "{whole:?}");
+        assert_eq!(focused.len(), 1, "{focused:?}");
+        assert!(
+            focused[0].starts_with("http://example.org/p3 "),
+            "{focused:?}"
+        );
+        assert!(whole.contains(&focused[0]));
+
+        let repair = post("ex:bad ex:name \"Bea\" .");
+        assert!(gate(&repair, false).is_ok());
+        assert!(gate(&repair, true).is_ok());
+    }
+
+    /// A small write into a big graph stages its own triples and what the
+    /// nodes it can affect read, not the graph: here one new asset, and the
+    /// deletion of a type that ten children's `sh:class` reads.
+    #[test]
+    fn a_small_write_into_a_big_graph_stages_only_what_it_reads() {
+        let shapes = "ex:S a sh:NodeShape ; sh:targetClass ex:Asset ; \
+            sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:maxCount 1 ] , \
+                        [ sh:path ex:partOf ; sh:maxCount 1 ; sh:class ex:Asset ] .";
+        let mut base = String::new();
+        for i in 0..5_000 {
+            base.push_str(&format!("ex:a{i} a ex:Asset ; ex:name \"A{i}\""));
+            if i > 0 {
+                base.push_str(&format!(" ; ex:partOf ex:a{}", i / 10));
+            }
+            base.push_str(" .\n");
+        }
+        let (store, auth, studio) = gated(shapes, &base);
+        let graph_quads = store.graph_count_cached(Some(DATA_GRAPH)).unwrap();
+        assert_eq!(graph_quads, 14_999);
+
+        let new_asset = post("ex:a5000 a ex:Asset ; ex:name \"New\" ; ex:partOf ex:a500 .");
+        let (whole, whole_staging) = gate_on(&store, &auth, &studio, &new_asset, false);
+        let (focused, staging) = gate_on(&store, &auth, &studio, &new_asset, true);
+        assert!(whole.is_ok() && focused.is_ok());
+        assert_eq!(whole_staging.data_quads, graph_quads + 3);
+        let focus = staging.focus.expect("a focused run");
+        assert_eq!(
+            focus.len(),
+            1,
+            "the new asset; nothing refers to it: {focus:?}"
+        );
+        // Its three triples, and the type of the asset it is part of.
+        assert_eq!(staging.data_quads, 4);
+
+        // Ten assets are part of ex:a1: deleting its type breaks their
+        // `sh:class`, and leaves ex:a1 itself no target.
+        let untyped = patch("ex:a1 a ex:Asset .", "");
+        let (whole, whole_staging) = gate_on(&store, &auth, &studio, &untyped, false);
+        let (focused, staging) = gate_on(&store, &auth, &studio, &untyped, true);
+        assert_eq!(whole_staging.data_quads, graph_quads - 1);
+        let focus = staging.focus.expect("a focused run");
+        assert_eq!(focus.len(), 11, "ex:a1 and the ten parts of it: {focus:?}");
+        assert!(
+            staging.data_quads < 50,
+            "{} quads staged",
+            staging.data_quads
+        );
+        assert_eq!(results_of(&whole).len(), 10);
+        assert_eq!(results_of(&focused), results_of(&whole));
     }
 }

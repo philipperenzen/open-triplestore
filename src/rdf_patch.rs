@@ -1046,28 +1046,10 @@ fn check_gates(
         writer: Some(writer),
     };
     for g in graphs {
-        if !gate::import_gates_apply(ctx, g) {
-            continue;
-        }
-        let name = NamedNode::new(g).map_err(gate::gate_error)?;
-        let mut future: HashSet<Quad> = state
-            .store
-            .quads_for_graph(GraphNameRef::NamedNode(name.as_ref()))
-            .map_err(gate::gate_error)?
-            .into_iter()
-            .collect();
-        for op in ops {
-            let q = op.quad();
-            if q.graph_name.as_ref() != GraphNameRef::NamedNode(name.as_ref()) {
-                continue;
-            }
-            match op {
-                QuadOp::Add(q) => future.insert(q.clone()),
-                QuadOp::Remove(q) => future.remove(q),
-            };
-        }
-        let future: Vec<Quad> = future.into_iter().collect();
-        gate::check_import_gates(ctx, g, &future)?;
+        let rows = ops
+            .iter()
+            .map(|op| (matches!(op, QuadOp::Add(_)), op.quad()));
+        gate::check_delta_gates(ctx, g, rows)?;
     }
     Ok(())
 }
