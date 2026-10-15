@@ -4683,38 +4683,57 @@ enum CountScope {
 }
 
 fn count_star_var(pattern: &GraphPattern) -> Option<(String, CountScope)> {
-    if let GraphPattern::Project { inner, variables } = pattern {
-        if variables.len() == 1 {
-            if let Some(scope) = count_star_scope(inner) {
-                return Some((variables[0].as_str().to_string(), scope));
-            }
-        }
-    }
-    None
+    let GraphPattern::Project { inner, variables } = pattern else {
+        return None;
+    };
+    let [variable] = variables.as_slice() else {
+        return None;
+    };
+    Some((
+        variable.as_str().to_string(),
+        count_star_scope(inner, variable)?,
+    ))
 }
 
-fn count_star_scope(p: &GraphPattern) -> Option<CountScope> {
-    match p {
-        GraphPattern::Extend {
-            inner,
-            expression: Expression::Variable(_),
-            ..
-        } => count_star_scope(inner),
+/// The scope of the `COUNT(*)` full scan whose count `p` binds to `variable`:
+/// the aggregate itself, `Extend(Group)`, or a sub-select of it,
+/// `Extend(Project(Extend(Group)))`. The second is how `Display` prints an
+/// aggregate query, so it is what a query scoped by the dataset endpoint
+/// (parsed, given its `FROM` clauses and printed again) reads as; only the
+/// first was recognised, so a dataset's `COUNT(*)` was always scanned.
+fn count_star_scope(
+    p: &GraphPattern,
+    variable: &opengraph::spargebra::term::Variable,
+) -> Option<CountScope> {
+    let GraphPattern::Extend {
+        inner,
+        variable: bound,
+        expression: Expression::Variable(source),
+    } = p
+    else {
+        return None;
+    };
+    if bound != variable {
+        return None;
+    }
+    match inner.as_ref() {
         GraphPattern::Group {
             inner,
             variables,
             aggregates,
         } => {
-            if !variables.is_empty()
-                || aggregates.len() != 1
-                || !matches!(
-                    &aggregates[0].1,
-                    AggregateExpression::CountSolutions { distinct: false }
-                )
-            {
+            let [(counted, AggregateExpression::CountSolutions { distinct: false })] =
+                aggregates.as_slice()
+            else {
+                return None;
+            };
+            if !variables.is_empty() || counted != source {
                 return None;
             }
             full_scan_scope(inner)
+        }
+        GraphPattern::Project { inner, variables } if variables.as_slice() == [source.clone()] => {
+            count_star_scope(inner, source)
         }
         _ => None,
     }
@@ -4893,6 +4912,52 @@ mod tests {
             cases.len() as u64,
             "every merge was counted without the evaluator"
         );
+    }
+
+    /// A `COUNT(*)` printed back from its syntax tree — the form the dataset
+    /// endpoint hands the store after giving a query its `FROM` clauses — is
+    /// counted without the evaluator too, and a sub-select count whose
+    /// variable the outer query does not project is not mistaken for one.
+    #[test]
+    fn fast_count_reads_a_count_printed_back_from_its_syntax_tree() {
+        let store = TripleStore::in_memory()
+            .unwrap()
+            .with_query_cache(false, 0, 0);
+        store
+            .load_str(
+                "<http://e/a> <http://e/p> 1 . <http://e/b> <http://e/p> 2 .",
+                RdfFormat::Turtle,
+                Some("http://g/data"),
+            )
+            .unwrap();
+        let printed = crate::sparql::parser()
+            .parse_query("SELECT (COUNT(*) AS ?c) FROM <http://g/data> WHERE { ?s ?p ?o }")
+            .unwrap()
+            .to_string();
+        assert!(printed.contains("SELECT"), "{printed}");
+        let fast_counts = || store.telemetry().summary().queries.by_served["fast_count"];
+        let before = fast_counts();
+        let QueryResults::Solutions(mut rows) = store.query(&printed).unwrap() else {
+            panic!("expected solutions");
+        };
+        let row = rows.next().unwrap().unwrap();
+        assert!(
+            matches!(row.get("c"), Some(Term::Literal(l)) if l.value() == "2"),
+            "{printed}: {row:?}"
+        );
+        assert_eq!(fast_counts() - before, 1, "{printed} was scanned");
+        // `?x` is never bound: the answer is one row without it.
+        let QueryResults::Solutions(mut rows) = store
+            .query(
+                "SELECT ?x FROM <http://g/data> \
+                 WHERE { { SELECT (COUNT(*) AS ?y) WHERE { ?s ?p ?o } } }",
+            )
+            .unwrap()
+        else {
+            panic!("expected solutions");
+        };
+        assert_eq!(rows.next().unwrap().unwrap().get("x"), None);
+        assert_eq!(fast_counts() - before, 1);
     }
 
     fn detect_format_from_mime(mime: &str) -> Result<RdfFormat, StoreError> {
