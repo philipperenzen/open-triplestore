@@ -441,7 +441,7 @@
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
   }
   tr.inactive { opacity: 0.5; }
   .actions {

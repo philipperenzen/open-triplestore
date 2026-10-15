@@ -1932,7 +1932,7 @@
     cursor: pointer;
   }
   .sel-zoom:hover {
-    background: var(--bg-accent, #d7e7fa);
+    background: var(--brand-200, #d7e7fa);
   }
   .sel-zoom:focus-visible {
     outline: 2px solid var(--brand-500, #2f88d8);

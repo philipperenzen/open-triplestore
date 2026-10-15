@@ -499,7 +499,7 @@
     padding: 0.6rem 0.75rem;
     border: 1px dashed var(--line-soft);
     border-radius: 10px;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
   }
   .resolves-busy { opacity: 0.75; }
   .resolves-line {
