@@ -1467,6 +1467,9 @@ impl AuthDb {
             "ALTER TABLE assets ADD COLUMN updated_at TEXT",
             // File-manager folders: a normalized relative path ('' = root).
             "ALTER TABLE assets ADD COLUMN folder TEXT NOT NULL DEFAULT ''",
+            // The seeder that created the row (NULL: an upload or import), so a
+            // demo reseed removes only what it made.
+            "ALTER TABLE assets ADD COLUMN seeded_by TEXT",
             // Dataset DCAT/ADMS/VoID metadata
             "ALTER TABLE datasets ADD COLUMN license TEXT",
             "ALTER TABLE datasets ADD COLUMN themes TEXT",
@@ -4995,9 +4998,7 @@ impl AuthDb {
 
     /// The graphs some dataset holds as private
     /// ([`Self::set_dataset_graph_private`]).
-    pub fn list_private_dataset_graph_iris(
-        &self,
-    ) -> anyhow::Result<std::collections::HashSet<String>> {
+    pub fn list_private_dataset_graph_iris(&self) -> anyhow::Result<HashSet<String>> {
         let conn = self.pool.get()?;
         let mut stmt =
             conn.prepare("SELECT DISTINCT graph_iri FROM dataset_graphs WHERE private != 0")?;
@@ -5644,6 +5645,31 @@ impl AuthDb {
         let conn = self.pool.get()?;
         conn.execute("DELETE FROM assets WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Record that `seeder` created asset `id`.
+    pub fn mark_asset_seeded(&self, id: &str, seeder: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE assets SET seeded_by = ?1 WHERE id = ?2",
+            params![seeder, id],
+        )?;
+        Ok(())
+    }
+
+    /// The ids of the assets in `dataset_id` that `seeder` created.
+    pub fn seeded_asset_ids(
+        &self,
+        dataset_id: &str,
+        seeder: &str,
+    ) -> anyhow::Result<HashSet<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM assets WHERE dataset_id = ?1 AND seeded_by = ?2")?;
+        let ids = stmt
+            .query_map(params![dataset_id, seeder], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
     }
 
     // ─── Access Control Helpers ───────────────────────────────────────────────
