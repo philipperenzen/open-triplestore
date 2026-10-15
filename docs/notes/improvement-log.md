@@ -476,9 +476,12 @@ the label table underneath the handler). W3C SHACL ratchet unchanged
   `IMPLEMENTED_RULES`), licence presentation.
 - **Found while censusing shape graphs, queued as its own task:** the
   implicit class target ASK is scoped to the shapes graph
-  (`src/shacl/engine.rs:455`), so a node shape that is also a class declared
-  in a *different* graph gets no focus nodes — 27 of the 30 NEN 2660 node
-  shapes validate nothing under that bundle's graph split.
+  (`src/shacl/engine.rs:622-635`; SHACL §2.1.3.3 looks for the class in the
+  shapes graph, so this is spec-conformant), so a node shape that is also a
+  class declared in a *different* graph gets no focus nodes — 27 of the 30
+  NEN 2660 node shapes validate nothing in the `nen2660-imbor` seed bundle
+  (`examples/seed-bundles/nen2660-imbor`), which loads the NEN 2660-2 SHACL
+  and RDFS files into separate graphs.
 
 ---
 

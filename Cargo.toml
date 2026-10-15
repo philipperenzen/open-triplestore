@@ -47,7 +47,7 @@ rdfs-entailment = []
 owl2-el         = ["rdfs-entailment"]
 ## OWL 2 QL profile (query rewriting)
 owl2-ql         = ["rdfs-entailment"]
-## OWL 2 RL profile (~80 forward-chaining rules)
+## OWL 2 RL profile (all 78 OWL 2 RL/RDF rules, forward-chaining)
 owl2-rl         = ["rdfs-entailment"]
 ## OWL 2 DL profile (external reasoner bridge)
 owl2-dl         = ["owl2-rl"]
