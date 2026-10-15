@@ -427,6 +427,13 @@ harness = false
 name = "parallel_live"
 harness = false
 
+# The delta-versions measurements (docs/performance.md, "Delta versions at
+# scale") drive the statement-provenance and LDES consumers through a test
+# `AppState`, which only `test-utils` builds.
+[[example]]
+name = "scale_delta"
+required-features = ["test-utils"]
+
 [profile.release]
 opt-level = 3
 lto = true

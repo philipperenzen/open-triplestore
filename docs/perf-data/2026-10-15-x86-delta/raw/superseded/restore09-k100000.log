@@ -1,0 +1,14 @@
+  k100000-1792074812-v1: checkpoint (a checkpoint was asked for)
+restore: checkpoint cut 38868 ms
+  apply A 1856 ms; delta cuts 195 / 472 ms; v2 delta=true v3 delta=true
+  build forward_v2: 41556 ms
+  build backward_v3: 42857 ms
+  build forward_v2: 44916 ms
+  build backward_v3: 43583 ms
+  build forward_v2: 45229 ms
+  build backward_v3: 43642 ms
+  tier 1: 13771 ms (plan 735, apply 10286, hash 2636)
+
+thread 'main' (3692) panicked at examples/scale_delta.rs:762:9:
+chain intact
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

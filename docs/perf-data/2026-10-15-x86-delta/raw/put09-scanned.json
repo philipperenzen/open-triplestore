@@ -1,0 +1,86 @@
+{
+  "args": [
+    "put",
+    "/data/run",
+    "100000",
+    "3"
+  ],
+  "command": "put",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_CHANGE_CAPTURE_MAX_SCAN": "20000000",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "first_put_empty_target_ms": 6316.65,
+    "graph_quads": 900000,
+    "max_payload": 250000,
+    "max_scan": 20000000,
+    "off": {
+      "max_ms": 58598.73,
+      "median_ms": 57015.89,
+      "min_ms": 55427.11,
+      "n": 3,
+      "values_ms": [
+        58598.73,
+        55427.11,
+        57015.89
+      ]
+    },
+    "off_peak_rss_mib": [
+      2554.81,
+      1326.0,
+      1342.0
+    ],
+    "on": {
+      "max_ms": 61464.2,
+      "median_ms": 60767.3,
+      "min_ms": 60547.58,
+      "n": 3,
+      "values_ms": [
+        60767.3,
+        61464.2,
+        60547.58
+      ]
+    },
+    "on_peak_rss_mib": [
+      2688.24,
+      1672.97,
+      1337.68
+    ],
+    "on_rows": [
+      [
+        {
+          "added_n": 1000,
+          "extent": "full",
+          "graph": "https://example.org/otl/put",
+          "removed_n": 1000,
+          "seq": 7,
+          "state": "committed"
+        }
+      ],
+      [
+        {
+          "added_n": 1000,
+          "extent": "full",
+          "graph": "https://example.org/otl/put",
+          "removed_n": 1000,
+          "seq": 8,
+          "state": "committed"
+        }
+      ],
+      [
+        {
+          "added_n": 1000,
+          "extent": "full",
+          "graph": "https://example.org/otl/put",
+          "removed_n": 1000,
+          "seq": 9,
+          "state": "committed"
+        }
+      ]
+    ],
+    "ratio_on_off": 1.07
+  }
+}

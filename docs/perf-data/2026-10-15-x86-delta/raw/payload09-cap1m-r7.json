@@ -1,0 +1,132 @@
+{
+  "args": [
+    "payload",
+    "/data/run",
+    "7",
+    "250000",
+    "900000"
+  ],
+  "command": "payload",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_CHANGE_CAPTURE_MAX_PAYLOAD": "1000000",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "changes_db_mib": 89.28,
+    "max_payload": 1000000,
+    "sizes": [
+      {
+        "added_ms": 204.42,
+        "bytes_per_quad_gz": 10.13,
+        "decode_ms": 289.1,
+        "gzip_bytes": 2532533,
+        "gzip_ms": 15.83,
+        "nquads_bytes": 35721883,
+        "on_rows_first_rep": [
+          {
+            "added_n": 249993,
+            "extent": "full",
+            "graph": "https://example.org/otl/payload",
+            "removed_n": 0,
+            "seq": 6,
+            "state": "committed"
+          }
+        ],
+        "put_empty_off": {
+          "max_ms": 2501.06,
+          "median_ms": 2345.25,
+          "min_ms": 2031.17,
+          "n": 7,
+          "values_ms": [
+            2031.17,
+            2501.06,
+            2367.12,
+            2345.25,
+            2360.01,
+            2213.5,
+            2310.27
+          ]
+        },
+        "put_empty_on": {
+          "max_ms": 2747.97,
+          "median_ms": 2549.66,
+          "min_ms": 2448.39,
+          "n": 7,
+          "values_ms": [
+            2669.94,
+            2549.66,
+            2608.71,
+            2747.97,
+            2486.74,
+            2448.39,
+            2528.43
+          ]
+        },
+        "quads": 249993,
+        "ratio_on_off": 1.09,
+        "row_blob_bytes": [
+          2532533,
+          0
+        ],
+        "serialise_ms": 56.8
+      },
+      {
+        "added_ms": 566.2,
+        "bytes_per_quad_gz": 10.13,
+        "decode_ms": 1016.64,
+        "gzip_bytes": 9118535,
+        "gzip_ms": 53.39,
+        "nquads_bytes": 128602815,
+        "on_rows_first_rep": [
+          {
+            "added_n": 900000,
+            "extent": "full",
+            "graph": "https://example.org/otl/payload",
+            "removed_n": 0,
+            "seq": 13,
+            "state": "committed"
+          }
+        ],
+        "put_empty_off": {
+          "max_ms": 8299.0,
+          "median_ms": 7887.65,
+          "min_ms": 7664.61,
+          "n": 7,
+          "values_ms": [
+            7742.97,
+            8262.56,
+            7896.02,
+            7887.65,
+            7873.35,
+            8299.0,
+            7664.61
+          ]
+        },
+        "put_empty_on": {
+          "max_ms": 8803.19,
+          "median_ms": 8453.85,
+          "min_ms": 8362.42,
+          "n": 7,
+          "values_ms": [
+            8666.0,
+            8396.51,
+            8682.08,
+            8453.85,
+            8803.19,
+            8362.42,
+            8420.52
+          ]
+        },
+        "quads": 900000,
+        "ratio_on_off": 1.07,
+        "row_blob_bytes": [
+          9118535,
+          0
+        ],
+        "serialise_ms": 207.62
+      }
+    ]
+  }
+}
