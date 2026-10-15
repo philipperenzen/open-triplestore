@@ -1,5 +1,5 @@
 /**
- * Pure helpers behind the admin Settings page (`/admin/settings`): the
+ * Pure helpers behind the Workspace settings page (`/admin/settings`): the
  * runtime settings an administrator can change without a restart
  * (`GET/PUT /api/admin/settings`) and the read-only effective configuration
  * (`GET /api/admin/config`). No DOM, no fetch — tested as functions.
@@ -78,4 +78,30 @@ export function filterConfig(settings: ConfigSetting[], query: string, changedOn
     if (!q) return true;
     return [s.name, s.group, s.value ?? '', s.doc].some((x) => x.toLowerCase().includes(q));
   });
+}
+
+/** The page's two tabs: the settings that apply at once, and the configuration
+ *  the server started with. */
+export const SETTINGS_TABS = ['live', 'config'] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
+
+/** The tab a URL hash names (`#config`), or the live settings. */
+export function tabFromHash(hash: string): SettingsTab {
+  const h = hash.replace(/^#/, '');
+  return (SETTINGS_TABS as readonly string[]).includes(h) ? (h as SettingsTab) : 'live';
+}
+
+/** Headline counts for the page summary: the settings the server read, how
+ *  many are not at their built-in default, how many runtime settings carry an
+ *  admin override, and how many are secrets. */
+export function configSummary(
+  runtime: Pick<RuntimeSetting, 'overridden'>[],
+  config: Pick<ConfigSetting, 'source' | 'secret'>[],
+): { total: number; changed: number; overrides: number; secrets: number } {
+  return {
+    total: config.length,
+    changed: config.filter((s) => s.source !== 'default').length,
+    overrides: runtime.filter((s) => s.overridden).length,
+    secrets: config.filter((s) => s.secret).length,
+  };
 }

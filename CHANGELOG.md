@@ -13,6 +13,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Admin → Settings is now Workspace settings**, so it no longer shares its
+  name with a user's own Settings (profile, password, API tokens), which it now
+  links to. The page has two tabs, *Live settings* (what applies without a
+  restart) and *Configuration* (the effective configuration), and the tab is
+  kept in the URL (`/admin/settings#config`). A summary shows the profile, how
+  many settings the server read, how many are not at their default (a click
+  lists just those) and how many carry an admin override. The configuration is
+  grouped by area under readable names, shows each setting's description,
+  marks secrets and the settings that can be changed live, and highlights
+  values not at their default.
+
 ### Deprecated
 
 ### Fixed
@@ -34,6 +46,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graph that conformed before the write is judged exactly as before; a
   violation already in the graph, on a node the write cannot affect, no
   longer refuses it. `PUT` is unchanged.
+- **Workspace settings rendered in light colours in dark mode**: its cards were
+  hard-coded white and its source badges and error box light-only.
+- **Panels meant to be light grey were dark teal, in both themes**: the API
+  token form, the two-factor secret and recovery codes on Settings, the table
+  headers on Users and AI Requests, the node-status cards, the prefix
+  "resolves" box, a dataset's service slugs, and the map's zoom button hover.
+  They used `--bg-accent`, a dark accent colour, expecting its light fallback.
 
 ### Security
 
