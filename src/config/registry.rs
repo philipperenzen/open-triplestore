@@ -600,6 +600,9 @@ settings! {
     LDES_MAX_IN_FLIGHT_PER_STREAM: usize = Spec::new("OTS_LDES_MAX_IN_FLIGHT_PER_STREAM", at_least(1), "ldes")
         .default("16")
         .doc("LDES page builds running at once for one stream.");
+    LDES_SYNC_CONCURRENCY: usize = Spec::new("OTS_LDES_SYNC_CONCURRENCY", Kind::Int { min: 1, max: 64 }, "ldes")
+        .default("2")
+        .doc("Scheduled LDES sync runs going at once; a due job waits for a free one.");
 
     // ── sources ──
     SOURCES_DIR: Option<PathBuf> = Spec::new("OTS_SOURCES_DIR", Kind::Path, "sources")

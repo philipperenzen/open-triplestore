@@ -132,6 +132,8 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{id}/patch` | **token** | Apply an RDF Patch; dataset writers only. |
 | `GET` | `/api/admin/users` | **admin** | The account directory. |
 | `GET` | `/api/admin/audit` | **admin** | The audit trail. |
+| `GET` | `/api/admin/ldes/syncs` | **admin** | Every LDES sync job with its last outcome and its schedule. |
+| `PUT` | `/api/admin/ldes/syncs/schedule` | **admin** | When a sync job runs on its own (see below). |
 | `GET` | `/api/admin/config` | **admin** | Every setting with its effective value, default and source; secrets redacted. |
 | `GET` | `/api/admin/settings` | **admin** | The runtime settings an admin can change without a restart. |
 | `PUT` | `/api/admin/settings/{name}` | **admin** | Override a runtime setting, or reset it with `{"value": null}`; audit-logged. |
@@ -237,6 +239,27 @@ with back-off, and any other error status is a `502`. The report gains
 `members_skipped_older` no longer counts members on immutable pages the
 client did not fetch again (those are in `nodes_skipped_immutable`). See
 [ldes.md](ldes.md#syncing-a-stream-into-a-dataset).
+
+## LDES sync schedules — `/api/admin/ldes/syncs/schedule`
+
+`PUT /api/admin/ldes/syncs/schedule?dataset_id=…&url=…` (admin) sets when a
+sync job runs on its own, with `{"schedule": "off" | "auto" | "interval",
+"interval_secs": n}`: `auto` waits the stream's `ldes:pollingInterval`
+between runs, `interval` waits `interval_secs` (60 to 31 622 400), and no job
+runs more often than every 60 seconds. It answers the job as the list shows
+it; `400` for any other schedule or an interval out of range, `404` when
+there is no such job, `409` for a job recorded before jobs kept their target
+graph and owner (run it once first). Setting a schedule, to anything, resumes
+a paused job and forgets its failures.
+
+`GET /api/admin/ldes/syncs` gains `schedule`, `interval_secs`, `next_run_at`,
+`consecutive_failures` and `paused_at`; the existing fields are unchanged,
+and every existing job's schedule is `off`. A scheduled run is recorded like
+a manual one (`last_run_at`, `last_status`, `last_error`, `last_report`); a
+job whose owner may no longer write its dataset is paused, with the reason in
+`last_error`. `POST /api/ldes/sync` answers as before; a run of a job that
+the scheduler is running waits for that run to end first. See
+[ldes.md](ldes.md#scheduled-sync).
 
 ## SHACL Compact Syntax — `?dialect`, `?lenient`, `?base`, `?lossy`
 

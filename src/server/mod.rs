@@ -1081,6 +1081,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .delete(crate::ldes::client::admin_forget_sync),
         )
         .route(
+            "/api/admin/ldes/syncs/schedule",
+            put(crate::ldes::schedule::admin_set_schedule),
+        )
+        .route(
             "/api/admin/llm/requests",
             get(llm_guard::admin_list_llm_requests),
         )
@@ -2876,6 +2880,13 @@ pub async fn run(
             state.store.clone(),
             state.auth_db.clone(),
             state.base_url.to_string(),
+        );
+        // LDES sync jobs with a schedule (docs/ldes.md): due runs start on
+        // the blocking pool, on the node that writes only.
+        crate::ldes::schedule::spawn(
+            state.clone(),
+            crate::ldes::schedule::TICK,
+            Arc::new(chrono::Utc::now),
         );
         // Change-log consumers, every few seconds (no-ops while change
         // capture is off): write-triggered pipelines and statement provenance.

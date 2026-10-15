@@ -77,6 +77,22 @@ impl AuthenticatedUser {
         }
         self
     }
+
+    /// The principal work done on `user`'s behalf without a request acts as
+    /// (a scheduled LDES sync): a session's authority, as the role policy
+    /// clamps it, that cannot mint tokens. The caller checks that the
+    /// account still exists and is active.
+    pub(crate) fn acting_for(db: &AuthDb, user: &super::models::User) -> Self {
+        AuthenticatedUser {
+            user_id: user.id.clone(),
+            role: user.role,
+            can_publish: user.can_publish,
+            write_access: true,
+            can_mint_api_tokens: false,
+            scopes: Vec::new(),
+        }
+        .clamped_to_role_policy(db)
+    }
 }
 
 /// Extract a bearer token from the request:

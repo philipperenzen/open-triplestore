@@ -3666,10 +3666,28 @@
       "updatedDeleted": "Bijgewerkt / verwijderd",
       "pollingInterval": "Pollinginterval (s)",
       "ranSummary": "Gesynchroniseerd: {updated} bijgewerkt, {deleted} verwijderd, {nodes} pagina(’s) gelezen.",
+      "schedule": "Planning",
+      "scheduleOff": "Uit",
+      "scheduleAuto": "Automatisch: het pollinginterval van de stream",
+      "scheduleInterval": "Een vast interval",
+      "intervalSecs": "Elke (seconden)",
+      "scheduleHint": "Automatisch wacht het ldes:pollingInterval dat de stream opgeeft; geen taak draait vaker dan eens per minuut. Een mislukte run verdubbelt de wachttijd tot er een slaagt. Runs handelen als de eigenaar van de taak; opslaan hervat een gepauzeerde taak.",
+      "saveSchedule": "Planning opslaan",
+      "scheduleSaved": "Planning opgeslagen",
+      "autoEvery": "Automatisch, elke {interval}",
+      "every": "Elke {interval}",
+      "nextRun": "Volgende: {when}",
+      "nextRunLabel": "Volgende run",
+      "paused": "Gepauzeerd",
+      "failures": "Mislukt op rij",
+      "unitSeconds": "{n} s",
+      "unitMinutes": "{n} min",
+      "unitHours": "{n} u",
       "errors": {
         "url": "Vul de http(s)-URL van de stream in.",
         "dataset": "Kies de dataset om naar te spiegelen.",
-        "graph": "Vul de IRI van de graaf in om naar te spiegelen."
+        "graph": "Vul de IRI van de graaf in om naar te spiegelen.",
+        "interval": "Vul een geheel aantal seconden in, minstens 60."
       }
     },
     "datasetReasoning": {
