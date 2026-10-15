@@ -382,7 +382,9 @@ fn keys(results: &[ValidationResult]) -> Vec<(String, Option<String>, String)> {
 ///    every target is revalidated in full: workload (ii), which no change log
 ///    narrows;
 /// 4. the write gate for a 1 000-quad POST into the instance graph, which
-///    copies the whole graph into a sandbox before it validates.
+///    stages the POST and what its nodes read rather than the whole graph
+///    (#534), and must report what a full validation of the merged graph
+///    says about the POST's assets.
 #[tokio::test]
 async fn write_triggered_shape_update_and_gate_runs() {
     let _serial = serial();
@@ -543,9 +545,13 @@ async fn write_triggered_shape_update_and_gate_runs() {
     );
 
     // 4. The write gate: a 1 000-quad POST into the instances, validated
-    //    against the graph it merges into. The graph does not conform (the
-    //    shape update above), so the gate refuses — after the full sandbox
-    //    cost, which is what is measured.
+    //    against the graph it merges into. The gate stages the POST and what
+    //    its assets read (the type of each asset they are part of), not the
+    //    graph, and validates the new assets (#534). It refuses: the new
+    //    assets whose length the shape update made too short. Its report is
+    //    what a full validation of the merged graph says about the POST's
+    //    assets; the violations the graph already holds elsewhere are not
+    //    this write's.
     let gate = pipeline(shapes.id.clone(), false, true);
     studio.insert_pipeline(&gate).unwrap();
     let post = assets_ttl(assets, 111);
@@ -565,10 +571,30 @@ async fn write_triggered_shape_update_and_gate_runs() {
         None,
     );
     let gate_s = secs(t);
-    assert!(verdict.is_err(), "the merged graph does not conform");
     println!(
         "{}",
         json!({ "phase": "gate_sandbox", "post_quads": 111 * 9, "seconds": gate_s })
+    );
+    let refused = verdict.expect_err("some of the POST's assets are too short");
+    let short_posted = (assets..assets + 111).filter(|i| i % 500 < 10).count();
+    assert!(short_posted > 0, "the fixture posts a short asset");
+    store
+        .load_str(&post, RdfFormat::Turtle, Some(DATA))
+        .unwrap();
+    let merged = open_triplestore::shacl::validate(store, SHAPES, &[DATA.to_string()]).unwrap();
+    let posted: std::collections::HashSet<String> = (assets..assets + 111)
+        .map(|i| format!("{EX}asset{i}"))
+        .collect();
+    let about_posted: Vec<ValidationResult> = merged
+        .results
+        .into_iter()
+        .filter(|r| posted.contains(&r.focus_node))
+        .collect();
+    assert_eq!(about_posted.len(), short_posted);
+    assert_eq!(
+        keys(&refused.results),
+        keys(&about_posted),
+        "the gate reports what a full validation of the merged graph says about the POST"
     );
     println!(
         "{}",
