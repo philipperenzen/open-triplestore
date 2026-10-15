@@ -1731,13 +1731,12 @@ impl AuthDb {
 
     pub fn get_user_by_id(&self, id: &str) -> anyhow::Result<Option<User>> {
         let conn = self.pool.get()?;
-        conn.query_row(
-            &format!("SELECT {} FROM users WHERE id = ?1", USER_COLS),
-            params![id],
-            read_user,
-        )
-        .optional()
-        .map_err(Into::into)
+        // Cached on the connection: every authenticated request asks this,
+        // a dataset service query three times.
+        let mut stmt =
+            conn.prepare_cached(&format!("SELECT {} FROM users WHERE id = ?1", USER_COLS))?;
+        let user = stmt.query_row(params![id], read_user).optional()?;
+        Ok(user)
     }
 
     pub fn get_user_by_username(&self, username: &str) -> anyhow::Result<Option<User>> {
@@ -3927,13 +3926,12 @@ impl AuthDb {
 
     pub fn get_dataset(&self, id: &str) -> anyhow::Result<Option<Dataset>> {
         let conn = self.pool.get()?;
-        conn.query_row(
+        // Cached on the connection: every dataset service query asks this.
+        let mut stmt = conn.prepare_cached(
             "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key, temporal_start, temporal_end, accrual_periodicity FROM datasets WHERE id = ?1",
-            params![id],
-            read_dataset_row,
-        )
-        .optional()
-        .map_err(Into::into)
+        )?;
+        let dataset = stmt.query_row(params![id], read_dataset_row).optional()?;
+        Ok(dataset)
     }
 
     pub fn list_datasets(&self) -> anyhow::Result<Vec<Dataset>> {
@@ -4868,7 +4866,7 @@ impl AuthDb {
 
     pub fn list_dataset_graphs(&self, dataset_id: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT graph_iri FROM dataset_graphs WHERE dataset_id=?1 ORDER BY graph_iri",
         )?;
         let graphs = stmt
@@ -4883,7 +4881,7 @@ impl AuthDb {
         dataset_id: &str,
     ) -> anyhow::Result<Vec<DatasetGraphEntry>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT graph_iri, graph_role, private FROM dataset_graphs WHERE dataset_id=?1 ORDER BY graph_iri",
         )?;
         let entries = stmt
@@ -5277,10 +5275,12 @@ impl AuthDb {
         slug: &str,
     ) -> anyhow::Result<Option<SparqlService>> {
         let conn = self.pool.get()?;
-        conn.query_row(
+        // Cached on the connection: every dataset service query asks this.
+        let mut stmt = conn.prepare_cached(
             "SELECT id, dataset_id, name, slug, description, is_active, created_at FROM sparql_services WHERE dataset_id=?1 AND slug=?2",
-            params![dataset_id, slug],
-            |row| {
+        )?;
+        let service = stmt
+            .query_row(params![dataset_id, slug], |row| {
                 Ok(SparqlService {
                     id: row.get(0)?,
                     dataset_id: row.get(1)?,
@@ -5295,10 +5295,9 @@ impl AuthDb {
                     is_active: row.get::<_, i32>(5)? != 0,
                     created_at: row.get(6)?,
                 })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+            })
+            .optional()?;
+        Ok(service)
     }
 
     pub fn list_dataset_services(&self, dataset_id: &str) -> anyhow::Result<Vec<SparqlService>> {
@@ -5371,7 +5370,7 @@ impl AuthDb {
 
     pub fn list_service_graphs(&self, service_id: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT graph_iri FROM service_graphs WHERE service_id=?1 ORDER BY graph_iri",
         )?;
         let graphs = stmt
@@ -6111,9 +6110,12 @@ impl AuthDb {
     /// unauthenticated request and simply allowed it — so a rule aimed at
     /// anonymous access did nothing, on exactly the `optional_auth` routes where
     /// anonymous access is what an operator wants to restrict.
+    ///
+    /// The endpoint ACL guard asks this (or the per-user variant below) on
+    /// every request, so their statements are cached on the connection.
     pub fn get_endpoint_acl_rules_for_public(&self) -> anyhow::Result<Vec<EndpointAclRule>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
              FROM endpoint_acl WHERE principal_type='role' AND principal_id='public'
              ORDER BY priority DESC",
@@ -6142,14 +6144,15 @@ impl AuthDb {
         let conn = self.pool.get()?;
         // Collect org and group ids for this user
         let org_ids: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT org_id FROM org_memberships WHERE user_id=?1")?;
+            let mut stmt =
+                conn.prepare_cached("SELECT org_id FROM org_memberships WHERE user_id=?1")?;
             let rows: rusqlite::Result<Vec<String>> =
                 stmt.query_map(params![user_id], |r| r.get(0))?.collect();
             rows?
         };
         let group_ids: Vec<String> = {
             let mut stmt =
-                conn.prepare("SELECT group_id FROM group_memberships WHERE user_id=?1")?;
+                conn.prepare_cached("SELECT group_id FROM group_memberships WHERE user_id=?1")?;
             let rows: rusqlite::Result<Vec<String>> =
                 stmt.query_map(params![user_id], |r| r.get(0))?.collect();
             rows?
@@ -6158,7 +6161,7 @@ impl AuthDb {
         let mut all_rules = Vec::new();
         // Rules by user id
         {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
                  FROM endpoint_acl WHERE principal_type='user' AND principal_id=?1
                  ORDER BY priority DESC",
@@ -6180,7 +6183,7 @@ impl AuthDb {
         }
         // Rules by role
         {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
                  FROM endpoint_acl WHERE principal_type='role' AND principal_id=?1
                  ORDER BY priority DESC",
@@ -6202,7 +6205,7 @@ impl AuthDb {
         }
         // Rules by org membership
         for org_id in &org_ids {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
                  FROM endpoint_acl WHERE principal_type='organisation' AND principal_id=?1
                  ORDER BY priority DESC",
@@ -6224,7 +6227,7 @@ impl AuthDb {
         }
         // Rules by group membership
         for group_id in &group_ids {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
                  FROM endpoint_acl WHERE principal_type='group' AND principal_id=?1
                  ORDER BY priority DESC",
