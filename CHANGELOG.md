@@ -15,6 +15,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **The reasoner sidecar decides inputs on which HermiT's disjunction learning
+  gets stuck** (#506). When HermiT has not decided consistency after 5 s (at
+  most a quarter of the time limit), the sidecar tries once more without
+  disjunction learning, then with HermiT's defaults for the rest of the time
+  limit. Disjunction learning only orders HermiT's search, so the answers are
+  the same. The W3C OWL 2 test cases WebOnt-description-logic-208 and -209,
+  which HermiT did not decide in 15 minutes, are now decided in about 6 s per
+  check and are no longer known failures. A request whose consistency test
+  answers within the first 5 s runs as before.
+
 ### Security
 
 ## [0.8.0] — 2026-10-14
