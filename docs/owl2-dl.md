@@ -177,6 +177,8 @@ Configure the server with:
 
 The client waits a quarter longer than the timeout (at most 5 s more), so the sidecar's own answer can arrive first.
 
+**A client must wait as long as the `timeout_ms` it sends.** The bundled sidecar cannot tell that a client has stopped waiting: the JDK's HTTP server gives a running request no sign that its connection was closed. A request whose client went away therefore keeps its reasoning slot until its `timeout_ms` runs out, and while every slot is held, further requests wait up to `OTS_REASONER_QUEUE_WAIT_MS` and then get a 503. The server waits longer than the time limit it sends, but a call it is still waiting for keeps its slot when the server's own client has gone away, and calls in progress keep theirs when the server restarts. To bound how long any client can hold a slot, set the sidecar's `OTS_REASONER_MAX_TIMEOUT_MS` to the server's `OTS_REASONER_TIMEOUT_SECS` (in milliseconds).
+
 **`POST /v1/reason`** — body `{"data": "<N-Triples>", "timeout_ms": n}`; answer:
 
 ```json
