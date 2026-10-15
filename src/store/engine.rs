@@ -463,6 +463,10 @@ type VoidScopedCache = std::collections::HashMap<Vec<String>, (u64, VoidStats)>;
 /// Graph sets whose statistics are kept at once; one more clears them all.
 const VOID_SCOPED_CACHE_CAP: usize = 64;
 
+/// The most triples [`TripleStore::merged_count`] reads outside the largest
+/// graph (one existence probe each) before it leaves the count to the evaluator.
+const MERGED_COUNT_MAX_READS: usize = 100_000;
+
 /// VoID class and property partitions of a set of graphs (see
 /// [`TripleStore::void_partitions_over`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1704,6 +1708,11 @@ impl TripleStore {
             }
         };
         let count = match scope {
+            // `{ ?s ?p ?o }` over several `FROM` graphs — their RDF merge, a
+            // triple two of them hold counted once.
+            CountScope::Default if dataset.as_ref().is_some_and(|ds| ds.default.len() > 1) => {
+                self.merged_count(&dataset.as_ref()?.default)?
+            }
             // `{ ?s ?p ?o }` — the query's default graph.
             CountScope::Default => {
                 let graph: Option<String> = match dataset {
@@ -1712,7 +1721,7 @@ impl TripleStore {
                         [] if ds.named.is_some() => return None,
                         [] => None,
                         [g] => Some(g.as_str().to_string()),
-                        _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+                        _ => return None, // several: the arm above
                     },
                 };
                 self.graph_count_cached(graph.as_deref())
@@ -1745,6 +1754,63 @@ impl TripleStore {
         let sol = QuerySolution::from((vars.clone(), vec![Some(Term::Literal(lit))]));
         let iter = QuerySolutionIter::new(vars, std::iter::once(Ok(sol)));
         Some(QueryResults::Solutions(iter))
+    }
+
+    /// The number of triples in the RDF merge of `graphs` — `COUNT(*)` over a
+    /// default graph of several `FROM` graphs, such as a dataset service's data
+    /// graph and its shapes graph. The largest graph's count comes from the
+    /// count index; every triple of the others is read and counted unless a
+    /// graph before it in that order holds it too. `None` (the evaluator
+    /// answers) when the other graphs hold more than [`MERGED_COUNT_MAX_READS`]
+    /// triples together, or on a read error. The evaluator scanned and merged
+    /// every graph: 2.8 s for a 3.5M-triple data graph and its shapes graph.
+    fn merged_count(&self, graphs: &[NamedNode]) -> Option<usize> {
+        let mut sized: Vec<(&NamedNode, usize)> = Vec::with_capacity(graphs.len());
+        for graph in graphs {
+            // `FROM <g> FROM <g>` merges a graph with itself.
+            if sized.iter().any(|(seen, _)| *seen == graph) {
+                continue;
+            }
+            let count = self
+                .graph_count_cached(Some(graph.as_str()))
+                .or_else(|| self.count_graph(Some(graph.as_str())).ok())?;
+            sized.push((graph, count));
+        }
+        sized.sort_by(|a, b| b.1.cmp(&a.1));
+        let ((_, largest), others) = sized.split_first()?;
+        if others.iter().map(|(_, count)| count).sum::<usize>() > MERGED_COUNT_MAX_READS {
+            return None;
+        }
+        let mut total = *largest;
+        for (i, (graph, _)) in others.iter().enumerate() {
+            // `others[i]` is `sized[i + 1]`: the graphs before it are `sized[..=i]`.
+            let before = &sized[..=i];
+            for quad in self.store.quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph.as_ref())),
+            ) {
+                let quad = quad.ok()?;
+                let mut held = false;
+                for (earlier, _) in before {
+                    let probe = QuadRef::new(
+                        quad.subject.as_ref(),
+                        quad.predicate.as_ref(),
+                        quad.object.as_ref(),
+                        GraphNameRef::NamedNode(earlier.as_ref()),
+                    );
+                    if self.store.contains(probe).ok()? {
+                        held = true;
+                        break;
+                    }
+                }
+                if !held {
+                    total += 1;
+                }
+            }
+        }
+        Some(total)
     }
 
     /// The query text with the GeoSPARQL Query Rewrite applied, or `None`
@@ -4744,6 +4810,80 @@ mod tests {
             "SELECT (COUNT(*) AS ?c) WHERE { ?s <http://e/p> ?o . ?s <http://e/p> ?o2 }"
         )
         .contains("\"3\""));
+    }
+
+    /// `COUNT(*)` over several `FROM` graphs counts their RDF merge — a triple
+    /// two of them hold counts once — as the evaluator does, and is answered
+    /// without it: a dataset service's default graph merges its data graph
+    /// with its shapes graph, and scanning the merge took 2.8 s at 3.5M
+    /// triples (issue #468).
+    #[test]
+    fn fast_count_of_several_from_graphs_is_their_merge() {
+        let dir = TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path())
+            .unwrap()
+            .with_query_cache(false, 0, 0)
+            .with_parallel_query(false, 1, 0);
+        store
+            .update(
+                "INSERT DATA {
+                   GRAPH <http://g/data> { <http://e/a> <http://e/p> 1 . <http://e/b> <http://e/p> 2 .
+                                           <http://e/c> <http://e/p> 3 . <http://e/d> <http://e/p> 4 }
+                   GRAPH <http://g/shapes> { <http://e/a> <http://e/p> 1 . <http://e/s> <http://e/q> 5 }
+                   GRAPH <http://g/vocab> { <http://e/s> <http://e/q> 5 . <http://e/t> <http://e/q> 6 }
+                 }",
+            )
+            .unwrap();
+        let count = |q: &str| -> String {
+            match store.query(q).unwrap() {
+                QueryResults::Solutions(s) => {
+                    let sol = s.into_iter().next().unwrap().unwrap();
+                    match sol.get("c") {
+                        Some(Term::Literal(l)) => l.value().to_string(),
+                        other => panic!("expected a count, got {other:?}"),
+                    }
+                }
+                _ => panic!("expected solutions"),
+            }
+        };
+        let fast_counts = || store.telemetry().summary().queries.by_served["fast_count"];
+        let before = fast_counts();
+        let cases = [
+            ("FROM <http://g/data> FROM <http://g/shapes>", "5"),
+            (
+                "FROM <http://g/shapes> FROM <http://g/data> FROM <http://g/vocab>",
+                "6",
+            ),
+            ("FROM <http://g/data> FROM <http://g/data>", "4"),
+            (
+                "FROM <http://g/shapes> FROM <http://g/vocab> FROM NAMED <http://g/data>",
+                "3",
+            ),
+            ("FROM <http://g/data> FROM <http://g/missing>", "4"),
+        ];
+        for (from, expected) in cases {
+            assert_eq!(
+                count(&format!(
+                    "SELECT (COUNT(*) AS ?c) {from} WHERE {{ ?s ?p ?o }}"
+                )),
+                expected,
+                "{from}"
+            );
+            // The same count through the evaluator (a FILTER is not the
+            // bare-scan shape).
+            assert_eq!(
+                count(&format!(
+                    "SELECT (COUNT(*) AS ?c) {from} WHERE {{ ?s ?p ?o FILTER(true) }}"
+                )),
+                expected,
+                "{from}: the evaluator's count"
+            );
+        }
+        assert_eq!(
+            fast_counts() - before,
+            cases.len() as u64,
+            "every merge was counted without the evaluator"
+        );
     }
 
     fn detect_format_from_mime(mime: &str) -> Result<RdfFormat, StoreError> {
