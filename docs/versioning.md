@@ -107,7 +107,7 @@ back to the version, in one of two ways — `tier` in the response says which:
 
 - **Tier 1** — when the version is anchored in the change log's current
   epoch, the chain from it to now is intact, and its inverse fits
-  `OTS_APPLY_DELTA_TX_MAX_QUADS` (50 000) quads: the inverse of everything
+  `OTS_APPLY_DELTA_TX_MAX_QUADS` (200 000) quads: the inverse of everything
   since the version is applied in **one transaction across all its graphs**,
   then each graph is checked against the version's content hash. Nothing is
   copied, and no reader ever sees the version half-restored.
@@ -522,7 +522,13 @@ less; the scan cost does not shrink.
   `reconcile`), so a consumer sees that its chain broke.
 - **Caps.** `OTS_CHANGE_CAPTURE_MAX_SCAN` (250 000) bounds the before-image
   scan; `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` (250 000) bounds the quads a
-  `full` row may carry — above it the row is `counts`.
+  `full` row may carry — above it the row is `counts`. Measured at 0.9M and
+  9M quads in [performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15):
+  a before-image costs about 5 µs and 0.8 KiB per quad of the target graph,
+  a payload about 370 bytes of memory per quad and little time. Keep
+  `OTS_APPLY_DELTA_TX_MAX_QUADS` (200 000) at or below the payload cap: a
+  tier-1 restore larger than it is recorded as `counts` and closes the
+  chains it crosses.
 - **Off by default.** A node records only when asked
   (`OTS_CHANGE_CAPTURE_ENABLED=on`); a replication leader or cluster member records
   regardless, because its followers read this log and the role means nothing
