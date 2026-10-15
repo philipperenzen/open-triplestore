@@ -19,6 +19,12 @@
 //! which report a refused write gets: a write lands only when every gate
 //! passes. Each gate is evaluated once per write; the incoming data is staged
 //! once and the shape graphs are copied once.
+//!
+//! A datasource run stages its candidate graph in the store before the graph
+//! joins its dataset, so [`discover_gates_joining`] finds the gates of the
+//! dataset it is about to join, and [`evaluate_every_gate`] runs them all over
+//! the candidate where it lies, in the same order, reporting every gate's
+//! verdict rather than stopping at the first refusal.
 
 use std::collections::BTreeSet;
 
@@ -334,7 +340,7 @@ pub fn summarize_report(report: &ValidationReport, max_results: usize) -> String
 /// Everything that gates a write to one graph, in evaluation order:
 /// covering `gate_writes` pipelines, validation-layer binding shape graphs,
 /// and the owning dataset's `shacl_on_write` shapes graph.
-struct GateSet {
+pub struct GateSet {
     pipelines: Vec<ValidationPipeline>,
     binding_graphs: BTreeSet<String>,
     dataset_gate: Option<DatasetGate>,
@@ -352,9 +358,39 @@ struct DatasetGate {
 pub type DatasetGateHook<'a> = &'a dyn Fn(&str, &str, &ValidationReport);
 
 impl GateSet {
-    fn is_empty(&self) -> bool {
+    /// No gate applies.
+    pub fn is_empty(&self) -> bool {
         self.pipelines.is_empty() && self.binding_graphs.is_empty() && self.dataset_gate.is_none()
     }
+
+    /// The dataset's own `shacl_on_write` shapes graph, when that gate
+    /// applies.
+    pub fn dataset_shapes_graph(&self) -> Option<&str> {
+        self.dataset_gate.as_ref().map(|g| g.shapes_graph.as_str())
+    }
+}
+
+/// Which gate a [`GateVerdict`] comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateSource {
+    /// A `gate_writes` pipeline, by id.
+    Pipeline(String),
+    /// The validation-layer bindings on the graph and its dataset, together.
+    Bindings,
+    /// The dataset's own `shacl_on_write` shapes, by dataset id.
+    Dataset(String),
+}
+
+/// What one gate found, and whether that refuses the write by the gate's own
+/// rule: a pipeline at its severity threshold, the bindings at `Violation`,
+/// the dataset's `shacl_on_write` shapes on any result. A gate that passes
+/// may still report results below its threshold.
+pub struct GateVerdict {
+    pub gate: GateSource,
+    pub report: ValidationReport,
+    pub refuses: bool,
+    /// The shape graphs the gate validated against.
+    pub shape_graphs: Vec<String>,
 }
 
 /// Every gate that applies to a write to `graph_iri`.
@@ -377,18 +413,62 @@ fn discover_gates(
     let owning_dataset = auth_db
         .find_dataset_by_graph_iri(graph_iri)
         .map_err(|e| gate_error(format!("looking up the dataset holding <{graph_iri}>: {e}")))?;
+    discover_gates_in(
+        main_store,
+        auth_db,
+        studio,
+        base_url,
+        graph_iri,
+        owning_dataset.as_ref(),
+    )
+}
 
+/// Every gate that will apply to `graph_iri` once it joins `dataset`, found
+/// by the rules [`discover_gates`] applies to a graph the dataset holds: the
+/// pipelines covering it whose creator may still write what they cover, the
+/// bindings on the graph and on the dataset, and the dataset's
+/// `shacl_on_write` shapes.
+///
+/// For a graph staged outside the dataset before it joins — a datasource
+/// run's candidate, attached only when it is promoted — which
+/// `find_dataset_by_graph_iri` cannot place yet. `Err` when a lookup fails,
+/// as for [`discover_gates`].
+pub fn discover_gates_joining(
+    main_store: &TripleStore,
+    auth_db: &AuthDb,
+    studio: &ShaclStudioStore,
+    base_url: &str,
+    graph_iri: &str,
+    dataset: &Dataset,
+) -> Result<GateSet, ValidationReport> {
+    discover_gates_in(
+        main_store,
+        auth_db,
+        studio,
+        base_url,
+        graph_iri,
+        Some(dataset),
+    )
+}
+
+/// The gates of a write to `graph_iri`, held by `owning_dataset`.
+fn discover_gates_in(
+    main_store: &TripleStore,
+    auth_db: &AuthDb,
+    studio: &ShaclStudioStore,
+    base_url: &str,
+    graph_iri: &str,
+    owning_dataset: Option<&Dataset>,
+) -> Result<GateSet, ValidationReport> {
     // (a) Gating pipelines whose scope covers this graph, by a route their
     // creator may still write.
     let pipelines: Vec<ValidationPipeline> = studio
         .list_gating_pipelines()
         .map_err(|e| gate_error(format!("listing the gating pipelines: {e}")))?
         .into_iter()
-        .filter(|p| {
-            pipeline_covers_graph(p, graph_iri, owning_dataset.as_ref().map(|d| d.id.as_str()))
-        })
+        .filter(|p| pipeline_covers_graph(p, graph_iri, owning_dataset.map(|d| d.id.as_str())))
         .filter(
-            |p| match creator_may_gate(auth_db, p, graph_iri, owning_dataset.as_ref()) {
+            |p| match creator_may_gate(auth_db, p, graph_iri, owning_dataset) {
                 Ok(true) => true,
                 Ok(false) => {
                     tracing::warn!(
@@ -420,14 +500,13 @@ fn discover_gates(
         })
     };
     let mut binding_graphs: BTreeSet<String> = bindings_of(graph_iri)?.into_iter().collect();
-    if let Some(ds) = &owning_dataset {
+    if let Some(ds) = owning_dataset {
         let ds_iri = bindings::dataset_target_iri(base_url, &ds.id);
         binding_graphs.extend(bindings_of(&ds_iri)?);
     }
 
     // (c) The dataset's own gate (`shacl_on_write` + `shapes_graph_iri`).
     let dataset_gate = owning_dataset
-        .as_ref()
         .filter(|ds| ds.shacl_on_write)
         .and_then(|ds| {
             ds.shapes_graph_iri
@@ -531,6 +610,59 @@ fn evaluate_gates(
     graph_iri: &str,
     on_dataset_gate: Option<DatasetGateHook<'_>>,
 ) -> Result<(), Refusal> {
+    let mut refused = None;
+    each_gate(
+        temp,
+        studio,
+        gates,
+        graph_iri,
+        on_dataset_gate,
+        &mut |verdict| {
+            if verdict.refuses {
+                refused = Some(refusal(verdict.report, verdict.shape_graphs));
+            }
+            refused.is_none()
+        },
+    )
+    .map_err(|report| refusal(report, Vec::new()))?;
+    refused.map_or(Ok(()), Err)
+}
+
+/// Evaluate every gate in `gates` against `graph_iri` as `store` holds it
+/// now, in the module's order, and return each gate's verdict, passing ones
+/// included.
+///
+/// A write stops at the first gate that refuses it. This is for a caller that
+/// has already staged the graph's whole future contents in `store` — a
+/// datasource run's candidate graph — and turns every refusal into work at
+/// once, so a gate further down the order is not discovered only after the
+/// first is fixed. Validation reads `store` and never writes it. `Err` is a
+/// gate that could not be evaluated, which must refuse like a failing one.
+pub fn evaluate_every_gate(
+    store: &TripleStore,
+    studio: &ShaclStudioStore,
+    gates: &GateSet,
+    graph_iri: &str,
+) -> Result<Vec<GateVerdict>, ValidationReport> {
+    let mut verdicts = Vec::new();
+    each_gate(store, studio, gates, graph_iri, None, &mut |verdict| {
+        verdicts.push(verdict);
+        true
+    })?;
+    Ok(verdicts)
+}
+
+/// Evaluate `gates` against `graph_iri` as `store` holds it, in the module's
+/// order, handing each gate's verdict to `visit` until it returns `false`.
+/// `Err` is a gate that could not be evaluated.
+fn each_gate(
+    store: &TripleStore,
+    studio: &ShaclStudioStore,
+    gates: &GateSet,
+    graph_iri: &str,
+    on_dataset_gate: Option<DatasetGateHook<'_>>,
+    visit: &mut dyn FnMut(GateVerdict) -> bool,
+) -> Result<(), ValidationReport> {
     let data_graphs = [graph_iri.to_string()];
     // Every run below is a gate, for the workload telemetry.
     let _path = crate::store::telemetry::ValidationPathGuard::set("gate");
@@ -541,45 +673,47 @@ fn evaluate_gates(
         // Resolved again rather than threaded through from
         // `needed_shape_graphs`, and with the same fail-closed rule: an
         // unresolvable pipeline is an error here too, never a skipped gate.
-        let shape_graphs = pipeline_shape_graphs(studio, p).map_err(|r| refusal(r, Vec::new()))?;
-        match super::run::run_validation(
-            temp,
+        let shape_graphs = pipeline_shape_graphs(studio, p)?;
+        // A `_ => {}` arm used to swallow an engine error, so it read as a
+        // pass and the gate quietly stopped gating.
+        let outcome = super::run::run_validation(
+            store,
             &shape_graphs,
             &data_graphs,
             p.severity_threshold,
             false,
-        ) {
-            Ok(outcome) if !outcome.passes => return Err(refusal(outcome.report, shape_graphs)),
-            Ok(_) => {}
-            // `_ => {}` used to swallow this arm, so an engine error read as a
-            // pass and the gate quietly stopped gating.
-            Err(e) => {
-                return Err(refusal(
-                    gate_error(format!("pipeline '{}': {e}", p.id)),
-                    Vec::new(),
-                ))
-            }
+        )
+        .map_err(|e| gate_error(format!("pipeline '{}': {e}", p.id)))?;
+        let verdict = GateVerdict {
+            gate: GateSource::Pipeline(p.id.clone()),
+            refuses: !outcome.passes,
+            report: outcome.report,
+            shape_graphs,
+        };
+        if !visit(verdict) {
+            return Ok(());
         }
     }
 
     // Binding gates — enforced at the default Violation threshold.
     if !gates.binding_graphs.is_empty() {
         let shape_graphs: Vec<String> = gates.binding_graphs.iter().cloned().collect();
-        match super::run::run_validation(
-            temp,
+        let outcome = super::run::run_validation(
+            store,
             &shape_graphs,
             &data_graphs,
             SeverityThreshold::Violation,
             false,
-        ) {
-            Ok(outcome) if !outcome.passes => return Err(refusal(outcome.report, shape_graphs)),
-            Ok(_) => {}
-            Err(e) => {
-                return Err(refusal(
-                    gate_error(format!("validation-layer binding: {e}")),
-                    Vec::new(),
-                ))
-            }
+        )
+        .map_err(|e| gate_error(format!("validation-layer binding: {e}")))?;
+        let verdict = GateVerdict {
+            gate: GateSource::Bindings,
+            refuses: !outcome.passes,
+            report: outcome.report,
+            shape_graphs,
+        };
+        if !visit(verdict) {
+            return Ok(());
         }
     }
 
@@ -593,18 +727,17 @@ fn evaluate_gates(
     {
         // `if let Ok(..)` dropped the error case, so a failing engine run meant
         // "no violations" and the write sailed through ungated.
-        let report = crate::shacl::validate(temp, shapes_graph, &data_graphs).map_err(|e| {
-            refusal(
-                gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")),
-                Vec::new(),
-            )
-        })?;
+        let report = crate::shacl::validate(store, shapes_graph, &data_graphs)
+            .map_err(|e| gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")))?;
         if let Some(hook) = on_dataset_gate {
             hook(dataset_id, shapes_graph, &report);
         }
-        if !report.conforms {
-            return Err(refusal(report, vec![shapes_graph.clone()]));
-        }
+        visit(GateVerdict {
+            gate: GateSource::Dataset(dataset_id.clone()),
+            refuses: !report.conforms,
+            report,
+            shape_graphs: vec![shapes_graph.clone()],
+        });
     }
 
     Ok(())
@@ -1280,6 +1413,182 @@ mod tests {
             None,
         )
         .expect("conforming data passes the dataset gate on the Graph Store path");
+    }
+
+    // ─── A graph about to join a dataset ──────────────────────────────────────
+
+    /// A datasource run's candidate, staged before it joins its dataset.
+    const STAGED: &str = "urn:run:r1";
+
+    /// A graph staged outside the dataset it is about to join is under that
+    /// dataset's gates before it joins, found by the same rules as for a
+    /// graph the dataset holds; `discover_gates` cannot place it yet.
+    #[test]
+    fn a_graph_about_to_join_a_dataset_is_under_its_gates_before_it_joins() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        let base = "http://x";
+        auth.create_user("reader", "reader", "reader@t.com", "hash", SystemRole::User)
+            .unwrap();
+        for id in ["d1", "d2"] {
+            auth.create_dataset(
+                id,
+                id,
+                None,
+                OwnerType::User,
+                CREATOR,
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        }
+        let joining = |dataset: &str| {
+            let ds = auth.get_dataset(dataset).unwrap().unwrap();
+            discover_gates_joining(&store, &auth, &studio, base, STAGED, &ds).unwrap()
+        };
+        assert!(joining("d1").is_empty());
+
+        // A pipeline on the dataset, and one whose creator may not write it.
+        let mut p = pipe(vec![dataset_target("d1")], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+        let mut q = pipe(vec![dataset_target("d1")], vec![], vec![]);
+        q.id = "q".into();
+        q.shape_graph_ids = vec![set.id.clone()];
+        q.created_by = Some("reader".into());
+        studio.insert_pipeline(&q).unwrap();
+        bindings::add_binding(
+            &store,
+            &bindings::dataset_target_iri(base, "d1"),
+            SHAPES_GRAPH,
+        )
+        .unwrap();
+        auth.update_dataset_shacl("d1", true, Some(SHAPES_GRAPH))
+            .unwrap();
+
+        let gates = joining("d1");
+        let pipelines: Vec<&str> = gates.pipelines.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            pipelines,
+            vec!["p"],
+            "only a creator who may write it gates"
+        );
+        assert!(gates.binding_graphs.contains(SHAPES_GRAPH) && gates.binding_graphs.len() == 1);
+        assert_eq!(gates.dataset_shapes_graph(), Some(SHAPES_GRAPH));
+        // While no dataset holds it, a write to the graph meets none of them…
+        assert!(!import_gates_apply(
+            ctx(&store, &auth, &studio, base),
+            STAGED
+        ));
+        // …and another dataset's gates are not its.
+        assert!(joining("d2").is_empty());
+    }
+
+    /// Every gate's verdict, in the module's order and passing ones included:
+    /// a pipeline refuses at its own severity threshold, the bindings at
+    /// `Violation`, the dataset's `shacl_on_write` shapes on any result.
+    #[test]
+    fn every_gate_is_evaluated_in_order_each_by_its_own_rule() {
+        const ADVICE_GRAPH: &str = "urn:shapes:advice";
+        const ADVICE_TTL: &str = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:AdviceShape a sh:NodeShape ;
+                sh:targetClass ex:Person ;
+                sh:property [ sh:path ex:email ; sh:minCount 1 ; sh:severity sh:Warning ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, person) = studio_with_shapes(&store, &auth);
+        let base = "http://x";
+        store
+            .load_str(ADVICE_TTL, RdfFormat::Turtle, Some(ADVICE_GRAPH))
+            .unwrap();
+        let advice = studio
+            .create_shape_graph(
+                "advice",
+                None,
+                OwnerType::User,
+                "u1",
+                Visibility::Private,
+                ADVICE_GRAPH,
+                &[],
+                ShapeSource::Manual,
+                None,
+            )
+            .unwrap();
+        // A person with neither a name (a violation) nor an email (a warning).
+        store
+            .load_str(
+                "<http://example.org/p1> a <http://example.org/Person> .",
+                RdfFormat::Turtle,
+                Some(STAGED),
+            )
+            .unwrap();
+        auth.create_dataset(
+            "d1",
+            "D1",
+            None,
+            OwnerType::User,
+            CREATOR,
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        for (id, set, threshold) in [
+            ("strict", &person, SeverityThreshold::Violation),
+            ("advisory", &advice, SeverityThreshold::Violation),
+            ("pedantic", &advice, SeverityThreshold::Warning),
+        ] {
+            let mut p = pipe(vec![dataset_target("d1")], vec![], vec![]);
+            p.id = id.into();
+            p.shape_graph_ids = vec![set.id.clone()];
+            p.severity_threshold = threshold;
+            studio.insert_pipeline(&p).unwrap();
+        }
+        bindings::add_binding(
+            &store,
+            &bindings::dataset_target_iri(base, "d1"),
+            ADVICE_GRAPH,
+        )
+        .unwrap();
+        auth.update_dataset_shacl("d1", true, Some(ADVICE_GRAPH))
+            .unwrap();
+
+        let ds = auth.get_dataset("d1").unwrap().unwrap();
+        let gates = discover_gates_joining(&store, &auth, &studio, base, STAGED, &ds).unwrap();
+        let verdicts = evaluate_every_gate(&store, &studio, &gates, STAGED).unwrap();
+        let seen: Vec<(GateSource, bool)> = verdicts
+            .iter()
+            .map(|v| (v.gate.clone(), v.refuses))
+            .collect();
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        // The pipelines first, in no particular order among themselves…
+        let mut pipelines = seen[..3].to_vec();
+        pipelines.sort_by_key(|(gate, _)| format!("{gate:?}"));
+        assert_eq!(
+            pipelines,
+            vec![
+                (GateSource::Pipeline("advisory".into()), false),
+                (GateSource::Pipeline("pedantic".into()), true),
+                (GateSource::Pipeline("strict".into()), true),
+            ]
+        );
+        // …then the bindings, for which a warning is below the threshold…
+        assert_eq!(seen[3], (GateSource::Bindings, false));
+        // …then the dataset's own gate, which refuses on any result.
+        assert_eq!(seen[4], (GateSource::Dataset("d1".into()), true));
+        // A gate that passes still says what it found.
+        let advisory = verdicts
+            .iter()
+            .find(|v| v.gate == GateSource::Pipeline("advisory".into()))
+            .unwrap();
+        assert_eq!(advisory.report.results_count, 1);
+        assert_eq!(advisory.report.results[0].severity, Severity::Warning);
+        assert_eq!(advisory.shape_graphs, vec![ADVICE_GRAPH.to_string()]);
+        // Evaluating wrote nothing.
+        assert_eq!(store.count_graph(Some(STAGED)).unwrap(), 1);
     }
 
     #[test]
