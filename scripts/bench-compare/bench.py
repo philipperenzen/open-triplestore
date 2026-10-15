@@ -48,6 +48,9 @@ EXPLORE_MIX = [1, 2, 2, 3, 2, 2, 4, 2, 2, 5, 7, 7, 5, 7, 7, 8, 9, 9, 8, 9, 9, 10
 DISPLAY = {"ots": "Open Triplestore", "oxigraph": "Oxigraph", "fuseki": "Fuseki", "qlever": "QLever",
            "virtuoso": "Virtuoso", "rdf4j": "RDF4J"}
 
+# A blank node label in a result's display strings (`_:` and its label).
+BLANK_LABEL = re.compile(r'(?<![\w:/])_:[A-Za-z0-9_.-]+')
+
 NT_LINE = re.compile(r'^<([^>]*)> <([^>]*)> (.*) \.\s*$')
 
 
@@ -379,11 +382,15 @@ def workload_features(a, ep):
 def results_digest(results):
     """SHA-256 of a JSON report's results, each as canonical JSON, sorted: the
     same digest means the same results in any order (a run evaluates in
-    parallel, so the order is not part of the answer)."""
+    parallel, so the order is not part of the answer). Blank node labels are
+    left out: a property shape written as `[ sh:path ... ]` gets a fresh label
+    every time the shapes are loaded, so two loads of the same data would never
+    agree on them; the result's path still tells such shapes apart."""
     if results is None:
         return None
     h = hashlib.sha256()
-    for line in sorted(json.dumps(r, sort_keys=True, ensure_ascii=False) for r in results):
+    lines = (BLANK_LABEL.sub("_:", json.dumps(r, sort_keys=True, ensure_ascii=False)) for r in results)
+    for line in sorted(lines):
         h.update(line.encode())
         h.update(b"\n")
     return h.hexdigest()
