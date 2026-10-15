@@ -1,0 +1,26 @@
+{
+  "args": [
+    "load",
+    "/data/base9m",
+    "data",
+    "0",
+    "1000000",
+    "50000",
+    "--with-model"
+  ],
+  "command": "load",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "off",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "assets": 1000000,
+    "dir_mib": 2988.9,
+    "graph": "https://example.org/otl/instances",
+    "quads": 8999999,
+    "quads_per_s": 105448.68,
+    "seconds": 85.35,
+    "store_quads": 9000156
+  }
+}

@@ -1,0 +1,7 @@
+  payload 900000 rep 0 capture=false: 6256 ms
+  payload 900000 rep 0 capture=true: 7548 ms
+  payload 900000 rep 1 capture=true: 7685 ms
+  payload 900000 rep 1 capture=false: 7398 ms
+  payload 900000 rep 2 capture=false: 7385 ms
+  payload 900000 rep 2 capture=true: 7560 ms
+(185.1s)

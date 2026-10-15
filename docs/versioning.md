@@ -514,9 +514,11 @@ less; the scan cost does not shrink.
   rows per graph.
 - **Crashes.** A row is written *before* its write runs and finalised with
   the sequence number right after the commit. A crash between the two
-  leaves it `pending`; the next start probes the store for the intended
-  quads and settles the row as `committed`, `aborted`, or `unknown` when it
-  cannot tell (a payload was never recorded). At the same start every
+  leaves it `pending`, and the next start settles it as `unknown`: the
+  payload is recorded only with the commit, so there is nothing to probe the
+  store against, and the row closes the chains through it rather than guess
+  whether the write landed (60 `kill -9`s during writes found no other
+  outcome, see [performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15)). At the same start every
   graph's count is compared with the last count the log recorded for it; a
   graph that changed outside the log gets an `unknown` row (`origin` =
   `reconcile`), so a consumer sees that its chain broke.
