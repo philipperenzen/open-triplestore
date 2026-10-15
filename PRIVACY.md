@@ -35,10 +35,14 @@ mechanism that sends data to the project maintainers or to any third party
 chosen by the project.** There is no embedded analytics SDK, no crash reporter,
 and no background reporting endpoint controlled by the project.
 
-The word "telemetry" appears in the source code only in reference to a **private,
-local** usage-tracking feature (see §4) that records data in your own database
-on your own infrastructure. It is never transmitted off your instance by the
-software.
+The word "telemetry" appears in the source code only for instrumentation that
+stays on your instance. **Workload telemetry** (`GET /api/admin/telemetry`,
+administrators only) keeps exact query counters and fixed-size in-memory samples
+of query latencies, SHACL validation timings and write spacing. It holds no
+query text, user identifiers or IP addresses, is never written to disk, and is
+lost on restart. The **usage tracking** of §4.5 and the **LLM request log** of
+§4.7 are stored in your own metadata database. None of it is ever transmitted
+off your instance by the software.
 
 All network calls the software can make are **either local to your own
 infrastructure or directed at endpoints that you explicitly configure**. They
@@ -125,6 +129,61 @@ Application logs, optional backups, and (if configured) outbound operational
 alerts (§5) may incidentally contain identifiers. Treat backups as containing
 every category above.
 
+Workload telemetry (§2) is kept in memory only and holds no personal data. Each
+stored SHACL validation run (the last 50 per dataset) also records how long it
+took and how many quads it read.
+
+### 4.7 LLM request log
+
+When the AI features are in use (§5), every LLM-backed request (a chat turn,
+natural-language→SPARQL, the SHACL assistant, a saved-query repair) adds one row
+to the `llm_request_log` table (`src/server/llm_guard.rs`), and so does any
+training-feedback signal the input guard blocks. Each row holds:
+
+- the time, the endpoint and model, the outcome (`ok`/`error`/`blocked`), the
+  guard rule that fired, if any, and an error message on failure;
+- latency, time to first token, prompt and answer sizes in characters, and the
+  number of query rounds;
+- **the user ID of a signed-in caller and, for most requests, the caller's IP
+  address**;
+- **a preview of the question** (for a query repair, of the error message):
+  its first 200 characters. The rest of the
+  question and the answer are not stored in this log (saved conversations are
+  a separate feature, §4.8).
+
+The log is readable by administrators (`GET /api/admin/llm/requests`, with the
+username, IP address and preview; `GET /api/admin/llm/stats` for counts per
+outcome and the most active users); a plugin holding an administrator's token
+can read the same counts and the top 10 users.
+
+- **Retention:** rows older than `OTS_LLM_LOG_RETENTION_DAYS` (default **90**
+  days) are deleted whenever a new row is written, so while the AI features go
+  unused older rows stay until the next request.
+- **Question preview:** on by default. Set `OTS_LLM_LOG_PREVIEW_ENABLED=false`
+  to stop storing it; rows written before the change keep theirs until they
+  expire.
+- Purging a user account does not remove its rows; they expire with the
+  retention period.
+- This log **never leaves your instance**. The question itself does go to the
+  LLM endpoint you configured (§5).
+
+### 4.8 Assistant conversations and feedback reports
+
+- **Saved chat conversations** (`chat_conversations`, `chat_messages`;
+  `src/server/llm_history.rs`). A signed-in user's conversations with the
+  assistant are stored in full — every message's text and the queries the
+  assistant ran — so they can be reopened. Only their owner can read them;
+  the owner can rename and delete them, and past 200 conversations per user the
+  oldest are pruned. The standing instructions a user gives the assistant
+  ("memory", up to 4,000 characters, `chat_user_memory`) are stored as well.
+- **Feedback reports** (`feedback_reports`; `src/feedback/`). A report a user
+  sends from the in-app dialog stores its title and text, the page it was sent
+  from (optional), the browser's user agent and the app version, with the
+  reporter's user ID. The reporter sees their own reports; administrators
+  read, answer and delete them.
+
+Both are deleted when the user account is purged.
+
 ## 5. External network calls and how to disable each
 
 By design, every outbound call is **off by default or points only at endpoints
@@ -207,7 +266,9 @@ above are essential; document any others your customised deployment introduces.
 - **International transfers:** _[where your servers and any processors are located;
   safeguards used]_
 - **Retention periods:** _[per category — RDF data, accounts, audit logs (incl.
-  IP/user-agent), usage events, backups]_
+  IP/user-agent), usage events, the LLM request log (incl. IP address and
+  question preview; `OTS_LLM_LOG_RETENTION_DAYS`, default 90 days), saved chat
+  conversations, feedback reports, backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_
