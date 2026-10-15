@@ -5,15 +5,20 @@
 //! entities it changed, deletions become tombstones, and fragments chain with
 //! `tree:GreaterThanOrEqualToRelation`. Sync: a second instance of this server
 //! on a local listener publishes a dataset; the local instance mirrors it,
-//! then mirrors the increments (an update and a deletion).
+//! then mirrors the increments (an update and a deletion). Scheduled sync: a
+//! job with a schedule runs on its own, waits its interval (with a floor),
+//! backs off after failures and pauses when its owner may no longer write.
 
 mod common;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
+use std::sync::Arc;
+
 use axum::Router;
+use chrono::{DateTime, Utc};
 use common::*;
-use open_triplestore::auth::models::{OwnerType, Visibility};
+use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
 use open_triplestore::server::AppState;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
@@ -581,6 +586,14 @@ async fn private_graphs_are_never_published_to_the_stream() {
     );
 }
 
+/// `OTS_LDES_ALLOWLIST` is one variable for the whole process, and a sync
+/// test points it at its own publisher (and the first one clears it at the
+/// end): the tests that sync run one at a time.
+fn net() -> &'static tokio::sync::Mutex<()> {
+    static NET: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    NET.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// A second instance on a local listener publishes; this instance syncs.
 /// The publisher's base URL is the listener's origin, as a deployment's
 /// OTS_BASE_URL is its public origin — the stream's node IRIs are built from it.
@@ -606,6 +619,7 @@ fn publisher() -> (AppState, String, String) {
 
 #[tokio::test]
 async fn sync_mirrors_a_remote_stream_and_its_increments() {
+    let _net = net().lock().await;
     let (remote_state, remote_token, origin) = publisher();
     std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let remote_app = test_app(remote_state.clone());
@@ -845,4 +859,556 @@ async fn sync_mirrors_a_remote_stream_and_its_increments() {
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+// ─── Scheduled sync (#530) ──────────────────────────────────────────────────
+
+const TARGET: &str = "https://example.org/mirror/instances";
+
+/// A local instance with a private dataset `mirror`, owned by `adm`, to sync
+/// into.
+fn mirror() -> (AppState, String) {
+    let (local, token) = admin_state();
+    local
+        .auth_db
+        .create_dataset(
+            "mirror",
+            "Mirror",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    (local, token)
+}
+
+async fn run_sync(app: &Router, token: &str, url: &str) -> (StatusCode, String) {
+    let (st, _, txt) = req(
+        app,
+        Method::POST,
+        "/api/ldes/sync",
+        Some(token),
+        Some("application/json"),
+        None,
+        &json!({ "url": url, "dataset_id": "mirror", "graph_iri": TARGET }).to_string(),
+    )
+    .await;
+    (st, txt)
+}
+
+async fn set_schedule(app: &Router, token: &str, url: &str, body: Value) -> (StatusCode, String) {
+    let uri = format!(
+        "/api/admin/ldes/syncs/schedule?dataset_id=mirror&url={}",
+        url_encode(url)
+    );
+    let (st, _, txt) = req(
+        app,
+        Method::PUT,
+        &uri,
+        Some(token),
+        Some("application/json"),
+        None,
+        &body.to_string(),
+    )
+    .await;
+    (st, txt)
+}
+
+/// The admin's view of the job that syncs `url` into `mirror`.
+async fn job(app: &Router, token: &str, url: &str) -> Value {
+    let (st, _, txt) = req(
+        app,
+        Method::GET,
+        "/api/admin/ldes/syncs",
+        Some(token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let jobs: Value = serde_json::from_str(&txt).unwrap();
+    jobs.as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["source_url"] == url && j["dataset_id"] == "mirror")
+        .cloned()
+        .unwrap_or_else(|| panic!("no job for {url}: {txt}"))
+}
+
+fn at(v: &Value) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(v.as_str().unwrap_or_else(|| panic!("not a time: {v}")))
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+fn secs(n: i64) -> chrono::Duration {
+    chrono::Duration::seconds(n)
+}
+
+/// The remote renames b1 (and so drops b2). Member timestamps have a
+/// resolution of a second: one is waited out first, so the change is newer
+/// than the mirror's bookmark.
+async fn rename_b1(remote_app: &Router, remote_token: &str, name: &str) {
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (st, _, _) = req(
+        remote_app,
+        Method::PUT,
+        &format!("/store?graph={}", url_encode(G)),
+        Some(remote_token),
+        Some("text/turtle"),
+        None,
+        &format!("<{EX}b1> a <{EX}Bridge> ; <{EX}name> \"{name}\" ."),
+    )
+    .await;
+    assert!(st.is_success());
+}
+
+fn has_b1(local: &AppState, name: &str) -> bool {
+    matches!(
+        local.store.query(&format!(
+            "ASK {{ GRAPH <{TARGET}> {{ <{EX}b1> <{EX}name> \"{name}\" }} }}"
+        )),
+        Ok(QueryResults::Boolean(true))
+    )
+}
+
+/// #530: a job with a schedule runs without anyone asking — the server's own
+/// scheduler starts it once it is due. A schedule is `off` (the default),
+/// `auto` (the stream's `ldes:pollingInterval`) or a fixed interval of at
+/// least 60 seconds.
+#[tokio::test]
+async fn a_scheduled_job_runs_without_a_manual_trigger() {
+    let _net = net().lock().await;
+    let (remote_state, remote_token, origin) = publisher();
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
+    let remote_app = test_app(remote_state.clone());
+    let (local, token) = mirror();
+    let app = test_app(local.clone());
+    let stream_url = format!("{origin}/api/datasets/src/ldes");
+
+    // A job exists once it has run, and its schedule is off until set.
+    let (st, txt) = run_sync(&app, &token, &stream_url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j = job(&app, &token, &stream_url).await;
+    assert_eq!(j["schedule"], "off", "{j}");
+    assert!(
+        j["next_run_at"].is_null() && j["paused_at"].is_null(),
+        "{j}"
+    );
+    assert_eq!(j["consecutive_failures"], 0, "{j}");
+
+    // What a schedule may be, and who may set it.
+    for bad in [
+        json!({ "schedule": "hourly" }),
+        json!({ "schedule": "interval" }),
+        json!({ "schedule": "interval", "interval_secs": 59 }),
+    ] {
+        let (st, txt) = set_schedule(&app, &token, &stream_url, bad.clone()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {txt}");
+    }
+    let (st, _) = set_schedule(
+        &app,
+        &token,
+        &format!("{origin}/elsewhere"),
+        json!({ "schedule": "auto" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    local
+        .auth_db
+        .create_user("u2", "plain", "plain@test.com", "hash", SystemRole::User)
+        .unwrap();
+    let plain = mint_token("u2", "plain", "user");
+    let (st, _) = set_schedule(&app, &plain, &stream_url, json!({ "schedule": "auto" })).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // `auto`: the stream's polling interval (60 s, the publisher's default)
+    // after the last run.
+    let (st, txt) = set_schedule(&app, &token, &stream_url, json!({ "schedule": "auto" })).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["schedule"], "auto", "{txt}");
+    assert!(j["interval_secs"].is_null(), "{txt}");
+    assert_eq!(
+        at(&j["next_run_at"]) - at(&j["last_run_at"]),
+        secs(60),
+        "{txt}"
+    );
+
+    // The remote changes and nobody runs the job: the scheduler, on a clock
+    // an hour ahead, finds it due and runs it.
+    rename_b1(&remote_app, &remote_token, "uno").await;
+    let ahead = chrono::Duration::hours(1);
+    let scheduler = open_triplestore::ldes::schedule::spawn(
+        local.clone(),
+        std::time::Duration::from_millis(50),
+        Arc::new(move || Utc::now() + ahead),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let j = loop {
+        let j = job(&app, &token, &stream_url).await;
+        // Planned from the scheduler's clock: the run has finished.
+        if j["next_run_at"].is_string()
+            && at(&j["next_run_at"]) > Utc::now() + chrono::Duration::minutes(30)
+        {
+            break j;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the scheduler never ran the job: {j}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    scheduler.abort();
+    assert_eq!(j["last_status"], "ok", "{j}");
+    assert_eq!(j["consecutive_failures"], 0, "{j}");
+    assert_eq!(j["last_report"]["entities_updated"], 1, "{j}");
+    assert_eq!(j["last_report"]["entities_deleted"], 1, "{j}");
+    assert!(has_b1(&local, "uno"), "b1 updated by the scheduled run");
+    assert!(!has_b1(&local, "one"), "the old value is gone");
+    let (_, _, commits) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/mirror/commits",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert!(commits.contains("Scheduled LDES sync"), "{commits}");
+
+    // Off again: nothing is planned.
+    let (st, txt) = set_schedule(&app, &token, &stream_url, json!({ "schedule": "off" })).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["schedule"], "off", "{txt}");
+    assert!(j["next_run_at"].is_null(), "{txt}");
+}
+
+/// A schedule waits its interval after every run — a fixed one, or the
+/// stream's `ldes:pollingInterval` — and never less than 60 seconds.
+#[tokio::test]
+async fn a_schedule_honours_its_interval_and_the_floor() {
+    use open_triplestore::ldes::schedule::run_due;
+    let _net = net().lock().await;
+    let (remote_state, _, origin) = publisher();
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
+    open_triplestore::ldes::store::set_polling_interval(&remote_state.auth_db, "src", Some(600))
+        .unwrap();
+    let (local, token) = mirror();
+    let app = test_app(local.clone());
+    let stream_url = format!("{origin}/api/datasets/src/ldes");
+    let (st, txt) = run_sync(&app, &token, &stream_url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+
+    // Every 120 s: not a second before, then 120 s after that run.
+    let (st, txt) = set_schedule(
+        &app,
+        &token,
+        &stream_url,
+        json!({ "schedule": "interval", "interval_secs": 120 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["schedule"], "interval", "{txt}");
+    assert_eq!(j["interval_secs"], 120, "{txt}");
+    let due = at(&j["next_run_at"]);
+    assert_eq!(due - at(&j["last_run_at"]), secs(120), "{txt}");
+    assert_eq!(run_due(&local, due - secs(1)).await, 0, "not due yet");
+    assert_eq!(
+        job(&app, &token, &stream_url).await["last_run_at"],
+        j["last_run_at"],
+        "nothing ran"
+    );
+    let now = due + secs(1);
+    assert_eq!(run_due(&local, now).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert_eq!(j["last_status"], "ok", "{j}");
+    assert_eq!(at(&j["next_run_at"]), now + secs(120), "{j}");
+    assert_eq!(run_due(&local, now).await, 0, "ran once, not again");
+
+    // `auto`: the stream declares 600 s.
+    let (st, txt) = set_schedule(&app, &token, &stream_url, json!({ "schedule": "auto" })).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["last_report"]["polling_interval"], 600, "{txt}");
+    let now = at(&j["next_run_at"]);
+    assert_eq!(now - at(&j["last_run_at"]), secs(600), "{txt}");
+    assert_eq!(run_due(&local, now - secs(1)).await, 0, "not due yet");
+    assert_eq!(run_due(&local, now).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert_eq!(at(&j["next_run_at"]), now + secs(600), "{j}");
+
+    // A stream that asks for less than the floor is read every 60 s.
+    open_triplestore::ldes::store::set_polling_interval(&remote_state.auth_db, "src", Some(5))
+        .unwrap();
+    let now = now + secs(600);
+    assert_eq!(run_due(&local, now).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert_eq!(j["last_report"]["polling_interval"], 5, "{j}");
+    assert_eq!(at(&j["next_run_at"]), now + secs(60), "{j}");
+}
+
+/// A failing job waits twice as long after each failure in a row, and its
+/// first success brings it back to its interval.
+#[tokio::test]
+async fn a_failing_schedule_backs_off_and_recovers() {
+    use open_triplestore::ldes::schedule::run_due;
+    let _net = net().lock().await;
+    let (remote_state, _, origin) = publisher();
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
+    let (local, token) = mirror();
+    let app = test_app(local.clone());
+
+    // A stream the publisher does not serve yet: the run fails, and is kept.
+    let later = format!("{origin}/api/datasets/later/ldes");
+    let (st, txt) = run_sync(&app, &token, &later).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{txt}");
+    let (st, txt) = set_schedule(
+        &app,
+        &token,
+        &later,
+        json!({ "schedule": "interval", "interval_secs": 60 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["consecutive_failures"], 0, "{txt}");
+    let mut now = at(&j["next_run_at"]);
+    for (failures, wait) in [(1, 120), (2, 240), (3, 480)] {
+        assert_eq!(run_due(&local, now).await, 1);
+        let j = job(&app, &token, &later).await;
+        assert_eq!(j["last_status"], "error", "{j}");
+        assert_eq!(j["consecutive_failures"], failures, "{j}");
+        let next = at(&j["next_run_at"]);
+        assert_eq!(next - now, secs(wait), "{j}");
+        assert_eq!(
+            run_due(&local, next - secs(1)).await,
+            0,
+            "not before the back-off: {j}"
+        );
+        now = next;
+    }
+
+    // The stream appears; the next run succeeds and the wait is the interval
+    // again.
+    let later_graph = "https://example.org/ldes-test/later";
+    remote_state
+        .auth_db
+        .create_dataset(
+            "later",
+            "Later",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    remote_state
+        .auth_db
+        .add_dataset_graph("later", later_graph)
+        .unwrap();
+    remote_state
+        .store
+        .load_str(
+            &format!("<{EX}b9> a <{EX}Bridge> ; <{EX}name> \"nine\" ."),
+            RdfFormat::Turtle,
+            Some(later_graph),
+        )
+        .unwrap();
+    open_triplestore::ldes::store::set_stream(&remote_state.auth_db, "later", true, 2).unwrap();
+    open_triplestore::ldes::capture::publish_all(
+        &remote_state,
+        "later",
+        &[later_graph.to_string()],
+    );
+    assert_eq!(run_due(&local, now).await, 1);
+    let j = job(&app, &token, &later).await;
+    assert_eq!(j["last_status"], "ok", "{j}");
+    assert!(j["last_error"].is_null(), "{j}");
+    assert_eq!(j["consecutive_failures"], 0, "{j}");
+    assert_eq!(j["last_report"]["entities_updated"], 1, "{j}");
+    assert_eq!(at(&j["next_run_at"]), now + secs(60), "{j}");
+}
+
+/// A scheduled run acts as the job's owner, checked every time as a request
+/// is: an owner who can no longer write the dataset, or no longer exists,
+/// pauses the job with the reason in `last_error`, and it stays paused until
+/// its schedule is set again.
+#[tokio::test]
+async fn a_schedule_pauses_when_its_owner_loses_write_access() {
+    use open_triplestore::ldes::schedule::run_due;
+    let _net = net().lock().await;
+    let (remote_state, remote_token, origin) = publisher();
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
+    let remote_app = test_app(remote_state.clone());
+    let (local, token) = mirror();
+    let app = test_app(local.clone());
+    let stream_url = format!("{origin}/api/datasets/src/ldes");
+
+    // Ed, an administrator, adds the job: it is ed's.
+    local
+        .auth_db
+        .create_user("ed", "ed", "ed@test.com", "hash", SystemRole::Admin)
+        .unwrap();
+    let ed = mint_token("ed", "ed", "admin");
+    let (st, txt) = run_sync(&app, &ed, &stream_url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(job(&app, &token, &stream_url).await["created_by"], "ed");
+    let (st, txt) = set_schedule(
+        &app,
+        &token,
+        &stream_url,
+        json!({ "schedule": "interval", "interval_secs": 60 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let due = at(&serde_json::from_str::<Value>(&txt).unwrap()["next_run_at"]);
+
+    // Ed is an administrator no more, and `mirror` is adm's: ed may not
+    // write it, so the run does not happen and the schedule pauses.
+    rename_b1(&remote_app, &remote_token, "uno").await;
+    local
+        .auth_db
+        .update_user_role("ed", SystemRole::User)
+        .unwrap();
+    assert_eq!(run_due(&local, due).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert!(j["paused_at"].is_string(), "{j}");
+    assert!(j["next_run_at"].is_null(), "{j}");
+    assert_eq!(
+        j["schedule"], "interval",
+        "the schedule itself is kept: {j}"
+    );
+    assert_eq!(j["last_status"], "error", "{j}");
+    let why = j["last_error"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("paused") && why.contains("may no longer write"),
+        "{j}"
+    );
+    assert!(!has_b1(&local, "uno"), "nothing was synced as ed");
+    assert_eq!(
+        run_due(&local, due + chrono::Duration::days(30)).await,
+        0,
+        "a paused job is never due"
+    );
+
+    // Write access back and the schedule set again: the job resumes.
+    local
+        .auth_db
+        .update_user_role("ed", SystemRole::Admin)
+        .unwrap();
+    let (st, txt) = set_schedule(
+        &app,
+        &token,
+        &stream_url,
+        json!({ "schedule": "interval", "interval_secs": 60 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let j: Value = serde_json::from_str(&txt).unwrap();
+    assert!(j["paused_at"].is_null(), "{txt}");
+    let now = at(&j["next_run_at"]);
+    assert_eq!(run_due(&local, now).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert_eq!(j["last_status"], "ok", "{j}");
+    assert!(has_b1(&local, "uno"), "synced as ed again");
+
+    // An owner who no longer exists pauses it too.
+    local
+        .auth_db
+        .pool()
+        .get()
+        .unwrap()
+        .execute(
+            "UPDATE ldes_sync_state SET created_by = 'gone' WHERE dataset_id = 'mirror'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(run_due(&local, at(&j["next_run_at"])).await, 1);
+    let j = job(&app, &token, &stream_url).await;
+    assert!(j["paused_at"].is_string(), "{j}");
+    assert!(
+        j["last_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no longer exists")),
+        "{j}"
+    );
+}
+
+/// Only the node that writes runs scheduled jobs: a follower holds a copy of
+/// every job (the identity database is shipped to it) but starts none, where
+/// the same job on a node that is not a follower is started.
+#[tokio::test]
+async fn a_follower_runs_no_scheduled_job() {
+    use open_triplestore::ldes::schedule::run_due;
+    use open_triplestore::ldes::store::{record_sync_outcome, set_sync_schedule, Schedule};
+    use open_triplestore::store::replication::{Mode, ReplicationConfig, Scope};
+    let _net = net().lock().await;
+    // Never contacted: not in the allowlist, so a run that starts fails at
+    // once.
+    let url = "http://leader.invalid/api/datasets/src/ldes";
+    let with_job = |state: &AppState| {
+        state
+            .auth_db
+            .create_dataset(
+                "mirror",
+                "Mirror",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        record_sync_outcome(
+            &state.auth_db,
+            "mirror",
+            url,
+            TARGET,
+            "adm",
+            Err("never ran"),
+        )
+        .unwrap();
+        assert!(set_sync_schedule(
+            &state.auth_db,
+            "mirror",
+            url,
+            Schedule::Every(60),
+            Some(Utc::now())
+        )
+        .unwrap());
+    };
+    let follower = admin_state_with_store(
+        open_triplestore::store::TripleStore::in_memory()
+            .unwrap()
+            .with_replication(ReplicationConfig::follower(
+                "http://leader.invalid:7878",
+                Mode::Hot,
+                Scope::All,
+            )),
+    )
+    .0;
+    with_job(&follower);
+    let later = Utc::now() + chrono::Duration::days(1);
+    assert_eq!(run_due(&follower, later).await, 0);
+    let j = open_triplestore::ldes::store::sync_job(&follower.auth_db, "mirror", url)
+        .unwrap()
+        .unwrap();
+    assert_eq!(j.last_error.as_deref(), Some("never ran"));
+    assert_eq!(j.consecutive_failures, 0);
+
+    let (leader, _) = admin_state();
+    with_job(&leader);
+    assert_eq!(run_due(&leader, later).await, 1);
+    let j = open_triplestore::ldes::store::sync_job(&leader.auth_db, "mirror", url)
+        .unwrap()
+        .unwrap();
+    assert_eq!(j.consecutive_failures, 1, "{j:?}");
 }

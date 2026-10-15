@@ -19,7 +19,8 @@
 //!   property paths, parsed by the SHACL engine's parser.
 //!
 //! The newest version per entity is materialised into the target graph when
-//! the run has finished (the run's end is its finalisation, §3).
+//! the run has finished (the run's end is its finalisation, §3). A job on a
+//! schedule is run the same way by [`super::schedule`].
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1373,56 +1374,91 @@ pub async fn sync_handler(
         body.graph_iri.clone(),
     );
     let uid = user.user_id.clone();
-    let federated_identity = crate::federation::identity_for(&state, &user.user_id);
     let report = tokio::task::spawn_blocking(move || {
-        let _identity = crate::federation::IdentityGuard::set(federated_identity);
-        let before = super::capture::before(&st, std::slice::from_ref(&graph));
-        let r = sync(&st, &url, &ds_id, &graph);
-        super::capture::after(&st, before);
-        crate::entailment::after_write(&st, std::slice::from_ref(&graph));
-        if let Ok(r) = &r {
-            crate::commit_log::record(
-                &st.store,
-                &st.base_url,
-                crate::commit_log::CommitKind::Import,
-                format!(
-                    "LDES sync from <{url}>: {} entities updated, {} deleted",
-                    r.entities_updated, r.entities_deleted
-                ),
-                Some(&uid),
-                Some(format!(
-                    "{}/dataset/{}",
-                    st.base_url.trim_end_matches('/'),
-                    ds_id
-                )),
-                vec![graph.clone()],
-                r.entities_updated,
-                r.entities_deleted,
-                None,
-            );
-        }
+        // One run of a job at a time: this waits for a scheduled one.
+        let _running = super::schedule::Running::claim(&ds_id, &url);
+        let r = run_job(&st, &url, &ds_id, &graph, &uid, Trigger::Request);
+        // A scheduled job waits its interval from this run, too.
+        super::schedule::after_run(&st.auth_db, &ds_id, &url, r.is_ok(), chrono::Utc::now());
         r
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let report = report.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(report))
+}
+
+/// What started a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// `POST /api/ldes/sync`.
+    Request,
+    /// The job's schedule.
+    Schedule,
+}
+
+/// One run of a sync job as `user_id`, the same for a request and the
+/// scheduler: with that user's federated identity, change capture for the
+/// dataset's own stream, entailment, a commit in the dataset's history, and
+/// the outcome recorded for the admin's list of jobs. The caller has checked
+/// the user's authority. Blocking.
+pub(crate) fn run_job(
+    state: &AppState,
+    url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+    user_id: &str,
+    trigger: Trigger,
+) -> anyhow::Result<SyncReport> {
+    let graph = graph_iri.to_string();
+    let _identity =
+        crate::federation::IdentityGuard::set(crate::federation::identity_for(state, user_id));
+    let before = super::capture::before(state, std::slice::from_ref(&graph));
+    let r = sync(state, url, dataset_id, graph_iri);
+    super::capture::after(state, before);
+    crate::entailment::after_write(state, std::slice::from_ref(&graph));
+    if let Ok(r) = &r {
+        let what = match trigger {
+            Trigger::Request => "LDES sync",
+            Trigger::Schedule => "Scheduled LDES sync",
+        };
+        crate::commit_log::record(
+            &state.store,
+            &state.base_url,
+            crate::commit_log::CommitKind::Import,
+            format!(
+                "{what} from <{url}>: {} entities updated, {} deleted",
+                r.entities_updated, r.entities_deleted
+            ),
+            Some(user_id),
+            Some(format!(
+                "{}/dataset/{}",
+                state.base_url.trim_end_matches('/'),
+                dataset_id
+            )),
+            vec![graph.clone()],
+            r.entities_updated,
+            r.entities_deleted,
+            None,
+        );
+    }
     // The job's latest outcome, for the admin's list of syncs: a failure is
     // recorded as well as answered, so a run nobody watched still shows it.
-    let recorded: Result<serde_json::Value, String> = match &report {
+    let recorded: Result<serde_json::Value, String> = match &r {
         Ok(r) => serde_json::to_value(r).map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
     };
     if let Err(e) = super::store::record_sync_outcome(
         &state.auth_db,
-        &body.dataset_id,
-        &body.url,
-        &body.graph_iri,
-        &user.user_id,
+        dataset_id,
+        url,
+        graph_iri,
+        user_id,
         recorded.as_ref().map_err(String::as_str),
     ) {
         tracing::warn!("ldes sync: recording the run's outcome failed: {e}");
     }
-    let report = report.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(report))
+    r
 }
 
 #[derive(Debug, Serialize)]
@@ -1433,16 +1469,9 @@ pub struct SyncJobView {
     pub dataset_name: Option<String>,
 }
 
-/// GET /api/admin/ldes/syncs — every sync job with its latest outcome.
-/// Admin only (the admin router's guard).
-pub async fn admin_list_syncs(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let jobs = super::store::sync_jobs(&state.auth_db)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let views: Vec<SyncJobView> = jobs
-        .into_iter()
-        .map(|job| SyncJobView {
+impl SyncJobView {
+    pub fn of(state: &AppState, job: super::store::SyncJob) -> Self {
+        SyncJobView {
             dataset_name: state
                 .auth_db
                 .get_dataset(&job.dataset_id)
@@ -1450,13 +1479,27 @@ pub async fn admin_list_syncs(
                 .flatten()
                 .map(|d| d.name),
             job,
-        })
+        }
+    }
+}
+
+/// GET /api/admin/ldes/syncs — every sync job with its latest outcome and
+/// its schedule. Admin only (the admin router's guard).
+pub async fn admin_list_syncs(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let jobs = super::store::sync_jobs(&state.auth_db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let views: Vec<SyncJobView> = jobs
+        .into_iter()
+        .map(|job| SyncJobView::of(&state, job))
         .collect();
     Ok(Json(views))
 }
 
+/// The sync job a request names.
 #[derive(Debug, Deserialize)]
-pub struct ForgetQuery {
+pub struct JobQuery {
     pub dataset_id: String,
     pub url: String,
 }
@@ -1466,7 +1509,7 @@ pub struct ForgetQuery {
 /// reads the whole stream again.
 pub async fn admin_forget_sync(
     State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<ForgetQuery>,
+    axum::extract::Query(q): axum::extract::Query<JobQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let removed = super::store::forget_sync(&state.auth_db, &q.dataset_id, &q.url)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

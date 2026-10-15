@@ -211,20 +211,21 @@ curl -X POST http://localhost:7878/api/ldes/sync \
 
 Admins manage these sync jobs in **Admin → Event stream sync**: every
 `(dataset, url)` sync with its target graph, bookmark, members applied, the
-last run's time and status, its error when it failed, and its last report; a
-form adds a stream (and runs it), and each job can be run again or forgotten.
-`GET /api/admin/ldes/syncs` lists the jobs (`last_status` `ok` or `error`,
-`last_error`, `last_report`); a failed run is recorded too and keeps the
-previous bookmark, so the next run resumes from it. `DELETE
-/api/admin/ldes/syncs?dataset_id=…&url=…` forgets a job and its client state;
-the mirrored graph stays, and the next sync from that source reads the whole
-stream again.
+last run's time and status, its error when it failed, its last report, and
+its schedule with the next run; a form adds a stream (and runs it), and each
+job can be run again, scheduled or forgotten. `GET /api/admin/ldes/syncs`
+lists the jobs (`last_status` `ok` or `error`, `last_error`, `last_report`,
+and the schedule fields of [Scheduled sync](#scheduled-sync)); a failed run is
+recorded too and keeps the previous bookmark, so the next run resumes from it.
+`DELETE /api/admin/ldes/syncs?dataset_id=…&url=…` forgets a job and its client
+state; the mirrored graph stays, and the next sync from that source reads the
+whole stream again.
 
 The `url` may be the event stream, its root node, a redirect to either, or a
 page with exactly one `tree:view` (LDES 1.0 §3.1); the report names the
-`stream` and `root_node` it found and the stream's `polling_interval` — how
-long to wait before the next run, since nothing here schedules one
-([#530](https://github.com/philipperenzen/open-triplestore/issues/530)). The client
+`stream` and `root_node` it found and the stream's `polling_interval` — the
+`ldes:pollingInterval` it declares, which an `auto` schedule waits between
+runs ([Scheduled sync](#scheduled-sync)). The client
 reads the stream's context from the root node, follows each page's
 `tree:relation`s, and extracts every member: its triples in the default graph,
 every quad in the graph named after it, and the blank nodes they reach
@@ -295,6 +296,64 @@ that list covers too (§3.3: "A client MUST follow redirects"; the URL after
 the redirects is the page's base IRI), and each fetch has the usual timeout and
 body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 
+### Scheduled sync
+
+A sync job runs on its own once it has a schedule. Every job starts `off`,
+existing ones included: it runs when someone runs it. Set the schedule in
+**Admin → Event stream sync**, or:
+
+```bash
+curl -X PUT 'http://localhost:7878/api/admin/ldes/syncs/schedule?dataset_id=roads-mirror&url=https%3A%2F%2Fother.example.org%2Fapi%2Fdatasets%2Froads%2Fldes' \
+  -H "Authorization: Bearer <admin token>" -H 'Content-Type: application/json' \
+  -d '{"schedule": "auto"}'
+```
+
+- `auto` waits the stream's `ldes:pollingInterval` between runs. The LDES
+  vocabulary defines it as "the number of seconds the client should keep
+  between synchronization run calls", and LDES 1.0 §3.1 says a client "SHOULD
+  check whether an ldes:pollingInterval was set". The interval used is the one
+  the stream declared at the job's last successful run; a stream that
+  declares none is read every 60 seconds.
+- `interval`, with `interval_secs`, waits a fixed number of seconds: at least
+  60, at most a year.
+- No schedule runs a job more often than once a minute, whatever the stream
+  declares.
+
+The next run is due an interval after the last one, whoever started it, so
+"run now" moves it too; the list shows it as `next_run_at` (**Next run** on
+the page). A failed scheduled run is recorded like any other (`last_status`
+`error`, `last_error`, the bookmark kept) and doubles the wait before the
+next: twice the interval after one failure, four times after two, at most six
+hours (or the interval, when that is longer). `consecutive_failures` counts
+them, and the first success resets it.
+
+A scheduled run acts as the job's owner — the user who first ran it,
+`created_by` — with their federated identity, as their own request would.
+Their authority is checked at every run, the way `POST /api/ldes/sync` checks
+a caller's: the account still exists and is active, may still write the
+dataset, and the target graph still passes the dataset's graph gate. When it
+does not, nothing runs and the job is paused: `paused_at` is set,
+`next_run_at` is cleared and `last_error` says why ("schedule paused: its
+owner … may no longer write dataset …"). Setting the schedule again, to
+anything, resumes the job and forgets its failures. To hand a job over to
+another account, forget it and add it again as that account; its first run
+reads the whole stream again.
+
+At most `OTS_LDES_SYNC_CONCURRENCY` scheduled runs go at once (default 2), on
+the server's blocking pool; a due job waits for a free one. Two runs of one
+job never overlap: "run now" waits for a scheduled run of the same job, and
+the scheduler skips a job that is running. The server looks for due jobs
+every 10 seconds. A scheduled run's commit in the dataset's history reads
+"Scheduled LDES sync from …".
+
+Only the node that writes runs scheduled jobs. A replication follower holds a
+copy of every job, because the identity database is shipped to it, but its
+store is read-only, so it runs none; in a Raft cluster only the member that
+leads at the time runs them, and a newly elected leader carries on from each
+job's `next_run_at`. `OTS_OFFLINE` does not stop scheduled runs: it is about
+downloads at startup, and what a sync may read is decided by
+`OTS_LDES_ALLOWLIST`, at every run.
+
 ## What is and is not implemented
 
 - Fragmentation: time-ordered, fixed-size pages under one root node with
@@ -321,11 +380,12 @@ body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
   `xsd:dateTime` values that keeps the members at its own timestamp;
   immutable pages fetched once, ETags kept, nodes pruned by relation bounds;
   `410 Gone` as an empty page; the retention policy, legacy classes included,
-  kept as context. The run's end is its finalisation: entities are written
-  when every page has been read. Not implemented, and not required: an ordered
-  mode (a priority queue over relation values), transactions
-  (`ldes:transactionPath`), scheduled polling (the report gives
-  `polling_interval` to whoever schedules runs), and source selection.
+  kept as context; scheduled runs that wait the stream's
+  `ldes:pollingInterval` (or a fixed interval), never less than a minute. The
+  run's end is its finalisation: entities are written when every page has
+  been read. Not implemented, and not required: an ordered mode (a priority
+  queue over relation values), transactions (`ldes:transactionPath`), and
+  source selection.
 
 The spec rules the implementation is held to are in
 `tests/ldes_conformance.rs`, one assertion per clause of the LDES
