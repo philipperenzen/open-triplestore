@@ -1553,15 +1553,18 @@ impl TripleStore {
         // relations. The cache stays keyed by the text the caller sent.
         let rewritten = self.geo_rewrite_query_text(sparql);
         let eval = rewritten.as_deref().unwrap_or(sparql);
-        // The shape bits, once per uncached evaluation: the classifier parses
-        // (the mirror reuses its verdict rather than parsing again), and the
-        // bits are stamped on the cache entry so a hit inherits them.
-        let class = parallel::classify(eval);
+        // The shape bits, once per uncached evaluation: the classifier reads
+        // the syntax tree (the mirror reuses its verdict rather than parsing
+        // again), and the bits are stamped on the cache entry so a hit
+        // inherits them. The tree is kept for the engine at the end of the
+        // pipeline, which used to parse the text a second time.
+        let parsed = crate::sparql::parser().parse_query(eval).ok();
+        let class = parsed.as_ref().and_then(parallel::classify_query);
         let shape = QueryShape {
             analytical: class == Some(ParClass::Aggregate),
             aggregate_text: QueryShape::mentions_aggregate(eval),
         };
-        let (results, served) = self.query_uncached(eval, class, cancel)?;
+        let (results, served) = self.query_uncached(eval, class, parsed, cancel)?;
         let results = self.query_cache.put(sparql, gen, results, shape);
         self.telemetry
             .record_query(served, t0.map(|t| t.elapsed()), shape);
@@ -1570,11 +1573,13 @@ impl TripleStore {
 
     /// The evaluation pipeline behind [`Self::query`], without the result cache,
     /// naming the exit that answered. `class` is the parallel classifier's
-    /// verdict, computed by the caller.
+    /// verdict and `parsed` the syntax tree it read (`None` when the text
+    /// does not parse), both computed by the caller.
     fn query_uncached(
         &self,
         sparql: &str,
         class: Option<ParClass>,
+        parsed: Option<SpargebraQuery>,
         cancel: Option<&oxigraph::sparql::CancellationToken>,
     ) -> Result<(QueryResults<'static>, Served), StoreError> {
         let options = || match cancel {
@@ -1634,10 +1639,14 @@ impl TripleStore {
         {
             return Ok((full, Served::FullCopy));
         }
-        let results = options()
-            .parse_query(sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // The shared parser reads a query exactly as the evaluator's own does
+        // (`crate::sparql::parser`); a text it refused is parsed again here
+        // only to report the error the way the evaluator words it.
+        let prepared = match parsed {
+            Some(query) => options().for_query(query),
+            None => options().parse_query(sparql)?,
+        };
+        let results = prepared.on_store(&self.store).execute()?;
         Ok((results, Served::Engine))
     }
 

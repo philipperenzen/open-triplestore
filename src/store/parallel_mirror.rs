@@ -738,7 +738,9 @@ impl ParallelMirror {
     where
         F: FnOnce() -> SparqlEvaluator,
     {
-        if !self.inner.enabled {
+        // Off for this state of the store (over the cap): decline before the
+        // parse below, which every query on such a store paid for nothing.
+        if !self.inner.enabled || self.is_off() {
             return None;
         }
         // Fidelity: `SUM`/`AVG` over `xsd:double`/`float` is IEEE-754 non-associative,
