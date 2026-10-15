@@ -120,6 +120,7 @@ A local, privacy-respecting feature records lightweight per-user usage events
 - **A user only ever sees their own footprint.** The per-user read path is scoped
   to the requesting user.
 - **Cross-user aggregates are restricted to `super_admin`.**
+- Purging a user account deletes that user's events.
 - This data **never leaves your instance**; it is not sent to the maintainers or
   any third party.
 
@@ -162,8 +163,7 @@ can read the same counts and the top 10 users.
 - **Question preview:** on by default. Set `OTS_LLM_LOG_PREVIEW_ENABLED=false`
   to stop storing it; rows written before the change keep theirs until they
   expire.
-- Purging a user account does not remove its rows; they expire with the
-  retention period.
+- Purging a user account deletes that user's rows.
 - This log **never leaves your instance**. The question itself does go to the
   LLM endpoint you configured (§5).
 

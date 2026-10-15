@@ -62,11 +62,12 @@ graphs); account/identity data lives in a local metadata database.
 - **User accounts:** an admin can **deactivate** an account and **revoke its
   tokens**, then **permanently purge** a deactivated user
   (`admin_delete_user` → `purge`); a user can **self-deactivate** their own
-  account (`DELETE /api/auth/account`). A purge deletes the user's saved chat
-  conversations and feedback reports with the account, but **not** their rows
-  in the LLM request log (user ID, IP address, question preview): those expire
-  after `OTS_LLM_LOG_RETENTION_DAYS` (default 90). Plan for erasure in
-  **backups** too (re-export or age them out per your retention policy).
+  account (`DELETE /api/auth/account`) or, with their password, purge it
+  (`POST /api/auth/account/purge`). A purge deletes the user's saved chat
+  conversations, feedback reports, LLM request-log rows (user ID, IP address,
+  question preview) and usage events with the account; the append-only audit
+  log keeps its entries by design. Plan for erasure in **backups** too
+  (re-export or age them out per your retention policy).
 
 ### Art. 18 — Right to restriction of processing
 

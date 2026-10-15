@@ -70,10 +70,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   documents that log: it keeps the caller's user ID and IP address and the
   first 200 characters of each question, for 90 days by default
   (`OTS_LLM_LOG_RETENTION_DAYS`; `OTS_LLM_LOG_PREVIEW_ENABLED=false` stops the
-  preview), and a user purge does not remove it. The new §4.8 documents saved
-  assistant conversations and feedback reports; the §7 retention list and
-  `docs/gdpr.md` name all three. Operators who published a notice from the
-  earlier template should update theirs.
+  preview). The new §4.8 documents saved assistant conversations and feedback
+  reports; the §7 retention list and `docs/gdpr.md` name all three. Operators
+  who published a notice from the earlier template should update theirs.
+- **Purging a user erases their LLM request-log rows and usage events.** Both
+  tables carry the user ID without a foreign key, so an admin purge, a
+  self-service purge (`POST /api/auth/account/purge`) and an admin delete left
+  the user's IP addresses and question previews in the LLM request log until
+  retention removed them (90 days by default), and their dataset usage events
+  for good. The purge now deletes both in the same transaction as the account.
+  Rows left behind by earlier purges stay until retention removes the log
+  rows; usage events of deleted users can be removed with
+  `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
 
 ## [0.8.0] — 2026-10-14
 

@@ -3064,12 +3064,25 @@ impl AuthDb {
     }
 
     pub fn delete_user(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
         // assets.uploaded_by has no CASCADE — clear it before deleting the user
         // to avoid a FK constraint violation. Asset metadata is lost; S3 objects
         // become orphaned (acceptable for a permanent purge operation).
-        conn.execute("DELETE FROM assets WHERE uploaded_by = ?1", params![id])?;
-        conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM assets WHERE uploaded_by = ?1", params![id])?;
+        // The LLM request log (IP address, question preview) and the usage
+        // events carry the user id without a foreign key, so nothing cascades
+        // to them: erase them with the account. The audit log stays.
+        tx.execute(
+            "DELETE FROM llm_request_log WHERE user_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM dataset_usage_events WHERE user_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -7070,6 +7083,52 @@ fn saml_config_json(p: &OauthProviderCreate) -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A purge erases the user's LLM request-log rows (IP address, question
+    /// preview) and usage events, which have no foreign key to cascade from;
+    /// other users' rows stay.
+    #[test]
+    fn a_purge_erases_the_users_llm_log_and_usage_events() {
+        use crate::server::llm_guard::{record, LlmLogEntry};
+        let db = AuthDb::in_memory().unwrap();
+        for (id, name) in [("u1", "alice"), ("u2", "bob")] {
+            db.create_user(
+                id,
+                name,
+                &format!("{name}@example.com"),
+                "hash",
+                SystemRole::User,
+            )
+            .unwrap();
+            let mut entry = LlmLogEntry::new("chat");
+            entry.user_id = Some(id.to_string());
+            entry.ip = Some("192.0.2.7".to_string());
+            entry.question_preview = Some(format!("a question from {name}"));
+            record(&db.pool(), entry);
+            db.record_dataset_usage("ds1", Some(id), "view").unwrap();
+        }
+        let rows = |table: &str, user: &str| -> i64 {
+            db.pool()
+                .get()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?1"),
+                    params![user],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(rows("llm_request_log", "u1"), 1);
+        assert_eq!(rows("dataset_usage_events", "u1"), 1);
+
+        db.delete_user("u1").unwrap();
+
+        assert_eq!(rows("llm_request_log", "u1"), 0);
+        assert_eq!(rows("dataset_usage_events", "u1"), 0);
+        assert_eq!(rows("llm_request_log", "u2"), 1);
+        assert_eq!(rows("dataset_usage_events", "u2"), 1);
+        assert!(db.get_user_by_id("u1").unwrap().is_none());
+    }
 
     /// The last-used stamp is written at most once a minute per token: a
     /// client that authenticates twice a second — a replication follower —
