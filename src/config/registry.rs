@@ -254,8 +254,8 @@ fn parallel_shards(_: &Ctx) -> Option<String> {
     Some(crate::store::parallel_mirror::default_shards().to_string())
 }
 
-fn shacl_index_max_quads(_: &Ctx) -> Option<String> {
-    Some(crate::shacl::view::default_index_max_quads().to_string())
+fn shacl_run_memory_bytes(_: &Ctx) -> Option<String> {
+    Some(crate::shacl::budget::default_run_memory_bytes().to_string())
 }
 
 fn repair_max_quads(_: &Ctx) -> Option<String> {
@@ -656,9 +656,11 @@ settings! {
     SHACL_RUN_INDEX_MIN_PROBES: usize = Spec::new("OTS_SHACL_RUN_INDEX_MIN_PROBES", at_least(0), "shacl")
         .default("20000")
         .doc("Probes before a validation run builds its own index.");
-    SHACL_RUN_INDEX_MAX_QUADS: usize = Spec::new("OTS_SHACL_RUN_INDEX_MAX_QUADS", at_least(1), "shacl")
-        .derived("from the memory limit", shacl_index_max_quads)
-        .doc("Largest data a validation run indexes.");
+    SHACL_RUN_MEMORY_BYTES: u64 = Spec::new("OTS_SHACL_RUN_MEMORY_BYTES", Kind::Bytes { min: 1 }, "shacl")
+        .derived("a quarter of the memory limit", shacl_run_memory_bytes)
+        .doc("Memory validation runs may hold at once for their class sets, indexes, path-closure memos and results.");
+    SHACL_RUN_INDEX_MAX_QUADS: Option<usize> = Spec::new("OTS_SHACL_RUN_INDEX_MAX_QUADS", at_least(1), "shacl")
+        .doc("Quads a validation run's index may hold; unset, the index is sized by OTS_SHACL_RUN_MEMORY_BYTES.");
     SPARQL_FUNCTION_GRAPHS: Vec<String> = Spec::new("OTS_SPARQL_FUNCTION_GRAPHS", Kind::Custom { what: "graph list", check: function_graphs }, "shacl")
         .doc("Graphs whose sh:SPARQLFunction definitions become callable functions.");
 

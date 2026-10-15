@@ -41,10 +41,16 @@ COPY tests/ tests/
 # Build and keep only the binary. target/ lives in a BuildKit cache, so a build of the next commit recompiles
 # only what changed (the dependencies took about two hours on the laptop of the
 # comparison); it is not part of any image layer.
+# The cache is shared by every checkout built on the machine, and cargo
+# decides what changed by file modification times, which COPY keeps: a commit
+# whose sources are older than the last build of another checkout was taken
+# as up to date and got that checkout's binary. Touching the workspace's own
+# sources makes cargo rebuild them (and only them) every time.
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     --mount=type=cache,id=ots-bench-target,sharing=locked,target=/app/target \
-    cargo build --release --features full \
+    find src opengraph plugins tools vendor benches examples tests -name '*.rs' -exec touch {} + \
+    && cargo build --release --features full \
     && cp target/release/open-triplestore /usr/local/bin/open-triplestore
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251

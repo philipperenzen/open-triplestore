@@ -62,6 +62,32 @@ the 1-minute load average is under `--max-load` (default 6) and at least
 `--max-wait`; other scales run anyway and are flagged `not_quiet` in their
 `meta.json`. Smoke test with `--max-wait 0 --seconds 5 --feature-runs 1`.
 
+Each phase records its peak `docker stats` reading (usage minus inactive file
+cache) and, from the container's cgroup `memory.stat` sampled twice a second,
+its peak anonymous memory (`peak_anon_bytes`: the processes' own memory) and
+file cache (`peak_file_bytes`, `peak_active_file_bytes`), so a peak can be told
+apart from page cache the kernel would reclaim. The samples behind them are in
+`memstat.jsonl` next to `meta.json`. A store image without `sh` records none.
+
+### The repeated-load check
+
+`--repeat N` runs every (store, scale) N times, each from an empty store, into
+`<out>/<store>/<scale>/attempt-<i>/`, and `--max-mem-fraction` fails the run
+(exit status 1) when a phase in `--check-phases` (default `load,shacl`) peaks
+above that fraction of the container's memory limit, by the `docker stats`
+measure or by anonymous memory, or when the SHACL answers differ between
+attempts (result count and a digest of the results' content). The verdict and
+every attempt's peaks are in `<out>/repeat-check.json`:
+
+```bash
+python3 scripts/bench-compare/campaign.py --data-root "$W/data" --cache "$W/cache" \
+  --out "$W/results/repeat" --ots-image ots-bench:$(git rev-parse --short HEAD) \
+  --stores ots --scales 10k --workloads shacl --repeat 3 --max-mem-fraction 0.8
+```
+
+BSBM 10k whole-dataset validation in the 4 GiB container is the case it was
+written for (issue #532).
+
 ## Fairness rules the scripts enforce
 
 - Every store container gets the same `mem_limit`/`memswap_limit` (4 GiB) and

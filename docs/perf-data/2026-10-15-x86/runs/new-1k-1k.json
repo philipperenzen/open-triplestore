@@ -1,0 +1,182 @@
+{
+ "store": "ots",
+ "scale": "1k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 8.839,
+   "peak_mem_bytes": 735051776.0,
+   "load_after": [
+    5.591796875,
+    4.18359375,
+    3.87890625
+   ],
+   "peak_current_bytes": 772055040,
+   "peak_anon_bytes": 763043840,
+   "peak_file_bytes": 170573824,
+   "peak_active_file_bytes": 22970368,
+   "peak_inactive_file_bytes": 147537920,
+   "peak_kernel_bytes": 9625600,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 768045056,
+   "cgroup_samples": 16,
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "shacl": {
+   "seconds": 2.888,
+   "peak_mem_bytes": 1005898956.8,
+   "load_after": [
+    3.10107421875,
+    3.76953125,
+    3.7578125
+   ],
+   "peak_current_bytes": 1157652480,
+   "peak_anon_bytes": 971624448,
+   "peak_file_bytes": 174809088,
+   "peak_active_file_bytes": 22970368,
+   "peak_inactive_file_bytes": 151838720,
+   "peak_kernel_bytes": 10469376,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 1005813760,
+   "cgroup_samples": 5
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/s2/new-1k/ots/1k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/s2/new-1k/ots/1k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   4.90625,
+   3.986328125,
+   3.81103515625
+  ],
+  "waited_s": 0,
+  "free_gib": 890.1,
+  "swap": ""
+ },
+ "started": "2026-10-15T22:45:51+0200",
+ "limit_bytes": 4294967296,
+ "db_bytes_after_load": 184422400,
+ "image": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6 ots-bench:532-2342e3f9",
+ "finished": "2026-10-15T22:47:06+0200",
+ "load_after": [
+  3.10107421875,
+  3.76953125,
+  3.7578125
+ ],
+ "shacl_records": [
+  {
+   "phase": "warmup",
+   "status": 200,
+   "seconds": 0.15553413799989357,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 129,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.13742161200025294,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 116,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.12894588299968746,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 113,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.13364426899988757,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 113,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.1540381710001384,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 139,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.14593873500052723,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 131,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  }
+ ],
+ "server_shacl_lines": [
+  "2026-10-15T20:45:57.345049Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 0 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 0 MiB (0); process anon MiB after start 666, class sets 667, targets 667, index 667, results 667",
+  "2026-10-15T20:47:04.560641Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 863, class sets 865, targets 865, index 865, results 892",
+  "2026-10-15T20:47:04.869229Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 892, class sets 893, targets 893, index 893, results 907",
+  "2026-10-15T20:47:05.163189Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 910, class sets 910, targets 910, index 910, results 916",
+  "2026-10-15T20:47:05.446812Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 916, class sets 916, targets 916, index 916, results 918",
+  "2026-10-15T20:47:05.752882Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 918, class sets 918, targets 918, index 918, results 924",
+  "2026-10-15T20:47:06.056853Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 10 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 18 MiB (5245); process anon MiB after start 924, class sets 924, targets 924, index 924, results 924"
+ ]
+}

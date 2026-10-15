@@ -1004,6 +1004,49 @@ termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is
 ~0.15 Mt/s here (disk-bound; the in-memory bulk loader is ~0.5–0.9 Mt/s at the
 smaller tiers).
 
+#### SHACL run memory budget: BSBM 10k in 4 GiB (2026-10-15, x86)
+
+Issue [#532](https://github.com/philipperenzen/open-triplestore/issues/532):
+whole-dataset validation of BSBM 10k (3.56 M triples, 51,690 results) in the
+4 GiB container of the store comparison peaked near the limit. Measured on the
+reference system above (Docker Desktop on WSL 2), with the comparison harness
+(`scripts/bench-compare`, `--stores ots --workloads shacl`), before
+(`462b206c`, 0.8.0) and after (`2342e3f9`) back to back in one quiet window.
+Data, per-run files and the method: [`perf-data/2026-10-15-x86/`](perf-data/2026-10-15-x86/before-after.md).
+
+**What the peak was.** Anonymous memory, not page cache: before the change a
+10k run peaked at 3,279–3,573 MiB anonymous (3,734–4,080 MiB by `docker stats`)
+with 500–650 MiB of active file cache. Of the anonymous memory, the server
+held 1.3 GiB before the run; the class sets and focus lists added about
+290 MiB, the run index about 1.1 GiB (1.79 M quads at about 600 bytes each,
+twice what its quad cap assumed), the results about 30 MiB over what the
+index scans had freed, converting the report to a JSON value tree about
+170 MiB more; and the allocator kept what each run freed, so six runs in a row
+climbed from 2.8 to 3.6 GiB.
+
+**What changed.** One memory budget, `OTS_SHACL_RUN_MEMORY_BYTES` (a quarter
+of the limit: 1 GiB here), that the class sets, the run index (three quarters
+at most), the closure memo and the results count against; a node with one
+neighbour kept inline in the index; the freed memory handed back to the system
+after a large run; the JSON response streamed
+([shacl.md](shacl.md#what-a-run-holds-in-memory)).
+
+| BSBM, 4 GiB, 4 CPUs | Before | After |
+| --- | --: | --: |
+| 10k SHACL peak, `docker stats` (MiB), two paired runs | 4,080 / 3,734 | 2,931 / 2,881 |
+| 10k SHACL peak, anonymous (MiB) | 3,573 / 3,279 | 2,399 / 2,350 |
+| 10k validation, median of the 10 measured runs (s) | 7.60 | 6.98 |
+| 10k run index | 1.79 M quads, 2–3 pairs from the store | 1.40–1.59 M quads in ~590–660 MiB, 3–4 pairs from the store |
+| 1k SHACL peak, `docker stats` / anonymous (MiB) | 1,082 / 1,047 | 959 / 927 |
+| 1k validation, median of 5 (s) | 0.158 | 0.137 |
+| Results (count, content digest) | 51,690 and 5,245 | the same, same digests |
+| Repeated-load check, 10k, 80 % of 4 GiB | fails (4,021 MiB) | passes 3 of 3 (2,914–3,079 MiB) |
+
+The 1k store fits the query accelerator, so a 1k run reads its RAM copy and
+builds no index; only the results and the streamed response differ there.
+The 9M configuration B above (`docker run -m 4g`, run index capped at
+`memory/8/300`) now sizes its index by the same budget; it was not re-measured.
+
 ---
 
 ## Comparison with Apache Jena Fuseki and QLever

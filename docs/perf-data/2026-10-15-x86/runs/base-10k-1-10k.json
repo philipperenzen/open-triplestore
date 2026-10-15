@@ -1,0 +1,181 @@
+{
+ "store": "ots",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 71.28,
+   "peak_mem_bytes": 1824287358.976,
+   "load_after": [
+    6.7685546875,
+    4.158203125,
+    3.78271484375
+   ],
+   "peak_current_bytes": 3379990528,
+   "peak_anon_bytes": 1673957376,
+   "peak_file_bytes": 1876045824,
+   "peak_active_file_bytes": 162627584,
+   "peak_inactive_file_bytes": 1713750016,
+   "peak_kernel_bytes": 61153280,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 1890721792,
+   "cgroup_samples": 140,
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "shacl": {
+   "seconds": 59.425,
+   "peak_mem_bytes": 4277787426.816,
+   "load_after": [
+    3.27587890625,
+    3.728515625,
+    3.67333984375
+   ],
+   "peak_current_bytes": 4294963200,
+   "peak_anon_bytes": 3746742272,
+   "peak_file_bytes": 1789607936,
+   "peak_active_file_bytes": 548331520,
+   "peak_inactive_file_bytes": 1776472064,
+   "peak_kernel_bytes": 60465152,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 4271489024,
+   "cgroup_samples": 117
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/s2/base-10k-1/ots/10k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/s2/base-10k-1/ots/10k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   2.14990234375,
+   2.8779296875,
+   3.37109375
+  ],
+  "waited_s": 0,
+  "free_gib": 890.1,
+  "swap": ""
+ },
+ "started": "2026-10-15T22:31:15+0200",
+ "limit_bytes": 4294967296,
+ "db_bytes_after_load": 1806110720,
+ "image": "sha256:b612f7b3164ddc61aebce37ae308f2f6fd43b9df50227774ce8241530c8a2a31 ots-bench:462b206c",
+ "finished": "2026-10-15T22:34:30+0200",
+ "load_after": [
+  3.27587890625,
+  3.728515625,
+  3.67333984375
+ ],
+ "shacl_records": [
+  {
+   "phase": "warmup",
+   "status": 200,
+   "seconds": 10.040499200999875,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 9527,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 8.143009285000517,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 7560,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 7.395584576000147,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 6948,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 7.062665788999766,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 6626,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 8.097243004999655,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 7381,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 7.843836505000581,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83418257,
+   "metrics": {
+    "duration_ms": 7346,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  }
+ ],
+ "server_shacl_lines": [
+  "2026-10-15T20:33:36.157449Z  INFO open_triplestore::shacl::view: SHACL run index: 1791365 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:33:47.487217Z  INFO open_triplestore::shacl::view: SHACL run index: 1792069 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:33:57.051015Z  INFO open_triplestore::shacl::view: SHACL run index: 1791365 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/offerWebpage, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price",
+  "2026-10-15T20:34:05.876495Z  INFO open_triplestore::shacl::view: SHACL run index: 1791365 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:34:14.485899Z  INFO open_triplestore::shacl::view: SHACL run index: 1792159 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/rating1, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:34:24.466959Z  INFO open_triplestore::shacl::view: SHACL run index: 1791365 quads held; over the 1789569-quad budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/offerWebpage, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price"
+ ]
+}

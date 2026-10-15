@@ -214,6 +214,43 @@ integer types back as `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime` and
 valid data and a `"1"` flag acted as `true`. Data stored then still reads that
 way; reload it (`PUT`) to have it checked as written.
 
+### What a run holds in memory
+
+Besides the data it reads, a whole-dataset run holds four things that grow
+with the data, and all four count against one memory budget,
+`OTS_SHACL_RUN_MEMORY_BYTES`: by default a quarter of the memory limit (the
+container's cgroup limit), 1 GiB where none can be detected, never below
+64 MiB or above 8 GiB. Runs that overlap share it rather than each taking a
+full share.
+
+| What | Without room in the budget |
+|---|---|
+| **The class sets and focus lists.** The `rdfs:subClassOf*` closure of every class a shape names, the instances of every target class, the focus nodes of every shape. | Never dropped (the targets are read from them). They are counted first, so the index gets what they leave. |
+| **The run index.** On the RocksDB snapshot (the accelerator off), a run large enough to pay for it scans each (data graph, predicate) its shapes traverse once into an in-memory adjacency, so a value lookup is a hash probe instead of an index seek. It may fill the budget to three quarters, leaving the rest to the results. | A pair that does not fit is dropped as soon as its scan crosses the budget, what it held is given back, and its lookups go to the store: the same answer, slower. |
+| **The closure memo.** The reach sets of `sh:zeroOrMorePath` and `sh:oneOrMorePath` the run computed, so focus nodes on one chain share one walk. | Closures are still computed, not kept. |
+| **The results.** | Never dropped. They are counted against the budget, so the closure memo of the same run and the index of an overlapping one make room for them. |
+
+The sizes are estimates from the strings each structure keeps (a long literal
+counts in full), checked against the process's anonymous memory on BSBM 10k
+([performance.md](performance.md#shacl-run-memory-budget-bsbm-10k-in-4-gib-2026-10-15-x86)).
+`OTS_SHACL_RUN_INDEX_MAX_QUADS`, when set, sizes the index in quads instead, as
+before 0.8.1; its bytes still count against the budget. A run that held more
+than 64 MiB hands the memory it freed back to the system when it ends (glibc
+keeps freed memory in its arenas otherwise, and each whole-dataset run started
+from the high-water mark of the one before).
+
+A run that did without something logs one line at `info` (at `debug`
+otherwise):
+
+```text
+SHACL run memory: budget … MiB; class sets and targets … MiB, index … MiB (… quads, … pairs from the store), closure memo … MiB, results … MiB (…); process anon MiB after start …, class sets …, targets …, index …, results …
+```
+
+The JSON answer of `POST /api/datasets/{id}/validate` is written result by
+result as it goes out, the same bytes as before; it is no longer built as a
+value tree and a buffer beside the report, which at 50 000 results held the
+report three times over.
+
 ## On-Demand Validation
 
 ```bash
