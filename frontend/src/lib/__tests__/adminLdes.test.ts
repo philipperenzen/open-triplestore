@@ -1,6 +1,7 @@
 // Admin LDES sync jobs: every job with its last outcome and error, a new
-// stream added (and run at once), "run now" with the job's own graph, and
-// forgetting a job after asking.
+// stream added (and run at once), "run now" with the job's own graph,
+// forgetting a job after asking, and its schedule: the next run, a paused
+// job's reason, and saving a schedule.
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { init, addMessages } from 'svelte-i18n';
@@ -10,6 +11,7 @@ import { user, authInitialized } from '../stores';
 const api = vi.hoisted(() => ({
   adminListLdesSyncs: vi.fn(),
   adminForgetLdesSync: vi.fn(),
+  adminSetLdesSyncSchedule: vi.fn(),
   runLdesSync: vi.fn(),
   listDatasets: vi.fn(),
 }));
@@ -107,6 +109,66 @@ describe('AdminLdes', () => {
     expect(api.adminForgetLdesSync).not.toHaveBeenCalled();
     await fireEvent.click(getAllByRole('button', { name: /Forget/ })[1]);
     await waitFor(() => expect(api.adminForgetLdesSync).toHaveBeenCalledWith('bridges', FAILED.source_url));
+  });
+
+  it('shows each schedule with its next run, and why a job is paused', async () => {
+    const reason = 'schedule paused: its owner ed may no longer write dataset \'bridges\'; set the schedule again to resume it';
+    api.adminListLdesSyncs.mockResolvedValue([
+      { ...OK, schedule: 'auto', interval_secs: null, next_run_at: '2026-10-06T07:02:00Z', consecutive_failures: 0, paused_at: null },
+      { ...FAILED, schedule: 'interval', interval_secs: 900, next_run_at: null, consecutive_failures: 0, paused_at: '2026-10-06T07:03:00Z', last_error: reason },
+    ]);
+    const { findByTestId, getAllByTestId } = render(AdminLdes);
+    const card = await findByTestId('ldes-jobs');
+    await waitFor(() => expect(card.textContent).toContain('Road mirror'));
+    const [auto, paused] = getAllByTestId('ldes-schedule');
+    expect(auto.textContent).toContain('Auto, every 1 min');
+    expect(auto.textContent).toContain('Next:');
+    expect(paused.textContent).toContain('Paused');
+    expect(card.textContent).toContain(reason);
+  });
+
+  it('a job without a schedule says so', async () => {
+    const { findByTestId, getAllByTestId } = render(AdminLdes);
+    await waitFor(async () => expect((await findByTestId('ldes-jobs')).textContent).toContain('Road mirror'));
+    expect(getAllByTestId('ldes-schedule')[0].textContent).toContain('Off');
+  });
+
+  it('saves a schedule, checking the interval first', async () => {
+    api.adminSetLdesSyncSchedule.mockResolvedValue({ ...OK, schedule: 'interval', interval_secs: 900 });
+    const { findByTestId, getAllByRole } = render(AdminLdes);
+    await waitFor(async () => expect((await findByTestId('ldes-jobs')).textContent).toContain('Road mirror'));
+    await fireEvent.click(getAllByRole('button', { name: 'Show details' })[0]);
+    const form = await findByTestId('ldes-schedule-form');
+    await fireEvent.change(form.querySelector('select')!, { target: { value: 'interval' } });
+    const secs = await waitFor(() => {
+      const input = form.querySelector('input[type="number"]') as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      return input!;
+    });
+    await fireEvent.input(secs, { target: { value: '30' } });
+    await fireEvent.submit(form);
+    await waitFor(() => expect(form.textContent).toContain(en.pages.adminLdes.errors.interval));
+    expect(api.adminSetLdesSyncSchedule).not.toHaveBeenCalled();
+
+    await fireEvent.input(secs, { target: { value: '900' } });
+    await fireEvent.submit(form);
+    await waitFor(() => expect(api.adminSetLdesSyncSchedule).toHaveBeenCalledWith(
+      'mirror', OK.source_url, { schedule: 'interval', interval_secs: 900 },
+    ));
+    await waitFor(() => expect(api.adminListLdesSyncs).toHaveBeenCalledTimes(2));
+  });
+
+  it('turns a schedule to auto without an interval', async () => {
+    api.adminSetLdesSyncSchedule.mockResolvedValue({ ...OK, schedule: 'auto' });
+    const { findByTestId, getAllByRole } = render(AdminLdes);
+    await waitFor(async () => expect((await findByTestId('ldes-jobs')).textContent).toContain('Road mirror'));
+    await fireEvent.click(getAllByRole('button', { name: 'Show details' })[0]);
+    const form = await findByTestId('ldes-schedule-form');
+    await fireEvent.change(form.querySelector('select')!, { target: { value: 'auto' } });
+    await fireEvent.click(getAllByRole('button', { name: /Save schedule/ })[0]);
+    await waitFor(() => expect(api.adminSetLdesSyncSchedule).toHaveBeenCalledWith(
+      'mirror', OK.source_url, { schedule: 'auto' },
+    ));
   });
 
   it('sends a non-admin away', async () => {

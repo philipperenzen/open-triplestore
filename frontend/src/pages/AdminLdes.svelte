@@ -1,14 +1,19 @@
 <script lang="ts">
   // Admin: LDES sync jobs — remote event streams mirrored into dataset
   // graphs. Lists every (dataset, source) sync with its latest outcome, adds
-  // one (which runs it at once), re-runs one, and forgets one (its bookmark
-  // too; the mirrored graph stays). A failed run keeps the previous bookmark,
-  // so "run now" resumes from where the last good run stopped.
+  // one (which runs it at once), re-runs one, schedules one, and forgets one
+  // (its bookmark too; the mirrored graph stays). A failed run keeps the
+  // previous bookmark, so "run now" resumes from where the last good run
+  // stopped. A scheduled job shows its next run, or that it is paused (its
+  // owner may no longer write; last_error says why) until saved again.
   import { t, locale } from 'svelte-i18n';
-  import { Rss, Loader2, RefreshCw, Play, Trash2, Plus, CircleAlert, ChevronDown, ChevronRight } from 'lucide-svelte';
+  import { Rss, Loader2, RefreshCw, Play, Trash2, Plus, CircleAlert, ChevronDown, ChevronRight, Clock } from 'lucide-svelte';
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { navigate, Link } from '../lib/router/index.js';
-  import { adminListLdesSyncs, adminForgetLdesSync, runLdesSync, listDatasets, type LdesSyncJob } from '../lib/api';
+  import {
+    adminListLdesSyncs, adminForgetLdesSync, adminSetLdesSyncSchedule, runLdesSync, listDatasets,
+    type LdesSyncJob, type LdesSchedule,
+  } from '../lib/api';
   import { askConfirm } from '../lib/confirm';
   import { toastError, toastSuccess, toastWarn } from '../lib/toast';
   import '../components/exchange/exchange.css';
@@ -18,6 +23,13 @@
   let error = '';
   let running: Record<string, boolean> = {};
   let expanded = new Set<string>();
+
+  // The schedule form of each opened job: what is being edited, whether it
+  // is being saved, and why it was refused.
+  const MIN_INTERVAL = 60;
+  let drafts: Record<string, { schedule: LdesSchedule; interval: number | string }> = {};
+  let saving: Record<string, boolean> = {};
+  let scheduleError: Record<string, string> = {};
 
   let datasets: { id: string; name: string }[] = [];
   let adding = false;
@@ -123,8 +135,59 @@
 
   function toggle(j: LdesSyncJob) {
     const k = key(j);
-    expanded.has(k) ? expanded.delete(k) : expanded.add(k);
+    if (expanded.has(k)) {
+      expanded.delete(k);
+    } else {
+      expanded.add(k);
+      drafts = { ...drafts, [k]: { schedule: j.schedule ?? 'off', interval: j.interval_secs ?? 900 } };
+    }
     expanded = expanded;
+  }
+
+  // 90 → "90 s", 900 → "15 min", 7200 → "2 h".
+  function span(secs: number): string {
+    if (secs % 3600 === 0) return $t('pages.adminLdes.unitHours', { values: { n: secs / 3600 } });
+    if (secs % 60 === 0) return $t('pages.adminLdes.unitMinutes', { values: { n: secs / 60 } });
+    return $t('pages.adminLdes.unitSeconds', { values: { n: secs } });
+  }
+
+  // What the job's schedule does, as the list says it.
+  function scheduleLabel(j: LdesSyncJob): string {
+    if (j.schedule === 'interval' && j.interval_secs) {
+      return $t('pages.adminLdes.every', { values: { interval: span(j.interval_secs) } });
+    }
+    if (j.schedule === 'auto') {
+      const declared = j.last_report?.polling_interval;
+      const secs = Math.max(MIN_INTERVAL, typeof declared === 'number' ? declared : MIN_INTERVAL);
+      return $t('pages.adminLdes.autoEvery', { values: { interval: span(secs) } });
+    }
+    return $t('pages.adminLdes.scheduleOff');
+  }
+
+  async function saveSchedule(j: LdesSyncJob) {
+    const k = key(j);
+    const d = drafts[k];
+    if (!d) return;
+    scheduleError = { ...scheduleError, [k]: '' };
+    const body: { schedule: LdesSchedule; interval_secs?: number } = { schedule: d.schedule };
+    if (d.schedule === 'interval') {
+      const secs = Number(d.interval);
+      if (!Number.isInteger(secs) || secs < MIN_INTERVAL) {
+        scheduleError = { ...scheduleError, [k]: $t('pages.adminLdes.errors.interval') };
+        return;
+      }
+      body.interval_secs = secs;
+    }
+    saving = { ...saving, [k]: true };
+    try {
+      await adminSetLdesSyncSchedule(j.dataset_id, j.source_url, body);
+      toastSuccess($t('pages.adminLdes.scheduleSaved'));
+      await load();
+    } catch (e) {
+      scheduleError = { ...scheduleError, [k]: (e as Error)?.message || String(e) };
+    } finally {
+      saving = { ...saving, [k]: false };
+    }
   }
 </script>
 
@@ -196,6 +259,7 @@
               <th>{$t('pages.adminLdes.target')}</th>
               <th>{$t('pages.adminLdes.status')}</th>
               <th>{$t('pages.adminLdes.lastRun')}</th>
+              <th>{$t('pages.adminLdes.schedule')}</th>
               <th>{$t('pages.adminLdes.applied')}</th>
               <th></th>
             </tr>
@@ -223,6 +287,16 @@
                   {/if}
                 </td>
                 <td>{when(j.last_run_at ?? j.synced_at)}</td>
+                <td data-testid="ldes-schedule">
+                  {#if j.paused_at}
+                    <span class="xc-badge xc-bad">{$t('pages.adminLdes.paused')}</span>
+                  {:else}
+                    {scheduleLabel(j)}
+                    {#if j.next_run_at}
+                      <br /><small class="xc-muted">{$t('pages.adminLdes.nextRun', { values: { when: when(j.next_run_at) } })}</small>
+                    {/if}
+                  {/if}
+                </td>
                 <td>{j.members_applied.toLocaleString()}</td>
                 <td class="row-actions">
                   <button class="btn btn-xs btn-ghost" on:click={() => runNow(j)} disabled={!j.graph_iri || running[key(j)]} title={j.graph_iri ? '' : $t('pages.adminLdes.noGraph')}>
@@ -233,15 +307,19 @@
                 </td>
               </tr>
               {#if j.last_status === 'error' && j.last_error}
-                <tr class="err-row"><td></td><td colspan="6"><span class="xc-error">{j.last_error}</span></td></tr>
+                <tr class="err-row"><td></td><td colspan="7"><span class="xc-error">{j.last_error}</span></td></tr>
               {/if}
               {#if expanded.has(key(j))}
                 <tr>
                   <td></td>
-                  <td colspan="6">
+                  <td colspan="7">
                     <dl class="xc-facts">
                       <div><dt>{$t('pages.adminLdes.bookmark')}</dt><dd>{j.last_timestamp || '—'}</dd></div>
                       <div><dt>{$t('pages.adminLdes.lastSuccess')}</dt><dd>{when(j.synced_at)}</dd></div>
+                      <div><dt>{$t('pages.adminLdes.nextRunLabel')}</dt><dd>{j.paused_at ? $t('pages.adminLdes.paused') : when(j.next_run_at)}</dd></div>
+                      {#if j.consecutive_failures}
+                        <div><dt>{$t('pages.adminLdes.failures')}</dt><dd>{j.consecutive_failures}</dd></div>
+                      {/if}
                       {#if j.last_report}
                         <div><dt>{$t('pages.adminLdes.nodes')}</dt><dd>{j.last_report.nodes_visited ?? 0}</dd></div>
                         <div><dt>{$t('pages.adminLdes.members')}</dt><dd>{j.last_report.members_seen ?? 0}</dd></div>
@@ -251,6 +329,34 @@
                     </dl>
                     {#if j.last_report?.warnings?.length}
                       <ul class="xc-list">{#each j.last_report.warnings as w}<li>{w}</li>{/each}</ul>
+                    {/if}
+                    {#if drafts[key(j)]}
+                      <form class="xc-form sched-form" data-testid="ldes-schedule-form" on:submit|preventDefault={() => saveSchedule(j)}>
+                        <div class="xc-grid">
+                          <label class="xc-field">
+                            <span>{$t('pages.adminLdes.schedule')}</span>
+                            <select bind:value={drafts[key(j)].schedule} disabled={!j.graph_iri || saving[key(j)]}>
+                              <option value="off">{$t('pages.adminLdes.scheduleOff')}</option>
+                              <option value="auto">{$t('pages.adminLdes.scheduleAuto')}</option>
+                              <option value="interval">{$t('pages.adminLdes.scheduleInterval')}</option>
+                            </select>
+                          </label>
+                          {#if drafts[key(j)].schedule === 'interval'}
+                            <label class="xc-field">
+                              <span>{$t('pages.adminLdes.intervalSecs')}</span>
+                              <input type="number" min={MIN_INTERVAL} step="1" bind:value={drafts[key(j)].interval} disabled={saving[key(j)]} />
+                            </label>
+                          {/if}
+                        </div>
+                        <small>{j.graph_iri ? $t('pages.adminLdes.scheduleHint') : $t('pages.adminLdes.noGraph')}</small>
+                        {#if scheduleError[key(j)]}<p class="xc-error" role="alert">{scheduleError[key(j)]}</p>{/if}
+                        <div class="xc-row">
+                          <button type="submit" class="btn btn-xs" disabled={!j.graph_iri || saving[key(j)]}>
+                            {#if saving[key(j)]}<Loader2 size={12} class="animate-spin" />{:else}<Clock size={12} />{/if}
+                            {$t('pages.adminLdes.saveSchedule')}
+                          </button>
+                        </div>
+                      </form>
                     {/if}
                   </td>
                 </tr>
@@ -270,4 +376,5 @@
   .subtitle { margin: 0.25rem 0 0; color: var(--ink-500); font-size: 0.9rem; }
   .row-actions { white-space: nowrap; text-align: right; }
   .err-row td { border-top: 0; padding-top: 0; }
+  .sched-form { margin-top: 0.75rem; }
 </style>
