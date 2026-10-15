@@ -140,6 +140,30 @@ pub(crate) fn validate_graphs(
     data_graphs: &[String],
     focus: Option<&std::collections::HashSet<Term>>,
 ) -> Result<(ValidationReport, &'static str), String> {
+    let (report, source, held) = run_shapes(store, shapes_graph, data_graphs, focus)?;
+    // The run's view is gone, and with it the index and the class sets. A
+    // large run hands what the allocator kept of them back to the system, so
+    // the next run does not start from this one's high-water mark (on BSBM
+    // 10k each run added about 100 MiB of anonymous memory to the last).
+    if held >= super::budget::TRIM_AFTER_BYTES {
+        let t = std::time::Instant::now();
+        super::budget::release_freed_memory();
+        debug!(
+            "SHACL run: freed memory given back in {} ms",
+            t.elapsed().as_millis()
+        );
+    }
+    Ok((report, source))
+}
+
+/// [`validate_graphs`] up to the end of the run's view: the report, the kind
+/// of source the run read, and the bytes its budget held at the end.
+fn run_shapes(
+    store: &TripleStore,
+    shapes_graph: &str,
+    data_graphs: &[String],
+    focus: Option<&std::collections::HashSet<Term>>,
+) -> Result<(ValidationReport, &'static str, usize), String> {
     let started = std::time::Instant::now();
 
     let shapes = load_shapes(store, shapes_graph)?;
@@ -153,7 +177,9 @@ pub(crate) fn validate_graphs(
     // graph declares — never another graph's (see `sparql_functions`).
     let evaluator = store.query_options_for_shapes(shapes_graph)?;
     let mut view = DataView::new(store, data_graphs, evaluator);
+    let anon_start = super::budget::process_anon_bytes();
     view.prepare(&shapes);
+    let anon_classes = super::budget::process_anon_bytes();
 
     // `shapes_slice` is a shared immutable reference passed into parallel closures so
     // that logical constraint operators (sh:not, sh:and, sh:or, sh:xone, sh:node,
@@ -180,9 +206,19 @@ pub(crate) fn validate_graphs(
             })
             .collect::<Result<_, String>>()?
     };
+    // The focus lists are held for the whole run, like the class sets.
+    view.budget().charge(
+        super::budget::Part::Classes,
+        targeted
+            .iter()
+            .map(|(_, nodes)| nodes.iter().map(super::budget::term_bytes).sum::<usize>())
+            .sum(),
+    );
+    let anon_targets = super::budget::process_anon_bytes();
     // Sized by the real focus counts: one scan per (graph, shape predicate)
     // when the run is large enough for hash lookups to beat index seeks.
     view.build_index(shapes_slice, &targeted);
+    let anon_index = super::budget::process_anon_bytes();
     debug!(
         "SHACL data source: {} (run index: {})",
         view.source_kind(),
@@ -258,6 +294,14 @@ pub(crate) fn validate_graphs(
                         }
                     }
 
+                    // Results are never dropped: they are counted against
+                    // the run's budget, which the closure memo then yields.
+                    if !results.is_empty() {
+                        view.budget().charge(
+                            super::budget::Part::Results,
+                            results.iter().map(super::budget::result_bytes).sum(),
+                        );
+                    }
                     results
                 })
                 .collect::<Vec<_>>()
@@ -268,6 +312,17 @@ pub(crate) fn validate_graphs(
     let results_count = all_results.len();
 
     debug!("SHACL validation complete: {} violations", results_count);
+    log_run_memory(
+        view,
+        results_count,
+        [
+            ("start", anon_start),
+            ("class sets", anon_classes),
+            ("targets", anon_targets),
+            ("index", anon_index),
+            ("results", super::budget::process_anon_bytes()),
+        ],
+    );
 
     // `validate` completes the scope and duration and records the run.
     let metrics = RunMetrics {
@@ -287,7 +342,41 @@ pub(crate) fn validate_graphs(
             metrics: Some(metrics),
         },
         view.source_kind(),
+        view.budget().total(),
     ))
+}
+
+/// The run's memory account, one line: the budget, what the index, the
+/// closure memo and the results drew from it, and the process's anonymous
+/// memory after each phase. At info level when the run did without something
+/// (an index pair, a memo entry) or its results took the pool past its size;
+/// at debug level otherwise.
+fn log_run_memory(view: &DataView<'_>, results: usize, anon: [(&str, Option<u64>); 5]) {
+    use super::budget::{mib, Part};
+    let b = view.budget();
+    let stats = view.index_stats();
+    let degraded = !stats.dropped.is_empty() || b.refused(Part::Memo) > 0 || b.over();
+    let phases: Vec<String> = anon
+        .iter()
+        .filter_map(|(name, bytes)| bytes.map(|v| format!("{name} {}", mib(v))))
+        .collect();
+    let line = format!(
+        "SHACL run memory: budget {} MiB; class sets and targets {} MiB, index {} MiB ({} quads, {} pairs from the store), closure memo {} MiB, results {} MiB ({results}){}; process anon MiB after {}",
+        mib(b.capacity() as u64),
+        mib(b.held(Part::Classes) as u64),
+        mib(b.held(Part::Index) as u64),
+        stats.quads,
+        stats.dropped.len(),
+        mib(b.held(Part::Memo) as u64),
+        mib(b.held(Part::Results) as u64),
+        if b.over() { ", over the budget" } else { "" },
+        if phases.is_empty() { "(unknown)".to_string() } else { phases.join(", ") },
+    );
+    if degraded {
+        info!("{line}");
+    } else {
+        debug!("{line}");
+    }
 }
 
 /// Apply a shape-declared `sh:message` to the results of one constraint
@@ -3111,18 +3200,18 @@ mod tests {
         };
         set_index_policy_override(Some(IndexPolicy {
             min_probes: usize::MAX,
-            max_quads: 0,
+            max_quads: None,
         }));
         let without = validate(&store, "urn:shapes", &graphs).unwrap();
         set_index_policy_override(Some(IndexPolicy {
             min_probes: 0,
-            max_quads: usize::MAX,
+            max_quads: None,
         }));
         let with = validate(&store, "urn:shapes", &graphs).unwrap();
         // A budget too small for every pair: some pairs indexed, the rest raw.
         set_index_policy_override(Some(IndexPolicy {
             min_probes: 0,
-            max_quads: 1,
+            max_quads: Some(1),
         }));
         let partial = validate(&store, "urn:shapes", &graphs).unwrap();
         set_index_policy_override(None);
@@ -3261,12 +3350,12 @@ mod tests {
         };
         set_index_policy_override(Some(IndexPolicy {
             min_probes: usize::MAX,
-            max_quads: 0,
+            max_quads: None,
         }));
         let without = validate(&store, "urn:shapes", &graphs).unwrap();
         set_index_policy_override(Some(IndexPolicy {
             min_probes: 0,
-            max_quads: usize::MAX,
+            max_quads: None,
         }));
         let with = validate(&store, "urn:shapes", &graphs).unwrap();
         set_index_policy_override(None);
@@ -3294,5 +3383,183 @@ mod tests {
             "{:?}",
             summary(&without)
         );
+    }
+
+    /// The run index draws on the run's memory budget (issue #532): a pair
+    /// that does not fit is dropped, gives back what its partial scan held
+    /// and is answered from the store, and the report does not change. The
+    /// fixture has four small predicates and one large one; the budget has
+    /// room for the small ones only, so the large one goes, whatever order
+    /// the parallel scans finish in.
+    #[test]
+    fn a_pair_over_the_run_budget_is_dropped_and_the_report_holds() {
+        use super::super::budget::{set_budget_override, Part};
+        use super::super::view::{set_index_policy_override, IndexPolicy};
+        let store = TripleStore::in_memory().unwrap();
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path ex:a ; sh:minCount 1 ] ,
+                            [ sh:path ex:b ; sh:maxCount 1 ] ,
+                            [ sh:path ex:c ; sh:datatype xsd:integer ] ,
+                            [ sh:path [ sh:inversePath ex:d ] ; sh:maxCount 1 ] ,
+                            [ sh:path ex:big ; sh:maxLength 50 ] .
+        "#;
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        let g = "http://example.org/g";
+        let mut data = String::from("@prefix ex: <http://example.org/> .\n");
+        data.push_str("ex:t0 a ex:T ; ex:a 1, 2 ; ex:b 1, 2 ; ex:c \"x\" .\n");
+        data.push_str("ex:t1 a ex:T ; ex:c 3 . ex:x ex:d ex:t1 . ex:y ex:d ex:t1 .\n");
+        for i in 0..400 {
+            let long = "v".repeat(if i % 50 == 0 { 60 } else { 10 });
+            data.push_str(&format!("ex:t{} a ex:T ; ex:big \"{long}{i}\" .\n", i % 3));
+        }
+        store.load_str(&data, RdfFormat::Turtle, Some(g)).unwrap();
+        let graphs = vec![g.to_string()];
+        let shapes = load_shapes(&store, "urn:shapes").unwrap();
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{} | {} | {:?} | {:?}",
+                        x.focus_node, x.source_constraint, x.path, x.value
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        // What the view holds after `build_index` under a budget of `bytes`.
+        let indexed = |bytes: usize, max_quads: Option<usize>| {
+            set_budget_override(Some(bytes));
+            set_index_policy_override(Some(IndexPolicy {
+                min_probes: 0,
+                max_quads,
+            }));
+            let mut view = DataView::new(&store, &graphs, store.query_options());
+            view.prepare(&shapes);
+            let targeted: Vec<(&Shape, Vec<Term>)> = shapes
+                .iter()
+                .map(|s| (s, resolve_targets(&view, s).unwrap()))
+                .collect();
+            view.build_index(&shapes, &targeted);
+            let out = (
+                view.index_stats().quads,
+                view.index_stats().dropped.clone(),
+                view.budget().held(Part::Index),
+            );
+            set_budget_override(None);
+            set_index_policy_override(None);
+            out
+        };
+        let (all_quads, dropped, all_bytes) = indexed(64 << 20, None);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(all_quads, 2 + 2 + 2 + 2 + 400);
+        let (small_quads, dropped, small_bytes) = indexed(40_000, None);
+        assert_eq!(dropped, vec!["http://example.org/big".to_string()]);
+        assert_eq!(small_quads, 8, "the small pairs stay indexed");
+        assert!(
+            small_bytes > 0 && small_bytes <= 30_000,
+            "{small_bytes} of a 30 000 share"
+        );
+        assert!(all_bytes > 40_000, "{all_bytes}");
+        // With no budget at all every pair holding data goes.
+        let (none_quads, dropped, none_bytes) = indexed(0, None);
+        assert_eq!((none_quads, none_bytes), (0, 0));
+        assert_eq!(dropped.len(), 5, "{dropped:?}");
+        // An explicit OTS_SHACL_RUN_INDEX_MAX_QUADS decides the size instead:
+        // everything under it is indexed, and its bytes are still counted.
+        let (cap_quads, dropped, cap_bytes) = indexed(0, Some(1_000_000));
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(cap_quads, all_quads);
+        assert!(cap_bytes > 0);
+
+        // The report is the same whatever the index held, and the results
+        // are never dropped (charged even past a zero budget).
+        let run = |bytes: usize| {
+            set_budget_override(Some(bytes));
+            set_index_policy_override(Some(IndexPolicy {
+                min_probes: 0,
+                max_quads: None,
+            }));
+            let r = validate(&store, "urn:shapes", &graphs).unwrap();
+            set_budget_override(None);
+            set_index_policy_override(None);
+            r
+        };
+        let full = run(64 << 20);
+        assert!(full.results_count >= 4, "{:?}", summary(&full));
+        assert_eq!(summary(&run(40_000)), summary(&full));
+        assert_eq!(summary(&run(0)), summary(&full));
+    }
+
+    /// The closure memo is a cache: with no budget it keeps nothing and a
+    /// run reports the same as with room for every closure.
+    #[test]
+    fn closure_memo_without_budget_changes_nothing() {
+        use super::super::budget::{set_budget_override, Part, RunBudget};
+        use super::super::view::{ClosureMemo, GraphSel};
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path [ sh:oneOrMorePath ex:partOf ] ; sh:class ex:T ] ,
+                            [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:maxCount 3 ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        let g = "http://example.org/g";
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:a a ex:T ; ex:partOf ex:b . ex:b a ex:T ; ex:partOf ex:c .
+                   ex:c a ex:T ; ex:partOf ex:d . ex:d ex:partOf ex:a .
+                   ex:e a ex:T ; ex:partOf ex:a ."#,
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+        let graphs = vec![g.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| format!("{} | {} | {:?}", x.focus_node, x.source_constraint, x.value))
+                .collect();
+            v.sort();
+            v
+        };
+        set_budget_override(Some(0));
+        let starved = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_budget_override(Some(64 << 20));
+        let roomy = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_budget_override(None);
+        assert!(
+            !roomy.conforms,
+            "ex:d is not a T, and every node reaches four"
+        );
+        assert_eq!(summary(&starved), summary(&roomy));
+
+        let memo = ClosureMemo::default();
+        let path = memo
+            .path_id(&PropertyPath::Predicate("http://example.org/p".into()))
+            .unwrap();
+        let start = Term::NamedNode(NamedNode::new_unchecked("http://example.org/s"));
+        let reach: std::sync::Arc<[Term]> = vec![start.clone()].into();
+        let none = RunBudget::private(0);
+        memo.insert(path, GraphSel::All, start.clone(), reach.clone(), &none);
+        assert!(memo.get(path, GraphSel::All, &start).is_none());
+        let some = RunBudget::private(1 << 20);
+        memo.insert(path, GraphSel::All, start.clone(), reach, &some);
+        assert!(memo.get(path, GraphSel::All, &start).is_some());
+        assert!(some.held(Part::Memo) > 0);
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod budget;
 pub mod constraints;
 pub mod engine;
 pub(crate) mod entailment;
