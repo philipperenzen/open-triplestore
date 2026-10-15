@@ -43,10 +43,15 @@ once `OTS_CHECKPOINT_EVERY` (100) deltas chain from the same base, or when
 the changes since the base exceed `OTS_CHECKPOINT_FRACTION` (0.25) of its
 size (and more than 1 000 quads).
 
-**Backups.** A backup holds the store and the identity database, not the
-change log, so an unpublished delta is not in it: after a restore it answers
-`410`. Publish a version, or cut it with `"checkpoint": true`, before a
-backup it must survive.
+**Backups.** A backup holds the change log beside the store and the identity
+database, so an unpublished delta survives one: after a restore it reads as
+it did, built forward from its base. The restored log goes on in a new
+epoch, so nothing from before the restore is built backward from the live
+graphs, restored by inverse, or used as the base of a new delta — a
+dataset's first version cut after a restore is a checkpoint. A backup made
+before 0.8.1 holds no change log; its unpublished deltas answer `410` once
+restored, unless the data directory's own log still holds their rows (see
+[Backups](administration.md#backups)).
 
 **Building a delta.** The first read of a delta's data — `…/versions/:ver/data`,
 a `versions=` pin in browse, a dataset service's `?version=`, a saved query

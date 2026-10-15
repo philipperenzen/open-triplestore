@@ -15,6 +15,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **Unpublished delta versions survive a backup** (#535). A delta version is
+  a base checkpoint plus a range of the change log, and a backup held the RDF
+  dump and the identity database but not the log, so a restored delta
+  answered `410`. A backup now carries `changes.db` too — an online SQLite
+  copy, encrypted like the other files, covered by verify and the S3 copy —
+  and a restore puts it back at `<data-dir>/changes/changes.db`. The dump's
+  snapshot is taken at a known point of the log (`changes_seq` in the
+  manifest) and the log is copied after it; the restore drops the rows past
+  that point and the delta builds, and continues the log in a new epoch, so a
+  restored delta is built forward from its base and never backward from live
+  graphs the log does not describe. Manifests without the new fields still
+  verify and restore. A delta whose range belongs to an epoch the change log
+  never held now answers `410` instead of being built as its base.
+
 ### Security
 
 ## [0.8.0] — 2026-10-14
