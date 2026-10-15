@@ -266,14 +266,14 @@ mod tests {
 
     fn result(i: usize, annotated: bool) -> ValidationResult {
         ValidationResult {
-            severity: if i % 2 == 0 {
+            severity: if i.is_multiple_of(2) {
                 Severity::Violation
             } else {
                 Severity::Warning
             },
             focus_node: format!("http://example.org/n{i}"),
-            path: (i % 3 != 0).then(|| "<http://example.org/p>".to_string()),
-            value: (i % 4 != 0).then(|| format!("välue \"{i}\"\n\u{1F600}")),
+            path: (!i.is_multiple_of(3)).then(|| "<http://example.org/p>".to_string()),
+            value: (!i.is_multiple_of(4)).then(|| format!("välue \"{i}\"\n\u{1F600}")),
             source_shape: "http://example.org/S".to_string(),
             source_constraint: "sh:minCount 1".to_string(),
             source_constraint_component: "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
