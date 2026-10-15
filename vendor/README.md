@@ -152,6 +152,20 @@ non-canonical literal is false. Graph patterns are not affected.
    merged with its shapes graph took 4.4 s in the store comparison (1.7 s before
    change 2 deduplicated). Draft: `oxigraph/UPSTREAM-PR-merged-union-streaming.md`.
 
+15. **A merged default graph leaves out the graphs without the pattern's
+   predicate** (`oxigraph` `DatasetView`). A pattern with a bound predicate over
+   a default graph made of several graphs opened a scan on every graph, and a
+   for-loop join makes one such lookup per row: with a data graph merged with
+   its shapes graph, every lookup opened two RocksDB iterators. `DatasetView`
+   now asks each graph of the merge once per predicate whether it holds a quad
+   with it (one probe of its predicate-first index; at most 1,024 answers kept
+   per evaluation, which reads one snapshot) and, from the second scan with a
+   predicate on, scans only the graphs that do; a predicate looked up once
+   pays no probe. Patterns without a bound predicate are unchanged. Issue
+   #468: BSBM explore Q5 at 10k through a dataset service ran 1.6 times as
+   long as over its data graph alone. Draft:
+   `oxigraph/UPSTREAM-PR-merged-union-predicate-probe.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
