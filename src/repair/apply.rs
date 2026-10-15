@@ -23,7 +23,7 @@
 //! SPARQL update or Graph Store write landing between the check and the
 //! write is not detected.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
@@ -32,7 +32,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use dashmap::DashMap;
-use oxigraph::model::{GraphName, GraphNameRef, NamedNode, Quad};
+use oxigraph::model::{GraphName, Quad};
 use serde::Deserialize;
 
 use super::handlers::{newest_commit, writable_dataset};
@@ -210,28 +210,7 @@ fn check_gates(
         writer: Some(writer),
     };
     for g in graphs {
-        if !gate::import_gates_apply(ctx, g) {
-            continue;
-        }
-        let name = NamedNode::new(g).map_err(gate::gate_error)?;
-        let mut future: HashSet<Quad> = state
-            .store
-            .quads_for_graph(GraphNameRef::NamedNode(name.as_ref()))
-            .map_err(gate::gate_error)?
-            .into_iter()
-            .collect();
-        for (add, q) in rows {
-            if q.graph_name.as_ref() != GraphNameRef::NamedNode(name.as_ref()) {
-                continue;
-            }
-            if *add {
-                future.insert(q.clone());
-            } else {
-                future.remove(q);
-            }
-        }
-        let future: Vec<Quad> = future.into_iter().collect();
-        gate::check_import_gates(ctx, g, &future)?;
+        gate::check_delta_gates(ctx, g, rows.iter().map(|(add, q)| (*add, q)))?;
     }
     Ok(())
 }

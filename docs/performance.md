@@ -828,15 +828,16 @@ more numbers on the same data, and the change log adds a fourth workload:
    target revalidated, because no change log can narrow a change to the
    shapes;
 4. the **write gate's sandbox** for a 1 000-quad Graph Store `POST` into the
-   instance graph, which copies the whole graph into a temporary store before
-   it validates the merge (`seed_existing_graph`).
+   instance graph, which copied the whole graph into a temporary store before
+   it validated the merge (`seed_existing_graph`); since #534 it stages the
+   `POST` and what its nodes read (below).
 
 They are the second test of `tests/scale_shacl_9m.rs`, run with change
 capture on. At its default size, 20 000 assets, it runs in every suite run
 and asserts what matters at any size: the merged incremental report equals a
 full validation result for result, the shape update finds exactly the
-violations it introduced, and the gate refuses a write into a graph that
-does not conform.
+violations it introduced, and the gate refuses the `POST` with what a full
+validation of the merged graph says about the `POST`'s assets.
 
 What the suite run printed on the branch (debug build, 20 000 assets, a
 shared machine under heavy load — an ordering, not a benchmark):
@@ -861,6 +862,30 @@ this test have not been taken; the run is:
 ```bash
 OTS_SCALE_ASSETS=1000000 cargo test --release --features full --test scale_shacl_9m -- --nocapture write_triggered
 ```
+
+**The write gate stages what a write can affect (#534, 2026-10-15).** A
+merge (`POST`) or a delta (RDF Patch, a repair apply) no longer copies the
+graph into the gate's sandbox. The gate works out from the shapes which
+nodes the write can affect — its subjects, the targets it adds or removes,
+and the nodes whose paths, `sh:class`, nested shapes or `sh:closed` reach a
+changed triple — and stages the write's triples plus what those nodes read;
+shapes it cannot bound (SPARQL, SHACL-AF components and expressions,
+recursion, `sh:entailment`) still copy the graph ([shacl.md](shacl.md),
+"What a gate validates"). For the 999-quad `POST` above that is the 111 new
+assets, their 999 triples and the type of each asset they are part of. The
+same test, before and after, on one machine in one sitting (debug build,
+20 000 assets, a shared Docker host — an ordering, not a benchmark):
+
+| 999-quad `POST` into ~180 000 quads | seconds |
+|---|--:|
+| gate, whole graph copied (forced) | 6.62 |
+| gate, what the write can affect | 0.21 |
+| full validation, for comparison | 0.99 |
+
+The staged sandbox grows with the write and with what its nodes read, not
+with the graph, so a 9M graph should not change the `POST`'s cost much; the
+9M run has not been taken. Each graph gets a read budget of as many quads as it
+holds (at least 100 000): past it, the gate copies the graph as before.
 
 **Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
 is now one transaction — `clear_graph` plus every parsed quad inserted on
