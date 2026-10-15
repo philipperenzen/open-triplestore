@@ -365,6 +365,22 @@ Three things can gate a write to a graph: SHACL Studio pipelines with `gate_writ
 
 The write lands only when every gate passes. When several would refuse it, the 422 carries the report of the first in this order, so fixing that one may reveal the next. Each gate is evaluated once per write; a shapes graph named by more than one gate is still checked by each, at that gate's own threshold. Every run of the dataset gate, passing or not, is kept in the dataset's report history as an `on-write` report.
 
+### What a gate validates
+
+A `PUT` and a validate-and-commit replace the graph, so the gates validate the payload, which is the graph's whole future; a bulk import's gates validate the imported quads. A `POST`, an RDF Patch and a repair apply change part of a graph. For these the gates do not copy the graph: they work out from the shapes which nodes the write can affect, and validate those nodes against the graph as it will be, staging only the write's triples and what those nodes read. A 1 000-quad `POST` into a large graph costs about what validating its own nodes costs, not a copy of the graph ([#534](https://github.com/philipperenzen/open-triplestore/issues/534); figures in [performance](performance.md)).
+
+A node can be affected when the write adds or removes a triple about it, makes it a target or stops it being one (`sh:targetClass` through its `rdf:type`, `sh:targetSubjectsOf`, `sh:targetObjectsOf`), or reaches a changed triple through what its shapes read: a property path (inverse and sequence paths, alternatives and `sh:zeroOrMorePath`/`sh:oneOrMorePath` included), `sh:class` on its value nodes, nested `sh:node`, `sh:property` and `sh:qualifiedValueShape` shapes, the logical constraints, `sh:closed`, and `sh:equals`, `sh:disjoint`, `sh:lessThan` and `sh:lessThanOrEquals`. Removing `ex:x a ex:Person` affects every node whose `sh:class ex:Person` reaches `ex:x`; adding a third `ex:memberOf ex:t1` affects `ex:t1` under a shape that counts `[ sh:inversePath ex:memberOf ]`.
+
+The gates copy the whole graph instead, as they used to, when that cannot be bounded:
+
+- a shape uses a SPARQL constraint (`sh:sparql`) or a SPARQL target, a SHACL-AF constraint component or a node expression (`sh:expression`), or refers back to itself through `sh:node` or a logical constraint;
+- a shapes graph declares `sh:entailment`;
+- the write adds or removes an `rdfs:subClassOf` triple while a shape uses `sh:targetClass` or `sh:class`;
+- the graph written holds one of the gates' shapes graphs;
+- finding the affected nodes and what they read takes more reads of the graph than it holds quads (and at least 100 000).
+
+What the gates report is what validating the whole graph says about the affected nodes. A graph that conformed before the write, as one written only through its gates does, is therefore judged exactly as before. A graph that already holds violations (written through SPARQL Update, or before the gate or its shapes existed) used to have every `POST` and patch refused until all of them were repaired; now a write is refused only when a node it can affect does not conform, and the 422 and the dataset gate's `on-write` report list those nodes only. Run the pipeline, or `POST /api/datasets/{id}/validate`, to see the whole graph.
+
 ### Limitations
 
 These apply to every write gate: this per-dataset `shacl_on_write` gate, and the SHACL Studio gates below (validation-layer bindings and pipelines with `gate_writes`).
