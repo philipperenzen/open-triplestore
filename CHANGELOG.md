@@ -15,6 +15,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **Whole-dataset SHACL validation stays inside one memory budget (#532).**
+  Validating BSBM 10k (3.56 M triples, 51,690 results) in a 4 GiB container
+  peaked at 3.7–4.1 GiB, 3.3–3.6 GiB of it anonymous memory: a run index of
+  about 1.1 GiB (its quad cap assumed 300 bytes a quad; it took about 600),
+  class sets, results and a JSON value tree of the report, and every run
+  starting from the last one's high-water mark because freed memory stayed
+  with the allocator. The class sets and focus lists, the run index, the
+  closure memo and the results now count against one budget,
+  `OTS_SHACL_RUN_MEMORY_BYTES` (default a quarter of the memory limit, 1 GiB
+  when none is detected, 64 MiB to 8 GiB, shared by overlapping runs): the
+  index may fill three quarters of it and answers the (graph, predicate)
+  pairs that do not fit from the store, the memo keeps a closure only when
+  there is room, and class sets and results are never dropped. A run that held
+  more than 64 MiB hands the freed memory back when it ends and logs its memory
+  account. `OTS_SHACL_RUN_INDEX_MAX_QUADS` is unset by default now and, when
+  set, sizes the index in quads as before. `POST /api/datasets/{id}/validate`
+  streams its JSON (the same bytes). Measured on an x86 host (paired, same
+  report): the 10k peak fell from 4,080 / 3,734 to 2,931 / 2,881 MiB, the
+  median validation time from 7.60 to 6.98 s
+  ([`docs/perf-data/2026-10-15-x86/`](docs/perf-data/2026-10-15-x86/before-after.md)).
+  The store comparison harness records anonymous memory and file cache per
+  phase and has a repeated-load check (`--repeat`, `--max-mem-fraction`), which
+  the 10k SHACL run now passes at 80 % of the limit.
+
 ### Security
 
 ## [0.8.0] — 2026-10-14
