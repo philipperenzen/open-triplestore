@@ -15,6 +15,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **A bulk load killed mid-write no longer leaves its staging files behind.**
+  The bulk loader writes `bulk-<n>.sst` files beside the database and removes
+  them only after the ingest; a `kill -9` (or an OOM kill) left them for
+  good — 14–40 files (8–20 MiB) at every kill of the crash series (#536).
+  Opening the store now deletes them: its lock is held then, so no load of
+  it can be running.
+
 ### Security
 
 ## [0.8.0] — 2026-10-14
