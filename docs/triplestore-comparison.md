@@ -908,8 +908,8 @@ even after updates. Best OWL DL implementation available.
 **GraphDB** uses forward-chaining (materialisation) — fast reads; requires re-inference after
 updates. OWL DL requires the commercial edition.
 
-**Open Triplestore** materialises RDFS and the OWL 2 EL, QL and RL profiles in process (RL graded
-Partial, see §4.2), reasons over OWL 2 DL through its HermiT sidecar, and also supports
+**Open Triplestore** materialises RDFS and the OWL 2 EL, QL and RL profiles in process (all
+graded Full, see §4.2), reasons over OWL 2 DL through its HermiT sidecar, and also supports
 **SHACL-AF** rules (rule-based inference via SHACL Advanced Features), which cover many
 derivations an ontology does not state:
 
@@ -1023,19 +1023,28 @@ Scored 1–5 (5 = best) across six dimensions.
 |--------|:-----------:|:----------:|:------------:|:---------:|:-------:|:---------:|:-------------:|
 | GraphDB | 5 | 4 | 5 | 5 | 3 | 5 | **27** |
 | Neptune | 5 | 3 | 5 | 5 | 5 | 3 | **26** |
+| **Open Triplestore** | 4 | **4** | **4** | 4 | 5 | 3 | **24** ↑ |
 | QLever | 5 | 3 | 3 | 4 | 5 | 3 | **23** |
 | Stardog | 4 | 4 | 4 | 4 | 3 | 4 | **23** |
 | Jena 5 | 4 | 4 | 3 | 5 | 2 | 5 | **23** |
-| **Open Triplestore** | 4 | 3 | **4** | 4 | 5 | 3 | **23** ↑ |
 | Virtuoso | 4 | 3 | 3 | 3 | 5 | 3 | **21** |
 | RDF4J 5 | 4 | 4 | 2 | 4 | 2 | 5 | **21** |
 | Blazegraph | 1 | 1 | 1 | 1 | 2 | 2 | **8** |
 
-> **Only this project was rescored (2026-09-18).** The other nine carry their April 2026
-> scores: nothing new was measured or read about them in this pass, and inventing movement
-> would be worse than leaving them.
+> **Only this project was rescored (2026-09-18 and 2026-10-15).** The other nine carry their
+> April 2026 scores: nothing new was measured or read about them in either pass, and inventing
+> movement would be worse than leaving them.
 >
-> Open Triplestore 22 → **23/30**, on one dimension, against the 13.1 rubric:
+> Open Triplestore 23 → **24/30** on 2026-10-15, on one dimension, against the 13.1 rubric:
+>
+> - **SPARQL 1.2 readiness 3 → 4.** RDF 1.2 and SPARQL 1.2 are graded Full in
+>   [`docs/standards.md`](standards.md) since 2026-10-03, against the Candidate
+>   Recommendations of 2026-04-07 and the Working Draft of 2026-10-01, with the W3C suites
+>   passing in CI (§4.1, footnotes ² and ³). The upstream triple-term blocker the earlier
+>   score cited no longer applies. It is a 4, level with the Java stores that track the
+>   drafts, not a 5: their scores were not revisited, so this one is not raised above them.
+>
+> Open Triplestore 22 → 23/30 on 2026-09-18, on one dimension:
 >
 > - **Cloud-native trajectory 3 → 4.** Release 0.6.0 ships replication by logical log
 >   shipping (leader and follower, configurable temperature and scope), synchronous
@@ -1043,7 +1052,7 @@ Scored 1–5 (5 = best) across six dimensions.
 >   shipping, and Raft consensus with automatic failover — so "single-machine only" is
 >   no longer true (see [operations.md](operations.md#replication)). It is not a 5: there
 >   is no serverless or operator-managed Kubernetes story.
-> - Unchanged: dev activity 4, SPARQL 1.2 readiness 3 (still the upstream oxrdf
+> - Unchanged then: dev activity 4, SPARQL 1.2 readiness 3 (then still the upstream oxrdf
 >   triple-term blocker), community 4, runtime 5 (Rust), standards participation 3.
 >
 > Earlier movement, for the record: 20 → 22 in April, from SPARQL 1.2 readiness 2 → 3 and
@@ -1054,7 +1063,7 @@ Future-Proofness Score (out of 30)
 ─────────────────────────────────────────────────────────────────────────────────
 GraphDB                                     ███████████████████████████    27
 Neptune                                     ██████████████████████████     26
-Open Triplestore                            ███████████████████████        23  (↑ from 22; rescored 2026-09-18)
+Open Triplestore                            ████████████████████████       24  (↑ from 23; rescored 2026-10-15)
 QLever                                      ███████████████████████        23
 Stardog                                     ███████████████████████        23
 Jena 5                                      ███████████████████████        23
@@ -1066,13 +1075,15 @@ Blazegraph                                  ████████            
 
 ### 13.3 Notes by System
 
-**Open Triplestore (23/30):**
+**Open Triplestore (24/30):**
 Rust runtime is the strongest future-proofing factor — no GC pauses, stable binary, trivially
 cross-compiled. Oxigraph upstream is active and tracking SPARQL 1.1 conformance closely.
-The `rdf-12` feature flag and Oxigraph's rdf-star support place it ahead of most Java stores
-on SPARQL 1.2 readiness. Auth (JWT + OAuth + SAML), DCAT 3, VoID, and RML put it well
-ahead of Oxigraph standalone. Gaps: no serverless/cloud-native story, smaller community
-than Jena/GraphDB. The architectural choices (Rust + RocksDB) are sound for the next decade.
+RDF 1.2 and SPARQL 1.2 are graded Full against the current drafts (the `rdf-12` feature, part
+of `full`), which puts it level with the Java stores that track them. Auth (JWT + OAuth +
+SAML), DCAT 3, VoID, and RML put it well ahead of Oxigraph standalone. Gaps: replication and
+Raft failover exist, but there is no serverless or operator-managed Kubernetes story; smaller
+community than Jena/GraphDB. The architectural choices (Rust + RocksDB) are sound for the next
+decade.
 
 **GraphDB (27/30):**
 Ontotext is an active W3C/OGC participant. GraphDB 11.x tracks GeoSPARQL 1.1, SPARQL 1.2
@@ -1125,9 +1136,15 @@ security patches not applied. Any existing deployment should migrate to QLever o
 ```
 1. Stardog 10         — OWL 2 DL, backward-chaining, no re-inference needed
 2. GraphDB 11         — OWL EL/QL/RL (commercial: DL), SHACL-AF
-3. Virtuoso 8         — OWL QL/RL, mature
-4. Jena 5             — OWL reasoners (Pellet integration); Java ecosystem
+3. Open Triplestore   — RDFS, OWL 2 EL/QL/RL, SHACL-AF, SWRL; OWL 2 DL via the HermiT sidecar
+4. Virtuoso 8         — OWL QL/RL, mature
+5. Jena 5             — OWL reasoners (Pellet integration); Java ecosystem
 ```
+
+Open Triplestore has a ✅ in every column of §11.1, as Stardog does, but ranks below the two
+commercial engines: complete OWL 2 DL needs the separate reasoner sidecar (in process, the DL
+rules are sound but incomplete), and this document has no reasoning-performance measurements
+for it.
 
 ### Open-Source / Community / Developer Experience
 

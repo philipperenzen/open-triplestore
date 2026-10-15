@@ -4,9 +4,9 @@ Open Triplestore runs on Windows three ways. Pick based on what you're doing:
 
 | Path | Best for | Effort | Features |
 |---|---|---|---|
-| **Docker Desktop** | Just running it; production-like local stack | ⭐ easiest | All (`full`) |
-| **WSL2 (Ubuntu)** | Developing the Rust backend / frontend | ⭐⭐ easy | All (`full`) |
-| **Native MSVC** | Avoiding WSL/Docker entirely | ⭐⭐⭐ advanced / experimental | Partial (no `saml`) |
+| **Docker Desktop** | Just running it; production-like local stack | ⭐ easiest | All (`image` = `full` + `saml` + the SQL connectors) |
+| **WSL2 (Ubuntu)** | Developing the Rust backend / frontend | ⭐⭐ easy | All (build `--features image`) |
+| **Native MSVC** | Avoiding WSL/Docker entirely | ⭐⭐⭐ advanced / experimental | `full` (no `saml`) |
 
 The native build depends on the **GEOS** C library, 3.11 or later (for GeoSPARQL), on every OS, and
 on **libxmlsec1** for the optional `saml` feature. Those are trivial to install on
@@ -53,7 +53,7 @@ it as **LF** to be safe.)
 ```powershell
 docker compose up -d
 docker compose ps
-curl.exe http://localhost:7878/health     # -> {"status":"ok","version":"0.2.0"}
+curl.exe http://localhost:7878/health     # -> {"status":"ok","version":"0.8.0"}
 ```
 
 Then open <http://localhost:7878/> and register the first user — it becomes
@@ -89,7 +89,8 @@ The standalone container auto-generates a JWT secret into the `/data` volume, so
 ## Option 2 — WSL2 (recommended for development)
 
 WSL2 gives you a real Ubuntu environment, so the Linux build instructions work
-unchanged and you get all features including `saml`.
+unchanged and you can build the Docker image's feature set (`--features image`),
+`saml` included.
 
 ### 1. Install WSL2 + Ubuntu
 
@@ -129,8 +130,8 @@ source "$HOME/.cargo/env"
 ### 4. Build, run, develop
 
 ```bash
-# Backend
-cargo build --release --features full
+# Backend: `image` is `full` + `saml` + the SQL connectors, the Docker image's set
+cargo build --release --features image
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 
 # Frontend (Node 24+; install via nvm or apt)

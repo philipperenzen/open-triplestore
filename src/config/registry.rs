@@ -1021,7 +1021,7 @@ pub(super) fn checks(config: &super::Config) -> Vec<ConfigError> {
                  trusted origins",
             );
         }
-        for spec in super::SPECS {
+        for spec in super::all_specs() {
             if !matches!(spec.kind, Kind::Secret) {
                 continue;
             }

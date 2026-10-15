@@ -7254,7 +7254,7 @@ mod dataset_iri_tests {
 
 // ─── Asset helpers ───────────────────────────────────────────────────────────
 
-fn asset_iri(base_url: &str, dataset_id: &str, asset_id: &str) -> String {
+pub(crate) fn asset_iri(base_url: &str, dataset_id: &str, asset_id: &str) -> String {
     format!("{}/datasets/{}/assets/{}", base_url, dataset_id, asset_id)
 }
 
@@ -7482,7 +7482,7 @@ async fn rebuild_asset_triples(
     insert_asset_triples(state, asset, dataset_id, kind, &meta)
 }
 
-fn remove_dcat_triples(
+pub(crate) fn remove_dcat_triples(
     state: &AppState,
     asset_iri_str: &str,
     graph_iri: &str,
