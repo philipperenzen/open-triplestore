@@ -129,6 +129,121 @@ pub struct RunMetrics {
     pub run_index: bool,
 }
 
+/// The JSON object `fields` plus `"report": report`, exactly as
+/// `serde_json::to_vec(&json!({ ..fields, "report": report }))` writes it
+/// (keys sorted, as `serde_json::Value` keeps them), in pieces: the text
+/// before the first result, each result as it is reached, the text after the
+/// last. Each result is converted and written on its own and then dropped,
+/// so a large report is never held twice more over, as a value tree and as
+/// one buffer, while it goes out (issue #532).
+pub struct ReportJson {
+    head: Option<Vec<u8>>,
+    results: std::vec::IntoIter<ValidationResult>,
+    first: bool,
+    tail: Option<Vec<u8>>,
+}
+
+/// Bytes a [`ReportJson`] piece collects results into before it is handed on.
+const REPORT_JSON_PIECE: usize = 256 * 1024;
+
+impl ReportJson {
+    pub fn new(
+        fields: serde_json::Map<String, serde_json::Value>,
+        report: ValidationReport,
+    ) -> serde_json::Result<Self> {
+        let ValidationReport {
+            conforms,
+            results,
+            results_count,
+            metrics,
+        } = report;
+        // The report without its results, as the value tree would hold it.
+        let shell = serde_json::to_value(ValidationReport {
+            conforms,
+            results: Vec::new(),
+            results_count,
+            metrics,
+        })?;
+        let mut top = fields;
+        top.insert("report".to_string(), shell);
+        // Written into `head` up to the opening of the results array, into
+        // `tail` after its close.
+        let mut parts = [Vec::new(), Vec::new()];
+        let mut cur = 0;
+        parts[cur].push(b'{');
+        for (i, (key, value)) in top.iter().enumerate() {
+            if i > 0 {
+                parts[cur].push(b',');
+            }
+            serde_json::to_writer(&mut parts[cur], key)?;
+            parts[cur].push(b':');
+            let serde_json::Value::Object(report) = value else {
+                serde_json::to_writer(&mut parts[cur], value)?;
+                continue;
+            };
+            if key != "report" {
+                serde_json::to_writer(&mut parts[cur], value)?;
+                continue;
+            }
+            parts[cur].push(b'{');
+            for (j, (rk, rv)) in report.iter().enumerate() {
+                if j > 0 {
+                    parts[cur].push(b',');
+                }
+                serde_json::to_writer(&mut parts[cur], rk)?;
+                parts[cur].push(b':');
+                if rk == "results" {
+                    parts[cur].push(b'[');
+                    cur = 1;
+                    parts[cur].push(b']');
+                } else {
+                    serde_json::to_writer(&mut parts[cur], rv)?;
+                }
+            }
+            parts[cur].push(b'}');
+        }
+        parts[cur].push(b'}');
+        let [head, tail] = parts;
+        Ok(Self {
+            head: Some(head),
+            results: results.into_iter(),
+            first: true,
+            tail: Some(tail),
+        })
+    }
+}
+
+impl Iterator for ReportJson {
+    type Item = serde_json::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(head) = self.head.take() {
+            return Some(Ok(head));
+        }
+        let mut piece = Vec::new();
+        for r in self.results.by_ref() {
+            if !std::mem::take(&mut self.first) {
+                piece.push(b',');
+            }
+            // Through a value, as the whole report was: the same key order.
+            let value = match serde_json::to_value(&r) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Err(e) = serde_json::to_writer(&mut piece, &value) {
+                return Some(Err(e));
+            }
+            if piece.len() >= REPORT_JSON_PIECE {
+                return Some(Ok(piece));
+            }
+        }
+        if !piece.is_empty() {
+            return Some(Ok(piece));
+        }
+        self.tail.take().map(Ok)
+    }
+}
+
 impl RunMetrics {
     /// Fold a second run into this one (a route validates one shapes graph
     /// at a time and merges the reports): durations add, the scope is the
@@ -142,5 +257,116 @@ impl RunMetrics {
         }
         self.run_index |= other.run_index;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(i: usize, annotated: bool) -> ValidationResult {
+        ValidationResult {
+            severity: if i % 2 == 0 {
+                Severity::Violation
+            } else {
+                Severity::Warning
+            },
+            focus_node: format!("http://example.org/n{i}"),
+            path: (i % 3 != 0).then(|| "<http://example.org/p>".to_string()),
+            value: (i % 4 != 0).then(|| format!("välue \"{i}\"\n\u{1F600}")),
+            source_shape: "http://example.org/S".to_string(),
+            source_constraint: "sh:minCount 1".to_string(),
+            source_constraint_component: "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
+                .to_string(),
+            message: format!("message {i}"),
+            annotations: if annotated {
+                vec![ResultAnnotationValue {
+                    property: "http://example.org/a".to_string(),
+                    value: "x".to_string(),
+                }]
+            } else {
+                Vec::new()
+            },
+            terms: ResultTerms::default(),
+        }
+    }
+
+    fn report(n: usize, metrics: bool) -> ValidationReport {
+        let results: Vec<ValidationResult> = (0..n).map(|i| result(i, i % 5 == 1)).collect();
+        ValidationReport {
+            conforms: results.is_empty(),
+            results_count: results.len(),
+            results,
+            metrics: metrics.then(|| RunMetrics {
+                path: "dataset".to_string(),
+                duration_ms: 12,
+                quads: 34,
+                graphs: 2,
+                source: "snapshot".to_string(),
+                run_index: true,
+            }),
+        }
+    }
+
+    fn streamed(fields: serde_json::Value, report: ValidationReport) -> Vec<u8> {
+        let serde_json::Value::Object(fields) = fields else {
+            unreachable!()
+        };
+        ReportJson::new(fields, report)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    /// The streamed response is byte for byte what the value tree gave, for
+    /// a test run, an official run, an empty report and one large enough to
+    /// take several pieces.
+    #[test]
+    fn report_json_writes_what_the_value_tree_wrote() {
+        for (n, metrics) in [(0, false), (1, true), (7, true), (3000, false)] {
+            let r = report(n, metrics);
+            let expected = serde_json::to_vec(&serde_json::json!({
+                "report": r.clone(),
+                "run_id": null,
+                "ran_at": null,
+                "test": true,
+                "partial": n % 2 == 1,
+            }))
+            .unwrap();
+            let got = streamed(
+                serde_json::json!({
+                    "run_id": null,
+                    "ran_at": null,
+                    "test": true,
+                    "partial": n % 2 == 1,
+                }),
+                r.clone(),
+            );
+            assert_eq!(
+                String::from_utf8(got).unwrap(),
+                String::from_utf8(expected).unwrap(),
+                "test run, {n} results"
+            );
+            let expected = serde_json::to_vec(&serde_json::json!({
+                "report": r.clone(),
+                "run_id": "run-1",
+                "ran_at": "2026-10-15T00:00:00Z",
+            }))
+            .unwrap();
+            let got = streamed(
+                serde_json::json!({ "run_id": "run-1", "ran_at": "2026-10-15T00:00:00Z" }),
+                r,
+            );
+            assert_eq!(got, expected, "official run, {n} results");
+        }
+        // Large reports go out in more than one piece.
+        let serde_json::Value::Object(fields) = serde_json::json!({ "test": true }) else {
+            unreachable!()
+        };
+        let pieces = ReportJson::new(fields, report(3000, false))
+            .unwrap()
+            .count();
+        assert!(pieces > 3, "{pieces} pieces");
     }
 }
