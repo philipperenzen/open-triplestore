@@ -28,9 +28,28 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ots_plugin_api::{Plugin, PluginContext};
+use ots_plugin_api::{Plugin, PluginContext, PluginSetting, SettingKind};
 
 const UI_HTML: &str = include_str!("ui.html");
+
+/// The variables this plugin reads (documented in `docs/plugins.md`).
+const SETTINGS: &[PluginSetting] = &[
+    PluginSetting {
+        name: "OTS_ACCOUNTS_DASHBOARD_APP_GROUPS",
+        kind: SettingKind::List,
+        doc: "Per-app entitlements the dashboard lists, as `app=group-slug` pairs.",
+    },
+    PluginSetting {
+        name: "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+        kind: SettingKind::Url,
+        doc: "Base URL of an external LLM gateway whose usage ledger the dashboard merges in.",
+    },
+    PluginSetting {
+        name: "OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY",
+        kind: SettingKind::Secret,
+        doc: "Bearer token for the gateway call (a secret reference).",
+    },
+];
 
 /// The dashboard plugin (feature `plugin-accounts-dashboard`, off by default).
 #[derive(Default)]
@@ -50,6 +69,10 @@ impl Plugin for AccountsDashboardPlugin {
             .route("/", get(|| async { Redirect::permanent("ui") }))
             .route("/ui", get(ui))
             .route("/api/overview", get(overview))
+    }
+
+    fn settings(&self) -> &'static [PluginSetting] {
+        SETTINGS
     }
 
     fn on_boot(&self, _ctx: &PluginContext) {
