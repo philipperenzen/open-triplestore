@@ -63,14 +63,52 @@ writes each premise, as sent, to `<dir>/<identifier>.nt`, and
 
 ## Known failures
 
-Each is classified under the Full rubric of [standards.md](../standards.md) (2026-10-06): (a) a
-defect in the test suite, or (c) a limit of an external engine, with its issue.
+Each is classified under the Full rubric of [standards.md](../standards.md) (2026-10-06) as
+(a) a defect in the test suite, with its issue.
 
 | Test case | Why | Class |
 |---|---|---|
 | `New-Feature-Rational-002`, `New-Feature-Rational-003` | The premise's RDF list ends in `rdf:` (the namespace IRI) instead of `rdf:nil`. It is not a well-formed OWL 2 document, so the server refuses it as outside OWL 2 DL (422). | (a) [#505](https://github.com/philipperenzen/open-triplestore/issues/505) |
 | `WebOnt-I5.26-001` | The premise holds a class expression that no axiom uses. The OWL 2 RDF mapping leaves its triples unparsed (Mapping to RDF Graphs §3.2.5: the graph must be empty at the end), so the server refuses the input as outside OWL 2 DL (422). | (a) [#505](https://github.com/philipperenzen/open-triplestore/issues/505) |
-| `WebOnt-description-logic-208`, `WebOnt-description-logic-209` | HermiT does not decide consistency within the 60 s limit, so the answer is unknown (504). With a 900 s budget (`OTS_TEST_W3C_OWL2_TIMEOUT_SECS=900`, 2026-10-06) it still had no answer, so a larger CI budget would not help. | (c) HermiT, [#506](https://github.com/philipperenzen/open-triplestore/issues/506) |
+
+## WebOnt-description-logic-208 and -209
+
+These two cases (k_poly, an ABox test from the DL98 systems comparison) were
+known failures until [#506](https://github.com/philipperenzen/open-triplestore/issues/506):
+both are consistency tests, 208 also a positive and 209 a negative entailment
+test, and HermiT 1.4.5.519 did not decide the consistency of their premise in
+60 s, nor in 900 s. They pass now, with each of their four checks taking
+5.2–6.0 s. What was tried, on 2026-10-15, on the development host (x86_64, 24
+logical CPUs, Docker Desktop), with the premises as the runner sends them
+(`OTS_TEST_W3C_OWL2_DUMP`):
+
+| Backend and configuration | Consistency of the premise |
+|---|---|
+| HermiT with its defaults: blocking strategy `OPTIMAL`, direct blocking `OPTIMAL`, blocking signature cache, existential strategy `CREATION_ORDER`, disjunction learning | no answer in 120 s |
+| HermiT, blocking strategy `ANYWHERE`, `ANCESTOR`, `SIMPLE_CORE` or `COMPLEX_CORE` | no answer in 120 s |
+| HermiT, direct blocking `SINGLE` or `PAIR_WISE`; without the blocking signature cache | no answer in 120 s |
+| HermiT, existential strategy `INDIVIDUAL_REUSE` (also with `ANCESTOR` blocking) or `EL` | no answer in 120 s |
+| HermiT **without disjunction learning** | consistent, 208 in 0.6 s and 209 in 0.3 s (the expected answer) |
+| Konclude v0.7.0-1138 (`OTS_DL_BACKEND=konclude`), through the server | consistent, and the entailment checks right too: all checks of 208 in 0.8 s, of 209 in 0.2 s |
+
+Disjunction learning makes HermiT try first the disjuncts of a disjunction
+that led to fewer clashes so far. It changes only the order of the search, so
+HermiT gives the same answers without it, but it cannot simply be switched
+off: without it, the classification of the WebOnt-description-logic-905
+premise did not finish in 20 s (0.5 s with it), and classifying and realising
+the premises of the other cases took about 70 % longer in all. The real
+ontologies tried (GALEN, LUBM, GoodRelations, BOT, DCAT and IMBOR) classify as
+fast either way. The sidecar therefore keeps HermiT's defaults and, when they
+have not decided consistency after 5 s, tries once without disjunction
+learning (see [owl2-dl.md](../owl2-dl.md#what-the-bundled-sidecar-does)); the
+checks of 208 and 209 are decided in that second try. A materialisation
+(`/v1/reason`) of the k_poly premise, whose classification and realisation
+then also run without disjunction learning, takes 35 s, within the default
+limit of 300 s.
+
+Konclude is not needed for these cases any more and is not run in CI, which
+installs no Konclude binary. The Konclude Linux release binary also needs
+`libpcre.so.3` (PCRE 1) at run time.
 
 ## What the run found
 
@@ -97,3 +135,7 @@ Building the run surfaced these problems, all fixed:
   several `owl:oneOf` lists and OWL 1's `owl:DataRange`.
 - The OWL API read an undeclared predicate between two IRIs as an annotation;
   the sidecar now types undeclared properties by use as the server does.
+- HermiT's disjunction learning kept it from deciding the k_poly cases
+  (WebOnt-description-logic-208 and -209); the sidecar now retries a
+  consistency test that HermiT's defaults have not decided after 5 s without
+  it (above).
