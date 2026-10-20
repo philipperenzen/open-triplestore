@@ -1646,7 +1646,8 @@ fn cmd_crash_writer(args: &[String]) {
         let (s, out) = (store.clone(), out.clone());
         handles.push(std::thread::spawn(move || {
             let g = crash_graph(w);
-            for i in 0.. {
+            // Until the process is killed: that is the experiment.
+            for i in 0..=usize::MAX {
                 let batch = crash_batch(run, w, i, n);
                 let _ctx = WriteContextGuard::set(WriteContext {
                     actor_iri: None,
