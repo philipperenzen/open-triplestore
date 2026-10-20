@@ -6893,7 +6893,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "List backups",
-                    "The backups in the backup directory, newest first: `[{id, created_at, software_version, rdf_path, rdf_sha256, rdf_quad_count, sqlite_path, sqlite_sha256, encrypted}]`. super_admin only.",
+                    "The backups in the backup directory, newest first: `[{id, created_at, software_version, rdf_path, rdf_sha256, rdf_quad_count, sqlite_path, sqlite_sha256, encrypted, changes_path?, changes_sha256?, changes_seq?}]`. The `changes_*` fields describe the change log, when the store keeps one (`changes_seq` is the change-log sequence number the RDF dump holds exactly); a backup made before 0.8.1 has none. super_admin only.",
                     vec![],
                     vec![("200", "Array of backups"), ("403", "super_admin role required"), ("503", "Backups are not configured")],
                     true,
@@ -6904,7 +6904,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "Create backup",
-                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `OTS_BACKUP_ENCRYPTION_ENABLED=true`). With `OTS_BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
+                    "Take a backup now (the RDF store as gzipped N-Quads, the change log when the store keeps one, and the identity DB, with SHA-256 checksums; age-encrypted when `OTS_BACKUP_ENCRYPTION_ENABLED=true`). With `OTS_BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
                     vec![],
                     vec![("200", "The new backup's manifest and `s3`"), ("403", "super_admin role required"), ("500", "The backup failed"), ("503", "Backups are not configured")],
                     true,

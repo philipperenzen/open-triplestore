@@ -66,13 +66,57 @@ pub fn run_validation_scoped(
     threshold: SeverityThreshold,
     run_inference: bool,
 ) -> Result<RunOutcome, String> {
+    run(
+        store,
+        shape_graph_graphs,
+        read_graphs,
+        run_inference.then_some(infer_graphs),
+        threshold,
+        None,
+    )
+}
+
+/// The write gate's run ([`super::gate`]): [`run_validation`] without
+/// inference, every shape's targets narrowed to `focus` when given — the
+/// nodes a write can affect, in a sandbox that holds what they read.
+pub(crate) fn run_gate_validation(
+    store: &TripleStore,
+    shape_graph_graphs: &[String],
+    data_graphs: &[String],
+    threshold: SeverityThreshold,
+    focus: Option<&HashSet<Term>>,
+) -> Result<RunOutcome, String> {
+    run(
+        store,
+        shape_graph_graphs,
+        data_graphs,
+        None,
+        threshold,
+        focus,
+    )
+}
+
+/// Validate `read_graphs` against each shapes graph — after materialising its
+/// rules into `infer_graphs` when given, over `focus` only when given — and
+/// merge the reports.
+fn run(
+    store: &TripleStore,
+    shape_graph_graphs: &[String],
+    read_graphs: &[String],
+    infer_graphs: Option<&[String]>,
+    threshold: SeverityThreshold,
+    focus: Option<&HashSet<Term>>,
+) -> Result<RunOutcome, String> {
     let mut results = Vec::new();
     let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for shapes_graph in shape_graph_graphs {
-        if run_inference {
+        if let Some(infer_graphs) = infer_graphs {
             let _ = crate::shacl::infer(store, shapes_graph, infer_graphs)?;
         }
-        let report = crate::shacl::validate(store, shapes_graph, read_graphs)?;
+        let report = match focus {
+            Some(focus) => crate::shacl::validate_focused(store, shapes_graph, read_graphs, focus)?,
+            None => crate::shacl::validate(store, shapes_graph, read_graphs)?,
+        };
         results.extend(report.results);
         metrics = match (metrics.take(), report.metrics) {
             (Some(a), Some(b)) => Some(a.merge(b)),
