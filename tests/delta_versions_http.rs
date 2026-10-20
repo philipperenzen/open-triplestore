@@ -917,3 +917,81 @@ async fn a_delta_records_the_model_pin_like_a_checkpoint() {
     assert_eq!(rec["conforms_to_model"], "m1");
     assert_eq!(rec["conforms_to_version"], "1.0.0", "{rec}");
 }
+
+/// A backup holds an unpublished delta, and a restore into a data directory
+/// that has never seen the store reads it exactly as it read before (#535).
+///
+/// A delta is a base checkpoint plus a range of the change log. Backups used
+/// to leave the log out, so the restored version's range belonged to an
+/// epoch the restored store did not hold and its data answered 410. The
+/// version here was built before the backup: the build is dropped by the
+/// restore (the dump and the log copy are taken at different instants, so a
+/// build the log records may not be in the dump), and the version is built
+/// again, forward from its base.
+#[tokio::test]
+async fn an_unpublished_delta_survives_a_backup_restored_into_a_fresh_data_dir() {
+    use open_triplestore::auth::{audit::AuditLogger, db::AuthDb};
+    use open_triplestore::backup::{restore_backup, BackupManager};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    // A backup copies the identity database from a file.
+    let sqlite = dir.path().join("auth.sqlite");
+    let mut state = test_state_with_store(recording());
+    state.auth_db = Arc::new(AuthDb::open(&sqlite).unwrap());
+    state.audit = Arc::new(AuditLogger::new(state.auth_db.pool()));
+    let (state, token) = admin_state_over(state);
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    edit_after_v1(&state);
+    let v2 = cut(&app, &token, &ds, "1.1.0").await;
+    assert_eq!(v2["kind"], "delta", "{v2}");
+    let snap = v2["snapshot_graphs"][0].as_str().unwrap().to_string();
+    let (st, _) = data(&app, Some(&token), &ds, "1.1.0").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(count(&state, &snap), 2, "built before the backup");
+    // The live graph moves on, so it is not the version.
+    edit_after_v2(&state);
+
+    let backups = dir.path().join("backups");
+    let manifest = BackupManager::new(
+        backups.clone(),
+        sqlite.clone(),
+        state.store.clone(),
+        state.audit.clone(),
+        7,
+        false,
+        None,
+    )
+    .unwrap()
+    .run_once()
+    .unwrap();
+
+    // Restore onto a host that has never run this store, then start it.
+    let data_dir = dir.path().join("restored");
+    let restored_sqlite = data_dir.join("auth.db");
+    {
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let store = TripleStore::open(&data_dir).unwrap();
+        restore_backup(&backups, &manifest.id, &store, &restored_sqlite, None).unwrap();
+    }
+    let mut restored = test_state_with_store(TripleStore::open(&data_dir).unwrap());
+    restored.auth_db = Arc::new(AuthDb::open(&restored_sqlite).unwrap());
+    restored.audit = Arc::new(AuditLogger::new(restored.auth_db.pool()));
+    let app = test_app(restored.clone());
+
+    let left_built = count(&restored, &snap);
+    let (st, lines) = data(&app, Some(&token), &ds, "1.1.0").await;
+    assert_eq!(st, StatusCode::OK, "{lines:?}");
+    assert_eq!(subjects(&lines), vec!["<urn:dv:b>", "<urn:dv:c>"]);
+    assert_eq!(left_built, 0, "the restore drops the build");
+    let (st, base) = data(&app, Some(&token), &ds, "1.0.0").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(subjects(&base), vec!["<urn:dv:a>", "<urn:dv:b>"]);
+    assert_eq!(
+        live_subjects(&restored),
+        vec!["<urn:dv:b>", "<urn:dv:c>", "<urn:dv:d>"],
+        "the live graph is the dump's"
+    );
+}
