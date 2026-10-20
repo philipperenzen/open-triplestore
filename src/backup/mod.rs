@@ -1,12 +1,27 @@
 //! Backup subsystem.
 //!
 //! Produces gzipped N-Quads dumps of the RDF store and online SQLite backups
-//! of the auth database, both written to a configurable backup directory.
-//! Each backup writes a JSON manifest with SHA-256 checksums so it can be
-//! verified later without trusting filesystem mtime.
+//! of the auth database and, when the store keeps one, of its change log —
+//! all written to a configurable backup directory. Each backup writes a JSON
+//! manifest with SHA-256 checksums so it can be verified later without
+//! trusting filesystem mtime.
 //!
-//! Optional `age` X25519 encryption is applied to both files when the
+//! Optional `age` X25519 encryption is applied to every file when the
 //! `backup-encrypt` feature is enabled and `OTS_BACKUP_ENCRYPTION_ENABLED=true`.
+//!
+//! **The dump and the change log.** An unpublished delta version is a base
+//! checkpoint plus a range of the change log, so a backup without the log
+//! restored it as a version nothing could build (#535). The two are copied
+//! at different instants, and writes land in between, so they are tied
+//! together: the dump's snapshot is opened inside the log's sequence
+//! section, which makes it hold exactly the writes up to one sequence number
+//! (`changes_seq`), and the log is copied after it, so it holds every row a
+//! delta version in the dump needs. A restore drops the rows past
+//! `changes_seq` and the builds the copy records, and moves the log to a new
+//! epoch: a restored delta is then only ever built forward, from its base
+//! through rows that are all there — never backward from live graphs, which
+//! the dump and the copy may disagree about. See
+//! [`ChangeLog::prepare_restore`].
 
 use anyhow::Context;
 use chrono::Utc;
@@ -20,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditLogger, AuditOutcome};
+use crate::store::changes::ChangeLog;
 use crate::store::TripleStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +49,16 @@ pub struct BackupManifest {
     pub sqlite_path: String,
     pub sqlite_sha256: String,
     pub encrypted: bool,
+    /// The change log (`changes.db`), when the store keeps one. Absent from
+    /// a backup made before 0.8.1, or of a store with capture never on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_sha256: Option<String>,
+    /// The change-log sequence number the RDF dump holds exactly: every
+    /// recorded write at or below it, none above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_seq: Option<i64>,
 }
 
 /// Resolve the age recipient used to encrypt backups.
@@ -171,15 +197,23 @@ impl BackupManager {
         };
         let rdf_path = dir.join(rdf_name);
         let mut rdf_buf: Vec<u8> = Vec::new();
-        let quad_count = {
+        // `changes_seq`: the change-log sequence number the dump holds exactly.
+        let (quad_count, changes_seq) = {
             let mut gz = GzEncoder::new(&mut rdf_buf, Compression::default());
-            let n = self.store.dump_all_nquads(&mut gz)?;
+            let dumped = self.store.dump_all_nquads_at_head(&mut gz)?;
             gz.finish()?;
-            n
+            dumped
         };
         let rdf_bytes = self.maybe_encrypt(&rdf_buf)?;
         write_secure(&rdf_path, &rdf_bytes)?;
         let rdf_sha256 = sha256_hex(&rdf_bytes);
+
+        // ── Change log (online SQLite backup) ─────────────────────────────
+        // After the dump, never before: a delta version in the dump was cut
+        // at or below `changes_seq`, so a copy taken now holds its whole
+        // range. Writes that land in between are in the copy and not in the
+        // dump; a restore drops their rows (`ChangeLog::prepare_restore`).
+        let changes = self.backup_change_log(&dir)?;
 
         // ── SQLite online backup ──────────────────────────────────────────
         let sqlite_name = if self.encrypt {
@@ -206,6 +240,9 @@ impl BackupManager {
             sqlite_path: sqlite_out.file_name().unwrap().to_string_lossy().into(),
             sqlite_sha256,
             encrypted: self.encrypt,
+            changes_seq: changes.is_some().then_some(changes_seq),
+            changes_path: changes.as_ref().map(|(name, _)| name.clone()),
+            changes_sha256: changes.map(|(_, sha)| sha),
         };
         write_secure(
             &dir.join("manifest.json"),
@@ -216,6 +253,26 @@ impl BackupManager {
         Ok(manifest)
     }
 
+    /// Copy the change log into `dir`, encrypted like the other files.
+    /// Returns its file name and checksum; `None` when the store keeps no log.
+    fn backup_change_log(&self, dir: &Path) -> anyhow::Result<Option<(String, String)>> {
+        let raw = dir.join("changes.db.raw");
+        if !self.store.changes().backup_to(&raw)? {
+            return Ok(None);
+        }
+        if self.encrypt {
+            let bytes = self.maybe_encrypt(&fs::read(&raw)?)?;
+            fs::remove_file(&raw).ok();
+            write_secure(&dir.join("changes.db.age"), &bytes)?;
+            return Ok(Some(("changes.db.age".into(), sha256_hex(&bytes))));
+        }
+        // Not read into memory: a log keeps months of payloads.
+        let out = dir.join("changes.db");
+        fs::rename(&raw, &out)?;
+        restrict_permissions(&out);
+        Ok(Some(("changes.db".into(), sha256_file(&out)?)))
+    }
+
     /// Recompute SHA-256 of a backup's files and compare to its manifest.
     pub fn verify(&self, id: &str) -> anyhow::Result<bool> {
         validate_backup_id(id)?;
@@ -224,7 +281,14 @@ impl BackupManager {
         let rdf_ok = sha256_hex(&fs::read(dir.join(&manifest.rdf_path))?) == manifest.rdf_sha256;
         let sqlite_ok =
             sha256_hex(&fs::read(dir.join(&manifest.sqlite_path))?) == manifest.sqlite_sha256;
-        let ok = rdf_ok && sqlite_ok;
+        // `None` for a backup without a change log; a manifest that names
+        // only half of one does not verify.
+        let changes_ok = match (&manifest.changes_path, &manifest.changes_sha256) {
+            (None, None) => None,
+            (Some(name), Some(sha)) => Some(sha256_file(&dir.join(name))? == *sha),
+            _ => Some(false),
+        };
+        let ok = rdf_ok && sqlite_ok && changes_ok != Some(false);
         self.audit.log(
             AuditEventBuilder::new(
                 AuditEventType::BackupVerified,
@@ -235,7 +299,11 @@ impl BackupManager {
                 },
             )
             .resource("backup", id)
-            .details(serde_json::json!({ "rdf_ok": rdf_ok, "sqlite_ok": sqlite_ok })),
+            .details(serde_json::json!({
+                "rdf_ok": rdf_ok,
+                "sqlite_ok": sqlite_ok,
+                "changes_ok": changes_ok,
+            })),
         );
         Ok(ok)
     }
@@ -314,14 +382,13 @@ impl BackupManager {
     }
 }
 
-/// Decrypt both halves of an age-encrypted backup with the operator's identity
-/// from `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`.
-fn decrypt_backup_pair(
-    id: &str,
-    rdf_raw: &[u8],
-    sqlite_raw: &[u8],
-    identity_path: Option<&Path>,
-) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+/// Decrypts one file of an age-encrypted backup: `(bytes, what it is)`.
+type Decrypt = Box<dyn Fn(&[u8], &str) -> anyhow::Result<Vec<u8>>>;
+
+/// The decryption of an age-encrypted backup's files, with the operator's
+/// identity from `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`. Fails at once when no
+/// identity is configured or none can be read from it.
+fn backup_decryptor(id: &str, identity_path: Option<&Path>) -> anyhow::Result<Decrypt> {
     #[cfg(feature = "backup-encrypt")]
     {
         use std::io::Read;
@@ -333,8 +400,8 @@ fn decrypt_backup_pair(
                  stores only the recipient, never the identity."
             )
         })?;
-        let identity_path = identity_path.display();
-        let identity_text = fs::read_to_string(identity_path.to_string())
+        let identity_path = identity_path.display().to_string();
+        let identity_text = fs::read_to_string(&identity_path)
             .with_context(|| format!("read age identity {identity_path}"))?;
         // An age-keygen file carries `# public key:` comment lines around the
         // AGE-SECRET-KEY line; take the first parseable identity.
@@ -350,7 +417,8 @@ fn decrypt_backup_pair(
                 )
             })?;
 
-        let decrypt = |data: &[u8], what: &str| -> anyhow::Result<Vec<u8>> {
+        let id = id.to_string();
+        Ok(Box::new(move |data: &[u8], what: &str| {
             let decryptor = age::Decryptor::new(data)
                 .with_context(|| format!("read age header of the {what} of backup {id}"))?;
             let mut reader = decryptor
@@ -364,16 +432,11 @@ fn decrypt_backup_pair(
             let mut out = Vec::new();
             reader.read_to_end(&mut out)?;
             Ok(out)
-        };
-
-        Ok((
-            decrypt(rdf_raw, "RDF dump")?,
-            decrypt(sqlite_raw, "SQLite DB")?,
-        ))
+        }))
     }
     #[cfg(not(feature = "backup-encrypt"))]
     {
-        let _ = (rdf_raw, sqlite_raw, identity_path);
+        let _ = identity_path;
         anyhow::bail!(
             "backup {id} is age-encrypted but this binary was built without the \
              `backup-encrypt` feature; rebuild with --features backup-encrypt to restore it"
@@ -387,15 +450,71 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// [`sha256_hex`] of a file, read in pieces rather than whole.
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut f = File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
 fn write_secure(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     let mut f = File::create(path)?;
     f.write_all(data)?;
+    restrict_permissions(path);
+    Ok(())
+}
+
+/// 0o600 on a backup file.
+fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
-    Ok(())
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// `path` with `suffix` appended (`auth.db` + `-wal`).
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_os_string();
+    p.push(suffix);
+    PathBuf::from(p)
+}
+
+/// A SQLite file the restore works on, removed with its journals when the
+/// restore is done with it, whether it succeeded or not.
+struct ScratchDb(PathBuf);
+
+impl ScratchDb {
+    /// One at `path`, clear of anything an interrupted restore left there.
+    fn new(path: PathBuf) -> Self {
+        let scratch = Self(path);
+        scratch.clear();
+        scratch
+    }
+
+    fn clear(&self) {
+        let _ = fs::remove_file(&self.0);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = fs::remove_file(with_suffix(&self.0, suffix));
+        }
+    }
+}
+
+impl Drop for ScratchDb {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 /// Online SQLite backup using `rusqlite::backup::Backup`. Safe under WAL.
@@ -505,11 +624,11 @@ fn validate_backup_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reject a manifest file-name (`rdf_path` / `sqlite_path`) that could escape the
-/// per-backup directory. Manifests are written by us, but they live on disk and
-/// could be tampered with, so these names are untrusted when read back: require a
-/// bare file name with no path separators, `..`, or absolute-path prefix before
-/// it is `join`ed onto the backup dir.
+/// Reject a manifest file-name (`rdf_path` / `sqlite_path` / `changes_path`)
+/// that could escape the per-backup directory. Manifests are written by us,
+/// but they live on disk and could be tampered with, so these names are
+/// untrusted when read back: require a bare file name with no path separators,
+/// `..`, or absolute-path prefix before it is `join`ed onto the backup dir.
 fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty()
         || name.contains('/')
@@ -533,6 +652,9 @@ fn read_manifest(dir: &Path, id: &str) -> anyhow::Result<BackupManifest> {
     )?;
     validate_backup_file_name(&manifest.rdf_path)?;
     validate_backup_file_name(&manifest.sqlite_path)?;
+    if let Some(name) = &manifest.changes_path {
+        validate_backup_file_name(name)?;
+    }
     Ok(manifest)
 }
 
@@ -552,6 +674,13 @@ fn read_manifest(dir: &Path, id: &str) -> anyhow::Result<BackupManifest> {
 /// The path is a parameter rather than an env lookup so this stays a pure
 /// function: reading it here would force every test to mutate the process
 /// environment, which races other tests in the same binary.
+///
+/// The change log, when the backup holds one, replaces the store's own
+/// (`<data dir>/changes/changes.db`, or the in-memory log of an in-memory
+/// store): rows past the dump dropped, builds forgotten, a new epoch — see
+/// [`ChangeLog::prepare_restore`]. A backup without one (made before 0.8.1)
+/// leaves the store's own log in place but moves it to a new epoch: that log
+/// describes the data the restore has just replaced.
 pub fn restore_backup(
     backup_dir: &Path,
     id: &str,
@@ -566,17 +695,48 @@ pub fn restore_backup(
     // Verify integrity BEFORE replacing any live data.
     let rdf_raw = fs::read(dir.join(&manifest.rdf_path))?;
     let sqlite_raw = fs::read(dir.join(&manifest.sqlite_path))?;
+    let changes_raw = match &manifest.changes_path {
+        Some(name) => Some(fs::read(dir.join(name))?),
+        None => None,
+    };
+    let changes_ok = match (&changes_raw, &manifest.changes_sha256) {
+        (None, None) => true,
+        (Some(raw), Some(sha)) => sha256_hex(raw) == *sha,
+        _ => false,
+    };
     if sha256_hex(&rdf_raw) != manifest.rdf_sha256
         || sha256_hex(&sqlite_raw) != manifest.sqlite_sha256
+        || !changes_ok
     {
         anyhow::bail!("backup {id} failed checksum verification; refusing to restore");
     }
     // Decrypt before anything is replaced: a missing or wrong identity must fail
     // while the live store is still intact.
-    let (rdf_raw, sqlite_raw) = if manifest.encrypted {
-        decrypt_backup_pair(id, &rdf_raw, &sqlite_raw, identity_path)?
+    let (rdf_raw, sqlite_raw, changes_raw) = if manifest.encrypted {
+        let decrypt = backup_decryptor(id, identity_path)?;
+        (
+            decrypt(&rdf_raw, "RDF dump")?,
+            decrypt(&sqlite_raw, "SQLite DB")?,
+            match &changes_raw {
+                Some(raw) => Some(decrypt(raw, "change log")?),
+                None => None,
+            },
+        )
     } else {
-        (rdf_raw, sqlite_raw)
+        (rdf_raw, sqlite_raw, changes_raw)
+    };
+
+    // ── Change log: made ready before anything live is touched, so a copy
+    // that is not a change log fails while the store is intact. ──
+    let changes = match changes_raw {
+        Some(raw) => {
+            let scratch = ScratchDb::new(target_sqlite.with_extension("changes-restore-tmp"));
+            write_secure(&scratch.0, &raw)?;
+            let prepared = ChangeLog::prepare_restore(&scratch.0, manifest.changes_seq)
+                .map_err(|e| anyhow::anyhow!("the change log of backup {id}: {e}"))?;
+            Some((scratch, prepared))
+        }
+        None => None,
     };
 
     // ── RDF: clear the store, then stream the gzipped N-Quads dump back in. ──
@@ -588,13 +748,46 @@ pub fn restore_backup(
         .load_reader(reader, oxigraph::io::RdfFormat::NQuads, None)
         .map_err(|e| anyhow::anyhow!("load N-Quads dump: {e}"))?;
 
+    // ── Change log: the backup's, in place of the store's own. ──
+    match changes {
+        Some((scratch, prepared)) => {
+            // The dump may hold all, part or none of a build the log records:
+            // drop them all; each delta is built again on its next read.
+            let built: Vec<&str> = prepared.built_graphs.iter().map(String::as_str).collect();
+            if !built.is_empty() {
+                store
+                    .bulk_delete_graphs(&built)
+                    .map_err(|e| anyhow::anyhow!("drop the restored delta builds: {e}"))?;
+            }
+            let restored = store
+                .changes()
+                .restore_from(&scratch.0)
+                .map_err(|e| anyhow::anyhow!("restore the change log: {e}"))?;
+            if restored {
+                tracing::info!(
+                    "Restored the change log of backup {id}: epoch {} goes on as {}, {} row(s) \
+                     the dump does not hold dropped",
+                    prepared.epoch,
+                    prepared.new_epoch,
+                    prepared.dropped_rows
+                );
+            } else {
+                tracing::warn!(
+                    "Backup {id} holds a change log, but this store keeps none (in memory, \
+                     change capture off): its unpublished delta versions cannot be read"
+                );
+            }
+        }
+        // Whatever log this store has describes the data just replaced: no
+        // chain of its epoch may be extended across the restore.
+        None => store.changes().renew_epoch(),
+    }
+
     // ── SQLite: atomically replace the identity DB (drop stale WAL/SHM). ──
     let tmp = target_sqlite.with_extension("restore-tmp");
     write_secure(&tmp, &sqlite_raw)?;
     for ext in ["-wal", "-shm"] {
-        let mut p = target_sqlite.as_os_str().to_os_string();
-        p.push(ext);
-        let _ = fs::remove_file(PathBuf::from(p));
+        let _ = fs::remove_file(with_suffix(target_sqlite, ext));
     }
     fs::rename(&tmp, target_sqlite)
         .with_context(|| format!("replace identity DB at {}", target_sqlite.display()))?;
@@ -669,10 +862,17 @@ async fn upload_to_s3(
     let dir = mgr.backup_dir().join(id);
     let manifest = read_manifest(&dir, id)?;
     for (name, ct) in [
-        (manifest.rdf_path.as_str(), "application/octet-stream"),
-        (manifest.sqlite_path.as_str(), "application/octet-stream"),
-        ("manifest.json", "application/json"),
-    ] {
+        Some((manifest.rdf_path.as_str(), "application/octet-stream")),
+        Some((manifest.sqlite_path.as_str(), "application/octet-stream")),
+        manifest
+            .changes_path
+            .as_deref()
+            .map(|name| (name, "application/octet-stream")),
+        Some(("manifest.json", "application/json")),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let bytes = fs::read(dir.join(name))?;
         let key = format!("backups/{}/{}", id, name);
         obj.upload(&key, bytes::Bytes::from(bytes), ct).await?;
@@ -1354,6 +1554,274 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    /// A store whose change log records (in memory), after two writes to one
+    /// graph: three quads.
+    fn recording_store() -> TripleStore {
+        let store = TripleStore::in_memory().unwrap().with_change_capture(
+            crate::store::changes::DEFAULT_MAX_SCAN,
+            crate::store::changes::DEFAULT_MAX_PAYLOAD,
+        );
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> . ex:a ex:b ex:c . ex:d ex:e ex:f .",
+                RdfFormat::Turtle,
+                Some("http://example.org/g"),
+            )
+            .unwrap();
+        store
+            .update(
+                "INSERT DATA { GRAPH <http://example.org/g> \
+                 { <http://example.org/x> <http://example.org/y> <http://example.org/z> } }",
+            )
+            .unwrap();
+        store
+    }
+
+    /// A manager over `store` backing up into `dir/backups`, encrypting to
+    /// the recipient at `recipient` when there is one.
+    fn manager(dir: &Path, store: &TripleStore, recipient: Option<PathBuf>) -> BackupManager {
+        let sqlite_path = dir.join("auth.sqlite");
+        let auth_db = AuthDb::open(&sqlite_path).unwrap();
+        BackupManager::new(
+            dir.join("backups"),
+            sqlite_path,
+            store.clone(),
+            Arc::new(AuditLogger::new(auth_db.pool())),
+            7,
+            recipient.is_some(),
+            recipient,
+        )
+        .unwrap()
+    }
+
+    /// With the change log on, a backup carries it, and the sequence number
+    /// its dump holds; verify covers it, so a tampered copy fails (and is
+    /// not restored), and a change-log name that leaves the backup directory
+    /// is refused like the other names.
+    #[test]
+    fn a_backup_carries_the_change_log_and_verify_covers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = recording_store();
+        let head = store.changes().head_seq();
+        assert!(head > 0, "the writes were recorded");
+        let mgr = manager(dir.path(), &store, None);
+        let m = mgr.run_once().unwrap();
+        assert_eq!(m.changes_path.as_deref(), Some("changes.db"));
+        assert_eq!(
+            m.changes_seq,
+            Some(head),
+            "the dump holds every write so far"
+        );
+        assert!(mgr.verify(&m.id).unwrap(), "fresh backup should verify");
+
+        let backup = mgr.backup_dir().join(&m.id);
+        let mut evil = m.clone();
+        evil.changes_path = Some("../../secret.txt".into());
+        fs::write(
+            backup.join("manifest.json"),
+            serde_json::to_vec(&evil).unwrap(),
+        )
+        .unwrap();
+        let err = mgr
+            .verify(&m.id)
+            .expect_err("a change-log name outside the backup must be refused");
+        assert!(
+            err.to_string().contains("invalid backup file name"),
+            "{err}"
+        );
+        fs::write(
+            backup.join("manifest.json"),
+            serde_json::to_vec(&m).unwrap(),
+        )
+        .unwrap();
+
+        fs::write(backup.join("changes.db"), b"tampered").unwrap();
+        assert!(
+            !mgr.verify(&m.id).unwrap(),
+            "a tampered change log must fail verification"
+        );
+        let target = TripleStore::in_memory().unwrap();
+        let err = restore_backup(
+            mgr.backup_dir(),
+            &m.id,
+            &target,
+            &dir.path().join("restored.sqlite"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("checksum"), "{err}");
+    }
+
+    /// The change log restored into a data directory that never had one: it
+    /// lands where the store looks for it, with the rows the dump holds and
+    /// none past them, in a new epoch, its sequence going on past the copy's.
+    /// The manifest is edited to say the dump held one write fewer than the
+    /// copy — a write that landed between the two.
+    #[test]
+    fn a_restored_change_log_holds_what_the_dump_holds_in_a_new_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = recording_store();
+        let mgr = manager(dir.path(), &store, None);
+        let m = mgr.run_once().unwrap();
+        let copied = m.changes_seq.unwrap();
+        let mut edited = m.clone();
+        edited.changes_seq = Some(copied - 1);
+        fs::write(
+            mgr.backup_dir().join(&m.id).join("manifest.json"),
+            serde_json::to_vec(&edited).unwrap(),
+        )
+        .unwrap();
+
+        let data_dir = dir.path().join("restored");
+        {
+            let target = TripleStore::open(&data_dir).unwrap();
+            restore_backup(
+                mgr.backup_dir(),
+                &m.id,
+                &target,
+                &dir.path().join("restored.sqlite"),
+                None,
+            )
+            .unwrap();
+        }
+        assert!(data_dir.join("changes").join("changes.db").exists());
+        let restored = TripleStore::open(&data_dir).unwrap();
+        let log = restored.changes();
+        let old = store.changes().epoch();
+        assert!(log.readable());
+        assert_ne!(log.epoch(), old, "the restored log goes on in a new epoch");
+        let rows = log.rows_after(0, 100);
+        let kept: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.epoch == old)
+            .filter_map(|r| r.seq)
+            .collect();
+        assert_eq!(
+            kept,
+            (1..copied).collect::<Vec<_>>(),
+            "the rows the dump holds"
+        );
+        assert!(
+            rows.iter()
+                .filter(|r| r.epoch != old)
+                .all(|r| r.seq.is_some_and(|s| s > copied)),
+            "no sequence number is handed out twice"
+        );
+        let g = vec!["http://example.org/g".to_string()];
+        assert!(log.chain(&g, &old, 0, copied - 1).intact);
+        assert_eq!(data_quads(&restored), 3);
+    }
+
+    /// A backup made before the change log was part of one has none of its
+    /// fields in the manifest. It still lists, verifies and restores; the
+    /// store's own log, which describes the data the restore replaced, goes
+    /// on in a new epoch.
+    #[test]
+    fn a_backup_without_a_change_log_still_verifies_and_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = recording_store();
+        let mgr = manager(dir.path(), &store, None);
+        let m = mgr.run_once().unwrap();
+        // Written back as 0.8.0 wrote it.
+        let backup = mgr.backup_dir().join(&m.id);
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+        let fields = old.as_object_mut().unwrap();
+        for key in ["changes_path", "changes_sha256", "changes_seq"] {
+            assert!(fields.remove(key).is_some(), "{key}");
+        }
+        fs::write(
+            backup.join("manifest.json"),
+            serde_json::to_vec_pretty(&old).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(backup.join("changes.db")).unwrap();
+
+        assert!(mgr
+            .list()
+            .unwrap()
+            .iter()
+            .any(|l| l.id == m.id && l.changes_path.is_none()));
+        assert!(mgr.verify(&m.id).unwrap(), "an old manifest still verifies");
+        store
+            .update("INSERT DATA { <http://example.org/later> <http://example.org/p> <http://example.org/o> }")
+            .unwrap();
+        let epoch = store.changes().epoch();
+        restore_backup(
+            mgr.backup_dir(),
+            &m.id,
+            &store,
+            &dir.path().join("restored.sqlite"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(data_quads(&store), 3, "the store is the backup's");
+        assert_ne!(
+            store.changes().epoch(),
+            epoch,
+            "no chain crosses the restore"
+        );
+    }
+
+    /// Encrypted, the change log is encrypted like the other files and comes
+    /// back with the operator's identity — into an in-memory log here, which
+    /// takes the copy's rows and epoch in place. Without the identity the
+    /// restore refuses before it touches anything.
+    #[cfg(feature = "backup-encrypt")]
+    #[test]
+    fn an_encrypted_backup_carries_the_change_log_encrypted() {
+        use age::secrecy::ExposeSecret;
+
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let identity_path = dir.path().join("identity.txt");
+        fs::write(
+            &identity_path,
+            format!("{}\n", identity.to_string().expose_secret()),
+        )
+        .unwrap();
+        let recipient_path = dir.path().join("backup_key.age");
+        fs::write(&recipient_path, format!("{}\n", identity.to_public())).unwrap();
+
+        let store = recording_store();
+        let mgr = manager(dir.path(), &store, Some(recipient_path));
+        let m = mgr.run_once().unwrap();
+        assert!(m.encrypted);
+        assert_eq!(m.changes_path.as_deref(), Some("changes.db.age"));
+        let copy = fs::read(mgr.backup_dir().join(&m.id).join("changes.db.age")).unwrap();
+        assert!(copy.starts_with(b"age-encryption.org/"), "encrypted");
+        assert!(mgr.verify(&m.id).unwrap());
+
+        let target = TripleStore::in_memory().unwrap().with_change_capture(
+            crate::store::changes::DEFAULT_MAX_SCAN,
+            crate::store::changes::DEFAULT_MAX_PAYLOAD,
+        );
+        let sqlite = dir.path().join("restored.sqlite");
+        let err = restore_backup(mgr.backup_dir(), &m.id, &target, &sqlite, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("OTS_BACKUP_DECRYPTION_IDENTITY_PATH"),
+            "{err}"
+        );
+        assert_eq!(data_quads(&target), 0, "nothing was touched");
+
+        restore_backup(
+            mgr.backup_dir(),
+            &m.id,
+            &target,
+            &sqlite,
+            Some(identity_path.as_path()),
+        )
+        .unwrap();
+        assert_eq!(data_quads(&target), 3);
+        let old = store.changes().epoch();
+        assert_ne!(target.changes().epoch(), old);
+        let g = vec!["http://example.org/g".to_string()];
+        let chain = target.changes().chain(&g, &old, 0, m.changes_seq.unwrap());
+        assert!(chain.intact, "{:?}", chain.reason);
+        assert!(!chain.rows.is_empty(), "the source's rows came back");
     }
 
     /// Retention pruning keeps only the newest `retention` snapshots.

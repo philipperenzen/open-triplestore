@@ -182,10 +182,7 @@ fn a_follower_bootstraps_through_the_leaders_rate_limiter_and_tails_it_live() {
     assert_eq!(st.role, Role::Follower);
     assert_eq!(st.lag_rows, Some(0), "{st:?}");
     assert!(st.healthy, "{st:?}");
-    assert_eq!(
-        st.epoch.as_deref(),
-        Some(leader_state.store.changes().epoch())
-    );
+    assert_eq!(st.epoch, Some(leader_state.store.changes().epoch()));
 
     // ── 2. A write on the leader over HTTP lands during the long-poll ─────
     // The follower asks first and is held; the write comes a second later;
