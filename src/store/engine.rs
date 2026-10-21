@@ -1801,7 +1801,7 @@ impl TripleStore {
                 .or_else(|| self.count_graph(Some(graph.as_str())).ok())?;
             sized.push((graph, count));
         }
-        sized.sort_by(|a, b| b.1.cmp(&a.1));
+        sized.sort_by_key(|g| std::cmp::Reverse(g.1));
         let ((_, largest), others) = sized.split_first()?;
         if others.iter().map(|(_, count)| count).sum::<usize>() > MERGED_COUNT_MAX_READS {
             return None;
