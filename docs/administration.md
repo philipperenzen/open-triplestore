@@ -665,8 +665,16 @@ required by Article 5(1)(e) AVG / GDPR.
 The backup subsystem produces a snapshot every `OTS_BACKUP_SCHEDULE_SECS` seconds
 (default `86400`, a day) containing:
 - `rdf.nq.gz` — gzipped N-Quads dump of every named graph
+- `changes.db` — the [change log](versioning.md#change-log), when the store
+  keeps one: an online SQLite backup taken just after the dump. An
+  unpublished [delta version](versioning.md#delta-versions) is a range of
+  it, so without it a backup could not bring one back
 - `auth.sqlite` — online `rusqlite::backup::Backup` snapshot of the auth DB
-- `manifest.json` — SHA-256 checksums + software version
+- `manifest.json` — SHA-256 checksums + software version, and `changes_seq`:
+  the change-log sequence number the dump holds exactly (its snapshot is
+  taken at that point of the log)
+
+With encryption on, every file but the manifest carries an `.age` suffix.
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -710,6 +718,17 @@ open-triplestore --restore <backup-id> --data-dir ./data
 Checksums are verified (and an encrypted backup decrypted) before anything is
 touched, so a corrupt backup or a wrong key aborts without destroying the live
 store.
+
+The change log goes back where the store keeps it,
+`<data-dir>/changes/changes.db`, replacing whatever log was there. Writes
+that landed between the dump and the copy of the log are in the copy but not
+in the dump, so the restore drops every row past `changes_seq`, and it forgets
+the delta versions' builds (each is built again on its next read). The log
+then goes on in a new epoch: a delta from before the restore is built forward
+from its base, through rows that are all in the backup, never backward from
+the live graphs, and replication followers resynchronise. A backup made
+before 0.8.1 has no change log and restores as before, except that the
+store's own log, if it has one, moves to a new epoch.
 
 #### Encrypted backups
 

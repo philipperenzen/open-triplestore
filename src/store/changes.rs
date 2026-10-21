@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{NamedOrBlankNode, Quad, Term};
@@ -364,7 +364,9 @@ pub struct ChangeLog {
     /// whose file exists from an earlier run is *readable* (delta versions
     /// resolve through its rows) without recording anything.
     recording: bool,
-    epoch: String,
+    /// The epoch new rows carry. Behind a lock because a restore replaces
+    /// it under a log that stays open ([`Self::restore_from`]).
+    epoch: RwLock<String>,
     /// The next sequence number. Handed out under `section`; persisted in
     /// `meta` before a sweep (which may empty the table) and by the open-time
     /// repair, and recomputed from `MAX(seq)` at open.
@@ -555,7 +557,7 @@ impl ChangeLog {
                     return Self::open_at(Some(dir), false);
                 }
             }
-            return Ok(Self::disabled());
+            return Ok(Self::disabled_at(dir));
         }
         Self::open_at(dir, true)
     }
@@ -632,6 +634,7 @@ impl ChangeLog {
             // An earlier run wrote without recording: a new epoch, so no
             // chain from before it is ever extended across the gap.
             let fresh = uuid::Uuid::new_v4().to_string();
+            retire_epoch(&conn, &epoch, meta_next.max(max_seq + 1) - 1).map_err(sql_err)?;
             conn.execute(
                 "UPDATE meta SET value = ?1 WHERE key = 'epoch'",
                 params![fresh],
@@ -646,7 +649,7 @@ impl ChangeLog {
         Ok(Self {
             conn: Some(Mutex::new(conn)),
             recording,
-            epoch,
+            epoch: RwLock::new(epoch),
             next_seq: AtomicI64::new(meta_next.max(max_seq + 1)),
             section: Mutex::new(()),
             max_scan: crate::config::CHANGE_CAPTURE_MAX_SCAN.get(),
@@ -665,7 +668,7 @@ impl ChangeLog {
         Self {
             conn: None,
             recording: false,
-            epoch: String::new(),
+            epoch: RwLock::new(String::new()),
             next_seq: AtomicI64::new(0),
             section: Mutex::new(()),
             max_scan: 0,
@@ -676,6 +679,16 @@ impl ChangeLog {
             path: None,
             rows_notify: tokio::sync::Notify::new(),
             cursor_moves: (Mutex::new(0), std::sync::Condvar::new()),
+        }
+    }
+
+    /// The off switch beside a persistent store whose log was never
+    /// written: it records nothing, but knows where the log would live, so a
+    /// restore can put a backup's log there ([`Self::restore_from`]).
+    fn disabled_at(dir: Option<&Path>) -> Self {
+        Self {
+            path: dir.map(|d| d.join("changes").join("changes.db")),
+            ..Self::disabled()
         }
     }
 
@@ -697,8 +710,8 @@ impl ChangeLog {
         self.conn.is_some()
     }
 
-    pub fn epoch(&self) -> &str {
-        &self.epoch
+    pub fn epoch(&self) -> String {
+        self.epoch.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// The before-image scan cap: a primitive scans its targets only when
@@ -750,11 +763,12 @@ impl ChangeLog {
         let ctx = context();
         let txn = uuid::Uuid::new_v4().to_string();
         let created = now();
+        let epoch = self.epoch();
         let insert = |graph: Option<&str>, scope: &str| -> Option<i64> {
             exec(&conn,
                 "INSERT INTO changes (epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, state, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unknown', 'pending', ?9)",
-                params![self.epoch, txn, scope, graph, origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, created],
+                params![epoch, txn, scope, graph, origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, created],
             )
             .ok()?;
             Some(conn.last_insert_rowid())
@@ -881,13 +895,14 @@ impl ChangeLog {
         }
         // Deltas for graphs the intent did not know (a primitive that
         // discovered its targets while running).
+        let epoch = self.epoch();
         for delta in deltas {
             let ctx = context();
             if tx
                 .execute(
                     "INSERT INTO changes (epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, state, created_at) \
                      VALUES (?1, ?2, 'graph', ?3, ?4, ?5, ?6, ?7, 'unknown', 'pending', ?8)",
-                    params![self.epoch, intent.txn, delta.graph, intent.origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
+                    params![epoch, intent.txn, delta.graph, intent.origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
                 )
                 .is_err()
             {
@@ -1192,8 +1207,21 @@ impl ChangeLog {
         if self.conn.is_none() {
             return 0;
         }
+        self.at_head(|| ()).0
+    }
+
+    /// Run `f` inside the sequence section and return the head with its
+    /// result: while `f` runs no recorded write is between its data commit
+    /// and its sequence number, so a store snapshot `f` opens holds exactly
+    /// the writes at or below the head. A backup opens its dump here.
+    pub fn at_head<T>(&self, f: impl FnOnce() -> T) -> (i64, T) {
         let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
-        (self.next_seq.load(Ordering::Relaxed) - 1).max(0)
+        let head = if self.conn.is_none() {
+            0
+        } else {
+            (self.next_seq.load(Ordering::Relaxed) - 1).max(0)
+        };
+        (head, f())
     }
 
     pub fn status(&self) -> Status {
@@ -1243,7 +1271,7 @@ impl ChangeLog {
         Status {
             enabled: self.recording,
             readable: true,
-            epoch: self.epoch.clone(),
+            epoch: self.epoch(),
             next_seq,
             rows: conn
                 .query_row("SELECT COUNT(*) FROM changes", [], |r| r.get(0))
@@ -1559,6 +1587,16 @@ impl ChangeLog {
                 Vec::new(),
             );
         }
+        // The range of an epoch this log never held finds no rows, which
+        // would read as an intact, empty chain: a delta restored from a
+        // backup without its log, onto a log begun elsewhere, would build as
+        // its base.
+        if epoch != self.epoch() && !holds_epoch(&conn, epoch) {
+            return broken(
+                format!("the change log holds no row of epoch {epoch}"),
+                Vec::new(),
+            );
+        }
         let placeholders = (0..graphs.len())
             .map(|i| format!("?{}", i + 3))
             .collect::<Vec<_>>()
@@ -1814,6 +1852,7 @@ impl ChangeLog {
         let Ok(tx) = conn.transaction() else {
             return Vec::new();
         };
+        let epoch = self.epoch();
         let mut next: i64 = self.next_seq.load(Ordering::Relaxed);
         for graph in &disagree {
             let post = live
@@ -1823,7 +1862,7 @@ impl ChangeLog {
             let _ = tx.execute(
                 "INSERT INTO changes (epoch, txn, scope, graph_iri, origin, extent, post_count, state, created_at, seq) \
                  VALUES (?1, ?2, 'graph', ?3, 'reconcile', 'unknown', ?4, 'unknown', ?5, ?6)",
-                params![self.epoch, uuid::Uuid::new_v4().to_string(), graph, post, now(), next],
+                params![epoch, uuid::Uuid::new_v4().to_string(), graph, post, now(), next],
             );
             let _ = tx.execute(
                 "INSERT INTO graph_state (graph_key, last_seq, post_count) VALUES (?1, ?2, ?3) \
@@ -1842,17 +1881,244 @@ impl ChangeLog {
     }
 
     /// Mint a new epoch: the store was replaced wholesale (a quarantine and
-    /// rebuild), so no chain from before it may be applied.
-    pub fn renew_epoch(&mut self) {
-        let epoch = uuid::Uuid::new_v4().to_string();
-        if let Some(conn) = self.lock() {
-            let _ = conn.execute(
-                "UPDATE meta SET value = ?1 WHERE key = 'epoch'",
-                params![epoch],
-            );
-        }
-        self.epoch = epoch;
+    /// rebuild, the restore of a backup that holds no log), so no chain from
+    /// before it may be extended across it. Nothing to do without a log.
+    pub fn renew_epoch(&self) {
+        let Some(conn) = self.lock() else { return };
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let _ = retire_epoch(&conn, &self.epoch(), self.last_seq());
+        let _ = conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'epoch'",
+            params![fresh],
+        );
+        *self.epoch.write().unwrap_or_else(|p| p.into_inner()) = fresh;
     }
+
+    // ── Backup and restore ──────────────────────────────────────────────────
+
+    /// Copy the log to `dst` with SQLite's online backup. A log on disk is
+    /// read through a connection of its own, in a single step: a WAL reader
+    /// holds one snapshot for the whole copy and holds up no writer, where a
+    /// copy in increments would start over each time a write landed.
+    /// `Ok(false)` when there is no log (capture off, and never on).
+    pub fn backup_to(&self, dst: &Path) -> Result<bool, StoreError> {
+        if self.conn.is_none() {
+            return Ok(false);
+        }
+        let mut out = Connection::open(dst).map_err(sql_err)?;
+        match &self.path {
+            Some(path) => {
+                let src =
+                    Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .map_err(sql_err)?;
+                copy_database(&src, &mut out)?;
+            }
+            None => {
+                let Some(conn) = self.lock() else {
+                    return Ok(false);
+                };
+                copy_database(&conn, &mut out)?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Make a backup's copy of the log, at `path`, the log of the store its
+    /// RDF dump restores. `head` is the sequence number the dump holds
+    /// exactly (`changes_seq` in the manifest). The copy was taken after the
+    /// dump, so it holds every row a delta version in the dump needs; rows
+    /// above `head`, and rows still pending, are writes the dump does not
+    /// hold, and go. So do the builds the copy records — the dump may hold
+    /// all, part or none of a build's graphs — whose graphs are returned for
+    /// the restore to drop; each delta is built again on its next read.
+    ///
+    /// Last, the copy moves to a new epoch. Its rows keep theirs, so a delta
+    /// still resolves forward from its base through rows that are all here;
+    /// but nothing that needs the current epoch — a backward build, a tier-1
+    /// restore, a cut on an old checkpoint, a follower's cursor — extends a
+    /// chain of the old one across the restore. The sequence goes on from
+    /// where the copy's stopped, so no number is handed out twice.
+    pub fn prepare_restore(path: &Path, head: Option<i64>) -> Result<PreparedRestore, StoreError> {
+        let mut conn = Connection::open(path).map_err(sql_err)?;
+        let epoch: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'epoch'", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| StoreError::Other(format!("not a change log: {e}")))?;
+        conn.execute_batch(SCHEMA).map_err(sql_err)?;
+        let max_seq: i64 = conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM changes", [], |r| {
+                r.get(0)
+            })
+            .map_err(sql_err)?;
+        let next = meta_i64(&conn, "next_seq").max(max_seq + 1);
+        let tx = conn.transaction().map_err(sql_err)?;
+        let dropped_rows = match head {
+            Some(head) => {
+                tx.execute("DELETE FROM graph_state WHERE last_seq > ?1", params![head])
+                    .map_err(sql_err)?;
+                tx.execute(
+                    "DELETE FROM changes WHERE seq IS NULL OR seq > ?1",
+                    params![head],
+                )
+                .map_err(sql_err)?
+            }
+            None => tx
+                .execute("DELETE FROM changes WHERE seq IS NULL", [])
+                .map_err(sql_err)?,
+        };
+        let built_graphs: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT graphs FROM materialisations")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(sql_err)?;
+            rows.flatten()
+                .flat_map(|g| serde_json::from_str::<Vec<String>>(&g).unwrap_or_default())
+                .collect()
+        };
+        tx.execute("DELETE FROM materialisations", [])
+            .map_err(sql_err)?;
+        retire_epoch(&tx, &epoch, head.unwrap_or(next - 1)).map_err(sql_err)?;
+        let new_epoch = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'epoch'",
+            params![new_epoch],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('next_seq', ?1)",
+            params![next.to_string()],
+        )
+        .map_err(sql_err)?;
+        // The new epoch is the boundary a capture gap would have made.
+        tx.execute("DELETE FROM meta WHERE key = 'capture_gap'", [])
+            .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        // One self-contained file, which may be copied into place.
+        conn.execute_batch("PRAGMA journal_mode = DELETE;")
+            .map_err(sql_err)?;
+        Ok(PreparedRestore {
+            epoch,
+            new_epoch,
+            dropped_rows,
+            built_graphs,
+        })
+    }
+
+    /// Replace the log with the copy at `src`, made ready by
+    /// [`Self::prepare_restore`]. An open log takes it through SQLite's
+    /// online backup — its connection stays valid — and takes up the copy's
+    /// epoch and sequence. A log that was never opened (capture off, no file
+    /// yet) gets the file where [`Self::open`] looks for it, read from the
+    /// next start. A log that does not record marks the capture gap, as an
+    /// open does: what this run still writes goes unrecorded. `Ok(false)`
+    /// when there is nowhere to put it (an in-memory store, capture off).
+    pub fn restore_from(&self, src: &Path) -> Result<bool, StoreError> {
+        let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        let source = Connection::open(src).map_err(sql_err)?;
+        if let Some(mut conn) = self.lock() {
+            copy_database(&source, &mut conn)?;
+            if !self.recording {
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('capture_gap', ?1)",
+                    params![now()],
+                )
+                .map_err(sql_err)?;
+            }
+            let epoch: String = conn
+                .query_row("SELECT value FROM meta WHERE key = 'epoch'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(sql_err)?;
+            let max_seq: i64 = conn
+                .query_row("SELECT COALESCE(MAX(seq), 0) FROM changes", [], |r| {
+                    r.get(0)
+                })
+                .map_err(sql_err)?;
+            *self.epoch.write().unwrap_or_else(|p| p.into_inner()) = epoch;
+            self.next_seq.store(
+                meta_i64(&conn, "next_seq").max(max_seq + 1),
+                Ordering::Relaxed,
+            );
+            self.rows_since_sweep.store(0, Ordering::Relaxed);
+            return Ok(true);
+        }
+        drop(source);
+        let Some(path) = &self.path else {
+            return Ok(false);
+        };
+        let io = |e: std::io::Error| StoreError::Other(format!("change log: {e}"));
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        for ext in ["-wal", "-shm"] {
+            let mut p = path.as_os_str().to_os_string();
+            p.push(ext);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+        }
+        std::fs::copy(src, path).map_err(io)?;
+        Connection::open(path)
+            .and_then(|c| {
+                c.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('capture_gap', ?1)",
+                    params![now()],
+                )
+            })
+            .map_err(sql_err)?;
+        Ok(true)
+    }
+}
+
+/// What [`ChangeLog::prepare_restore`] did to a backup's copy of the log.
+#[derive(Debug, Clone)]
+pub struct PreparedRestore {
+    /// The epoch the copy's rows carry.
+    pub epoch: String,
+    /// The epoch the restored log goes on in.
+    pub new_epoch: String,
+    /// Rows dropped: past the dump, or still pending.
+    pub dropped_rows: usize,
+    /// The graphs of the builds the copy recorded, to drop from the store.
+    pub built_graphs: Vec<String>,
+}
+
+/// Copy the whole of `src` into `dst`, in one step of SQLite's online backup
+/// (`run_to_completion` copies in increments only), waiting a few seconds at
+/// most for a lock another connection holds.
+fn copy_database(src: &Connection, dst: &mut Connection) -> Result<(), StoreError> {
+    let backup = rusqlite::backup::Backup::new(src, dst).map_err(sql_err)?;
+    for _ in 0..100 {
+        match backup.step(-1).map_err(sql_err)? {
+            rusqlite::backup::StepResult::Done => return Ok(()),
+            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    Err(StoreError::Other(
+        "change log: the database stayed locked for the copy".into(),
+    ))
+}
+
+/// Remember, when a new epoch replaces `epoch`, that this log held it, up to
+/// sequence `last_seq`: its rows may all go to retention later, and
+/// [`ChangeLog::chain`] must still tell it from an epoch it never held.
+fn retire_epoch(conn: &Connection, epoch: &str, last_seq: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params![format!("retired_epoch:{epoch}"), last_seq.to_string()],
+    )
+}
+
+/// Whether this log ever held `epoch`: it retired it, or has rows of it.
+fn holds_epoch(conn: &Connection, epoch: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1) \
+             OR EXISTS (SELECT 1 FROM changes WHERE epoch = ?2)",
+        params![format!("retired_epoch:{epoch}"), epoch],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 // ─── Payloads ───────────────────────────────────────────────────────────────
@@ -2589,5 +2855,112 @@ mod tests {
         assert!(log.begin("update", Some(&data), &|_| None).is_some());
         leave_write();
         assert_eq!(log.status().pending, 1);
+    }
+
+    /// A range of an epoch the log never held finds no rows; that is not an
+    /// empty chain — a delta restored without its log would build as its
+    /// base. An epoch the log retired is still its own, rows or none.
+    #[test]
+    fn a_chain_of_an_epoch_the_log_never_held_is_broken_not_empty() {
+        let log = log();
+        let first = log.epoch();
+        log.renew_epoch();
+        assert_ne!(log.epoch(), first);
+        let g = vec!["http://g/a".to_string()];
+        assert!(log.chain(&g, &first, 0, 3).intact, "a retired epoch");
+        let never = log.chain(&g, "an-epoch-from-elsewhere", 0, 3);
+        assert!(!never.intact);
+        assert!(never.reason.unwrap().contains("holds no row"));
+        assert!(
+            log.chain(&g, "an-epoch-from-elsewhere", 3, 3).intact,
+            "an empty range"
+        );
+    }
+
+    /// A backup's copy of the log, restored: the rows past the dump and the
+    /// pending one go, and so do the builds (their graphs are handed back,
+    /// to be dropped); the log goes on in a new epoch, its sequence where the
+    /// copy's stopped. An open log takes the copy in place; a log that was
+    /// never opened gets the file where the next open looks.
+    #[test]
+    fn a_restored_copy_keeps_the_rows_the_dump_holds_under_a_new_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = "http://g/a";
+        let source = ChangeLog::open_at(Some(&dir.path().join("source")), true).unwrap();
+        for i in 1..=4 {
+            write(&source, a, vec![q(i, Some(a))], vec![]);
+        }
+        // A write in flight when the copy was taken.
+        let _in_flight = source
+            .begin("test", Some(&[Some(a.to_string())]), &|_| None)
+            .unwrap();
+        leave_write();
+        let build = "http://x/dataset/d/version/1.1.0/g";
+        source
+            .put_materialisation(&Materialisation {
+                version_iri: "http://x/dataset/d/version/1.1.0".into(),
+                dataset_id: "d".into(),
+                graphs: vec![build.into()],
+                quads: 1,
+                built_at: now(),
+                last_used: now(),
+            })
+            .unwrap();
+        let copy = dir.path().join("copy.db");
+        assert!(source.backup_to(&copy).unwrap());
+        assert!(!ChangeLog::disabled()
+            .backup_to(&dir.path().join("none.db"))
+            .unwrap());
+
+        // The dump held the first two writes; the next two landed between
+        // it and the copy.
+        let prepared = ChangeLog::prepare_restore(&copy, Some(2)).unwrap();
+        assert_eq!(prepared.epoch, source.epoch());
+        assert_ne!(prepared.new_epoch, prepared.epoch);
+        assert_eq!(prepared.dropped_rows, 3, "two past the dump, one pending");
+        assert_eq!(prepared.built_graphs, vec![build.to_string()]);
+
+        // An open log, with rows of its own, takes it in place.
+        let target_dir = dir.path().join("target");
+        let target = ChangeLog::open_at(Some(&target_dir), true).unwrap();
+        write(
+            &target,
+            "http://g/b",
+            vec![q(9, Some("http://g/b"))],
+            vec![],
+        );
+        assert!(target.restore_from(&copy).unwrap());
+        assert_eq!(target.epoch(), prepared.new_epoch);
+        let rows = target.rows_after(0, 10);
+        assert_eq!(
+            rows.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        assert!(rows.iter().all(|r| r.epoch == prepared.epoch));
+        assert_eq!(target.status().pending, 0);
+        assert!(target.materialisations(None).is_empty());
+        let g = vec![a.to_string()];
+        assert!(target.chain(&g, &prepared.epoch, 0, 2).intact);
+        // No sequence number is handed out twice.
+        write(&target, a, vec![q(5, Some(a))], vec![]);
+        let next = &target.rows_after(2, 10)[0];
+        assert_eq!(next.seq, Some(5));
+        assert_eq!(next.epoch, prepared.new_epoch);
+        drop(target);
+        let reopened = ChangeLog::open_at(Some(&target_dir), true).unwrap();
+        assert_eq!(reopened.epoch(), prepared.new_epoch, "the epoch is on disk");
+
+        // A log never opened: the file goes where the next open looks, with
+        // the gap marked, since this run records nothing.
+        let fresh = dir.path().join("fresh");
+        assert!(ChangeLog::disabled_at(Some(&fresh))
+            .restore_from(&copy)
+            .unwrap());
+        let opened = ChangeLog::open_at(Some(&fresh), true).unwrap();
+        assert_ne!(opened.epoch(), prepared.new_epoch, "the gap starts another");
+        assert_eq!(opened.rows_after(0, 10).len(), 2);
+        assert!(opened.chain(&g, &prepared.epoch, 0, 2).intact);
+        // Nowhere to put it.
+        assert!(!ChangeLog::disabled().restore_from(&copy).unwrap());
     }
 }
