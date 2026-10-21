@@ -65,6 +65,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graphs the log does not describe. Manifests without the new fields still
   verify and restore. A delta whose range belongs to an epoch the change log
   never held now answers `410` instead of being built as its base.
+- **A datasource run into a dataset passes all of the dataset's SHACL write
+  gates** (#503). A run bound to a dataset, and the promotion of a kept
+  candidate after review, checked the candidate graph against the mapping's
+  shapes and the dataset's `shacl_on_write` shapes only. Data that a Graph
+  Store write, bulk import, RDF Patch or repair into the same dataset would
+  refuse with a `422` could reach it through a run. Runs, snapshots of virtual
+  sources included, now also run the dataset's `gate_writes` pipelines (each
+  at its own severity threshold, and only with its creator's write access)
+  and its validation-layer bindings, in the documented gate order, before the
+  candidate joins the dataset. A refusal by any of them is handled like a
+  `shacl_on_write` refusal: the run is `rejected` and not promoted, each
+  refusing gate's results join the run's report (a result two gates share is
+  listed once) and open review items, and `POST /api/runs/:id/promote`
+  answers `422` while any gate still refuses. A gate that cannot be
+  evaluated, or a failed lookup of the bound dataset, fails the run instead
+  of letting it through.
 - **A demo content refresh no longer deletes files an operator added to the
   demo dataset.** When the recorded demo content version was behind, the
   refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
@@ -113,6 +129,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rows left behind by earlier purges stay until retention removes the log
   rows; usage events of deleted users can be removed with
   `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+
+- **Dependency advisories of October 2026.** `calamine` 0.37 replaces 0.36,
+  so the `zip` 8 it pulled in (RUSTSEC-2026-0367, -0368, -0369: `extract()`
+  preserving SUID bits and following symlinks out of the destination) is
+  gone; the server only reads workbook entries and never extracted, and the
+  rest of the tree already used `zip` 9. `rustls-webpki` 0.103.16
+  (RUSTSEC-2026-0382, distrusted intermediates), `webpki-roots` and
+  `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0381, -0383, emSign roots).
+  `basic-toml` (RUSTSEC-2026-0374, unmaintained) is only read at build time
+  by `age`'s i18n macros and is listed in `deny.toml` with that reason.
 
 ## [0.8.0] — 2026-10-14
 

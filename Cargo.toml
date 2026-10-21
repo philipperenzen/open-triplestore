@@ -361,7 +361,7 @@ infer = "0.22"
 lopdf = { version = "0.45", optional = true }
 kamadak-exif = { version = "0.6", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
-calamine = { version = "0.36", optional = true }
+calamine = { version = "0.37", optional = true }
 mp4 = { version = "0.14", optional = true }
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "isomp4"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
