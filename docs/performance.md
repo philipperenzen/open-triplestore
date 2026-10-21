@@ -1607,6 +1607,19 @@ from matched patterns. Tests serialisation overhead vs. SELECT.
 variable forces an index scan across all named graphs. Binding the graph IRI
 converts this to a constant-time graph-partition lookup.
 
+### `query/over_cap_dataset`
+
+The engine path of a dataset service on a store over the accelerator's cap
+(issue #468): a RocksDB store with 4,000 BSBM-shaped products (48,000 triples)
+in a data graph beside a small shapes graph, the accelerator capped at 1,000
+triples, and every query scoped the way the dataset endpoint scopes it —
+`FROM` and `FROM NAMED` both graphs, so the default graph is their RDF merge.
+`q5_merged` is BSBM explore Q5 over the merge and `q5_one_graph` the same over
+the data graph alone; the two should stay close, since the shapes graph holds
+none of Q5's predicates. `describe_merged` is BSBM Q9's shape and
+`count_merged` a `COUNT(*)` over the merge, which is counted from the graph
+counts rather than scanned.
+
 ### `path/zero_or_more`
 
 `ex:next*` path (includes the identity relation — every node reaches itself

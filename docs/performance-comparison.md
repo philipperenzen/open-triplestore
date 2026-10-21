@@ -600,6 +600,88 @@ the new build finished it, with 43,428 offers)
   1k feature queries (F01, F02, F04, F08, F09) are 19–37 % slower than before;
   not investigated.
 
+### 5.9 The engine path over the accelerator's cap, on an x86 workstation (2026-10-20)
+
+[#468](https://github.com/philipperenzen/open-triplestore/issues/468), after
+§5.8. **A different machine from every other section:** an AMD Ryzen 9
+7900X3D workstation running the stores in Docker Desktop on WSL 2 (24 CPUs
+for the VM), shared with other jobs, which a machine-wide lock kept off it
+during the runs. The containers had the same 4 GiB and 4 CPUs, the same data
+(checksums as on 2026-10-13) and the same query instances. **Before** is
+develop `462b206c` (0.8.0), **After** is `757c2489`; both built from
+`Dockerfile.ots` with fat LTO and every source file touched before the
+build, so the shared `target/` cache could not hand back an older binary.
+Oxigraph 0.5.11 ran in the same window. The machine ran about half as fast
+in that window as five days earlier, so only ratios within the window mean
+anything. Data, the harness's tables and the probes:
+[`docs/perf-data/2026-10-20-x86/`](perf-data/2026-10-20-x86/).
+
+**10k (3.56M triples, accelerator off), BSBM explore, one client** — median ms
+
+| Query | Before | After | Oxigraph 0.5.11 | After / Oxigraph |
+| --- | --: | --: | --: | --: |
+| Q1 | 5.72 | 3.79 | 2.71 | 1.40 |
+| Q2 | 5.08 | 3.74 | 2.37 | 1.58 |
+| Q3 | 8.78 | 6.22 | 5.18 | 1.20 |
+| Q4 | 9.88 | 6.67 | 5.10 | 1.31 |
+| Q5 | 87.0 | 52.5 | 53.1 | 0.99 |
+| Q7 | 7.23 | 5.39 | 3.57 | 1.51 |
+| Q8 | 4.52 | 3.41 | 2.29 | 1.49 |
+| Q9 | 1.98 | 1.43 | 0.72 | 2.00 |
+| Q10 | 4.08 | 2.91 | 1.92 | 1.52 |
+| Q11 | 2.08 | 1.52 | 0.77 | 1.97 |
+| Q12 | 2.60 | 1.83 | 1.05 | 1.75 |
+| **QMpH** | **10,859** | **16,586** | **19,331** | **1.17× slower** |
+
+At 1k (the accelerator on) the explore mix gave 48,629 QMpH before, 44,133
+after and 63,030 for Oxigraph. The after build's deficit at 1k did not
+reproduce in an interleaved run of both builds loaded side by side
+([`before-after.md`](perf-data/2026-10-20-x86/before-after.md)); none of
+the changes touches the accelerator's evaluators.
+
+**10k, SPARQL 1.1 feature mix** — median ms
+
+| Query | Before | After | Oxigraph 0.5.11 |
+| --- | --: | --: | --: |
+| F03-path-alternative | 3,039 | 1,968 | 2,234 |
+| F05-agg-group-avg | 7,192 | 4,084 | 4,511 |
+| F09-minus | 1,682 | 1,337 | 1,246 |
+| F11-subquery-topk | 1,412 | 743 | 598 |
+| F12-subquery-agg-join | 9,189 | 7,396 | 6,436 |
+| F14-count-all | 1,433 | 2.41 | 1,347 |
+
+The whole feature table is in the data directory. Every query instance got the
+same result count from all three (2,632 instances at 1k, 2,967 at 10k).
+
+**Where the time went.** Diagnosed on the before build, with Oxigraph and
+the before build loaded side by side and queried in turn:
+
+- **The merged default graph.** A dataset service reads the RDF merge of its
+  data graph and its shapes graph, and the evaluator opened a scan on both for
+  every pattern it looked up: one lookup per row in Q5's for-loop joins. Q5
+  took 32.0 ms through the dataset's service, 20.2 ms through a second service
+  of the same dataset over the data graph alone, and 17.1 ms in Oxigraph. Graphs
+  without the pattern's predicate are now left out (vendored oxigraph change
+  15); after it Q5 runs within 14 % of the data graph alone.
+- **`COUNT(*)` of the dataset (F14)** was always scanned: the dataset endpoint
+  prints a scoped query back from its syntax tree, which writes the count as a
+  sub-select, and the fast count only knew the written form; with two graphs
+  it also needed the merge. Both are now counted from the count index.
+- **Per request**, a trivial `ASK` took 0.65 ms against Oxigraph's 0.20 ms, and
+  `GET /livez` 0.24 ms. Of the 0.4 ms, about 0.06 ms is the token, the rest
+  eleven identity-database lookups (the user, the endpoint ACL rules, the
+  dataset, its service and graphs, the role twice), the query's parses and the
+  streamed response. The lookups now use cached statements and the store
+  parses a query once on its engine path (it parsed three times): 1.71 → 1.53
+  ms in the 2026-10-20 window, against Oxigraph's 0.56 ms.
+- **Not the file layout:** a full compaction of the before build's store
+  (`oxigraph optimize`) left Q5 where it was.
+
+The target of #468, within about 1.5× of Oxigraph on the 10k explore mix, is
+met on this machine. The queries that are still 1.5–2× Oxigraph are the
+shortest ones (Q9, Q11, Q12, under 2 ms), where the per-request cost above is
+most of the time.
+
 ## 6. Where Open Triplestore loses
 
 The bullets are the 2026-10-03 findings; where the round-3 fixes changed one,
@@ -616,6 +698,8 @@ its 2026-10-13 status follows it (§5.8).
   [#468](https://github.com/philipperenzen/open-triplestore/issues/468).
   *2026-10-13:* about 2× at 10k and 1.8× at 1k against Oxigraph run in the same
   window; DESCRIBE 1.0 ms. The rest is Q5 and the analytical queries at 10k.
+  *2026-10-20 (x86 workstation, §5.9):* 1.17× Oxigraph on the 10k explore mix
+  (was 1.78×); what is left is about 0.3 ms per request outside the engine.
 - **Above 2 M triples in a 4 GiB container the accelerator is off**, by design
   (`OTS_PARALLEL_QUERY_MAX_TRIPLES`, default 2,000,000 at this memory size; since
   round 3, 1,048,576 in 4 GiB, a quarter of the limit at about 1 KiB a triple), and
