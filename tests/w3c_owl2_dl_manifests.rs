@@ -62,8 +62,6 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("New-Feature-Rational-002", "the premise's RDF list ends in `rdf:` (the namespace IRI) instead of `rdf:nil`, so it is not a well-formed OWL 2 document and the server refuses it as outside OWL 2 DL (422); a test-suite defect, #505"),
     ("New-Feature-Rational-003", "as New-Feature-Rational-002: a list ending in `rdf:`"),
     ("WebOnt-I5.26-001", "the premise holds a class expression that no axiom uses; the OWL 2 RDF mapping leaves its triples unparsed (Mapping to RDF Graphs §3.2.5: the graph must be empty at the end), so the server refuses the input as outside OWL 2 DL (422); a test-suite defect, #505"),
-    ("WebOnt-description-logic-208", "HermiT does not decide consistency within the runner's 60 s limit (504, result unknown), nor within 900 s; an engine limit, #506"),
-    ("WebOnt-description-logic-209", "as WebOnt-description-logic-208: no answer within 60 s"),
 ];
 
 /// Pass floor: a loader or mapping regression that turns passes into skips
@@ -225,7 +223,9 @@ fn sidecar() -> Option<DlConfig> {
     let mut c = DlConfig::default().with_backend(DlBackendKind::Sidecar);
     c.sidecar_url = Some(url);
     c.sidecar_token = std::env::var("OTS_TEST_REASONER_TOKEN").ok();
-    // Every case but the known slow ones answers in well under a second.
+    // Every case answers in well under a second, except
+    // WebOnt-description-logic-208 and -209, which the sidecar decides after
+    // HermiT's 5 s first try, in about 6 s (#506).
     // OTS_TEST_W3C_OWL2_TIMEOUT_SECS overrides the per-check budget.
     let secs = std::env::var("OTS_TEST_W3C_OWL2_TIMEOUT_SECS")
         .ok()

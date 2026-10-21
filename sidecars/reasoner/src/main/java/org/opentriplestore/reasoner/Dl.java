@@ -312,11 +312,20 @@ final class Dl {
 
     // ── reasoning ────────────────────────────────────────────────────────
 
-    /** HermiT over {@code o}, registered with {@code job} so a timeout can interrupt it. */
+    /**
+     * HermiT over {@code o} that has decided consistency, or that has the rest
+     * of the time limit to decide it ({@link Restart}).
+     */
     static OWLReasoner hermit(OWLOntology o, Job job) throws NotInProfile {
+        return Restart.consistencyDecided(learning -> hermit(o, job, learning), job, Restart.FIRST_TRY_MS);
+    }
+
+    /** HermiT over {@code o}, registered with {@code job} so a timeout can interrupt it. */
+    static OWLReasoner hermit(OWLOntology o, Job job, boolean disjunctionLearning) throws NotInProfile {
         Configuration c = new Configuration();
         c.throwInconsistentOntologyException = false;
         c.ignoreUnsupportedDatatypes = false;
+        c.useDisjunctionLearning = disjunctionLearning;
         try {
             OWLReasoner r = new Reasoner.ReasonerFactory().createReasoner(o, c);
             job.attach(r);

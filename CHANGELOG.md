@@ -75,6 +75,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answers `422` while any gate still refuses. A gate that cannot be
   evaluated, or a failed lookup of the bound dataset, fails the run instead
   of letting it through.
+- **The reasoner sidecar decides inputs on which HermiT's disjunction learning
+  gets stuck** (#506). When HermiT has not decided consistency after 5 s (at
+  most a quarter of the time limit), the sidecar tries once more without
+  disjunction learning, then with HermiT's defaults for the rest of the time
+  limit. Disjunction learning only orders HermiT's search, so the answers are
+  the same. The W3C OWL 2 test cases WebOnt-description-logic-208 and -209,
+  which HermiT did not decide in 15 minutes, are now decided in about 6 s per
+  check and are no longer known failures. A request whose consistency test
+  answers within the first 5 s runs as before.
 - **Workspace settings rendered in light colours in dark mode**: its cards were
   hard-coded white and its source badges and error box light-only.
 - **Panels meant to be light grey were dark teal, in both themes**: the API
