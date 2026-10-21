@@ -700,3 +700,171 @@ async fn a_public_dataset_does_not_share_its_source_credential() {
     assert_eq!(mock.authorised_hits.load(Ordering::SeqCst), hits);
     assert!(service_names(&app, Some(&admin), "vkg-pub").await.is_some());
 }
+
+/// A snapshot into a dataset answers to the dataset's SHACL Studio write
+/// gates as a mapped run does (#503): a `gate_writes` pipeline and a
+/// validation-layer binding refuse it, the refusal opens review items, and
+/// the corrected candidate promotes only once every gate passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_into_a_dataset_passes_its_pipelines_and_bindings() {
+    let _env = ALLOWLIST.lock().await;
+    let (port, _) = start_mock().await;
+    std::env::set_var("OTS_SOURCES_ALLOWLIST", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "snap-ds",
+            "Snapshots",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let dataset_graphs = || state.auth_db.list_dataset_graphs("snap-ds").unwrap();
+    register_source(&app, &admin, "vkg-gated", port, "snap-ds").await;
+
+    // A gating pipeline: no product costs more than 1, and the nut does. A
+    // binding: every product has a price, and the washer has none.
+    let mut shape_graphs = Vec::new();
+    for (name, constraint) in [("Cheap", "sh:maxInclusive 1"), ("Priced", "sh:minCount 1")] {
+        let turtle = format!(
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <{EX}> .\n\
+             ex:{name} a sh:NodeShape ; sh:targetClass ex:Product ;\n\
+               sh:property [ sh:path ex:price ; {constraint} ] .\n"
+        );
+        let (st, v, txt) = req(
+            &app,
+            Method::POST,
+            "/api/shacl/shape-graphs",
+            &admin,
+            json!({ "name": name, "visibility": "private", "turtle": turtle }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{txt}");
+        shape_graphs.push(v["id"].as_str().unwrap().to_string());
+    }
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/shacl/pipelines",
+        &admin,
+        json!({ "name": "cheap", "gate_writes": true, "shape_graph_ids": [shape_graphs[0]],
+                "targets": [{ "kind": "dataset", "id": "snap-ds" }] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/shacl/bindings",
+        &admin,
+        json!({ "shape_graph_id": shape_graphs[1],
+                "target": { "kind": "dataset", "id": "snap-ds" } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+
+    // Refused by both: rejected, production untouched, nothing joins.
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources/vkg-gated/runs",
+        &admin,
+        json!({ "mode": "snapshot" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(v["run"]["mode"], "snapshot", "{txt}");
+    assert_eq!(v["run"]["status"], "rejected", "{txt}");
+    assert_eq!(v["report"]["results_count"], 2, "{txt}");
+    let run_id = v["run"]["id"].as_str().unwrap().to_string();
+    let run_graph = v["run"]["graph"].as_str().unwrap().to_string();
+    let (_, src, _) = req(
+        &app,
+        Method::GET,
+        "/api/sources/vkg-gated",
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert!(src["production"].is_null(), "{src}");
+    assert!(!dataset_graphs().contains(&run_graph));
+
+    // One review item for each refused product.
+    let (st, items, txt) = req(
+        &app,
+        Method::GET,
+        "/api/sources/vkg-gated/reviews",
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let mut subjects: Vec<(String, String)> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["subject"].as_str().unwrap().to_string(),
+                i["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    subjects.sort();
+    assert_eq!(subjects.len(), 2, "{txt}");
+    assert_eq!(subjects[0].0, "http://example.org/products/product_2");
+    assert_eq!(subjects[1].0, "http://example.org/products/product_3");
+
+    let promote_uri = format!("/api/runs/{run_id}/promote");
+    let promote = || req(&app, Method::POST, &promote_uri, &admin, Value::Null);
+    let (st, _, txt) = promote().await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+
+    // The fixer clamps the nut's price; the pipeline passes, the binding
+    // still refuses.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/reviews/{}/autofix", subjects[0].1),
+        &admin,
+        json!({ "apply": true }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (st, p, txt) = promote().await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(p["report"]["results_count"], 1, "{txt}");
+    assert_eq!(
+        p["report"]["results"][0]["focus_node"], "http://example.org/products/product_3",
+        "{txt}"
+    );
+
+    // The washer's price is a human's to supply, in the candidate.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/store?graph={}", url_encode(&run_graph)))
+                .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+                .header(header::CONTENT_TYPE, "text/turtle")
+                .body(Body::from(format!(
+                    "<http://example.org/products/product_3> <{EX}price> \
+                     \"0.75\"^^<http://www.w3.org/2001/XMLSchema#decimal> ."
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let (st, p, txt) = promote().await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(p["source"]["production"]["run"], run_id, "{txt}");
+    assert!(dataset_graphs().contains(&run_graph));
+}

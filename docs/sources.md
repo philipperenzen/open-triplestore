@@ -236,7 +236,7 @@ rr:subjectMap [ rr:column "s" ; rr:termType rr:IRI ; rr:class out:Item ] ;
 
 **A snapshot** materialises the endpoint's whole graph without any mapping —
 one `CONSTRUCT`, loaded in one pass so blank nodes keep their identity — as a
-run with `mode: snapshot`: gated against the bound dataset's shapes, swapped
+run with `mode: snapshot`: gated by the bound dataset's write gates, swapped
 in atomically, listed with the mapped runs, reviewable and promotable, with
 `prov:used <urn:source:…>` on its trail and no `mapping` on its record. The
 body is fetched whole, up to `OTS_REMOTE_MAX_BYTES` (64 MiB by default; a
@@ -681,10 +681,20 @@ What a run does, in order:
    datasource and the mapping *version*, `prov:generated` the graph, the agent,
    the interval, and the row and triple counts.
 3. **Gate.** The SHACL write gate runs on the candidate graph: the mapping's
-   own `dct:conformsTo` shapes graph, plus the bound dataset's `shacl_on_write`
-   shapes. A gate that cannot be evaluated refuses the promotion, exactly as
-   the Graph Store write gate does. The gate applies to the swap, not to every
-   batch.
+   own `dct:conformsTo` shapes graph, then every write gate of the bound
+   dataset, in the order a Graph Store write into the dataset meets them —
+   its `gate_writes` pipelines, each at its own severity threshold, its
+   validation-layer bindings and its `shacl_on_write` shapes (see
+   [how the write gates combine](shacl.md#how-the-write-gates-combine)). The
+   candidate is not in the dataset yet, so these are the gates of the dataset
+   it is about to join. A write stops at the first gate that refuses it; a
+   run hears from every gate, and each refusing gate's results go into the
+   run's report, a result two gates share only once. Results a pipeline finds
+   below its threshold refuse nothing and stay out of the report. When the
+   mapping's shapes graph is the dataset's `shacl_on_write` graph it is
+   validated once. A gate that cannot be evaluated refuses the promotion,
+   exactly as the Graph Store write gate does. The gate applies to the swap,
+   not to every batch.
 4. **Swap.** The candidate takes the production role for that datasource in a
    single update, so a reader sees either the old graph or the new one. The
    previous graph is **kept**, demoted, and unregistered from the dataset.
@@ -1113,9 +1123,12 @@ it that graph is evidence of nothing. So a refusal opens **one review item
 per subject with violations** in `urn:system:reviews:<datasource>` — a
 system graph, outside every dataset's SPARQL scope — carrying the violations
 and a snapshot of the subject as the candidate describes it, refreshed after
-every fix. A refusal over a whole table with a systematic defect is a mapping
-problem, which the dry-run classifier catches before a run; the queue is
-capped at `OTS_REVIEW_MAX_ITEMS` (default 500) per run for that reason.
+every fix. The violations are those of every gate that refused the run: the
+mapping's shapes, the dataset's `gate_writes` pipelines and validation-layer
+bindings, and its `shacl_on_write` shapes. A refusal over a whole table with
+a systematic defect is a mapping problem, which the dry-run classifier
+catches before a run; the queue is capped at `OTS_REVIEW_MAX_ITEMS` (default
+500) per run for that reason.
 
 ```bash
 curl "http://localhost:7878/api/sources/legacy-assets/reviews?status=needsHuman" -H "Authorization: Bearer $TOKEN"
@@ -1174,9 +1187,10 @@ the call is a 503 rather than a pretence.
 curl -X POST http://localhost:7878/api/runs/$RUN_ID/promote -H "Authorization: Bearer $TOKEN"
 ```
 
-The gate runs again over the graph as it now stands, and only a passing graph
-takes the production role — the same single pointer swap a passing run makes,
-the previous graph demoted and kept, LDES members published. A graph the gate
+The gate runs again over the graph as it now stands — the mapping's shapes and
+every write gate the dataset has now — and only a graph every gate passes
+takes the production role: the same single pointer swap a passing run makes,
+the previous graph demoted and kept, LDES members published. A graph any gate
 still refuses answers 422 with the report and production is unchanged; a run
 already in production, or one without a candidate graph, is a 409. The
 promotion is its own `ds:Promotion` activity naming who released it, served

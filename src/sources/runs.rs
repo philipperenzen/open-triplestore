@@ -16,6 +16,8 @@ use crate::auth::db::AuthDb;
 use crate::auth::models::GraphKind;
 use crate::secrets::Secret;
 use crate::shacl::report::ValidationReport;
+use crate::shacl_studio::gate as write_gate;
+use crate::shacl_studio::store::ShaclStudioStore;
 use crate::store::TripleStore;
 
 use super::model::*;
@@ -596,57 +598,138 @@ fn snapshot(
     Ok(record)
 }
 
-/// Validate the candidate graph against every shapes graph that applies: the
-/// one the mapping declares it conforms to, and the bound dataset's own
-/// `shacl_on_write` shapes. `None` means no gate applied.
+/// Validate the candidate graph against every gate that applies and fold
+/// what each refusing gate found into one report: first the shapes graph the
+/// mapping declares it conforms to, then every SHACL write gate of the bound
+/// dataset, through the shared gate module and in its order — `gate_writes`
+/// pipelines (each at its own severity threshold), validation-layer
+/// bindings, the dataset's `shacl_on_write` shapes. So a run promotes only
+/// what a Graph Store write into the dataset could write. A write stops at
+/// the first gate that refuses it; a run hears from every one, so a refusal
+/// opens review items for all of them at once. `None` means no gate applied.
 fn gate(
     ctx: RunContext<'_>,
     source: &SqlSource,
     mapping: Option<&MappingRecord>,
     candidate: &str,
 ) -> Result<Option<ValidationReport>, String> {
-    let mut shape_graphs: Vec<String> = Vec::new();
-    if let Some(g) = mapping.and_then(|m| m.shapes_graph.clone()) {
-        shape_graphs.push(g);
-    }
-    if let Some(dataset_id) = &source.dataset {
-        if let Ok(Some(ds)) = ctx.auth_db.get_dataset(dataset_id) {
-            if ds.shacl_on_write {
-                if let Some(g) = ds.shapes_graph_iri.filter(|g| !g.is_empty()) {
-                    shape_graphs.push(g);
-                }
+    let studio = ShaclStudioStore::new(ctx.auth_db.pool());
+    // The candidate joins the dataset only when it is promoted, so its gates
+    // are those of the dataset it is about to join. A dataset that is gone
+    // gates nothing (`attach` says so); a lookup that fails must not lift the
+    // dataset's gates.
+    let dataset_gates = match source.dataset.as_deref() {
+        None => None,
+        Some(id) => match ctx.auth_db.get_dataset(id) {
+            Ok(Some(ds)) => Some(
+                write_gate::discover_gates_joining(
+                    ctx.store,
+                    ctx.auth_db,
+                    &studio,
+                    ctx.base_url,
+                    candidate,
+                    &ds,
+                )
+                .map_err(unevaluable)?,
+            ),
+            Ok(None) => None,
+            Err(e) => {
+                return Err(format!(
+                    "the write gate could not be evaluated: looking up dataset '{id}': {e}"
+                ))
             }
-        }
+        },
     }
-    shape_graphs.sort();
-    shape_graphs.dedup();
-    if shape_graphs.is_empty() {
+    .filter(|gates| !gates.is_empty());
+    // The mapping's shapes, unless they are the dataset's `shacl_on_write`
+    // shapes, which the dataset's own gate validates by the same rule.
+    let own = mapping.and_then(|m| m.shapes_graph.clone()).filter(|g| {
+        dataset_gates
+            .as_ref()
+            .and_then(|d| d.dataset_shapes_graph())
+            != Some(g.as_str())
+    });
+    if own.is_none() && dataset_gates.is_none() {
         return Ok(None);
     }
 
-    let data = vec![candidate.to_string()];
     let mut combined = ValidationReport {
         conforms: true,
         results: Vec::new(),
         results_count: 0,
         metrics: None,
     };
-    for shapes in &shape_graphs {
+    let mut seen = HashSet::new();
+    if let Some(shapes) = &own {
         // A gate that cannot be evaluated must refuse the promotion, not wave
         // it through: the same rule the Graph Store write gate follows.
-        let report = crate::shacl::engine::validate(ctx.store, shapes, &data).map_err(|e| {
-            format!("the write gate could not be evaluated against <{shapes}>: {e}")
-        })?;
-        combined.conforms &= report.conforms;
-        combined.results_count += report.results_count;
-        combined.results.extend(report.results);
-        // One shapes graph at a time, folded the way the validate route does.
-        combined.metrics = match (combined.metrics.take(), report.metrics) {
-            (Some(a), Some(b)) => Some(a.merge(b)),
-            (a, b) => a.or(b),
-        };
+        let report = crate::shacl::engine::validate(ctx.store, shapes, &[candidate.to_string()])
+            .map_err(|e| {
+                format!("the write gate could not be evaluated against <{shapes}>: {e}")
+            })?;
+        let refuses = !report.conforms;
+        fold(&mut combined, &mut seen, report, refuses);
+    }
+    if let Some(gates) = &dataset_gates {
+        let verdicts = write_gate::evaluate_every_gate(ctx.store, &studio, gates, candidate)
+            .map_err(unevaluable)?;
+        // A gate that passes adds nothing: what it found is below its
+        // threshold and refuses nothing.
+        for verdict in verdicts.into_iter().filter(|v| v.refuses) {
+            tracing::info!(
+                candidate,
+                gate = ?verdict.gate,
+                results = verdict.report.results_count,
+                "a write gate of the dataset refused the candidate"
+            );
+            fold(&mut combined, &mut seen, verdict.report, true);
+        }
     }
     Ok(Some(combined))
+}
+
+/// Fold one gate's report into the run's: its refusal into `conforms`, its
+/// results once each — two gates can share a shapes graph, and a review item
+/// lists a violation once — and its metrics, the way the validate route
+/// folds one shapes graph at a time.
+fn fold(
+    combined: &mut ValidationReport,
+    seen: &mut HashSet<String>,
+    report: ValidationReport,
+    refuses: bool,
+) {
+    combined.conforms &= !refuses;
+    for r in report.results {
+        let key = format!(
+            "{}\0{}\0{:?}\0{:?}\0{}\0{}\0{}",
+            r.severity.iri(),
+            r.focus_node,
+            r.path,
+            r.value,
+            r.source_shape,
+            r.source_constraint,
+            r.message
+        );
+        if seen.insert(key) {
+            combined.results.push(r);
+        }
+    }
+    combined.results_count = combined.results.len();
+    combined.metrics = match (combined.metrics.take(), report.metrics) {
+        (Some(a), Some(b)) => Some(a.merge(b)),
+        (a, b) => a.or(b),
+    };
+}
+
+/// A gate the shared module could not evaluate, as the run's error. The
+/// module reports one as a non-conforming report whose one result says why.
+fn unevaluable(report: ValidationReport) -> String {
+    report
+        .results
+        .into_iter()
+        .next()
+        .map(|r| r.message)
+        .unwrap_or_else(|| "the SHACL write gate could not be evaluated".to_string())
 }
 
 /// Give the run's graph the production role for its source, demoting the
@@ -1189,6 +1272,281 @@ mod tests {
         );
         // Another source's trail is not mixed in.
         assert!(!source_provenance_turtle(&store, "other").contains("ds:Run"));
+    }
+
+    // ─── The gate ────────────────────────────────────────────────────────────
+
+    use crate::auth::models::{OwnerType, SystemRole, Visibility};
+    use crate::shacl::report::Severity;
+    use crate::shacl_studio::bindings;
+    use crate::shacl_studio::models::{
+        ResultsTarget, SeverityThreshold, ShapeSource, TargetKind, ValidationPipeline,
+        ValidationTarget, WriteTarget,
+    };
+    use oxigraph::io::RdfFormat;
+
+    const DATASET: &str = "d1";
+    const BASE: &str = "http://x";
+    const CANDIDATE: &str = "urn:run:r1";
+    const NON_NEGATIVE: &str = "urn:shapes:non-negative";
+    const CEILING: &str = "urn:shapes:ceiling";
+    const ADVICE: &str = "urn:shapes:advice";
+
+    fn gating_pipeline(id: &str, shape_graph_id: &str) -> ValidationPipeline {
+        ValidationPipeline {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+            owner_type: OwnerType::User,
+            owner_id: "adm".into(),
+            visibility: Visibility::Private,
+            targets: vec![ValidationTarget {
+                kind: TargetKind::Dataset,
+                id: DATASET.into(),
+            }],
+            dataset_ids: vec![],
+            graph_iris: vec![],
+            target_classes: vec![],
+            shape_graph_ids: vec![shape_graph_id.into()],
+            severity_threshold: SeverityThreshold::Violation,
+            run_inference: false,
+            max_results: None,
+            trigger_on_write: false,
+            schedule_cron: None,
+            gate_writes: true,
+            retention: 50,
+            inferred_target: WriteTarget::InPlace,
+            inferred_target_graph: None,
+            results_target: ResultsTarget::None,
+            results_target_graph: None,
+            last_run_at: None,
+            last_conforms: None,
+            created_by: Some("adm".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// A dataset whose Studio gates are a pipeline refusing a negative price,
+    /// an advisory pipeline that only warns about a missing SKU, and a
+    /// binding with a price ceiling; and a candidate run graph with a sound
+    /// product, a negative price and one past the ceiling.
+    fn gated() -> (TripleStore, AuthDb, ShaclStudioStore) {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        auth.create_user("adm", "adm", "adm@t.com", "hash", SystemRole::Admin)
+            .unwrap();
+        auth.create_dataset(
+            DATASET,
+            DATASET,
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        let studio = ShaclStudioStore::new(auth.pool());
+        for (graph, path, constraint) in [
+            (NON_NEGATIVE, "price", "sh:minInclusive 0"),
+            (CEILING, "price", "sh:maxInclusive 1000"),
+            (ADVICE, "sku", "sh:minCount 1 ; sh:severity sh:Warning"),
+        ] {
+            let turtle = format!(
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+                 @prefix ex: <http://example.org/> .\n\
+                 <{graph}#shape> a sh:NodeShape ; sh:targetClass ex:Product ;\n\
+                   sh:property [ sh:path ex:{path} ; {constraint} ] .\n"
+            );
+            store
+                .load_str(&turtle, RdfFormat::Turtle, Some(graph))
+                .unwrap();
+            let set = studio
+                .create_shape_graph(
+                    graph,
+                    None,
+                    OwnerType::User,
+                    "adm",
+                    Visibility::Private,
+                    graph,
+                    &[],
+                    ShapeSource::Manual,
+                    Some("adm"),
+                )
+                .unwrap();
+            if graph != CEILING {
+                studio
+                    .insert_pipeline(&gating_pipeline(graph, &set.id))
+                    .unwrap();
+            }
+        }
+        bindings::add_binding(
+            &store,
+            &bindings::dataset_target_iri(BASE, DATASET),
+            CEILING,
+        )
+        .unwrap();
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> .\n\
+                 ex:p1 a ex:Product ; ex:price 0.25 .\n\
+                 ex:p2 a ex:Product ; ex:price -0.1 .\n\
+                 ex:p3 a ex:Product ; ex:price 5000 .\n",
+                RdfFormat::Turtle,
+                Some(CANDIDATE),
+            )
+            .unwrap();
+        (store, auth, studio)
+    }
+
+    fn bound_source() -> SqlSource {
+        SqlSource {
+            id: "s".into(),
+            dataset: Some(DATASET.into()),
+            ..Default::default()
+        }
+    }
+
+    /// `(subject, constraint)` of every result, sorted.
+    fn refused(report: &ValidationReport) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = report
+            .results
+            .iter()
+            .map(|r| (r.focus_node.clone(), r.source_constraint.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The gate a snapshot runs (no mapping) is the bound dataset's write
+    /// gates: every refusing one is heard at once, and what a passing gate
+    /// found below its threshold refuses nothing.
+    #[test]
+    fn a_run_answers_to_every_refusing_gate_of_its_dataset() {
+        let (store, auth, _) = gated();
+        let ctx = RunContext {
+            store: &store,
+            auth_db: &auth,
+            base_url: BASE,
+        };
+        let report = gate(ctx, &bound_source(), None, CANDIDATE)
+            .unwrap()
+            .expect("the dataset's gates apply");
+        assert!(!report.conforms);
+        let found = refused(&report);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(report.results_count, 2);
+        assert!(
+            found[0].0.ends_with("p2") && found[0].1.starts_with("sh:minInclusive"),
+            "the pipeline's refusal: {found:?}"
+        );
+        assert!(
+            found[1].0.ends_with("p3") && found[1].1.starts_with("sh:maxInclusive"),
+            "the binding's refusal: {found:?}"
+        );
+        assert!(report
+            .results
+            .iter()
+            .all(|r| r.severity == Severity::Violation));
+
+        // A conforming candidate passes; the advice's warnings stay out.
+        store
+            .load_str(
+                "<http://example.org/p9> a <http://example.org/Product> ; \
+                 <http://example.org/price> 1 .",
+                RdfFormat::Turtle,
+                Some("urn:run:r2"),
+            )
+            .unwrap();
+        let report = gate(ctx, &bound_source(), None, "urn:run:r2")
+            .unwrap()
+            .unwrap();
+        assert!(report.conforms, "{:?}", report.results);
+        assert_eq!(report.results_count, 0);
+
+        // A source bound to no dataset has nothing to gate a snapshot.
+        let unbound = SqlSource {
+            dataset: None,
+            ..bound_source()
+        };
+        assert!(gate(ctx, &unbound, None, CANDIDATE).unwrap().is_none());
+    }
+
+    /// A mapping that conforms to the shapes the dataset's own
+    /// `shacl_on_write` gate and one of its pipelines use: the shapes graph
+    /// is validated by the dataset's gate rather than twice over, and a
+    /// result two gates share is reported once.
+    #[test]
+    fn a_shapes_graph_two_gates_share_reports_each_result_once() {
+        let (store, auth, _) = gated();
+        auth.update_dataset_shacl(DATASET, true, Some(NON_NEGATIVE))
+            .unwrap();
+        let ctx = RunContext {
+            store: &store,
+            auth_db: &auth,
+            base_url: BASE,
+        };
+        let mapping = MappingRecord {
+            id: "m".into(),
+            title: "m".into(),
+            source_id: "s".into(),
+            version: 1,
+            state: MappingState::Approved,
+            shapes_graph: Some(NON_NEGATIVE.into()),
+            model: None,
+            model_version: None,
+            profile_version: None,
+            created_by: None,
+            created_at: registry::now(),
+            updated_at: registry::now(),
+        };
+        let report = gate(ctx, &bound_source(), Some(&mapping), CANDIDATE)
+            .unwrap()
+            .unwrap();
+        assert!(!report.conforms);
+        let found = refused(&report);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(report.results_count, 2);
+        assert!(found[0].0.ends_with("p2") && found[1].0.ends_with("p3"));
+
+        // Without a dataset, the mapping's shapes still gate.
+        let unbound = SqlSource {
+            dataset: None,
+            ..bound_source()
+        };
+        let report = gate(ctx, &unbound, Some(&mapping), CANDIDATE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused(&report).len(), 1, "{:?}", refused(&report));
+    }
+
+    /// A gate the run cannot evaluate fails the run; it never lets the
+    /// candidate through.
+    #[test]
+    fn a_gate_that_cannot_be_evaluated_fails_the_run() {
+        let (store, auth, studio) = gated();
+        let ctx = RunContext {
+            store: &store,
+            auth_db: &auth,
+            base_url: BASE,
+        };
+        // A gating pipeline whose shape graph is gone.
+        let set = studio
+            .get_shape_graph_by_iri(NON_NEGATIVE)
+            .unwrap()
+            .unwrap();
+        studio.delete_shape_graph(&set.id).unwrap();
+        let err = gate(ctx, &bound_source(), None, CANDIDATE).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+
+        // A dataset that cannot be looked up does not lift its gates.
+        auth.pool()
+            .get()
+            .unwrap()
+            .execute_batch("ALTER TABLE datasets RENAME TO datasets_gone")
+            .unwrap();
+        let err = gate(ctx, &bound_source(), None, CANDIDATE).unwrap_err();
+        assert!(err.contains("looking up dataset 'd1'"), "{err}");
     }
 
     #[test]
