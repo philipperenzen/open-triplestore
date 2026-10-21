@@ -65,6 +65,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graphs the log does not describe. Manifests without the new fields still
   verify and restore. A delta whose range belongs to an epoch the change log
   never held now answers `410` instead of being built as its base.
+- **A datasource run into a dataset passes all of the dataset's SHACL write
+  gates** (#503). A run bound to a dataset, and the promotion of a kept
+  candidate after review, checked the candidate graph against the mapping's
+  shapes and the dataset's `shacl_on_write` shapes only. Data that a Graph
+  Store write, bulk import, RDF Patch or repair into the same dataset would
+  refuse with a `422` could reach it through a run. Runs, snapshots of virtual
+  sources included, now also run the dataset's `gate_writes` pipelines (each
+  at its own severity threshold, and only with its creator's write access)
+  and its validation-layer bindings, in the documented gate order, before the
+  candidate joins the dataset. A refusal by any of them is handled like a
+  `shacl_on_write` refusal: the run is `rejected` and not promoted, each
+  refusing gate's results join the run's report (a result two gates share is
+  listed once) and open review items, and `POST /api/runs/:id/promote`
+  answers `422` while any gate still refuses. A gate that cannot be
+  evaluated, or a failed lookup of the bound dataset, fails the run instead
+  of letting it through.
 
 ### Security
 

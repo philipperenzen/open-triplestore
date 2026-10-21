@@ -365,6 +365,8 @@ Three things can gate a write to a graph: SHACL Studio pipelines with `gate_writ
 
 The write lands only when every gate passes. When several would refuse it, the 422 carries the report of the first in this order, so fixing that one may reveal the next. Each gate is evaluated once per write; a shapes graph named by more than one gate is still checked by each, at that gate's own threshold. Every run of the dataset gate, passing or not, is kept in the dataset's report history as an `on-write` report.
 
+A datasource run into a dataset, and the promotion of a kept candidate after review, meet the same gates in the same order, over the candidate graph before it joins the dataset ([sources](sources.md)). There every gate is evaluated rather than only up to the first refusal: the results of each gate that refuses go into the run's report and open review items, so one refusal shows them all. The run keeps its own record of the outcome, not an `on-write` report.
+
 ### What a gate validates
 
 A `PUT` and a validate-and-commit replace the graph, so the gates validate the payload, which is the graph's whole future; a bulk import's gates validate the imported quads. A `POST`, an RDF Patch and a repair apply change part of a graph. For these the gates do not copy the graph: they work out from the shapes which nodes the write can affect, and validate those nodes against the graph as it will be, staging only the write's triples and what those nodes read. A 1 000-quad `POST` into a large graph costs about what validating its own nodes costs, not a copy of the graph ([#534](https://github.com/philipperenzen/open-triplestore/issues/534); figures in [performance](performance.md)).
@@ -388,7 +390,6 @@ These apply to every write gate: this per-dataset `shacl_on_write` gate, and the
 - Writes are validated on Graph Store `PUT` and `POST` (`/store`), bulk import (`/api/import/bulk`) and `POST /api/datasets/validate-and-commit`.
 - SPARQL Update (`/sparql`, `/sparql/batch`) is still not validated, Studio gates included: an update can write data that a gate would refuse on `/store`. To keep a gated graph valid, write it through one of the paths above, or run the pipeline (or `POST /api/datasets/{id}/validate`) after the update.
 - Only graphs a gate covers are validated: graphs registered to the dataset, graphs that carry a binding, and graphs in a gating pipeline's scope. Writes to other graphs pass through unchecked.
-- A datasource run that promotes its graph into a dataset is checked against the mapping's shapes and the dataset's `shacl_on_write` shapes ([sources](sources.md)), not yet against the dataset's `gate_writes` pipelines and bindings ([#503](https://github.com/philipperenzen/open-triplestore/issues/503)).
 
 ---
 
