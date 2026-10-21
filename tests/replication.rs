@@ -102,7 +102,7 @@ fn a_follower_bootstraps_from_the_manifest_and_then_tails_the_log() {
     let st = f.replication().status();
     assert_eq!(st.role, Role::Follower);
     assert_eq!(st.applied_seq, l.changes().last_seq());
-    assert_eq!(st.epoch.as_deref(), Some(l.changes().epoch()));
+    assert_eq!(st.epoch, Some(l.changes().epoch()));
     let cursor = l
         .changes()
         .cursor(&st.node_id)
@@ -229,7 +229,7 @@ fn an_epoch_change_forces_a_full_resynchronisation() {
     assert_eq!(graph(&f, G1), graph(&l2, G1));
     assert_eq!(graph(&f, G2), graph(&l2, G2));
     let st = f.replication().status();
-    assert_eq!(st.epoch.as_deref(), Some(l2.changes().epoch()));
+    assert_eq!(st.epoch, Some(l2.changes().epoch()));
     assert_eq!(st.applied_seq, l2.changes().last_seq());
 }
 
