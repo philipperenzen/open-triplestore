@@ -450,7 +450,7 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > cases (D-entailment by value, `rdfD1`, lexical spaces without whitespace normalization,
 > `rdf:XMLLiteral` checks; none fails now) and the OGC GeoSPARQL validator's S18 example
 > (braces in `REGEX` / `sh:pattern`). Filed: [#504](https://github.com/philipperenzen/open-triplestore/issues/504) (RDF 1.2, w3c/rdf-xml#97),
-> [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
+> [#505](https://github.com/philipperenzen/open-triplestore/issues/505) and [#506](https://github.com/philipperenzen/open-triplestore/issues/506) (OWL 2 DL: test defects, HermiT limit; #506 since fixed, the sidecar now decides both cases), [#507](https://github.com/philipperenzen/open-triplestore/issues/507) and
 > [#508](https://github.com/philipperenzen/open-triplestore/issues/508) (SHACL test defects), [#509](https://github.com/philipperenzen/open-triplestore/issues/509) (GeoSPARQL DGGS scope) and [#510](https://github.com/philipperenzen/open-triplestore/issues/510)
 > (GeoSPARQL `getSRID` / `geometryType` return type; since fixed, both now return the
 > `xsd:anyURI` literals their signatures give). No grade changed.

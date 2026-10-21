@@ -147,7 +147,7 @@ For every request it:
 3. declares undeclared properties by use, as the server's own mapping does (a literal object makes a data property, any other an object property; schema-only properties are settled from their restrictions and ranges), and any other undeclared entity as the OWL API reads it, with a warning;
 4. parses the N-Triples with the OWL API 5.1.9, the version HermiT 1.4.5.519 is built against;
 5. checks the OWL 2 DL profile with the OWL API's `OWL2DLProfile`, plus the property and class/datatype punning rules of the typing constraints, and refuses triples the OWL API could not read. Input outside OWL 2 DL is a 422 with `in_profile: false` and the violations, each named after the OWL API's violation class (for example `UseOfNonSimplePropertyInCardinalityRestriction`) or `unmapped-triple`. The server has already run its own check, so this is a second line. Annotations of annotations, which the OWL API does not read, are dropped with a warning: they do not affect reasoning;
-6. reasons with HermiT, which is interrupted when the time limit passes (504, result unknown).
+6. reasons with HermiT, which is interrupted when the time limit passes (504, result unknown). When HermiT has not decided consistency after 5 s (at most a quarter of the time limit), the sidecar tries once more without HermiT's disjunction learning, for as long, and then with HermiT's defaults for the rest of the time limit; the reasoner that decided consistency does the rest of the work. Disjunction learning only changes the order in which HermiT tries the disjuncts of a disjunction, so the answers are the same either way, but each setting has inputs that only the other decides in time (see [conformance/owl2-dl.md](conformance/owl2-dl.md#webont-description-logic-208-and--209)). A request whose consistency test answers within the first 5 s runs as before.
 
 What `/v1/reason` reports — only triples about named entities:
 - `rdfs:subClassOf` (the transitive closure, without `⊑ owl:Thing`) and `owl:equivalentClass` between named classes;
@@ -176,6 +176,8 @@ Configure the server with:
 - `OTS_REASONER_TIMEOUT_SECS` and `OTS_REASONER_MAX_TRIPLES`.
 
 The client waits a quarter longer than the timeout (at most 5 s more), so the sidecar's own answer can arrive first.
+
+**A client must wait as long as the `timeout_ms` it sends.** The bundled sidecar cannot tell that a client has stopped waiting: the JDK's HTTP server gives a running request no sign that its connection was closed. A request whose client went away therefore keeps its reasoning slot until its `timeout_ms` runs out, and while every slot is held, further requests wait up to `OTS_REASONER_QUEUE_WAIT_MS` and then get a 503. The server waits longer than the time limit it sends, but a call it is still waiting for keeps its slot when the server's own client has gone away, and calls in progress keep theirs when the server restarts. To bound how long any client can hold a slot, set the sidecar's `OTS_REASONER_MAX_TIMEOUT_MS` to the server's `OTS_REASONER_TIMEOUT_SECS` (in milliseconds).
 
 **`POST /v1/reason`** — body `{"data": "<N-Triples>", "timeout_ms": n}`; answer:
 
