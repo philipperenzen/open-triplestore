@@ -29,7 +29,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **A SHACL write gate no longer copies the whole graph before a merge**
+  (#534). A Graph Store `POST`, an RDF Patch or a repair apply into a gated
+  graph copied the whole graph into the gate's sandbox before validating (a
+  `POST` serialised it to Turtle and parsed it back), so a 1 000-quad `POST`
+  into a 9M-quad graph paid for all nine million. The gate now stages the
+  write's triples plus what the nodes the write can affect read — found from
+  the shapes: the targets it adds or removes, and the nodes that reach a
+  changed triple through a path, `sh:class`, `sh:node`,
+  `sh:qualifiedValueShape` or `sh:closed` — and validates those nodes; at
+  20 000 assets a 999-quad `POST` went from 6.6 s to 0.2 s. Shapes whose reach
+  no path bounds (SPARQL constraints and targets, SHACL-AF components and
+  expressions, recursive shapes, `sh:entailment`), a write that changes
+  `rdfs:subClassOf`, a write to a graph holding the gate's own shapes, and a
+  reach larger than the graph still copy the whole graph. The verdict and
+  report are a full validation's for every node the write can affect, so a
+  graph that conformed before the write is judged exactly as before; a
+  violation already in the graph, on a node the write cannot affect, no
+  longer refuses it. `PUT` is unchanged.
+- **Unpublished delta versions survive a backup** (#535). A delta version is
+  a base checkpoint plus a range of the change log, and a backup held the RDF
+  dump and the identity database but not the log, so a restored delta
+  answered `410`. A backup now carries `changes.db` too — an online SQLite
+  copy, encrypted like the other files, covered by verify and the S3 copy —
+  and a restore puts it back at `<data-dir>/changes/changes.db`. The dump's
+  snapshot is taken at a known point of the log (`changes_seq` in the
+  manifest) and the log is copied after it; the restore drops the rows past
+  that point and the delta builds, and continues the log in a new epoch, so a
+  restored delta is built forward from its base and never backward from live
+  graphs the log does not describe. Manifests without the new fields still
+  verify and restore. A delta whose range belongs to an epoch the change log
+  never held now answers `410` instead of being built as its base.
+
 ### Security
+
+- **Dependency advisories of October 2026.** `calamine` 0.37 replaces 0.36,
+  so the `zip` 8 it pulled in (RUSTSEC-2026-0367, -0368, -0369: `extract()`
+  preserving SUID bits and following symlinks out of the destination) is
+  gone; the server only reads workbook entries and never extracted, and the
+  rest of the tree already used `zip` 9. `rustls-webpki` 0.103.16
+  (RUSTSEC-2026-0382, distrusted intermediates), `webpki-roots` and
+  `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0381, -0383, emSign roots).
+  `basic-toml` (RUSTSEC-2026-0374, unmaintained) is only read at build time
+  by `age`'s i18n macros and is listed in `deny.toml` with that reason.
 
 ## [0.8.0] — 2026-10-14
 

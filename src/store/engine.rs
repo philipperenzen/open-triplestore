@@ -683,6 +683,22 @@ fn with_functions(
     opts
 }
 
+/// Write `quads` to `writer` as N-Quads; returns how many.
+fn write_nquads<W: Write>(
+    quads: oxigraph::store::QuadIter<'_>,
+    mut writer: W,
+) -> Result<usize, StoreError> {
+    let mut ser = RdfSerializer::from_format(RdfFormat::NQuads).for_writer(&mut writer);
+    let mut count = 0usize;
+    for quad in quads {
+        let quad = quad?;
+        ser.serialize_quad(quad.as_ref())?;
+        count += 1;
+    }
+    ser.finish()?;
+    Ok(count)
+}
+
 /// Monotonic source for [`TripleStore::cache_id`].
 static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -3368,19 +3384,20 @@ impl TripleStore {
     }
 
     /// Stream every quad in the store (default graph + all named graphs)
-    /// into `writer` as N-Quads. Used by the backup subsystem; preserves
-    /// graph names so a fresh store can be reconstructed by re-importing.
-    pub fn dump_all_nquads<W: Write>(&self, mut writer: W) -> Result<usize, StoreError> {
-        let serializer = RdfSerializer::from_format(RdfFormat::NQuads);
-        let mut ser = serializer.for_writer(&mut writer);
-        let mut count = 0usize;
-        for quad in self.store.iter() {
-            let quad = quad?;
-            ser.serialize_quad(quad.as_ref())?;
-            count += 1;
-        }
-        ser.finish()?;
-        Ok(count)
+    /// into `writer` as N-Quads. Preserves graph names so a fresh store can
+    /// be reconstructed by re-importing.
+    pub fn dump_all_nquads<W: Write>(&self, writer: W) -> Result<usize, StoreError> {
+        write_nquads(self.store.iter(), writer)
+    }
+
+    /// As [`Self::dump_all_nquads`], with the change-log sequence number the
+    /// dump holds exactly: its snapshot is opened inside the log's sequence
+    /// section ([`ChangeLog::at_head`]), so it holds every recorded write at
+    /// or below that number and none above it. 0 without a change log. The
+    /// backup subsystem's dump.
+    pub fn dump_all_nquads_at_head<W: Write>(&self, writer: W) -> Result<(usize, i64), StoreError> {
+        let (head, quads) = self.changes.at_head(|| self.store.iter());
+        Ok((write_nquads(quads, writer)?, head))
     }
 
     /// Dump all triples from a graph in the specified format into a `Vec<u8>`.
