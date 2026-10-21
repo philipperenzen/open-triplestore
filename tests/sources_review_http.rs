@@ -14,7 +14,11 @@
 //!   deterministic fixer clamps to `sh:maxInclusive` and reads a negative
 //!   where a positive is required as a sign typo, applies through the normal
 //!   write path, and never fabricates a value; promotion re-gates the
-//!   corrected candidate and swaps it in with provenance.
+//!   corrected candidate and swaps it in with provenance;
+//! * a run into a dataset answers to the dataset's SHACL Studio write gates
+//!   (`gate_writes` pipelines at their own threshold, validation-layer
+//!   bindings) as every other write into it does: refused, reviewed, and
+//!   promoted only once every gate passes (#503).
 
 mod common;
 
@@ -25,7 +29,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
-use open_triplestore::auth::models::SystemRole;
+use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
@@ -854,4 +858,285 @@ async fn the_fixer_never_fabricates_a_value_and_statuses_are_explicit() {
     )
     .await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ───────────────────────── The dataset's Studio write gates ─────────────────────────
+
+const GATED_DATASET: &str = "gated-products";
+
+/// A gating pipeline's shapes: a price is never negative.
+const NO_NEGATIVE_PRICE: &str = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/products/ontology#> .
+ex:NonNegativePrice a sh:NodeShape ; sh:targetClass ex:Product ;
+  sh:property [ sh:path ex:hasPrice ; sh:minInclusive 0 ] .
+"#;
+
+/// A validation-layer binding's shapes: a price stays under the ceiling.
+const PRICE_CEILING: &str = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/products/ontology#> .
+ex:PriceCeiling a sh:NodeShape ; sh:targetClass ex:Product ;
+  sh:property [ sh:path ex:hasPrice ; sh:maxInclusive 1000 ] .
+"#;
+
+/// An advisory pipeline's shapes: a product should carry a SKU. A warning,
+/// below its pipeline's `violation` threshold, so it refuses nothing.
+const SKU_ADVICE: &str = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/products/ontology#> .
+ex:SkuAdvice a sh:NodeShape ; sh:targetClass ex:Product ;
+  sh:property [ sh:path ex:sku ; sh:minCount 1 ; sh:severity sh:Warning ] .
+"#;
+
+async fn create_shape_graph(app: &Router, token: &str, name: &str, turtle: &str) -> String {
+    let (st, v, txt) = req(
+        app,
+        Method::POST,
+        "/api/shacl/shape-graphs",
+        token,
+        json!({ "name": name, "visibility": "private", "turtle": turtle }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "shape graph {name}: {txt}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+/// A run into a dataset is gated like every other write into it: the
+/// dataset's `gate_writes` pipelines (each at its own severity threshold) and
+/// its validation-layer bindings run over the candidate before it joins, and
+/// promoting the candidate after review runs them again.
+#[tokio::test]
+async fn a_run_into_a_dataset_passes_its_pipelines_and_bindings_and_so_does_promotion() {
+    sources_dir();
+    std::env::set_var("OTS_REVIEW_TEST_SECRET", "s3cret-value");
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            GATED_DATASET,
+            "Gated products",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let dataset_graphs = || state.auth_db.list_dataset_graphs(GATED_DATASET).unwrap();
+
+    // The dataset's gates: a pipeline that refuses a negative price, an
+    // advisory pipeline that only warns, and a binding with a price ceiling.
+    let no_negative = create_shape_graph(&app, &admin, "no-negative", NO_NEGATIVE_PRICE).await;
+    let advice = create_shape_graph(&app, &admin, "sku-advice", SKU_ADVICE).await;
+    let ceiling = create_shape_graph(&app, &admin, "price-ceiling", PRICE_CEILING).await;
+    for (name, shapes) in [("no-negative", &no_negative), ("sku-advice", &advice)] {
+        let (st, _, txt) = req(
+            &app,
+            Method::POST,
+            "/api/shacl/pipelines",
+            &admin,
+            json!({ "name": name, "gate_writes": true, "severity_threshold": "violation",
+                    "shape_graph_ids": [shapes],
+                    "targets": [{ "kind": "dataset", "id": GATED_DATASET }] }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "pipeline {name}: {txt}");
+    }
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/shacl/bindings",
+        &admin,
+        json!({ "shape_graph_id": ceiling,
+                "target": { "kind": "dataset", "id": GATED_DATASET } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "binding: {txt}");
+
+    // A datasource bound to the dataset, and a mapping with no shapes of its
+    // own: only the dataset's gates stand between a run and production.
+    let db = fresh_sqlite("gated");
+    let rows = rusqlite::Connection::open(&db).unwrap();
+    rows.execute_batch(
+        "UPDATE products SET price = 0.10 WHERE product_id = 2;
+         UPDATE products SET price = 500 WHERE product_id = 3;",
+    )
+    .unwrap();
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &admin,
+        json!({
+            "id": "gated", "name": "gated", "dialect": "sqlite",
+            "database": db.to_string_lossy(), "read_only": true, "statement_timeout_ms": 5000,
+            "credential": "env:OTS_REVIEW_TEST_SECRET", "dataset": GATED_DATASET,
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/mappings",
+        &admin,
+        json!({ "id": "gated-map", "title": "gated-map", "rml": mapping_for("gated") }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let run = || {
+        req(
+            &app,
+            Method::POST,
+            "/api/sources/gated/runs",
+            &admin,
+            json!({ "mapping": "gated-map" }),
+        )
+    };
+
+    // Conforming rows promote. The advisory pipeline's warnings stay below
+    // its threshold: they refuse nothing and do not count against the run.
+    let (st, first, txt) = run().await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert_eq!(first["status"], "succeeded", "{txt}");
+    assert_eq!(first["shacl"]["conforms"], true, "{txt}");
+    assert_eq!(first["shacl"]["violations"], 0, "{txt}");
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let first_graph = first["graph"].as_str().unwrap().to_string();
+    assert!(dataset_graphs().contains(&first_graph), "{txt}");
+
+    // A negative price (the pipeline refuses it) and one past the ceiling
+    // (the binding refuses it): rejected, with both gates' results.
+    rows.execute_batch(
+        "UPDATE products SET price = -0.10 WHERE product_id = 2;
+         UPDATE products SET price = 5000 WHERE product_id = 3;",
+    )
+    .unwrap();
+    let (st, v, txt) = run().await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(v["run"]["status"], "rejected", "{txt}");
+    assert_eq!(v["run"]["shacl"]["conforms"], false, "{txt}");
+    assert_eq!(v["report"]["conforms"], false, "{txt}");
+    assert_eq!(v["report"]["results_count"], 2, "{txt}");
+    let mut refused: Vec<(String, String)> = v["report"]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            assert_eq!(r["severity"], "violation", "{txt}");
+            (
+                r["focus_node"].as_str().unwrap().to_string(),
+                r["source_constraint"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    refused.sort();
+    assert!(
+        refused[0].0.ends_with("product_2") && refused[0].1.starts_with("sh:minInclusive"),
+        "{txt}"
+    );
+    assert!(
+        refused[1].0.ends_with("product_3") && refused[1].1.starts_with("sh:maxInclusive"),
+        "{txt}"
+    );
+    let run_id = v["run"]["id"].as_str().unwrap().to_string();
+    let run_graph = v["run"]["graph"].as_str().unwrap().to_string();
+    // Production is untouched and the candidate never joined the dataset.
+    let (_, src, _) = req(&app, Method::GET, "/api/sources/gated", &admin, Value::Null).await;
+    assert_eq!(src["production"]["run"], first_id, "{src}");
+    assert!(!dataset_graphs().contains(&run_graph));
+    assert!(dataset_graphs().contains(&first_graph));
+    let (_, stored, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run_id}"),
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(stored["status"], "rejected", "{stored}");
+
+    // One review item per refused subject, whichever gate refused it.
+    let (st, items, txt) = req(
+        &app,
+        Method::GET,
+        "/api/sources/gated/reviews",
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let items = items.as_array().unwrap();
+    assert_eq!(items.len(), 2, "{txt}");
+    let item = |subject: &str| -> Value {
+        items
+            .iter()
+            .find(|i| i["subject"] == format!("http://example.org/products/{subject}"))
+            .cloned()
+            .unwrap_or_else(|| panic!("{subject}: {txt}"))
+    };
+    let nut = item("product_2");
+    let washer = item("product_3");
+    for (it, constraint) in [(&nut, "sh:minInclusive"), (&washer, "sh:maxInclusive")] {
+        assert_eq!(it["run"], run_id, "{it}");
+        assert_eq!(it["status"], "needsHuman", "{it}");
+        assert!(
+            it["violations"].as_array().unwrap()[0]["constraint"]
+                .as_str()
+                .unwrap()
+                .starts_with(constraint),
+            "{it}"
+        );
+    }
+
+    let promote_uri = format!("/api/runs/{run_id}/promote");
+    let promote = || req(&app, Method::POST, &promote_uri, &admin, Value::Null);
+    let autofix = |item: &Value| {
+        let uri = format!("/api/reviews/{}/autofix", item["id"].as_str().unwrap());
+        let app = &app;
+        let admin = &admin;
+        async move {
+            let (st, fix, txt) =
+                req(app, Method::POST, &uri, admin, json!({ "apply": true })).await;
+            assert_eq!(st, StatusCode::OK, "{txt}");
+            assert_eq!(fix["status"], "corrected", "{txt}");
+        }
+    };
+
+    // Promotion gates again through every gate: refused while either refuses.
+    let (st, p, txt) = promote().await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+    assert_eq!(p["report"]["results_count"], 2, "{txt}");
+    autofix(&nut).await;
+    let (st, p, txt) = promote().await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the binding still refuses the washer: {txt}"
+    );
+    assert_eq!(p["report"]["results_count"], 1, "{txt}");
+    assert!(
+        p["report"]["results"][0]["source_constraint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sh:maxInclusive"),
+        "{txt}"
+    );
+    let (_, src, _) = req(&app, Method::GET, "/api/sources/gated", &admin, Value::Null).await;
+    assert_eq!(src["production"]["run"], first_id, "{src}");
+    assert!(!dataset_graphs().contains(&run_graph));
+
+    // Corrected for both gates, the candidate promotes into the dataset.
+    autofix(&washer).await;
+    let (st, p, txt) = promote().await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(p["run"]["status"], "succeeded", "{txt}");
+    assert_eq!(p["source"]["production"]["run"], run_id, "{txt}");
+    assert!(dataset_graphs().contains(&run_graph));
+    assert!(
+        !dataset_graphs().contains(&first_graph),
+        "the previous graph is detached"
+    );
 }
