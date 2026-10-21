@@ -68,6 +68,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Dependency advisories of October 2026.** `calamine` 0.37 replaces 0.36,
+  so the `zip` 8 it pulled in (RUSTSEC-2026-0367, -0368, -0369: `extract()`
+  preserving SUID bits and following symlinks out of the destination) is
+  gone; the server only reads workbook entries and never extracted, and the
+  rest of the tree already used `zip` 9. `rustls-webpki` 0.103.16
+  (RUSTSEC-2026-0382, distrusted intermediates), `webpki-roots` and
+  `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0381, -0383, emSign roots).
+  `basic-toml` (RUSTSEC-2026-0374, unmaintained) is only read at build time
+  by `age`'s i18n macros and is listed in `deny.toml` with that reason.
+
 ## [0.8.0] — 2026-10-14
 
 ### Added
