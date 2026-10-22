@@ -53,7 +53,7 @@ it as **LF** to be safe.)
 ```powershell
 docker compose up -d
 docker compose ps
-curl.exe http://localhost:7878/health     # -> {"status":"ok","version":"0.8.0"}
+curl.exe http://localhost:7878/health     # -> {"status":"ok","version":"0.8.1"}
 ```
 
 Then open <http://localhost:7878/> and register the first user — it becomes

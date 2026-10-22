@@ -260,7 +260,7 @@ Released images are published to the GitHub Container Registry:
 docker pull ghcr.io/philipperenzen/open-triplestore:latest
 
 # a specific release
-docker pull ghcr.io/philipperenzen/open-triplestore:0.8.0
+docker pull ghcr.io/philipperenzen/open-triplestore:0.8.1
 
 # the latest patch on a minor line
 docker pull ghcr.io/philipperenzen/open-triplestore:0.8

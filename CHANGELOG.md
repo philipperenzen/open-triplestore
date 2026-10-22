@@ -25,6 +25,67 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `…_GATEWAY_KEY`).
 
 ### Changed
+- With the accounts-dashboard plugin compiled in, a malformed
+  `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL`, or a raw
+  `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops
+  the start like any other setting; before, the dashboard reported the gateway
+  as unavailable.
+
+### Deprecated
+
+### Fixed
+- **A demo content refresh no longer deletes files an operator added to the
+  demo dataset.** When the recorded demo content version was behind, the
+  refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
+  and logged only at `info`. It now removes just the files the demo seed
+  created — marked on their rows from now on (`assets.seeded_by`), recognised by
+  their ids and file names for rows earlier builds seeded — along with their
+  DCAT metadata, logs that at `warn` with the count and the file names, and
+  keeps everything else. **Upgrades since 0.6.0 may already have removed such
+  files**: an IFC file imported into the demo dataset lost its asset and
+  stored object while the graphs imported from it stayed, so the 3D viewer
+  could no longer load its geometry. Restore those files from a backup taken
+  before the upgrade, or import them again.
+- **Documentation matched to the code** (docs only): the performance gate in
+  `docs/release-process.md` and `perf-baseline.yml` (base and change benched
+  alternately on one runner; the baseline supplies tolerances and tracked
+  medians), the duplicated SHACL optimisation and its non-existent per-worker
+  query cache in `docs/performance.md` and `docs/conformance/shacl.md`, a single
+  source for the SHACL→SQL thresholds (`docs/notes/analytical-mirror-design.md`
+  §1.5), the 3D feature gating in `docs/geo-3d-platform.md` (`geometry3d` has
+  the exact narrow phase and the convex hull; `sfcgal3d` the boolean
+  operations), `saml` and the `image` feature in `docs/windows.md`, the
+  data-model and vocabulary IRIs in the modelling styleguide, keys in
+  `docs/owl2-dl.md`, the OWL 2 RL, SPARQL 1.2 and reasoning entries of
+  `docs/triplestore-comparison.md`, the roles `POST /api/admin/users` accepts,
+  and stale code anchors and versions. The web UI's `frontend/package.json`
+  now carries the release version, and `release_prepare.py` keeps it, and the
+  Windows guide's sample response, in step.
+
+### Security
+- **The privacy-notice template covers every store of personal data.**
+  `PRIVACY.md` §2 now separates the three things the source calls telemetry:
+  workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
+  data), the usage tracking of §4.5, and the LLM request log. The new §4.7
+  documents that log: it keeps the caller's user ID and IP address and the
+  first 200 characters of each question, for 90 days by default
+  (`OTS_LLM_LOG_RETENTION_DAYS`; `OTS_LLM_LOG_PREVIEW_ENABLED=false` stops the
+  preview). The new §4.8 documents saved assistant conversations and feedback
+  reports; the §7 retention list and `docs/gdpr.md` name all three. Operators
+  who published a notice from the earlier template should update theirs.
+- **Purging a user erases their LLM request-log rows and usage events.** Both
+  tables carry the user ID without a foreign key, so an admin purge, a
+  self-service purge (`POST /api/auth/account/purge`) and an admin delete left
+  the user's IP addresses and question previews in the LLM request log until
+  retention removed them (90 days by default), and their dataset usage events
+  for good. The purge now deletes both in the same transaction as the account.
+  Rows left behind by earlier purges stay until retention removes the log
+  rows; usage events of deleted users can be removed with
+  `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+
+## [0.8.1] — 2026-10-22
+
+### Changed
 - **`OTS_APPLY_DELTA_TX_MAX_QUADS` defaults to 200 000 (was 50 000),** after
   the delta-versions measurements of the design note's §8.2 were taken
   (#536; `docs/performance.md`, "Delta versions at scale"): a tier-1 restore,
@@ -49,13 +110,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the same window (1.78× → 1.17×); Q5 87 → 53 ms; F14 1.4 s → 2.4 ms
   (`docs/performance-comparison.md` §5.10, `docs/perf-data/2026-10-20-x86/`).
   New benchmark group `query/over_cap_dataset`.
-- With the accounts-dashboard plugin compiled in, a malformed
-  `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL`, or a raw
-  `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops
-  the start like any other setting; before, the dashboard reported the gateway
-  as unavailable.
 
 ### Deprecated
+None.
 
 ### Fixed
 - **A SHACL write gate no longer copies the whole graph before a merge**
@@ -143,54 +200,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The store comparison harness records anonymous memory and file cache per
   phase and has a repeated-load check (`--repeat`, `--max-mem-fraction`), which
   the 10k SHACL run now passes at 80 % of the limit.
-- **A demo content refresh no longer deletes files an operator added to the
-  demo dataset.** When the recorded demo content version was behind, the
-  refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
-  and logged only at `info`. It now removes just the files the demo seed
-  created — marked on their rows from now on (`assets.seeded_by`), recognised by
-  their ids and file names for rows earlier builds seeded — along with their
-  DCAT metadata, logs that at `warn` with the count and the file names, and
-  keeps everything else. **Upgrades since 0.6.0 may already have removed such
-  files**: an IFC file imported into the demo dataset lost its asset and
-  stored object while the graphs imported from it stayed, so the 3D viewer
-  could no longer load its geometry. Restore those files from a backup taken
-  before the upgrade, or import them again.
-- **Documentation matched to the code** (docs only): the performance gate in
-  `docs/release-process.md` and `perf-baseline.yml` (base and change benched
-  alternately on one runner; the baseline supplies tolerances and tracked
-  medians), the duplicated SHACL optimisation and its non-existent per-worker
-  query cache in `docs/performance.md` and `docs/conformance/shacl.md`, a single
-  source for the SHACL→SQL thresholds (`docs/notes/analytical-mirror-design.md`
-  §1.5), the 3D feature gating in `docs/geo-3d-platform.md` (`geometry3d` has
-  the exact narrow phase and the convex hull; `sfcgal3d` the boolean
-  operations), `saml` and the `image` feature in `docs/windows.md`, the
-  data-model and vocabulary IRIs in the modelling styleguide, keys in
-  `docs/owl2-dl.md`, the OWL 2 RL, SPARQL 1.2 and reasoning entries of
-  `docs/triplestore-comparison.md`, the roles `POST /api/admin/users` accepts,
-  and stale code anchors and versions. The web UI's `frontend/package.json`
-  now carries the release version, and `release_prepare.py` keeps it, and the
-  Windows guide's sample response, in step.
 
 ### Security
-- **The privacy-notice template covers every store of personal data.**
-  `PRIVACY.md` §2 now separates the three things the source calls telemetry:
-  workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
-  data), the usage tracking of §4.5, and the LLM request log. The new §4.7
-  documents that log: it keeps the caller's user ID and IP address and the
-  first 200 characters of each question, for 90 days by default
-  (`OTS_LLM_LOG_RETENTION_DAYS`; `OTS_LLM_LOG_PREVIEW_ENABLED=false` stops the
-  preview). The new §4.8 documents saved assistant conversations and feedback
-  reports; the §7 retention list and `docs/gdpr.md` name all three. Operators
-  who published a notice from the earlier template should update theirs.
-- **Purging a user erases their LLM request-log rows and usage events.** Both
-  tables carry the user ID without a foreign key, so an admin purge, a
-  self-service purge (`POST /api/auth/account/purge`) and an admin delete left
-  the user's IP addresses and question previews in the LLM request log until
-  retention removed them (90 days by default), and their dataset usage events
-  for good. The purge now deletes both in the same transaction as the account.
-  Rows left behind by earlier purges stay until retention removes the log
-  rows; usage events of deleted users can be removed with
-  `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
 
 - **Dependency advisories of October 2026.** `calamine` 0.37 replaces 0.36,
   so the `zip` 8 it pulled in (RUSTSEC-2026-0367, -0368, -0369: `extract()`
@@ -6983,7 +6994,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/philipperenzen/open-triplestore/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.5.0...v0.6.0
