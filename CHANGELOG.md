@@ -37,6 +37,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   docs. The perf gate gains capture-on benchmarks (`update/capture_*`,
   `insert/capture_*`, `concurrent/capture_writes`), and
   `examples/scale_delta.rs` runs the measurements.
+- **Dataset service queries on a store over the accelerator's cap** (#468).
+  A pattern over a dataset's default graph (its data graph merged with its
+  shapes graph) no longer opens a scan on a graph that holds none of the
+  pattern's predicate (vendored oxigraph change 15); a dataset's `COUNT(*)` is
+  answered from the graph counts, with one graph or several (the endpoint's
+  rewritten query hid it from the fast count); the store parses a query once
+  on its engine path instead of three times; and the identity-database lookups
+  every request makes use cached statements. BSBM explore at 10k on an x86
+  workstation: 10,859 → 16,586 query mixes per hour against Oxigraph's 19,331
+  in the same window (1.78× → 1.17×); Q5 87 → 53 ms; F14 1.4 s → 2.4 ms
+  (`docs/performance-comparison.md` §5.10, `docs/perf-data/2026-10-20-x86/`).
+  New benchmark group `query/over_cap_dataset`.
 - With the accounts-dashboard plugin compiled in, a malformed
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL`, or a raw
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops

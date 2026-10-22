@@ -300,13 +300,18 @@ pub enum ParClass {
 
 /// Classify a query's parallel shape, or `None` if it is not decomposable.
 pub fn classify(sparql: &str) -> Option<ParClass> {
-    let query = crate::sparql_parser().parse_query(sparql).ok()?;
+    classify_query(&crate::sparql_parser().parse_query(sparql).ok()?)
+}
+
+/// [`classify`] on a query that is already parsed, for a caller that keeps
+/// the syntax tree to evaluate it.
+pub fn classify_query(query: &Query) -> Option<ParClass> {
     // A mergeable grouped/global non-COUNT aggregate or a COUNT(DISTINCT) is an
     // order-insensitive scalar/set result.
-    if plan_group_aggregate(&query).is_some() || plan_count_distinct(&query).is_some() {
+    if plan_group_aggregate(query).is_some() || plan_count_distinct(query).is_some() {
         return Some(ParClass::Aggregate);
     }
-    Some(match plan(&query)? {
+    Some(match plan(query)? {
         Merge::Concat { .. } => ParClass::Rows,
         Merge::SumCount | Merge::OrAsk | Merge::GroupCount { .. } => ParClass::Aggregate,
     })

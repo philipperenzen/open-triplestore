@@ -1,0 +1,66 @@
+{
+ "store": "ots",
+ "scale": "1k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 16.681,
+   "peak_mem_bytes": 815687270.4,
+   "load_after": [
+    4.943359375,
+    5.07958984375,
+    5.9365234375
+   ],
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "explore": {
+   "seconds": 11.054,
+   "peak_mem_bytes": 938056089.6,
+   "load_after": [
+    3.72607421875,
+    4.685546875,
+    5.7353515625
+   ]
+  },
+  "features": {
+   "seconds": 18.039,
+   "peak_mem_bytes": 1022047027.2,
+   "load_after": [
+    4.2099609375,
+    4.75,
+    5.734375
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/ots.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare:/h:ro -v /home/philippe/bench-work/data/bsbm-1k:/bench:ro -v /home/philippe/bench-work/results-468/base/ots/1k:/out python:3.12-slim python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare:/h:ro -v /home/philippe/bench-work/data/bsbm-1k:/bench:ro -v /home/philippe/bench-work/results-468/base/ots/1k:/out python:3.12-slim python /h/bench.py client --store ots --workload explore --out /out/explore.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --params /bench/params.json --token <token>",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare:/h:ro -v /home/philippe/bench-work/data/bsbm-1k:/bench:ro -v /home/philippe/bench-work/results-468/base/ots/1k:/out python:3.12-slim python /h/bench.py client --store ots --workload features --out /out/features.json --endpoint http://ots:7878/api/datasets/bench/services/sparql/sparql --features /h/queries/features --feature-runs 10 --token <token>",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/ots.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   4.47119140625,
+   5.0,
+   5.93017578125
+  ],
+  "waited_s": 0,
+  "free_gib": 891.0,
+  "swap": ""
+ },
+ "started": "2026-10-20T22:57:57+0200",
+ "db_bytes_after_load": 163573760,
+ "image": "sha256:aece6c91d38b7f35e024fe9a0a14f3ca42b159d80016cf0bacf1703d7239725f ots-bench:462b206c-t",
+ "finished": "2026-10-20T22:59:49+0200",
+ "load_after": [
+  4.2099609375,
+  4.75,
+  5.734375
+ ]
+}
