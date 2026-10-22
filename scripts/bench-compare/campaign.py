@@ -154,6 +154,7 @@ class MemSampler:
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
+        self.cgroup = CgroupSampler(container)
 
     def _read(self):
         for line in self.proc.stdout:
@@ -166,6 +167,90 @@ class MemSampler:
         return max(vals) if vals else None
 
     def stop(self):
+        self.proc.terminate()
+        self.cgroup.stop()
+
+
+class CgroupSampler:
+    """Samples the container's cgroup v2 `memory.current` and `memory.stat`
+    about twice a second, from one shell loop inside the container (one
+    `docker exec`, not one per sample).
+
+    `docker stats` reports usage minus inactive file cache, which still counts
+    active page cache: a store that reads its files through the page cache
+    looks larger than its own memory. `anon` is the processes' own memory (heap,
+    stacks, anonymous maps), the part the kernel cannot reclaim without swap.
+    Best effort: an image without `sh`, or a cgroup v1 host, leaves no samples
+    and the phase records None.
+    """
+
+    KEYS = ("anon", "file", "active_file", "inactive_file", "kernel", "shmem")
+    SCRIPT = ("echo $$; cat /sys/fs/cgroup/memory.max; "
+              "while :; do echo @; cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat; "
+              "sleep 0.5; done")
+
+    def __init__(self, container):
+        self.container = container
+        self.samples = []  # (time, {key: bytes, "current": bytes})
+        self.limit = None
+        self.pid = None
+        self.proc = subprocess.Popen(["docker", "exec", container, "sh", "-c", self.SCRIPT],
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        cur, expect_current = None, False
+        for n, line in enumerate(self.proc.stdout):
+            line = line.strip()
+            if n == 0:
+                self.pid = line if line.isdigit() else None
+                continue
+            if n == 1:
+                self.limit = int(line) if line.isdigit() else None
+                continue
+            if line == "@":
+                if cur:
+                    self.samples.append(cur)
+                cur, expect_current = (time.time(), {}), True
+                continue
+            if cur is None:
+                continue
+            if expect_current:
+                expect_current = False
+                if line.isdigit():
+                    cur[1]["current"] = int(line)
+                continue
+            k, _, v = line.partition(" ")
+            if k in self.KEYS and v.isdigit():
+                cur[1][k] = int(v)
+        if cur:
+            self.samples.append(cur)
+
+    def peaks(self, t0=None, t1=None):
+        """Peak of each sampled figure in [t0, t1], plus the peak of
+        `current - inactive_file` (the `docker stats` figure, sampled here)."""
+        rows = [s for t, s in self.samples if (t0 is None or t >= t0) and (t1 is None or t <= t1)]
+        if not rows:
+            return {}
+        out = {}
+        for k in ("current",) + self.KEYS:
+            vals = [r[k] for r in rows if k in r]
+            if vals:
+                out[f"peak_{k}_bytes"] = max(vals)
+        stats = [r["current"] - r.get("inactive_file", 0) for r in rows if "current" in r]
+        if stats:
+            out["peak_usage_minus_inactive_bytes"] = max(stats)
+        out["cgroup_samples"] = len(rows)
+        return out
+
+    def series(self):
+        return [{"t": round(t, 3), **s} for t, s in self.samples]
+
+    def stop(self):
+        if self.pid:
+            subprocess.run(["docker", "exec", self.container, "kill", self.pid],
+                           capture_output=True, check=False)
         self.proc.terminate()
 
 
@@ -194,11 +279,14 @@ def wait_http(url, timeout=600, ok=(200,), data=None, headers=None):
 
 
 class Run:
-    def __init__(self, a, store, scale):
+    def __init__(self, a, store, scale, attempt=None):
         self.a, self.store, self.scale = a, store, scale
         self.data_dir = os.path.join(a.data_root, f"bsbm-{scale}")
         self.out = os.path.join(a.out, store, scale)
+        if attempt is not None:  # --repeat: one directory per attempt
+            self.out = os.path.join(self.out, f"attempt-{attempt}")
         os.makedirs(self.out, exist_ok=True)
+        self.memstat = []
         self.port = a.port
         self.base = f"http://127.0.0.1:{self.port}"
         self.compose = os.path.join(COMPOSE, f"{store}.yml")
@@ -243,10 +331,17 @@ class Run:
     def phase(self, name, t0, t1, sampler, **extra):
         p = {"seconds": round(t1 - t0, 3), "peak_mem_bytes": sampler.peak(t0, t1) if sampler else None,
              "load_after": loadavg()}
+        if sampler:
+            p.update(sampler.cgroup.peaks(t0, t1))
+            if sampler.cgroup.limit:
+                self.meta["limit_bytes"] = sampler.cgroup.limit
+            self.memstat.extend({"phase": name, **s} for s in sampler.cgroup.series() if t0 <= s["t"] <= t1)
         p.update(extra)
         self.meta["phases"][name] = p
+        anon = p.get("peak_anon_bytes")
         log(f"{self.store}/{self.scale} {name}: {t1 - t0:.1f}s, peak mem "
-            f"{(p['peak_mem_bytes'] or 0) / 2**20:.0f} MiB")
+            f"{(p['peak_mem_bytes'] or 0) / 2**20:.0f} MiB"
+            + (f" (anon {anon / 2**20:.0f} MiB)" if anon else ""))
 
     def db_size(self):
         r = sh(["docker", "run", "--rm", "-v", f"{PROJECT}_db:/v:ro", BUSYBOX, "du", "-sk", "/v"], check=False)
@@ -428,6 +523,11 @@ class Run:
             self.down()
             with open(os.path.join(self.out, "meta.json"), "w") as f:
                 json.dump(self.meta, f, indent=1)
+            # The cgroup samples behind each phase's peaks (not *.json, so the
+            # report does not read them as a workload).
+            with open(os.path.join(self.out, "memstat.jsonl"), "w") as f:
+                for s in self.memstat:
+                    f.write(json.dumps(s) + "\n")
 
 
 def host_info():
@@ -436,8 +536,23 @@ def host_info():
                    "ncpu": ["sysctl", "-n", "hw.ncpu"], "macos": ["sw_vers", "-productVersion"],
                    "docker": ["docker", "version", "--format", "{{.Server.Version}}"],
                    "docker_vm": ["docker", "info", "--format", "{{.NCPU}} CPUs, {{.MemTotal}} bytes, kernel {{.KernelVersion}}"]}.items():
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        info[k] = r.stdout.strip()
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            info[k] = r.stdout.strip() if r.returncode == 0 else ""
+        except OSError:  # no sysctl/sw_vers: not macOS
+            info[k] = ""
+    if platform.system() == "Linux":  # the same facts from /proc (a Linux host, or WSL 2)
+        try:
+            with open("/proc/cpuinfo") as f:
+                info["cpu"] = info["cpu"] or next((l.split(":", 1)[1].strip() for l in f
+                                                   if l.startswith("model name")), "")
+            with open("/proc/meminfo") as f:
+                kb = next((l.split()[1] for l in f if l.startswith("MemTotal:")), None)
+            info["mem_bytes"] = info["mem_bytes"] or (str(int(kb) * 1024) if kb else "")
+        except OSError:
+            pass
+        info["ncpu"] = info["ncpu"] or str(os.cpu_count() or "")
+        info.pop("macos", None)
     return info
 
 
@@ -464,27 +579,136 @@ def main():
     ap.add_argument("--workloads", default="explore,features,concurrent,shacl")
     ap.add_argument("--require-quiet", default="",
                     help="comma-separated scales that run only in a quiet window (skipped otherwise)")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="the repeated-load check: run every (store, scale) this many times, each from an "
+                         "empty store, into <out>/<store>/<scale>/attempt-<i>/, and write <out>/repeat-check.json")
+    ap.add_argument("--max-mem-fraction", type=float,
+                    help="fail (exit 1) when a phase of --check-phases peaks above this fraction of the "
+                         "container's memory limit, by the docker stats measure or by anonymous memory")
+    ap.add_argument("--check-phases", default="load,shacl",
+                    help="phases --max-mem-fraction applies to (default load,shacl)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "host.json"), "w") as f:
         json.dump(host_info(), f, indent=1)
     failures = []
+    attempts = []
+    checked = a.repeat > 1 or a.max_mem_fraction is not None
     for scale in a.scales.split(","):
         for store in a.stores.split(","):
-            log(f"=== {store} @ {scale}")
-            try:
-                Run(a, store, scale).execute()
-            except NotQuiet as e:
-                log(f"--- {store}/{scale} skipped: {e}")
-                failures.append({"store": store, "scale": scale, "skipped": str(e)})
-                with open(os.path.join(a.out, "failures.json"), "w") as f:
-                    json.dump(failures, f, indent=1)
-            except Exception as e:
-                log(f"!!! {store}/{scale} failed: {e}")
-                failures.append({"store": store, "scale": scale, "error": str(e)[:2000]})
-                with open(os.path.join(a.out, "failures.json"), "w") as f:
-                    json.dump(failures, f, indent=1)
+            for i in range(1, a.repeat + 1):
+                label = f"{store} @ {scale}" + (f", attempt {i}/{a.repeat}" if a.repeat > 1 else "")
+                log(f"=== {label}")
+                run = Run(a, store, scale, attempt=i if a.repeat > 1 else None)
+                error = None
+                try:
+                    run.execute()
+                except NotQuiet as e:
+                    log(f"--- {label} skipped: {e}")
+                    failures.append({"store": store, "scale": scale, "attempt": i, "skipped": str(e)})
+                    error = f"skipped: {e}"
+                except Exception as e:
+                    log(f"!!! {label} failed: {e}")
+                    failures.append({"store": store, "scale": scale, "attempt": i, "error": str(e)[:2000]})
+                    error = str(e)[:2000]
+                if failures:
+                    with open(os.path.join(a.out, "failures.json"), "w") as f:
+                        json.dump(failures, f, indent=1)
+                if checked:
+                    attempts.append(check_attempt(a, run, i, error))
+                    with open(os.path.join(a.out, "repeat-check.json"), "w") as f:
+                        json.dump(repeat_summary(a, attempts), f, indent=1)
     log(f"done; {len(failures)} failure(s)")
+    if checked:
+        summary = repeat_summary(a, attempts)
+        for line in summary["lines"]:
+            log(line)
+        log("repeated-load check: " + ("passed" if summary["ok"] else "FAILED"))
+        if not summary["ok"]:
+            sys.exit(1)
+
+
+def mem_bytes(spec):
+    """`4g`, `4096m`, `4GiB` -> bytes (Docker's units are binary)."""
+    m = re.fullmatch(r"\s*([\d.]+)\s*([kmgt]?)i?b?\s*", spec.lower())
+    if not m:
+        raise ValueError(f"cannot read memory size {spec!r}")
+    return int(float(m.group(1)) * 1024 ** " kmgt".index(m.group(2) or " "))
+
+
+def check_attempt(a, run, attempt, error):
+    """One attempt of the repeated-load check: its phase peaks against the
+    limit, and its SHACL answer (result count and content digest)."""
+    meta = run.meta
+    limit = meta.get("limit_bytes") or mem_bytes(a.mem)
+    rec = {"store": run.store, "scale": run.scale, "attempt": attempt, "limit_bytes": limit,
+           "image": meta.get("image"), "error": error, "phases": {}, "violations": []}
+    for name, p in meta.get("phases", {}).items():
+        # The docker stats figure, from `docker stats` and from the cgroup
+        # sampler (the same quantity, sampled twice as often).
+        stats = max((v for v in (p.get("peak_mem_bytes"), p.get("peak_usage_minus_inactive_bytes"))
+                     if v is not None), default=None)
+        rec["phases"][name] = {"seconds": p.get("seconds"), "peak_stats_bytes": stats,
+                               "peak_anon_bytes": p.get("peak_anon_bytes"),
+                               "peak_file_bytes": p.get("peak_file_bytes"),
+                               "peak_active_file_bytes": p.get("peak_active_file_bytes")}
+    if a.max_mem_fraction is not None:
+        bound = limit * a.max_mem_fraction
+        ran = set(a.workloads.split(",")) | {"load"}
+        for name in a.check_phases.split(","):
+            p = rec["phases"].get(name)
+            if p is None:
+                if name in ran:
+                    rec["violations"].append(f"{name}: did not run")
+                continue
+            for key in ("peak_stats_bytes", "peak_anon_bytes"):
+                v = p.get(key)
+                if v is None and key == "peak_stats_bytes":
+                    rec["violations"].append(f"{name}: no memory sample")
+                elif v is not None and v > bound:
+                    rec["violations"].append(f"{name}: {key} {v / 2**20:,.0f} MiB > "
+                                             f"{a.max_mem_fraction:.0%} of {limit / 2**20:,.0f} MiB")
+    shacl = os.path.join(run.out, "shacl.json")
+    if os.path.exists(shacl):
+        with open(shacl) as f:
+            recs = json.load(f).get("records", [])
+        rec["shacl"] = {
+            "statuses": sorted({r["status"] for r in recs}),
+            "results": sorted({r["count"] for r in recs if r.get("count") is not None}),
+            "digests": sorted({r["results_sha256"] for r in recs if r.get("results_sha256")}),
+            "measured_seconds": [round(r["seconds"], 3) for r in recs if r["phase"] == "measured"],
+        }
+        if rec["shacl"]["statuses"] != [200]:
+            rec["violations"].append(f"shacl: HTTP statuses {rec['shacl']['statuses']}")
+    if error:
+        rec["violations"].append(f"run failed: {error[:300]}")
+    rec["ok"] = not rec["violations"]
+    return rec
+
+
+def repeat_summary(a, attempts):
+    lines, ok = [], True
+    for r in attempts:
+        ok &= r["ok"]
+        shp = r["phases"].get("shacl") or {}
+        ldp = r["phases"].get("load") or {}
+        lines.append(f"{r['store']}/{r['scale']} attempt {r['attempt']}: "
+                     f"load peak {(ldp.get('peak_stats_bytes') or 0) / 2**20:,.0f} MiB, "
+                     f"shacl peak {(shp.get('peak_stats_bytes') or 0) / 2**20:,.0f} MiB "
+                     f"(anon {(shp.get('peak_anon_bytes') or 0) / 2**20:,.0f}) of "
+                     f"{r['limit_bytes'] / 2**20:,.0f} MiB: " + ("ok" if r["ok"] else "; ".join(r["violations"])))
+    # Every run of one (store, scale) must give the same SHACL answer.
+    answers = {}
+    for r in attempts:
+        if r.get("shacl"):
+            answers.setdefault((r["store"], r["scale"]), set()).add(
+                (tuple(r["shacl"]["results"]), tuple(r["shacl"]["digests"])))
+    for (st, sc), seen in sorted(answers.items()):
+        if len(seen) > 1 or any(len(res) > 1 or len(dig) > 1 for res, dig in seen):
+            ok = False
+            lines.append(f"{st}/{sc}: the SHACL answer differs between runs: {sorted(seen)}")
+    return {"max_mem_fraction": a.max_mem_fraction, "check_phases": a.check_phases.split(","),
+            "ok": ok, "lines": lines, "attempts": attempts}
 
 
 if __name__ == "__main__":

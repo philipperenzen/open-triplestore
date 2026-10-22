@@ -1,0 +1,10 @@
+{
+ "platform": "Windows 11 Pro 10.0.26300; harness run from WSL 2 Ubuntu (Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39)",
+ "python": "3.12.3",
+ "cpu": "AMD Ryzen 9 7900X3D 12-Core Processor",
+ "mem_bytes": "58967851008 (the WSL 2 VM)",
+ "ncpu": "24",
+ "docker": "28.5.1 (Docker Desktop, WSL 2 backend)",
+ "docker_vm": "24 CPUs, 58967846912 bytes, kernel 6.6.87.2-microsoft-standard-WSL2",
+ "note": "Shared with other work: the runs were taken under a machine-wide lock, so no build or other measurement ran beside them; idle containers of other projects stayed up. Compare with the 2026-10-13 figures (Apple M1 Pro) only as ratios."
+}

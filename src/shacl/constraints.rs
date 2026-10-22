@@ -1722,7 +1722,7 @@ fn closure(
         None => {
             let reach: Arc<[Term]> = reach_one_or_more(view, from, inner, sel, path).into();
             if let Some(p) = path {
-                memo.insert(p, sel, from.clone(), reach.clone());
+                memo.insert(p, sel, from.clone(), reach.clone(), view.budget());
             }
             reach
         }

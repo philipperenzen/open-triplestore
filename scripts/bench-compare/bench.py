@@ -48,6 +48,9 @@ EXPLORE_MIX = [1, 2, 2, 3, 2, 2, 4, 2, 2, 5, 7, 7, 5, 7, 7, 8, 9, 9, 8, 9, 9, 10
 DISPLAY = {"ots": "Open Triplestore", "oxigraph": "Oxigraph", "fuseki": "Fuseki", "qlever": "QLever",
            "virtuoso": "Virtuoso", "rdf4j": "RDF4J"}
 
+# A blank node label in a result's display strings (`_:` and its label).
+BLANK_LABEL = re.compile(r'(?<![\w:/])_:[A-Za-z0-9_.-]+')
+
 NT_LINE = re.compile(r'^<([^>]*)> <([^>]*)> (.*) \.\s*$')
 
 
@@ -376,6 +379,23 @@ def workload_features(a, ep):
     return {"records": recs}
 
 
+def results_digest(results):
+    """SHA-256 of a JSON report's results, each as canonical JSON, sorted: the
+    same digest means the same results in any order (a run evaluates in
+    parallel, so the order is not part of the answer). Blank node labels are
+    left out: a property shape written as `[ sh:path ... ]` gets a fresh label
+    every time the shapes are loaded, so two loads of the same data would never
+    agree on them; the result's path still tells such shapes apart."""
+    if results is None:
+        return None
+    h = hashlib.sha256()
+    lines = (BLANK_LABEL.sub("_:", json.dumps(r, sort_keys=True, ensure_ascii=False)) for r in results)
+    for line in sorted(lines):
+        h.update(line.encode())
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def workload_shacl(a, ep):
     with open(a.shapes, "rb") as f:
         shapes = f.read()
@@ -399,14 +419,17 @@ def workload_shacl(a, ep):
                 rep = doc.get("report") or {}
                 count = rep.get("results_count")
                 extra = {"metrics": rep.get("metrics"), "conforms": rep.get("conforms"),
-                         "test_run": doc.get("test")}
+                         "test_run": doc.get("test"), "results_sha256": results_digest(rep.get("results")),
+                         "response_bytes": len(data)}
+                del doc, rep
         else:
             raise SystemExit(f"unknown --shacl-kind {a.shacl_kind}")
         rec = {"qid": "shacl", "phase": phase, "status": st, "seconds": dt, "count": count,
                "error": None if st == 200 else data[:300].decode("utf-8", "replace")}
         rec.update(extra)
         recs.append(rec)
-        print(f"  shacl {phase}: {dt:.2f}s status {st} results {count}", file=sys.stderr)
+        print(f"  shacl {phase}: {dt:.2f}s status {st} results {count}"
+              + (f" sha256 {rec['results_sha256'][:12]}" if rec.get("results_sha256") else ""), file=sys.stderr)
     return {"records": recs}
 
 
