@@ -629,7 +629,7 @@
     flex-direction: column;
     gap: 0.25rem;
     padding: 0.75rem 0.9rem;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
     border: 1px solid var(--line-soft);
     border-radius: 10px;
   }

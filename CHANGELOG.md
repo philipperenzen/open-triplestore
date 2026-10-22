@@ -38,6 +38,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the same window (1.78× → 1.17×); Q5 87 → 53 ms; F14 1.4 s → 2.4 ms
   (`docs/performance-comparison.md` §5.10, `docs/perf-data/2026-10-20-x86/`).
   New benchmark group `query/over_cap_dataset`.
+- **Admin → Settings is now Workspace settings**, so it no longer shares its
+  name with a user's own Settings (profile, password, API tokens), which it now
+  links to. The page has two tabs, *Live settings* (what applies without a
+  restart) and *Configuration* (the effective configuration), and the tab is
+  kept in the URL (`/admin/settings#config`). A summary shows the profile, how
+  many settings the server read, how many are not at their default (a click
+  lists just those) and how many carry an admin override. The configuration is
+  grouped by area under readable names, shows each setting's description,
+  marks secrets and the settings that can be changed live, and highlights
+  values not at their default.
 
 ### Deprecated
 
@@ -127,6 +137,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The store comparison harness records anonymous memory and file cache per
   phase and has a repeated-load check (`--repeat`, `--max-mem-fraction`), which
   the 10k SHACL run now passes at 80 % of the limit.
+- **Workspace settings rendered in light colours in dark mode**: its cards were
+  hard-coded white and its source badges and error box light-only.
+- **Panels meant to be light grey were dark teal, in both themes**: the API
+  token form, the two-factor secret and recovery codes on Settings, the table
+  headers on Users and AI Requests, the node-status cards, the prefix
+  "resolves" box, a dataset's service slugs, and the map's zoom button hover.
+  They used `--bg-accent`, a dark accent colour, expecting its light fallback.
 
 ### Security
 
