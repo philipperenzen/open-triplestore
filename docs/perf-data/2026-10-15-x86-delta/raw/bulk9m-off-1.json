@@ -1,0 +1,29 @@
+{
+  "args": [
+    "bulk",
+    "/data/run",
+    "1000000",
+    "off"
+  ],
+  "command": "bulk",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "capture": "off",
+    "changes_db_growth_mib": 0.0,
+    "max_payload": 250000,
+    "ms": 46945.21,
+    "peak_above_start_mib": 4503.9,
+    "quads": 9000000,
+    "quads_per_s": 191712.85,
+    "resident_at_start_mib": 3468.15,
+    "row_blob_bytes": [
+      0,
+      0
+    ],
+    "rows": []
+  }
+}

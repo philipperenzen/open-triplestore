@@ -1,0 +1,24 @@
+{
+  "args": [
+    "load",
+    "/data/base17",
+    "other",
+    "20000000",
+    "88889"
+  ],
+  "command": "load",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "off",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "assets": 88889,
+    "dir_mib": 399.69,
+    "graph": "https://example.org/otl/other",
+    "quads": 800001,
+    "quads_per_s": 107835.05,
+    "seconds": 7.42,
+    "store_quads": 1700157
+  }
+}

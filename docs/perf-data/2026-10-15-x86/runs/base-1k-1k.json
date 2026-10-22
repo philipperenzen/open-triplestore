@@ -1,0 +1,174 @@
+{
+ "store": "ots",
+ "scale": "1k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 13.941,
+   "peak_mem_bytes": 789158297.6,
+   "load_after": [
+    4.00634765625,
+    3.8447265625,
+    3.7646484375
+   ],
+   "peak_current_bytes": 1028386816,
+   "peak_anon_bytes": 782622720,
+   "peak_file_bytes": 232161280,
+   "peak_active_file_bytes": 23015424,
+   "peak_inactive_file_bytes": 209104896,
+   "peak_kernel_bytes": 12124160,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 819281920,
+   "cgroup_samples": 26,
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "shacl": {
+   "seconds": 2.984,
+   "peak_mem_bytes": 1133871366.144,
+   "load_after": [
+    4.90625,
+    3.986328125,
+    3.81103515625
+   ],
+   "peak_current_bytes": 1341476864,
+   "peak_anon_bytes": 1098330112,
+   "peak_file_bytes": 230055936,
+   "peak_active_file_bytes": 23015424,
+   "peak_inactive_file_bytes": 207040512,
+   "peak_kernel_bytes": 12546048,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 1134436352,
+   "cgroup_samples": 5
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/s2/base-1k/ots/1k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-1k:/bench:ro -v $WORK/results/s2/base-1k/ots/1k:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   3.271484375,
+   3.69921875,
+   3.716796875
+  ],
+  "waited_s": 0,
+  "free_gib": 890.1,
+  "swap": ""
+ },
+ "started": "2026-10-15T22:44:26+0200",
+ "limit_bytes": 4294967296,
+ "db_bytes_after_load": 235253760,
+ "image": "sha256:b612f7b3164ddc61aebce37ae308f2f6fd43b9df50227774ce8241530c8a2a31 ots-bench:462b206c",
+ "finished": "2026-10-15T22:45:48+0200",
+ "load_after": [
+  4.90625,
+  3.986328125,
+  3.81103515625
+ ],
+ "shacl_records": [
+  {
+   "phase": "warmup",
+   "status": 200,
+   "seconds": 0.18457368799954565,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 132,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.198477425999954,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 148,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.1576274339995507,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 127,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.1521639510001478,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 123,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.16495874199972604,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 140,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 0.1482576059997882,
+   "count": 5245,
+   "results_sha256": "239d2d5acec74d3c30397a6cfe91b8cdb76e55e4f5219afab4ed01b5ca8cc427",
+   "response_bytes": 8523927,
+   "metrics": {
+    "duration_ms": 111,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 375001,
+    "run_index": false,
+    "source": "mirror"
+   }
+  }
+ ],
+ "server_shacl_lines": []
+}

@@ -1,0 +1,7 @@
+  rep 0 capture=false: 23970.6 ms
+  rep 0 capture=true: 23937.6 ms
+  rep 1 capture=true: 24005.8 ms
+  rep 1 capture=false: 24532.1 ms
+  rep 2 capture=false: 24737.6 ms
+  rep 2 capture=true: 25105.7 ms
+(417.5s)

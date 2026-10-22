@@ -254,8 +254,8 @@ fn parallel_shards(_: &Ctx) -> Option<String> {
     Some(crate::store::parallel_mirror::default_shards().to_string())
 }
 
-fn shacl_index_max_quads(_: &Ctx) -> Option<String> {
-    Some(crate::shacl::view::default_index_max_quads().to_string())
+fn shacl_run_memory_bytes(_: &Ctx) -> Option<String> {
+    Some(crate::shacl::budget::default_run_memory_bytes().to_string())
 }
 
 fn repair_max_quads(_: &Ctx) -> Option<String> {
@@ -488,8 +488,8 @@ settings! {
         .default("5000")
         .doc("Quiet period after a write before a large store's accelerator rebuilds in the background.");
     APPLY_DELTA_TX_MAX_QUADS: usize = Spec::new("OTS_APPLY_DELTA_TX_MAX_QUADS", at_least(1), "query")
-        .default("50000")
-        .doc("Quads one transaction of a non-atomic delta apply (a materialisation build) writes.");
+        .default("200000")
+        .doc("Quads a version restore applies in one transaction (tier 1), and one transaction of a delta build writes; keep it at or below OTS_CHANGE_CAPTURE_MAX_PAYLOAD.");
     CHECKPOINT_EVERY: usize = Spec::new("OTS_CHECKPOINT_EVERY", at_least(1), "query")
         .default("100")
         .doc("A dataset version is cut as a full checkpoint after this many delta versions.");
@@ -531,7 +531,7 @@ settings! {
         .doc("Keep the change log (always on for a replication leader).");
     CHANGE_CAPTURE_MAX_SCAN: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_SCAN", at_least(0), "query")
         .default("250000")
-        .doc("Quads a WHERE update's graphs may hold for a before-image to be taken.");
+        .doc("Quads a WHERE update's graphs may hold for a before-image to be taken (about 5 µs and 0.8 KiB each).");
     CHANGE_CAPTURE_MAX_PAYLOAD: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", at_least(0), "query")
         .default("250000")
         .doc("Quads a full change-log row may carry.");
@@ -659,9 +659,11 @@ settings! {
     SHACL_RUN_INDEX_MIN_PROBES: usize = Spec::new("OTS_SHACL_RUN_INDEX_MIN_PROBES", at_least(0), "shacl")
         .default("20000")
         .doc("Probes before a validation run builds its own index.");
-    SHACL_RUN_INDEX_MAX_QUADS: usize = Spec::new("OTS_SHACL_RUN_INDEX_MAX_QUADS", at_least(1), "shacl")
-        .derived("from the memory limit", shacl_index_max_quads)
-        .doc("Largest data a validation run indexes.");
+    SHACL_RUN_MEMORY_BYTES: u64 = Spec::new("OTS_SHACL_RUN_MEMORY_BYTES", Kind::Bytes { min: 1 }, "shacl")
+        .derived("a quarter of the memory limit", shacl_run_memory_bytes)
+        .doc("Memory validation runs may hold at once for their class sets, indexes, path-closure memos and results.");
+    SHACL_RUN_INDEX_MAX_QUADS: Option<usize> = Spec::new("OTS_SHACL_RUN_INDEX_MAX_QUADS", at_least(1), "shacl")
+        .doc("Quads a validation run's index may hold; unset, the index is sized by OTS_SHACL_RUN_MEMORY_BYTES.");
     SPARQL_FUNCTION_GRAPHS: Vec<String> = Spec::new("OTS_SPARQL_FUNCTION_GRAPHS", Kind::Custom { what: "graph list", check: function_graphs }, "shacl")
         .doc("Graphs whose sh:SPARQLFunction definitions become callable functions.");
 

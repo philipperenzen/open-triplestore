@@ -1,0 +1,91 @@
+{
+  "args": [
+    "scan",
+    "/data/run",
+    "data",
+    "0",
+    "100000",
+    "5"
+  ],
+  "command": "scan",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_CHANGE_CAPTURE_MAX_SCAN": "20000000",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "added_ms": 4701.9,
+    "before_image_collect_ms": 2821.46,
+    "changed_quads": 200,
+    "diff_ms": 669.72,
+    "graph": "https://example.org/otl/instances",
+    "graph_quads": 899999,
+    "max_scan": 20000000,
+    "off": {
+      "max_ms": 2714.75,
+      "median_ms": 2583.58,
+      "min_ms": 2564.48,
+      "n": 5,
+      "values_ms": [
+        2583.58,
+        2714.75,
+        2564.48,
+        2652.06,
+        2569.0
+      ]
+    },
+    "on": {
+      "max_ms": 7425.74,
+      "median_ms": 7285.48,
+      "min_ms": 7200.54,
+      "n": 5,
+      "values_ms": [
+        7425.74,
+        7285.48,
+        7200.54,
+        7218.43,
+        7333.2
+      ]
+    },
+    "on_peak_rss_mib": [
+      696.56,
+      361.31,
+      361.31,
+      361.13,
+      361.31
+    ],
+    "on_rows_first_rep": [
+      {
+        "added_n": 100,
+        "extent": "full",
+        "graph": "https://example.org/otl/instances",
+        "removed_n": 100,
+        "seq": 26,
+        "state": "committed"
+      },
+      {
+        "added_n": 100,
+        "extent": "full",
+        "graph": "https://example.org/otl/instances",
+        "removed_n": 100,
+        "seq": 27,
+        "state": "committed"
+      }
+    ],
+    "on_undo": {
+      "max_ms": 7509.01,
+      "median_ms": 7327.77,
+      "min_ms": 7111.03,
+      "n": 5,
+      "values_ms": [
+        7509.01,
+        7327.77,
+        7331.58,
+        7111.03,
+        7228.94
+      ]
+    },
+    "ratio_on_off": 2.82
+  }
+}

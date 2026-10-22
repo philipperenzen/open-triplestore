@@ -1,0 +1,6 @@
+  cold-1792087100-v1: checkpoint (a checkpoint was asked for)
+coldread: store 10800192 quads; settling the mirror …
+  mirror published: false after 0s
+  build: 48936 ms, 900000 quads
+  mirror republished after 0.0s
+(190.3s)

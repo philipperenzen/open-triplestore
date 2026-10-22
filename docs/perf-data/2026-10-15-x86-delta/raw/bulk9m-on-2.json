@@ -1,0 +1,38 @@
+{
+  "args": [
+    "bulk",
+    "/data/run",
+    "1000000",
+    "on"
+  ],
+  "command": "bulk",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "capture": "on",
+    "changes_db_growth_mib": 0.06,
+    "max_payload": 250000,
+    "ms": 57027.91,
+    "peak_above_start_mib": 4697.7,
+    "quads": 9000000,
+    "quads_per_s": 157817.47,
+    "resident_at_start_mib": 3467.9,
+    "row_blob_bytes": [
+      0,
+      0
+    ],
+    "rows": [
+      {
+        "added_n": 9000000,
+        "extent": "counts",
+        "graph": "https://example.org/otl/bulk",
+        "removed_n": 0,
+        "seq": 6,
+        "state": "committed"
+      }
+    ]
+  }
+}

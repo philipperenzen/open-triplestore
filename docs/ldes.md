@@ -54,7 +54,12 @@ do not carry their quads (a change over the row cap, or one the log could not
 bound), or with more than `OTS_LDES_BNODE_SUBJECTS_MAX` (10 000) blank-node
 subjects in one write, is republished whole. With the log off, every tracked
 graph is indexed before and after the write and the two compared, as
-before.
+before. Capturing from the rows costs 5–15 ms where the two indexings cost
+0.7–3.3 s ([performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15),
+item 11). A change to a blank node more than `OTS_LDES_BNODE_DEPTH` levels
+below its entity is **not published**: the walk stops without an owner. An
+RDF list needs its length plus one; raise the setting for data with long
+lists or deep trees (each level is one index lookup).
 
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):

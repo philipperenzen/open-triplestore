@@ -1,0 +1,60 @@
+{
+ "max_mem_fraction": 0.8,
+ "check_phases": [
+  "load",
+  "shacl"
+ ],
+ "ok": false,
+ "lines": [
+  "ots/10k attempt 1: load peak 1,920 MiB, shacl peak 4,021 MiB (anon 3,509) of 4,096 MiB: shacl: peak_stats_bytes 4,021 MiB > 80% of 4,096 MiB; shacl: peak_anon_bytes 3,509 MiB > 80% of 4,096 MiB"
+ ],
+ "attempts": [
+  {
+   "store": "ots",
+   "scale": "10k",
+   "attempt": 1,
+   "limit_bytes": 4294967296,
+   "image": "sha256:b612f7b3164ddc61aebce37ae308f2f6fd43b9df50227774ce8241530c8a2a31 ots-bench:462b206c",
+   "error": null,
+   "phases": {
+    "load": {
+     "seconds": 92.473,
+     "peak_stats_bytes": 2013265920.0,
+     "peak_anon_bytes": 1931444224,
+     "peak_file_bytes": 1946279936,
+     "peak_active_file_bytes": 150097920
+    },
+    "shacl": {
+     "seconds": 54.878,
+     "peak_stats_bytes": 4216584142.848,
+     "peak_anon_bytes": 3679498240,
+     "peak_file_bytes": 1781825536,
+     "peak_active_file_bytes": 687804416
+    }
+   },
+   "violations": [
+    "shacl: peak_stats_bytes 4,021 MiB > 80% of 4,096 MiB",
+    "shacl: peak_anon_bytes 3,509 MiB > 80% of 4,096 MiB"
+   ],
+   "shacl": {
+    "statuses": [
+     200
+    ],
+    "results": [
+     51690
+    ],
+    "digests": [
+     "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38"
+    ],
+    "measured_seconds": [
+     7.528,
+     7.21,
+     6.99,
+     6.98,
+     7.629
+    ]
+   },
+   "ok": false
+  }
+ ]
+}

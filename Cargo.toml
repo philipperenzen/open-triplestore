@@ -13,7 +13,7 @@ resolver = "2"
 
 [package]
 name = "open-triplestore"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 # Floor set by the AWS SDK stack: aws-credential-types 1.3.0 / aws-smithy-runtime
 # 1.12 and friends declare `rust-version = "1.94.1"`. Bump the `rust:<ver>` images
@@ -426,6 +426,13 @@ harness = false
 [[bench]]
 name = "parallel_live"
 harness = false
+
+# The delta-versions measurements (docs/performance.md, "Delta versions at
+# scale") drive the statement-provenance and LDES consumers through a test
+# `AppState`, which only `test-utils` builds.
+[[example]]
+name = "scale_delta"
+required-features = ["test-utils"]
 
 [profile.release]
 opt-level = 3

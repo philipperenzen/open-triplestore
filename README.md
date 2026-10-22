@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.8.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.8.1`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), **SHACL Core**, **ShEx 2.1** and **OWL 2** reasoning (RL, EL and QL natively; DL with the bundled OWL API + HermiT reasoner sidecar) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -239,7 +239,7 @@ Every setting is an `OTS_…` environment variable, validated at startup; see
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.8.0"}
+# {"status":"ok","version":"0.8.1"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
