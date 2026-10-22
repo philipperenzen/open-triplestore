@@ -1,0 +1,5 @@
+ldes: 220000 quads at depth 4
+  rep 0: scan 1897 ms (100 members), rows 9 ms (100 members)
+  rep 1: scan 1678 ms (100 members), rows 9 ms (100 members)
+  rep 2: scan 1625 ms (100 members), rows 9 ms (100 members)
+(9.7s)

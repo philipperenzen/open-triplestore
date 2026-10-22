@@ -1,0 +1,56 @@
+{
+  "assets": 100000,
+  "load": {
+    "quads_per_s": 5400436835.820538,
+    "seconds": 0.000166653
+  },
+  "mixed": {
+    "quads_written": 171000,
+    "quads_written_per_s": 8550.0,
+    "read_p95_ms": 0.14487,
+    "readers": 4,
+    "reads": 904506,
+    "reads_per_s": 45225.3,
+    "seconds": 20,
+    "write_p95_ms": 399.149103,
+    "writers": 4
+  },
+  "patch": null,
+  "quads_loaded": 899999,
+  "queries": {
+    "count_all": {
+      "median_ms": 0.005025,
+      "rows": 1
+    },
+    "filter": {
+      "median_ms": 26.482567,
+      "rows": 1
+    },
+    "group_by": {
+      "median_ms": 1201.589515,
+      "rows": 41
+    },
+    "join_2way": {
+      "median_ms": 62.342166,
+      "rows": 10000
+    },
+    "lookup": {
+      "median_ms": 0.100549,
+      "rows": 9
+    },
+    "path": {
+      "median_ms": 0.07046999999999999,
+      "rows": 1
+    }
+  },
+  "repair": null,
+  "shacl": {
+    "conforms": false,
+    "quads_validated": 899999,
+    "results": 10,
+    "run_index": true,
+    "seconds": 1.085741404,
+    "source": "snapshot"
+  },
+  "store_quads_final": 1354062
+}

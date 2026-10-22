@@ -1,0 +1,68 @@
+{
+  "args": [
+    "ldes",
+    "/data/run",
+    "20000",
+    "8",
+    "100",
+    "3"
+  ],
+  "command": "ldes",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "assets": 20000,
+    "bnode_depth_setting": 8,
+    "bnode_subjects_max_setting": 10000,
+    "changed_entities_per_write": 100,
+    "depth": 8,
+    "graph_quads": 380000,
+    "publish_all_ms": 3456.1,
+    "rows_members": [
+      100,
+      100,
+      100
+    ],
+    "rows_path": {
+      "max_ms": 15.65,
+      "median_ms": 14.99,
+      "min_ms": 14.19,
+      "n": 3,
+      "values_ms": [
+        14.99,
+        14.19,
+        15.65
+      ]
+    },
+    "scan_members": [
+      100,
+      100,
+      100
+    ],
+    "scan_path": {
+      "max_ms": 3305.69,
+      "median_ms": 3190.95,
+      "min_ms": 3174.33,
+      "n": 3,
+      "values_ms": [
+        3305.69,
+        3174.33,
+        3190.95
+      ]
+    },
+    "write": {
+      "max_ms": 3.85,
+      "median_ms": 2.56,
+      "min_ms": 2.23,
+      "n": 3,
+      "values_ms": [
+        2.56,
+        3.85,
+        2.23
+      ]
+    }
+  }
+}

@@ -381,7 +381,7 @@ enum CountChange {
 // Quads a write's transaction applies once the store default is in effect:
 // above this a materialisation build commits in several transactions (it
 // writes graphs nobody reads until it is done); an apply that must be
-// atomic stays one transaction regardless (delta note §3.4). (`OTS_APPLY_DELTA_TX_MAX_QUADS`, default 50 000).
+// atomic stays one transaction regardless (delta note §3.4). (`OTS_APPLY_DELTA_TX_MAX_QUADS`, default 200 000: about 2.8 KiB a staged quad, measured in docs/performance.md, "Delta versions at scale").
 
 /// `OTS_APPLY_DELTA_TX_MAX_QUADS`, or the default.
 pub fn apply_delta_tx_max_quads() -> usize {
@@ -702,6 +702,42 @@ fn write_nquads<W: Write>(
 /// Monotonic source for [`TripleStore::cache_id`].
 static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Delete the bulk loader's staging files left in a store's directory.
+///
+/// Oxigraph's bulk loader writes its sorted runs as `bulk-<random>.sst`
+/// beside the database and removes them after the ingest, or when the loader
+/// is dropped. A process killed in between (`kill -9`, an OOM kill) runs
+/// neither, and the files stay: unreferenced by the database, never
+/// reclaimed, as large as the load they staged (the crash series in
+/// docs/performance.md, "Delta versions at scale", counted them). Called
+/// right after the database is opened, when its lock is held, so no loader of
+/// this store can be running and every such file is garbage. Returns the
+/// files removed.
+fn remove_orphan_bulk_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let staging = name.starts_with("bulk-") && name.ends_with(".sst");
+        if staging
+            && entry.file_type().is_ok_and(|t| t.is_file())
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::warn!(
+            "removed {removed} bulk-load staging file(s) an interrupted load left in {}",
+            dir.display()
+        );
+    }
+    removed
+}
+
 impl TripleStore {
     /// Open or create a persistent store at the given path.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
@@ -709,6 +745,9 @@ impl TripleStore {
         crate::geo::aggregates::register_with_parser();
         let store = Store::open(path)?;
         info!("Opened store at {}", path.display());
+        // The database's lock is ours now: no bulk load of this store runs,
+        // so staging files left beside it belong to a load that was killed.
+        remove_orphan_bulk_files(path);
         let graph_index = GraphIndex::new();
         graph_index.rebuild(&store);
         let spatial_index = SpatialIndex::new();
@@ -6331,5 +6370,37 @@ mod scoped_tests {
             store.query_scoped(q, &["urn:g1".to_string()]),
             Ok(QueryResults::Boolean(false))
         ));
+    }
+}
+
+#[cfg(test)]
+mod orphan_bulk_file_tests {
+    use super::TripleStore;
+    use oxigraph::io::RdfFormat;
+
+    /// A bulk load killed between writing its staging files and ingesting
+    /// them leaves `bulk-*.sst` beside the database (the `kill -9` series in
+    /// docs/performance.md, "Delta versions at scale", counts them). Opening
+    /// the store removes them and nothing else, and the data is untouched.
+    #[test]
+    fn opening_a_store_removes_the_staging_files_a_killed_load_left() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let s = TripleStore::open(dir.path()).unwrap();
+            s.load_str(
+                "<urn:a> <urn:p> <urn:b> .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        }
+        let orphan = dir.path().join("bulk-123456789.sst");
+        std::fs::write(&orphan, b"the sorted run of a load that never committed").unwrap();
+        let other = dir.path().join("bulk-notes.txt");
+        std::fs::write(&other, b"not a staging file").unwrap();
+        let s = TripleStore::open(dir.path()).unwrap();
+        assert!(!orphan.exists(), "the staging file is removed");
+        assert!(other.exists(), "nothing else is touched");
+        assert_eq!(s.count_graph(Some("urn:g")).unwrap(), 1);
     }
 }

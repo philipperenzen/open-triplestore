@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **`OTS_APPLY_DELTA_TX_MAX_QUADS` defaults to 200 000 (was 50 000),** after
+  the delta-versions measurements of the design note's §8.2 were taken
+  (#536; `docs/performance.md`, "Delta versions at scale"): a tier-1 restore,
+  one transaction across the version's graphs, put a 0.9M-quad graph back in
+  3.4–19 s where tier 2 (copy and `MOVE`) took 87–148 s and 3 GiB, and at 9M
+  quads tier 2's transaction passed 36 GiB. A transaction holds about 2.8 KiB
+  per quad, 530 MiB at the new default, which stays under the payload cap so
+  that a tier-1 restore is still recorded as a `full` row. Every other cap
+  keeps its default, now with the measurement behind it in the configuration
+  docs. The perf gate gains capture-on benchmarks (`update/capture_*`,
+  `insert/capture_*`, `concurrent/capture_writes`), and
+  `examples/scale_delta.rs` runs the measurements.
 - **Dataset service queries on a store over the accelerator's cap** (#468).
   A pattern over a dataset's default graph (its data graph merged with its
   shapes graph) no longer opens a scan on a graph that holds none of the
@@ -24,7 +36,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every request makes use cached statements. BSBM explore at 10k on an x86
   workstation: 10,859 → 16,586 query mixes per hour against Oxigraph's 19,331
   in the same window (1.78× → 1.17×); Q5 87 → 53 ms; F14 1.4 s → 2.4 ms
-  (`docs/performance-comparison.md` §5.9, `docs/perf-data/2026-10-20-x86/`).
+  (`docs/performance-comparison.md` §5.10, `docs/perf-data/2026-10-20-x86/`).
   New benchmark group `query/over_cap_dataset`.
 
 ### Deprecated
@@ -77,6 +89,44 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answers `422` while any gate still refuses. A gate that cannot be
   evaluated, or a failed lookup of the bound dataset, fails the run instead
   of letting it through.
+- **The reasoner sidecar decides inputs on which HermiT's disjunction learning
+  gets stuck** (#506). When HermiT has not decided consistency after 5 s (at
+  most a quarter of the time limit), the sidecar tries once more without
+  disjunction learning, then with HermiT's defaults for the rest of the time
+  limit. Disjunction learning only orders HermiT's search, so the answers are
+  the same. The W3C OWL 2 test cases WebOnt-description-logic-208 and -209,
+  which HermiT did not decide in 15 minutes, are now decided in about 6 s per
+  check and are no longer known failures. A request whose consistency test
+  answers within the first 5 s runs as before.
+- **A bulk load killed mid-write no longer leaves its staging files behind.**
+  The bulk loader writes `bulk-<n>.sst` files beside the database and removes
+  them only after the ingest; a `kill -9` (or an OOM kill) left them for
+  good — 14–40 files (8–20 MiB) at every kill of the crash series (#536).
+  Opening the store now deletes them: its lock is held then, so no load of
+  it can be running.
+- **Whole-dataset SHACL validation stays inside one memory budget (#532).**
+  Validating BSBM 10k (3.56 M triples, 51,690 results) in a 4 GiB container
+  peaked at 3.7–4.1 GiB, 3.3–3.6 GiB of it anonymous memory: a run index of
+  about 1.1 GiB (its quad cap assumed 300 bytes a quad; it took about 600),
+  class sets, results and a JSON value tree of the report, and every run
+  starting from the last one's high-water mark because freed memory stayed
+  with the allocator. The class sets and focus lists, the run index, the
+  closure memo and the results now count against one budget,
+  `OTS_SHACL_RUN_MEMORY_BYTES` (default a quarter of the memory limit, 1 GiB
+  when none is detected, 64 MiB to 8 GiB, shared by overlapping runs): the
+  index may fill three quarters of it and answers the (graph, predicate)
+  pairs that do not fit from the store, the memo keeps a closure only when
+  there is room, and class sets and results are never dropped. A run that held
+  more than 64 MiB hands the freed memory back when it ends and logs its memory
+  account. `OTS_SHACL_RUN_INDEX_MAX_QUADS` is unset by default now and, when
+  set, sizes the index in quads as before. `POST /api/datasets/{id}/validate`
+  streams its JSON (the same bytes). Measured on an x86 host (paired, same
+  report): the 10k peak fell from 4,080 / 3,734 to 2,931 / 2,881 MiB, the
+  median validation time from 7.60 to 6.98 s
+  ([`docs/perf-data/2026-10-15-x86/`](docs/perf-data/2026-10-15-x86/before-after.md)).
+  The store comparison harness records anonymous memory and file cache per
+  phase and has a repeated-load check (`--repeat`, `--max-mem-fraction`), which
+  the 10k SHACL run now passes at 80 % of the limit.
 
 ### Security
 

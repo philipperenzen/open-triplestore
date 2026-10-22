@@ -1,0 +1,9 @@
+{
+  "cpu": "AMD Ryzen 9 7900X3D 12-Core Processor",
+  "nproc": 24,
+  "mem_total_kib": 57585792,
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "os_in_container": "Debian GNU/Linux 12 (bookworm)",
+  "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "data_volume_fs": "ext4"
+}

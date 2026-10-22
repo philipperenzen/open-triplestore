@@ -206,6 +206,10 @@ inactive file cache. Stores that read through the operating system's page cache
 or memory maps (Oxigraph's RocksDB, QLever) look small by this measure; stores
 with their own buffer pools (JVM heaps, Virtuoso) look large. Treat it as "how
 close to the limit did the container get", not as a working-set size.
+Since 2026-10-15 the harness also samples the container's cgroup
+`memory.stat` twice a second and records each phase's peak anonymous memory
+and file cache next to it (§5.9), which tells a process's own memory from page
+cache the kernel would reclaim.
 
 ## 4. Hardware and software
 
@@ -600,7 +604,33 @@ the new build finished it, with 43,428 offers)
   1k feature queries (F01, F02, F04, F08, F09) are 19–37 % slower than before;
   not investigated.
 
-### 5.9 The engine path over the accelerator's cap, on an x86 workstation (2026-10-20)
+### 5.9 SHACL memory at 10k after the run budget (2026-10-15, AMD Ryzen 9 7900X3D, Docker Desktop on WSL 2)
+
+**A different machine.** Everything above ran on the M1 Pro laptop; this
+section ran on the x86 desktop of [performance.md](performance.md#reference-system-numbers-in-this-doc-unless-noted),
+so compare its two columns with each other, not with the tables above. Same
+harness, data (byte-identical inputs), shapes and 4 GiB / 4 CPU limits, Open
+Triplestore only, SHACL only; before (`462b206c`, 0.8.0) and after
+(`2342e3f9`, issue [#532](https://github.com/philipperenzen/open-triplestore/issues/532))
+back to back. Data: [`docs/perf-data/2026-10-15-x86/`](perf-data/2026-10-15-x86/before-after.md).
+
+| | Before (`462b206c`) | After (`2342e3f9`) |
+| --- | --: | --: |
+| SHACL validation at 10k, peak memory (MiB), two paired runs | 4,080 / 3,734 | 2,931 / 2,881 |
+| — of which anonymous (MiB) | 3,573 / 3,279 | 2,399 / 2,350 |
+| SHACL validation at 10k, median of 10 (s) | 7.60 | 6.98 |
+| SHACL validation at 1k, peak (MiB) / median (s) | 1,082 / 0.158 | 959 / 0.137 |
+| Results at 10k / 1k | 51,690 / 5,245 | the same, the same content |
+| Three repeated 10k loads + validations, SHACL peak (MiB) | 4,021 (one attempt) | 3,018, 2,914, 3,079 |
+
+The near-limit peak of §5.5 and §5.8 was anonymous memory, mostly the
+per-run index (about 1.1 GiB) on top of the 1.3 GiB the server held, and
+it grew run after run because nothing freed was handed back. The harness now
+records anonymous memory and file cache per phase next to the `docker stats`
+figure, and `--repeat N --max-mem-fraction 0.8` turns a run into a check that
+fails above 80 % of the limit ([README](../scripts/bench-compare/README.md#the-repeated-load-check)).
+
+### 5.10 The engine path over the accelerator's cap, on an x86 workstation (2026-10-20)
 
 [#468](https://github.com/philipperenzen/open-triplestore/issues/468), after
 §5.8. **A different machine from every other section:** an AMD Ryzen 9
@@ -698,7 +728,7 @@ its 2026-10-13 status follows it (§5.8).
   [#468](https://github.com/philipperenzen/open-triplestore/issues/468).
   *2026-10-13:* about 2× at 10k and 1.8× at 1k against Oxigraph run in the same
   window; DESCRIBE 1.0 ms. The rest is Q5 and the analytical queries at 10k.
-  *2026-10-20 (x86 workstation, §5.9):* 1.17× Oxigraph on the 10k explore mix
+  *2026-10-20 (x86 workstation, §5.10):* 1.17× Oxigraph on the 10k explore mix
   (was 1.78×); what is left is about 0.3 ms per request outside the engine.
 - **Above 2 M triples in a 4 GiB container the accelerator is off**, by design
   (`OTS_PARALLEL_QUERY_MAX_TRIPLES`, default 2,000,000 at this memory size; since
