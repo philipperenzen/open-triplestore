@@ -225,7 +225,7 @@ r2d2_sqlite = { version = "0.35", features = ["bundled"] }
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.18"
+lru = "0.19"
 # v11 ships no crypto backend by default — `rust_crypto` selects the pure-Rust
 # one (hmac/sha2/p256/…, all already in the tree via webauthn/openidconnect);
 # the alternative `aws_lc_rs` would add a C/cmake build dependency.
