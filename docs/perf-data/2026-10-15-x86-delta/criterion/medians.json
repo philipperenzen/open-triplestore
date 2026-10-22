@@ -1,0 +1,70 @@
+{
+  "concurrent_capture_writes/threads/4": {
+    "pass1_median_ns": 3996147.8,
+    "pass2_median_ns": 4119752.0
+  },
+  "concurrent_writes/threads/4": {
+    "pass1_median_ns": 1087721.1,
+    "pass2_median_ns": 1112304.9
+  },
+  "insert_capture_graph_store_put/10000": {
+    "pass1_median_ns": 54815424.5,
+    "pass2_median_ns": 63063871.2
+  },
+  "insert_capture_named_graph/10000": {
+    "pass1_median_ns": 97528862.2,
+    "pass2_median_ns": 119415237.7
+  },
+  "insert_named_graph/10000": {
+    "pass1_median_ns": 51555616.3,
+    "pass2_median_ns": 61043315.1
+  },
+  "update_capture_delete_where/1000": {
+    "pass1_median_ns": 5758254.2,
+    "pass2_median_ns": 5202180.6
+  },
+  "update_capture_delete_where/10000": {
+    "pass1_median_ns": 88161642.0,
+    "pass2_median_ns": 77594686.0
+  },
+  "update_capture_ground_delta/insert_data/1": {
+    "pass1_median_ns": 25314.0,
+    "pass2_median_ns": 26908.4
+  },
+  "update_capture_ground_delta/insert_data/100": {
+    "pass1_median_ns": 330034.0,
+    "pass2_median_ns": 309627.8
+  },
+  "update_capture_insert_where/1000": {
+    "pass1_median_ns": 7256946.4,
+    "pass2_median_ns": 7926249.6
+  },
+  "update_capture_insert_where/10000": {
+    "pass1_median_ns": 133171745.5,
+    "pass2_median_ns": 108446712.5
+  },
+  "update_delete_where/1000": {
+    "pass1_median_ns": 1774526.8,
+    "pass2_median_ns": 2000965.7
+  },
+  "update_delete_where/10000": {
+    "pass1_median_ns": 26061947.3,
+    "pass2_median_ns": 29294214.5
+  },
+  "update_ground_delta/insert_data/1": {
+    "pass1_median_ns": 27810.0,
+    "pass2_median_ns": 26118.3
+  },
+  "update_ground_delta/insert_data/100": {
+    "pass1_median_ns": 312043.8,
+    "pass2_median_ns": 312399.4
+  },
+  "update_insert_where/1000": {
+    "pass1_median_ns": 2906591.6,
+    "pass2_median_ns": 2925388.6
+  },
+  "update_insert_where/10000": {
+    "pass1_median_ns": 53305322.8,
+    "pass2_median_ns": 60864565.2
+  }
+}

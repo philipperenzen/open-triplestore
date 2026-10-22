@@ -1,0 +1,82 @@
+== list (the CI gate filter: query|path|geosparql|insert|update|shacl|concurrent)
+insert/capture_named_graph/10000: benchmark
+insert/capture_graph_store_put/10000: benchmark
+update/capture_insert_where/1000: benchmark
+update/capture_insert_where/10000: benchmark
+update/capture_delete_where/1000: benchmark
+update/capture_delete_where/10000: benchmark
+update/capture_ground_delta/insert_data/1: benchmark
+update/capture_ground_delta/insert_data/100: benchmark
+concurrent/capture_writes/threads/4: benchmark
+LIST_EXIT=0
+Benchmarking insert/named_graph/10000: Analyzing
+                        time:   [51.292 ms 52.459 ms 53.913 ms]
+Benchmarking insert/capture_named_graph/10000: Analyzing
+                        time:   [95.330 ms 98.033 ms 100.83 ms]
+Benchmarking insert/capture_graph_store_put/10000: Analyzing
+                        time:   [53.740 ms 54.804 ms 55.952 ms]
+Benchmarking update/insert_where/1000: Analyzing
+                        time:   [2.9538 ms 3.0816 ms 3.1871 ms]
+Benchmarking update/insert_where/10000: Analyzing
+                        time:   [49.843 ms 52.447 ms 55.166 ms]
+Benchmarking update/delete_where/1000: Analyzing
+                        time:   [1.7948 ms 1.9113 ms 2.0481 ms]
+Benchmarking update/delete_where/10000: Analyzing
+                        time:   [25.053 ms 26.442 ms 27.979 ms]
+Benchmarking update/ground_delta/insert_data/1: Analyzing
+                        time:   [27.615 µs 28.671 µs 29.943 µs]
+Benchmarking update/ground_delta/insert_data/100: Analyzing
+                        time:   [305.20 µs 314.88 µs 327.84 µs]
+Benchmarking update/capture_insert_where/1000: Analyzing
+                        time:   [7.2922 ms 7.7222 ms 8.2070 ms]
+Benchmarking update/capture_insert_where/10000: Analyzing
+                        time:   [127.63 ms 132.52 ms 137.64 ms]
+Benchmarking update/capture_delete_where/1000: Analyzing
+                        time:   [5.6621 ms 5.8558 ms 6.0958 ms]
+Benchmarking update/capture_delete_where/10000: Analyzing
+                        time:   [86.378 ms 89.744 ms 93.152 ms]
+Benchmarking update/capture_ground_delta/insert_data/1: Analyzing
+                        time:   [25.132 µs 25.506 µs 25.890 µs]
+Benchmarking update/capture_ground_delta/insert_data/100: Analyzing
+                        time:   [319.95 µs 329.90 µs 339.74 µs]
+Benchmarking concurrent/writes/threads/4: Analyzing
+                        time:   [1.0771 ms 1.0944 ms 1.1125 ms]
+Benchmarking concurrent/capture_writes/threads/4: Analyzing
+                        time:   [3.8374 ms 3.9592 ms 4.0818 ms]
+BENCH_EXIT_1=0
+Benchmarking insert/named_graph/10000: Analyzing
+                        time:   [59.645 ms 61.841 ms 64.440 ms]
+Benchmarking insert/capture_named_graph/10000: Analyzing
+                        time:   [116.04 ms 120.27 ms 124.79 ms]
+Benchmarking insert/capture_graph_store_put/10000: Analyzing
+                        time:   [61.608 ms 63.967 ms 66.481 ms]
+Benchmarking update/insert_where/1000: Analyzing
+                        time:   [3.1599 ms 3.5129 ms 3.7851 ms]
+Benchmarking update/insert_where/10000: Analyzing
+                        time:   [59.147 ms 62.668 ms 66.378 ms]
+Benchmarking update/delete_where/1000: Analyzing
+                        time:   [2.0063 ms 2.1495 ms 2.2786 ms]
+Benchmarking update/delete_where/10000: Analyzing
+                        time:   [29.080 ms 30.699 ms 32.663 ms]
+Benchmarking update/ground_delta/insert_data/1: Analyzing
+                        time:   [26.069 µs 26.668 µs 27.373 µs]
+Benchmarking update/ground_delta/insert_data/100: Analyzing
+                        time:   [303.77 µs 314.64 µs 329.93 µs]
+Benchmarking update/capture_insert_where/1000: Analyzing
+                        time:   [7.9951 ms 8.2849 ms 8.6054 ms]
+Benchmarking update/capture_insert_where/10000: Analyzing
+                        time:   [106.62 ms 109.42 ms 112.45 ms]
+Benchmarking update/capture_delete_where/1000: Analyzing
+                        time:   [5.2760 ms 5.6069 ms 5.9852 ms]
+Benchmarking update/capture_delete_where/10000: Analyzing
+                        time:   [77.241 ms 82.935 ms 90.190 ms]
+Benchmarking update/capture_ground_delta/insert_data/1: Analyzing
+                        time:   [26.908 µs 27.968 µs 29.321 µs]
+Benchmarking update/capture_ground_delta/insert_data/100: Analyzing
+                        time:   [307.25 µs 319.10 µs 334.50 µs]
+Benchmarking concurrent/writes/threads/4: Analyzing
+                        time:   [1.0932 ms 1.1226 ms 1.1562 ms]
+Benchmarking concurrent/capture_writes/threads/4: Analyzing
+                        time:   [4.0566 ms 4.1149 ms 4.1711 ms]
+BENCH_EXIT_2=0
+docker exit 0

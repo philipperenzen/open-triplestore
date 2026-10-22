@@ -1,0 +1,146 @@
+{
+  "args": [
+    "restore",
+    "/data/run",
+    "data",
+    "0",
+    "100000",
+    "100000",
+    "3"
+  ],
+  "command": "restore",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "build": {
+      "backward_v3": {
+        "max_ms": 53948.45,
+        "median_ms": 47795.75,
+        "min_ms": 45846.87,
+        "n": 3,
+        "values_ms": [
+          45846.87,
+          47795.75,
+          53948.45
+        ]
+      },
+      "forward_v2": {
+        "max_ms": 71466.38,
+        "median_ms": 58325.6,
+        "min_ms": 44360.51,
+        "n": 3,
+        "values_ms": [
+          44360.51,
+          71466.38,
+          58325.6
+        ]
+      }
+    },
+    "build_peak_rss_mib": {
+      "backward_v3": [
+        307.91,
+        293.75,
+        291.52
+      ],
+      "forward_v2": [
+        306.83,
+        218.73,
+        224.46
+      ]
+    },
+    "chain_intact": true,
+    "chain_intact_before_each_tier1": [
+      true,
+      false,
+      false
+    ],
+    "cut_checkpoint_ms": 45601.0,
+    "cut_delta_ms": [
+      307.56,
+      718.21
+    ],
+    "graph": "https://example.org/otl/instances",
+    "graph_quads": 899999,
+    "inverse_ops": 300020,
+    "k_changed": 100000,
+    "max_payload": 250000,
+    "tier1_apply": {
+      "max_ms": 14344.98,
+      "median_ms": 14202.98,
+      "min_ms": 14012.19,
+      "n": 3,
+      "values_ms": [
+        14012.19,
+        14344.98,
+        14202.98
+      ]
+    },
+    "tier1_hash_check": {
+      "max_ms": 3541.43,
+      "median_ms": 3245.67,
+      "min_ms": 3172.83,
+      "n": 3,
+      "values_ms": [
+        3172.83,
+        3245.67,
+        3541.43
+      ]
+    },
+    "tier1_peak_rss_mib": [
+      763.45,
+      868.19,
+      893.15
+    ],
+    "tier1_plan": {
+      "max_ms": 1171.38,
+      "median_ms": 1161.55,
+      "min_ms": 1086.41,
+      "n": 3,
+      "values_ms": [
+        1161.55,
+        1171.38,
+        1086.41
+      ]
+    },
+    "tier1_total": {
+      "max_ms": 18993.35,
+      "median_ms": 18922.33,
+      "min_ms": 18517.1,
+      "n": 3,
+      "values_ms": [
+        18517.1,
+        18922.33,
+        18993.35
+      ]
+    },
+    "tier2_change_log_growth_mib": [
+      6.64,
+      11.59,
+      11.59
+    ],
+    "tier2_copy_move": {
+      "max_ms": 198018.98,
+      "median_ms": 148137.82,
+      "min_ms": 119696.08,
+      "n": 3,
+      "values_ms": [
+        119696.08,
+        198018.98,
+        148137.82
+      ]
+    },
+    "tier2_peak_rss_mib": [
+      2881.12,
+      2794.51,
+      2894.53
+    ],
+    "tx_max_quads": 50000,
+    "v2_changes": 100010,
+    "v2_is_delta": true,
+    "v3_changes": 200010,
+    "v3_is_delta": true
+  }
+}

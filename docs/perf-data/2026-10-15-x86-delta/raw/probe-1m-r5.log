@@ -1,0 +1,22 @@
+probe: 999999 quads
+  rep 0 bulk_insert_quads capture=false: 10701 ms
+  rep 0 bulk_insert_quads capture=true: 14646 ms
+  rep 0 load_named capture=false: 14996 ms
+  rep 0 load_named capture=true: 14811 ms
+  rep 1 bulk_insert_quads capture=true: 14878 ms
+  rep 1 bulk_insert_quads capture=false: 12718 ms
+  rep 1 load_named capture=true: 14684 ms
+  rep 1 load_named capture=false: 14820 ms
+  rep 2 bulk_insert_quads capture=false: 12324 ms
+  rep 2 bulk_insert_quads capture=true: 14414 ms
+  rep 2 load_named capture=false: 13610 ms
+  rep 2 load_named capture=true: 13758 ms
+  rep 3 bulk_insert_quads capture=true: 13507 ms
+  rep 3 bulk_insert_quads capture=false: 12413 ms
+  rep 3 load_named capture=true: 13759 ms
+  rep 3 load_named capture=false: 14071 ms
+  rep 4 bulk_insert_quads capture=false: 11825 ms
+  rep 4 bulk_insert_quads capture=true: 15369 ms
+  rep 4 load_named capture=false: 17791 ms
+  rep 4 load_named capture=true: 14427 ms
+(837.4s)

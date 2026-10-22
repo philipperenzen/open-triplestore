@@ -1,0 +1,194 @@
+{
+ "store": "ots",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 67.695,
+   "peak_mem_bytes": 1745904205.824,
+   "load_after": [
+    4.62744140625,
+    4.01953125,
+    3.83984375
+   ],
+   "peak_current_bytes": 3331739648,
+   "peak_anon_bytes": 1588146176,
+   "peak_file_bytes": 1923698688,
+   "peak_active_file_bytes": 149647360,
+   "peak_inactive_file_bytes": 1773940736,
+   "peak_kernel_bytes": 64225280,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 1792626688,
+   "cgroup_samples": 133,
+   "method": "HTTP Graph Store POST into a dataset graph, 100 MB N-Triples chunks"
+  },
+  "shacl": {
+   "seconds": 53.167,
+   "peak_mem_bytes": 3146063544.32,
+   "load_after": [
+    3.544921875,
+    3.6494140625,
+    3.71435546875
+   ],
+   "peak_current_bytes": 4294963200,
+   "peak_anon_bytes": 2607202304,
+   "peak_file_bytes": 1744707584,
+   "peak_active_file_bytes": 523567104,
+   "peak_inactive_file_bytes": 1744211968,
+   "peak_kernel_bytes": 60944384,
+   "peak_shmem_bytes": 0,
+   "peak_usage_minus_inactive_bytes": 3164246016,
+   "cgroup_samples": 104
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp up -d ots",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/s2/check-new-10k/ots/10k/attempt-1:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload load-http --out /out/load.json --endpoint http://ots:7878/store?graph=http%3A%2F%2Fexample.org%2Fbench%2Fbsbm --token <token> --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/s2/check-new-10k/ots/10k/attempt-1:/out python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 python /h/bench.py client --store ots --workload shacl --out /out/shacl.json --endpoint http://ots:7878/api/datasets/bench/validate?test=true --shacl-kind ots --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5 --shapes-graph http://example.org/bench/shapes --token <token>",
+  "docker compose -f <repo>/scripts/bench-compare/compose/ots.yml -f $WORK/ots-override.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   3.0927734375,
+   3.75634765625,
+   3.75341796875
+  ],
+  "waited_s": 0,
+  "free_gib": 890.1,
+  "swap": ""
+ },
+ "started": "2026-10-15T22:47:08+0200",
+ "limit_bytes": 4294967296,
+ "db_bytes_after_load": 1839009792,
+ "image": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6 ots-bench:532-2342e3f9",
+ "finished": "2026-10-15T22:50:14+0200",
+ "load_after": [
+  3.544921875,
+  3.6494140625,
+  3.71435546875
+ ],
+ "shacl_records": [
+  {
+   "phase": "warmup",
+   "status": 200,
+   "seconds": 7.3576721529998395,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 7092,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 6.74399165199975,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 6499,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 6.568645645000288,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 6331,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 7.246547898999779,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 7011,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 7.041963884999859,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 6841,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  },
+  {
+   "phase": "measured",
+   "status": 200,
+   "seconds": 6.864324785000463,
+   "count": 51690,
+   "results_sha256": "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38",
+   "response_bytes": 83367318,
+   "metrics": {
+    "duration_ms": 6635,
+    "graphs": 2,
+    "path": "dataset",
+    "quads": 3564863,
+    "run_index": true,
+    "source": "snapshot"
+   }
+  }
+ ],
+ "server_shacl_lines": [
+  "2026-10-15T20:47:14.635725Z DEBUG open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 0 MiB, index 0 MiB (0 quads, 0 pairs from the store), closure memo 0 MiB, results 0 MiB (0); process anon MiB after start 657, class sets 657, targets 657, index 657, results 657",
+  "2026-10-15T20:49:25.122129Z  INFO open_triplestore::shacl::view: SHACL run index: 1444351 quads held (~605 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/rating1, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/reviewFor, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:49:27.929863Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 605 MiB (1444351 quads, 4 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 1278, class sets 1509, targets 1548, index 2276, results 2488",
+  "2026-10-15T20:49:28.790211Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 263 ms",
+  "2026-10-15T20:49:33.989846Z  INFO open_triplestore::shacl::view: SHACL run index: 1523198 quads held (~633 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www.w3.org/2000/01/rdf-schema#label, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/rating1, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:49:36.359035Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 633 MiB (1523198 quads, 4 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 986, class sets 1081, targets 1098, index 1521, results 1697",
+  "2026-10-15T20:49:37.236691Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 151 ms",
+  "2026-10-15T20:49:42.394978Z  INFO open_triplestore::shacl::view: SHACL run index: 1539249 quads held (~641 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/rating1, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor, http://xmlns.com/foaf/0.1/name",
+  "2026-10-15T20:49:44.552943Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 641 MiB (1539249 quads, 4 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 1056, class sets 1145, targets 1162, index 1582, results 1727",
+  "2026-10-15T20:49:45.426649Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 373 ms",
+  "2026-10-15T20:49:51.381800Z  INFO open_triplestore::shacl::view: SHACL run index: 1414213 quads held (~590 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:49:53.690563Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 590 MiB (1414213 quads, 3 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 990, class sets 1094, targets 1113, index 1513, results 1675",
+  "2026-10-15T20:49:54.509615Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 301 ms",
+  "2026-10-15T20:49:59.961192Z  INFO open_triplestore::shacl::view: SHACL run index: 1393060 quads held (~587 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www.w3.org/2000/01/rdf-schema#label, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/deliveryDays, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/offerWebpage, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/price",
+  "2026-10-15T20:50:02.554007Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 587 MiB (1393060 quads, 4 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 1087, class sets 1170, targets 1187, index 1572, results 1731",
+  "2026-10-15T20:50:03.326336Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 230 ms",
+  "2026-10-15T20:50:08.623198Z  INFO open_triplestore::shacl::view: SHACL run index: 1544351 quads held (~642 MiB); over the 1024 MiB SHACL run memory budget, answered from the store instead: http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/rating1, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/validTo, http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/vendor",
+  "2026-10-15T20:50:10.869639Z  INFO open_triplestore::shacl::engine: SHACL run memory: budget 1024 MiB; class sets and targets 109 MiB, index 642 MiB (1544351 quads, 3 pairs from the store), closure memo 0 MiB, results 177 MiB (51690); process anon MiB after start 1014, class sets 1092, targets 1112, index 1617, results 1761",
+  "2026-10-15T20:50:11.745617Z DEBUG open_triplestore::shacl::engine: SHACL run: freed memory given back in 319 ms"
+ ]
+}

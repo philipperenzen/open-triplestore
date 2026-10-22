@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
+use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
@@ -58,6 +59,15 @@ fn fresh_store() -> TripleStore {
     TripleStore::in_memory()
         .unwrap()
         .with_query_cache(false, 0, 0)
+}
+
+/// `fresh_store()` with change capture ON — an in-memory change log with the
+/// default caps — for the `capture_*` benchmarks. Capture is off by default,
+/// so no other benchmark runs a delta path: these are the perf gate's view of
+/// what a replication leader, delta versions and the change feed pay per
+/// write (docs/performance.md, "Delta versions at scale").
+fn capture_store() -> TripleStore {
+    fresh_store().with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD)
 }
 
 /// The one store with the result cache ON, for `query/cache_hit` only.
@@ -340,6 +350,76 @@ fn bench_insert_named_graph(c: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+/// `insert/named_graph` with change capture on: the same N-Quads load into
+/// ten named graphs, streamed, now probing every quad so each graph's row
+/// carries exactly the quads that were new, then serialising those rows.
+fn bench_insert_capture_named_graph(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert/capture_named_graph");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let n = 10_000_usize;
+    let nq = gen_named_graph_nq(n, 10);
+    group.throughput(Throughput::Elements((n * 3) as u64));
+    group.bench_with_input(BenchmarkId::from_parameter(n), &nq, |b, data| {
+        b.iter(|| {
+            let store = capture_store();
+            store.load_str(data, RdfFormat::NQuads, None).unwrap();
+            store.len().unwrap()
+        });
+    });
+    group.finish();
+}
+
+/// A Graph Store `PUT` that replaces a 30 000-quad named graph, with change
+/// capture on: the replace reads the graph's pre-image (it is under the scan
+/// cap), diffs it against the payload and records the net diff — the
+/// `PUT`-replace pre-image of the delta note's §8.2 item 4, at bench scale.
+/// Each iteration replaces the graph with the other of two versions that
+/// differ in 1 % of their quads, so every sample is a real replace.
+fn bench_insert_capture_graph_store_put(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert/capture_graph_store_put");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let graph = "http://example.org/put";
+    let n = 10_000_usize;
+    let version = |mark: &str| -> String {
+        (0..n)
+            .map(|i| {
+                let age = if i % 100 == 0 {
+                    format!("{}{mark}", 18 + i % 65)
+                } else {
+                    format!("{}", 18 + i % 65)
+                };
+                format!(
+                    "<http://example.org/p{i}> <http://example.org/name> \"Person {i}\" .\n\
+                     <http://example.org/p{i}> <http://example.org/age> \"{age}\" .\n\
+                     <http://example.org/p{i}> <http://example.org/type> <http://example.org/Type{}> .\n",
+                    i % 10
+                )
+            })
+            .collect()
+    };
+    let (a, b2) = (version(""), version("b"));
+    let store = capture_store();
+    store
+        .graph_store_put(Some(graph), &a, RdfFormat::NTriples)
+        .unwrap();
+    let mut flip = false;
+    group.throughput(Throughput::Elements((n * 3) as u64));
+    group.bench_function(BenchmarkId::from_parameter(n), |b| {
+        b.iter(|| {
+            flip = !flip;
+            let body = if flip { &b2 } else { &a };
+            store
+                .graph_store_put(Some(graph), body, RdfFormat::NTriples)
+                .unwrap()
+        });
+    });
     group.finish();
 }
 
@@ -1308,6 +1388,96 @@ fn bench_update_ground_delta(c: &mut Criterion) {
     group.finish();
 }
 
+/// `update/insert_where` and `update/delete_where` with change capture on.
+/// A `WHERE` update names its target by pattern, so the row needs the
+/// target graph's before-image, its after-image through the transaction and
+/// a diff: the cost is proportional to the graph, not to the change (the
+/// delta note's §8.2 item 1, at bench scale; the graphs here are under the
+/// scan cap, so the before-image is always taken).
+fn bench_update_capture_where(c: &mut Criterion) {
+    let updates = [
+        (
+            "update/capture_insert_where",
+            "INSERT { ?s <http://example.org/doubled> ?d } \
+             WHERE { ?s <http://example.org/age> ?a BIND(?a * 2 AS ?d) }",
+        ),
+        (
+            "update/capture_delete_where",
+            "DELETE { ?s <http://example.org/type> ?t } \
+             WHERE  { ?s <http://example.org/type> ?t \
+                      FILTER(?t = <http://example.org/Type0>) }",
+        ),
+    ];
+    for (name, sparql) in updates {
+        let mut group = c.benchmark_group(name);
+        for &n in &[1_000_usize, 10_000] {
+            group.throughput(Throughput::Elements(n as u64));
+            group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &size| {
+                b.iter_batched(
+                    || {
+                        let store = capture_store();
+                        store
+                            .load_str(&gen_persons_ttl(size), RdfFormat::Turtle, None)
+                            .unwrap();
+                        store
+                    },
+                    |store| {
+                        store.update(sparql).unwrap();
+                        store.len().unwrap()
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            });
+        }
+        group.finish();
+    }
+}
+
+/// `update/ground_delta` with change capture on: a ground `INSERT DATA` of 1
+/// and of 100 quads into a ~100k-quad named graph. The statement is already
+/// the delta, so the row costs an intent insert, an N-Quads payload and the
+/// sequence section — no scan.
+fn bench_update_capture_ground_delta(c: &mut Criterion) {
+    let mut group = c.benchmark_group("update/capture_ground_delta");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let graph = "http://example.org/g0";
+    let store = capture_store();
+    store
+        .load_str(&gen_named_graph_nq(34_000, 1), RdfFormat::NQuads, None)
+        .unwrap();
+    let affected = vec![graph.to_string()];
+    let quads = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("<http://example.org/fresh{i}> <http://example.org/p> \"v{i}\" ."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    for &n in &[1_usize, 100] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("insert_data", n), &n, |b, &n| {
+            let insert = format!("INSERT DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            let delete = format!("DELETE DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            b.iter_batched(
+                || {
+                    store
+                        .update_targeted_delta(&delete, &affected, false)
+                        .unwrap();
+                },
+                |()| {
+                    store
+                        .update_targeted_delta(&insert, &affected, false)
+                        .unwrap()
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 // ─── GeoSPARQL benchmarks ─────────────────────────────────────────────────────
 
 /// Measure GeoSPARQL sfContains over point features.
@@ -1905,6 +2075,51 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+/// `concurrent/writes` at four threads with change capture on: every write
+/// takes the change log's sequence section, which brackets its commit and
+/// its row, so this is where capture serialises writers.
+fn bench_concurrent_capture_writes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent/capture_writes");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let t = 4_usize;
+    group.throughput(Throughput::Elements((t * 10) as u64));
+    group.bench_with_input(BenchmarkId::new("threads", t), &t, |b, &t| {
+        b.iter_batched(
+            || (Arc::new(capture_store()), Arc::new(Mutex::new(0usize))),
+            |(store, counter)| {
+                let handles: Vec<_> = (0..t)
+                    .map(|_| {
+                        let s = Arc::clone(&store);
+                        let ctr = Arc::clone(&counter);
+                        std::thread::spawn(move || {
+                            let base = {
+                                let mut c = ctr.lock().unwrap();
+                                let v = *c;
+                                *c += 10;
+                                v
+                            };
+                            for i in base..base + 10 {
+                                s.update(&format!(
+                                    "INSERT DATA {{ <http://ex/s{i}> <http://ex/p> \"{i}\" }}"
+                                ))
+                                .unwrap();
+                            }
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    h.join().unwrap();
+                }
+                store.len().unwrap()
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 /// Measure query THROUGHPUT under concurrency — `N` threads each run `K` join
 /// queries against a shared `Arc<TripleStore>`.
 ///
@@ -1963,7 +2178,9 @@ criterion_group!(
         bench_insert_bulk,
         bench_insert_update,
         bench_insert_update_batch,
-        bench_insert_named_graph
+        bench_insert_named_graph,
+        bench_insert_capture_named_graph,
+        bench_insert_capture_graph_store_put
 );
 
 criterion_group!(
@@ -2011,7 +2228,9 @@ criterion_group!(
     targets =
         bench_update_insert_where,
         bench_update_delete_where,
-        bench_update_ground_delta
+        bench_update_ground_delta,
+        bench_update_capture_where,
+        bench_update_capture_ground_delta
 );
 
 criterion_group!(
@@ -2042,6 +2261,7 @@ criterion_group!(
         bench_concurrent_reads,
         bench_concurrent_writes,
         bench_concurrent_mixed,
+        bench_concurrent_capture_writes,
         bench_concurrent_throughput
 );
 

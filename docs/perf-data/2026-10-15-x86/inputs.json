@@ -1,0 +1,23 @@
+{
+ "date": "2026-10-15",
+ "issue": "https://github.com/philipperenzen/open-triplestore/issues/532",
+ "datasets": {
+  "1k": {"generator": "BSBM tools 0.2, Generator -fc -pc 1000 -s nt", "triples": 374911, "bytes": 95715671,
+         "sha256": "6f19f6aeba949d0869434b582c8c9ee503b5c7de90b5ec80fae0a1bb0612912f"},
+  "10k": {"generator": "BSBM tools 0.2, Generator -fc -pc 10000 -s nt", "triples": 3564773, "bytes": 919087340,
+          "sha256": "72309dd91f82545d8a379675ff72bebd0aea2dfd9cc61e410ebad539def5c7b5"}
+ },
+ "shapes": "scripts/bench-compare/shapes/bsbm-shapes.ttl",
+ "workload": "campaign.py --stores ots --workloads shacl: load over the Graph Store protocol (100 MB chunks), 60 s settle, 1 warm-up + 5 measured POST /api/datasets/bench/validate?test=true; memory limit 4g, 4 CPUs",
+ "client_image": "python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 (the copy already on the machine; the harness pins 78387bc3..., which was not, and nothing was pulled)",
+ "log_level": "RUST_LOG=info,open_triplestore::shacl=debug (compose override), for the phase lines",
+ "stores": {
+  "ots-before": {"commit": "462b206c (develop, 0.8.0)", "image": "ots-bench:462b206c",
+                 "image_id": "sha256:b612f7b3164ddc61aebce37ae308f2f6fd43b9df50227774ce8241530c8a2a31",
+                 "build": "scripts/bench-compare/Dockerfile.ots, fat LTO, --features full, rust:1.94-bookworm"},
+  "ots-after": {"commit": "2342e3f9 (perf/532-shacl-run-memory-budget)", "image": "ots-bench:532-2342e3f9",
+                "image_id": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6",
+                "build": "scripts/bench-compare/Dockerfile.ots of the branch (it now touches the workspace sources before cargo build), fat LTO, --features full, rust:1.94-bookworm"}
+ },
+ "order": "one lock acquisition, back to back: before 10k, after 10k, before 10k, after 10k, before 1k, after 1k, then the repeated-load check (after, 3 attempts; before, 1 attempt), each from an empty store"
+}

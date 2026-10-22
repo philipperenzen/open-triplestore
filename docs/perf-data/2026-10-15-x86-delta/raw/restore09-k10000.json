@@ -1,0 +1,129 @@
+{
+  "args": [
+    "restore",
+    "/data/run",
+    "data",
+    "0",
+    "100000",
+    "10000",
+    "3"
+  ],
+  "command": "restore",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "build": {
+      "backward_v3": {
+        "max_ms": 40250.9,
+        "median_ms": 40168.19,
+        "min_ms": 39871.53,
+        "n": 3,
+        "values_ms": [
+          40168.19,
+          40250.9,
+          39871.53
+        ]
+      },
+      "forward_v2": {
+        "max_ms": 42325.97,
+        "median_ms": 41895.99,
+        "min_ms": 41204.17,
+        "n": 3,
+        "values_ms": [
+          41204.17,
+          42325.97,
+          41895.99
+        ]
+      }
+    },
+    "build_peak_rss_mib": {
+      "backward_v3": [
+        27.18,
+        17.91,
+        11.5
+      ],
+      "forward_v2": [
+        69.94,
+        19.95,
+        12.12
+      ]
+    },
+    "chain_intact": true,
+    "cut_checkpoint_ms": 39644.98,
+    "cut_delta_ms": [
+      42.16,
+      40.64
+    ],
+    "graph": "https://example.org/otl/instances",
+    "graph_quads": 899999,
+    "inverse_ops": 27000,
+    "k_changed": 10000,
+    "tier1_apply": {
+      "max_ms": 618.44,
+      "median_ms": 600.77,
+      "min_ms": 559.43,
+      "n": 3,
+      "values_ms": [
+        559.43,
+        600.77,
+        618.44
+      ]
+    },
+    "tier1_hash_check": {
+      "max_ms": 2926.9,
+      "median_ms": 2881.02,
+      "min_ms": 2812.72,
+      "n": 3,
+      "values_ms": [
+        2812.72,
+        2881.02,
+        2926.9
+      ]
+    },
+    "tier1_peak_rss_mib": [
+      15.75,
+      0.0,
+      0.0
+    ],
+    "tier1_total": {
+      "max_ms": 3717.66,
+      "median_ms": 3591.4,
+      "min_ms": 3423.27,
+      "n": 3,
+      "values_ms": [
+        3423.27,
+        3591.4,
+        3717.66
+      ]
+    },
+    "tier2_change_log_growth_mib": [
+      8.08,
+      11.33,
+      11.33
+    ],
+    "tier2_copy_move": {
+      "max_ms": 91188.29,
+      "median_ms": 87726.3,
+      "min_ms": 87114.15,
+      "n": 3,
+      "values_ms": [
+        87726.3,
+        87114.15,
+        91188.29
+      ]
+    },
+    "tier2_peak_rss_mib": [
+      3251.2,
+      847.38,
+      2101.25
+    ],
+    "tx_max_quads": 50000,
+    "v2_changes": 9000,
+    "v2_is_delta": true,
+    "v3_changes": 18000,
+    "v3_is_delta": true
+  }
+}
