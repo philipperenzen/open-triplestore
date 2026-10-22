@@ -1,0 +1,14 @@
+probe: 999999 quads
+  rep 0 bulk_insert_quads capture=false: 9246 ms
+  rep 0 bulk_insert_quads capture=true: 14169 ms
+  rep 0 load_named capture=false: 15370 ms
+  rep 0 load_named capture=true: 13009 ms
+  rep 1 bulk_insert_quads capture=true: 12629 ms
+  rep 1 bulk_insert_quads capture=false: 11679 ms
+  rep 1 load_named capture=true: 13971 ms
+  rep 1 load_named capture=false: 13226 ms
+  rep 2 bulk_insert_quads capture=false: 11648 ms
+  rep 2 bulk_insert_quads capture=true: 12925 ms
+  rep 2 load_named capture=false: 13475 ms
+  rep 2 load_named capture=true: 12798 ms
+(433.4s)

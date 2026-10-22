@@ -1,0 +1,16 @@
+  k10000-1792074071-v1: checkpoint (a checkpoint was asked for)
+restore: checkpoint cut 39645 ms
+  apply A 176 ms; delta cuts 42 / 41 ms; v2 delta=true v3 delta=true
+  build forward_v2: 41204 ms
+  build backward_v3: 40168 ms
+  build forward_v2: 42326 ms
+  build backward_v3: 40251 ms
+  build forward_v2: 41896 ms
+  build backward_v3: 39872 ms
+  tier 1: 3423 ms (plan 44, apply 559, hash 2813)
+  tier 1: 3591 ms (plan 103, apply 601, hash 2881)
+  tier 1: 3718 ms (plan 165, apply 618, hash 2927)
+  tier 2: 87726 ms
+  tier 2: 87114 ms
+  tier 2: 91188 ms
+(740.6s)
