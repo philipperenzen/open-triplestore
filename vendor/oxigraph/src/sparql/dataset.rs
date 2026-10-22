@@ -6,6 +6,7 @@ use crate::storage::numeric_encoder::{
 use crate::storage::{CorruptionError, StorageError, StorageReader};
 use oxrdf::Term;
 use oxsdatatypes::Boolean;
+use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "rdf-12")]
 use spareval::ExpressionTriple;
 use spareval::{ExpressionTerm, InternalQuad, InternalTriple, QueryableDataset};
@@ -19,14 +20,67 @@ use std::sync::Arc;
 pub struct DatasetView<'a> {
     reader: StorageReader<'a>,
     extra: RefCell<HashMap<StrHash, String, BuildHasherDefault<StrHashHasher>>>,
+    /// The predicates a default graph that merges several graphs was scanned
+    /// with so far in this evaluation.
+    scanned: RefCell<FxHashSet<EncodedTerm>>,
+    /// Whether a graph holds a quad with a predicate, keyed by (graph,
+    /// predicate), for the graphs of a default graph that merges several.
+    /// The reader is a snapshot, so an answer holds for the whole evaluation.
+    predicates: RefCell<FxHashMap<(EncodedTerm, EncodedTerm), bool>>,
 }
+
+/// At most this many predicates and (graph, predicate) answers are kept per
+/// evaluation; past that, a new predicate is scanned over every graph.
+const MAX_PREDICATE_PROBES: usize = 1024;
 
 impl<'a> DatasetView<'a> {
     pub fn new(reader: StorageReader<'a>) -> Self {
         Self {
             reader,
             extra: RefCell::new(HashMap::default()),
+            scanned: RefCell::new(FxHashSet::default()),
+            predicates: RefCell::new(FxHashMap::default()),
         }
+    }
+
+    /// Whether a merge was scanned with `predicate` before in this
+    /// evaluation. The first scan opens every graph, as before; the graphs are
+    /// probed from the second scan on, so a predicate that a query looks up
+    /// once costs no probe.
+    fn scanned_before(&self, predicate: &EncodedTerm) -> bool {
+        let mut scanned = self.scanned.borrow_mut();
+        if scanned.contains(predicate) {
+            return true;
+        }
+        if scanned.len() < MAX_PREDICATE_PROBES {
+            scanned.insert(predicate.clone());
+        }
+        false
+    }
+
+    /// Whether `graph_name` (`None`: the default graph) holds a quad with
+    /// `predicate`, probed once per graph and predicate. A failed probe keeps
+    /// the graph, so the scan that follows reports the error.
+    fn graph_has_predicate(
+        &self,
+        graph_name: Option<&EncodedTerm>,
+        predicate: &EncodedTerm,
+    ) -> bool {
+        let graph_name = graph_name.unwrap_or(&EncodedTerm::DefaultGraph);
+        let key = (graph_name.clone(), predicate.clone());
+        if let Some(found) = self.predicates.borrow().get(&key) {
+            return *found;
+        }
+        let found = self
+            .reader
+            .quads_for_pattern(None, Some(predicate), None, Some(graph_name))
+            .next()
+            .is_some();
+        let mut predicates = self.predicates.borrow_mut();
+        if predicates.len() < MAX_PREDICATE_PROBES {
+            predicates.insert(key, found);
+        }
+        found
     }
 
     pub fn insert_str(&self, key: &StrHash, value: &str) {
@@ -78,6 +132,25 @@ impl<'a> QueryableDataset<'a> for DatasetView<'a> {
         object: Option<&EncodedTerm>,
         graph_names: Option<&[Option<EncodedTerm>]>,
     ) -> impl Iterator<Item = Result<InternalTriple<EncodedTerm>, StorageError>> + use<'a> {
+        // A graph with no quad of the pattern's predicate cannot match: from
+        // the second scan with a predicate on, it is left out before a scan is
+        // opened on it, so a data graph merged with a small side graph
+        // (shapes, a vocabulary) costs what the data graph alone costs. A
+        // for-loop join opened a scan on every graph per row.
+        let kept: Vec<Option<EncodedTerm>>;
+        let graph_names = match (graph_names, predicate) {
+            (Some(graph_names), Some(predicate))
+                if graph_names.len() > 1 && self.scanned_before(predicate) =>
+            {
+                kept = graph_names
+                    .iter()
+                    .filter(|graph_name| self.graph_has_predicate(graph_name.as_ref(), predicate))
+                    .cloned()
+                    .collect();
+                Some(kept.as_slice())
+            }
+            (graph_names, _) => graph_names,
+        };
         self.reader
             .quads_for_pattern_in_union(subject, predicate, object, graph_names)
             .map(|quad| {

@@ -1,0 +1,14 @@
+== 1k
+after: 2632 instances, 0 with two different counts []
+before: 2632 instances, 0 with two different counts []
+oxigraph: 2632 instances, 0 with two different counts []
+after vs before: 2632 instances agree, 0 differ []
+after vs oxigraph: 2632 instances agree, 0 differ []
+before vs oxigraph: 2632 instances agree, 0 differ []
+== 10k
+after: 2968 instances, 0 with two different counts []
+before: 2968 instances, 0 with two different counts []
+oxigraph: 2967 instances, 0 with two different counts []
+after vs before: 2968 instances agree, 0 differ []
+after vs oxigraph: 2967 instances agree, 0 differ []
+before vs oxigraph: 2967 instances agree, 0 differ []
