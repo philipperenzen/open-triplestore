@@ -17,6 +17,10 @@ ignore = [
     # (tiberius 0.13 moved `plugin-mssql` to rustls 0.23, which cleared the rustls 0.21 /
     # rustls-webpki 0.101 advisories this list used to carry.)
     "RUSTSEC-2025-0134",  # rustls-pemfile — unmaintained (via mysql)
+    # basic-toml is unmaintained (archived 2025-03, no successor release). It is read
+    # only at build time, by the i18n-embed proc-macros that `age` (backup encryption) uses
+    # to parse its own i18n.toml; nothing at run time links it and no vulnerability is reported.
+    "RUSTSEC-2026-0374",  # basic-toml — unmaintained (build-time, via age's i18n-embed-fl)
     # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
     # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults) — bumping
     # our own direct `quick-xml` dep would leave Oxigraph's copy in the tree, so the

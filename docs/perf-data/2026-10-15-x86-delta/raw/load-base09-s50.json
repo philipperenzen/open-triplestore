@@ -1,0 +1,24 @@
+{
+  "args": [
+    "load",
+    "/data/base09",
+    "https://example.org/otl/s50",
+    "10000000",
+    "5556"
+  ],
+  "command": "load",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "off",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "assets": 5556,
+    "dir_mib": 218.75,
+    "graph": "https://example.org/otl/s50",
+    "quads": 50004,
+    "quads_per_s": 98216.72,
+    "seconds": 0.51,
+    "store_quads": 950160
+  }
+}

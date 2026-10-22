@@ -1,0 +1,147 @@
+{
+ "max_mem_fraction": 0.8,
+ "check_phases": [
+  "load",
+  "shacl"
+ ],
+ "ok": true,
+ "lines": [
+  "ots/10k attempt 1: load peak 1,710 MiB, shacl peak 3,018 MiB (anon 2,486) of 4,096 MiB: ok",
+  "ots/10k attempt 2: load peak 1,853 MiB, shacl peak 2,914 MiB (anon 2,386) of 4,096 MiB: ok",
+  "ots/10k attempt 3: load peak 1,735 MiB, shacl peak 3,079 MiB (anon 2,386) of 4,096 MiB: ok"
+ ],
+ "attempts": [
+  {
+   "store": "ots",
+   "scale": "10k",
+   "attempt": 1,
+   "limit_bytes": 4294967296,
+   "image": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6 ots-bench:532-2342e3f9",
+   "error": null,
+   "phases": {
+    "load": {
+     "seconds": 67.695,
+     "peak_stats_bytes": 1792626688,
+     "peak_anon_bytes": 1588146176,
+     "peak_file_bytes": 1923698688,
+     "peak_active_file_bytes": 149647360
+    },
+    "shacl": {
+     "seconds": 53.167,
+     "peak_stats_bytes": 3164246016,
+     "peak_anon_bytes": 2607202304,
+     "peak_file_bytes": 1744707584,
+     "peak_active_file_bytes": 523567104
+    }
+   },
+   "violations": [],
+   "shacl": {
+    "statuses": [
+     200
+    ],
+    "results": [
+     51690
+    ],
+    "digests": [
+     "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38"
+    ],
+    "measured_seconds": [
+     6.744,
+     6.569,
+     7.247,
+     7.042,
+     6.864
+    ]
+   },
+   "ok": true
+  },
+  {
+   "store": "ots",
+   "scale": "10k",
+   "attempt": 2,
+   "limit_bytes": 4294967296,
+   "image": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6 ots-bench:532-2342e3f9",
+   "error": null,
+   "phases": {
+    "load": {
+     "seconds": 83.647,
+     "peak_stats_bytes": 1943265280,
+     "peak_anon_bytes": 1833119744,
+     "peak_file_bytes": 1876844544,
+     "peak_active_file_bytes": 149495808
+    },
+    "shacl": {
+     "seconds": 55.665,
+     "peak_stats_bytes": 3055869231.104,
+     "peak_anon_bytes": 2501398528,
+     "peak_file_bytes": 1781948416,
+     "peak_active_file_bytes": 520511488
+    }
+   },
+   "violations": [],
+   "shacl": {
+    "statuses": [
+     200
+    ],
+    "results": [
+     51690
+    ],
+    "digests": [
+     "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38"
+    ],
+    "measured_seconds": [
+     7.395,
+     7.173,
+     7.908,
+     7.973,
+     7.197
+    ]
+   },
+   "ok": true
+  },
+  {
+   "store": "ots",
+   "scale": "10k",
+   "attempt": 3,
+   "limit_bytes": 4294967296,
+   "image": "sha256:192a46b520941f35518ea801ba61ec2a32557290e94110a458196a8a990910e6 ots-bench:532-2342e3f9",
+   "error": null,
+   "phases": {
+    "load": {
+     "seconds": 76.532,
+     "peak_stats_bytes": 1818918649.856,
+     "peak_anon_bytes": 1611870208,
+     "peak_file_bytes": 1873068032,
+     "peak_active_file_bytes": 149798912
+    },
+    "shacl": {
+     "seconds": 58.075,
+     "peak_stats_bytes": 3228602368,
+     "peak_anon_bytes": 2501558272,
+     "peak_file_bytes": 1736261632,
+     "peak_active_file_bytes": 688730112
+    }
+   },
+   "violations": [],
+   "shacl": {
+    "statuses": [
+     200
+    ],
+    "results": [
+     51690
+    ],
+    "digests": [
+     "1c6b8ff25f98c65410378890f004f067d31e82412406dfc4d7cf1240da542f38"
+    ],
+    "measured_seconds": [
+     7.209,
+     7.785,
+     9.453,
+     6.911,
+     7.18
+    ]
+   },
+   "ok": true
+  }
+ ]
+}

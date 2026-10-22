@@ -94,6 +94,9 @@ COPY tools/ tools/
 # test at `tests/ldp_conformance.rs`"). With tests/ here the recipe records the
 # test targets and `cargo chef cook` stubs them; without it the cook fails.
 COPY tests/ tests/
+# Cargo.toml also declares an `[[example]]` (`scale_delta`, for its
+# required-features), which cargo checks the same way: copy examples/ too.
+COPY examples/ examples/
 # `cargo chef prepare` does not check that declared target files exist, so a
 # directory missing above passes here and fails only in the builder. CI's
 # docker-manifests job builds this stage on every PR and loads its tree and the

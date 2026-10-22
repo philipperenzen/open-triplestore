@@ -25,6 +25,7 @@
 //! constraints (`sh:sparql`), SPARQL targets and the bodies of the
 //! `sh:SPARQLFunction`s they call read the same source ([`DataView::query`]).
 
+use super::budget::{term_heap_bytes, term_set_bytes, Part, RunBudget};
 use super::shapes::{Constraint, PropertyPath, Shape, Target};
 use crate::store::TripleStore;
 use oxigraph::model::{
@@ -120,6 +121,20 @@ pub(crate) struct DataView<'a> {
     /// live sources when the run is large enough to pay for it (see
     /// [`RunIndex`]). `None` on the mirror source, whose probes are RAM lookups.
     index: Option<RunIndex>,
+    /// What the index holds, and the pairs it left to the store.
+    index_stats: IndexStats,
+    /// The run's draw on the validation memory pool, which the index, the
+    /// closure memo and the results share (see [`super::budget`]).
+    budget: RunBudget,
+}
+
+/// What the run index holds (for the run's log line).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct IndexStats {
+    pub quads: usize,
+    /// `(predicate, graph)` pairs answered from the store, `^`-prefixed when
+    /// inverse.
+    pub dropped: Vec<String>,
 }
 
 /// Adjacency lists for the predicates the run's shapes traverse, one scan per
@@ -127,44 +142,94 @@ pub(crate) struct DataView<'a> {
 /// and `inv[g][p][o] = subjects`. Answers a probe with one hash lookup instead
 /// of a RocksDB prefix seek plus four term decodes, which at 600 000 probes per
 /// run is the difference between a 2.3 s and a sub-second validation. A pair
-/// is present only when its scan completed within the budget, and is then
-/// authoritative for that graph and predicate; anything else falls through to
-/// the raw source.
+/// is present only when its scan completed within the run's memory budget
+/// ([`super::budget`]), and is then authoritative for that graph and
+/// predicate; anything else falls through to the raw source.
 /// `predicate -> node -> neighbours` for one data graph.
-type Adjacency = HashMap<String, HashMap<Term, Vec<Term>>>;
+type Adjacency = HashMap<String, HashMap<Term, Neighbours>>;
+
+/// The neighbours of one node under one predicate. Most predicates have one
+/// value per node, and a `Vec` of one holds room for four (`RawVec`'s first
+/// allocation): a node with one neighbour keeps it inline.
+#[derive(Debug)]
+enum Neighbours {
+    One(Term),
+    Many(Vec<Term>),
+}
+
+impl Neighbours {
+    fn push(&mut self, term: Term) {
+        if let Neighbours::Many(v) = self {
+            v.push(term);
+            return;
+        }
+        if let Neighbours::One(first) =
+            std::mem::replace(self, Neighbours::Many(Vec::with_capacity(2)))
+        {
+            if let Neighbours::Many(v) = self {
+                v.push(first);
+                v.push(term);
+            }
+        }
+    }
+
+    fn to_vec(&self) -> Vec<Term> {
+        match self {
+            Neighbours::One(t) => vec![t.clone()],
+            Neighbours::Many(v) => v.clone(),
+        }
+    }
+
+    fn extend_into(&self, out: &mut Vec<Term>) {
+        match self {
+            Neighbours::One(t) => out.push(t.clone()),
+            Neighbours::Many(v) => out.extend(v.iter().cloned()),
+        }
+    }
+
+    fn shrink(&mut self) {
+        if let Neighbours::Many(v) = self {
+            v.shrink_to_fit();
+        }
+    }
+}
+
+/// Estimated bytes of one adjacency entry besides its terms' strings: the
+/// hash table slot (key and [`Neighbours`] inline, a control byte) at the
+/// table's average occupancy, about two thirds.
+const INDEX_SLOT_BYTES: usize =
+    (std::mem::size_of::<Term>() + std::mem::size_of::<Neighbours>() + 1) * 3 / 2;
+/// Estimated bytes of a neighbour beyond a node's first: a `Vec` slot,
+/// half again for the growth slack until the scan's final shrink.
+const INDEX_MORE_BYTES: usize = std::mem::size_of::<Term>() * 3 / 2;
+/// A scan reserves its estimate from the run budget in steps of this many
+/// bytes, so the pool's atomic is touched rarely.
+const INDEX_RESERVE_STEP: usize = 1 << 20;
 
 struct RunIndex {
     fwd: Vec<Adjacency>,
     inv: Vec<Adjacency>,
 }
 
-/// When and how large the run index may be. Read from the environment once
-/// per run: `OTS_SHACL_RUN_INDEX_MIN_PROBES` (build only when the run will
-/// make at least this many probes, default 20 000) and
-/// `OTS_SHACL_RUN_INDEX_MAX_QUADS` (total quads the index may hold; default
-/// derived from the memory limit like the accelerator's cap, 1M when the
-/// limit is unknown, never below 250k or above 8M).
+/// When and how large the run index may be. Read from the configuration
+/// once per run: `OTS_SHACL_RUN_INDEX_MIN_PROBES` (build only when the run
+/// will make at least this many probes, default 20 000) and
+/// `OTS_SHACL_RUN_INDEX_MAX_QUADS`: unset (the default), the index takes
+/// what the run's memory budget ([`super::budget`]) has room for; set, it
+/// may hold that many quads whatever their size, as before the budget, and
+/// its bytes still count against the budget the closure memo and the results
+/// draw from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct IndexPolicy {
     pub min_probes: usize,
-    pub max_quads: usize,
-}
-
-/// The memory-derived default of `OTS_SHACL_RUN_INDEX_MAX_QUADS`.
-pub(crate) fn default_index_max_quads() -> usize {
-    crate::store::parallel_mirror::detect_memory_limit_bytes()
-        .map(|b| (b / 8 / 300) as usize)
-        .unwrap_or(1_000_000)
-        .clamp(250_000, 8_000_000)
+    pub max_quads: Option<usize>,
 }
 
 impl IndexPolicy {
     pub(crate) fn from_env() -> Self {
-        let min_probes = crate::config::SHACL_RUN_INDEX_MIN_PROBES.get();
-        let max_quads = crate::config::SHACL_RUN_INDEX_MAX_QUADS.get();
         Self {
-            min_probes,
-            max_quads,
+            min_probes: crate::config::SHACL_RUN_INDEX_MIN_PROBES.get(),
+            max_quads: crate::config::SHACL_RUN_INDEX_MAX_QUADS.get(),
         }
     }
 }
@@ -232,12 +297,24 @@ impl<'a> DataView<'a> {
             closures: ClosureMemo::default(),
             evaluator,
             index: None,
+            index_stats: IndexStats::default(),
+            budget: RunBudget::for_run(),
         }
     }
 
     /// The run's memo of property-path closures (see [`ClosureMemo`]).
     pub(crate) fn closure_memo(&self) -> &ClosureMemo {
         &self.closures
+    }
+
+    /// The run's memory budget (see [`super::budget`]).
+    pub(crate) fn budget(&self) -> &RunBudget {
+        &self.budget
+    }
+
+    /// What the run index holds (diagnostics).
+    pub(crate) fn index_stats(&self) -> &IndexStats {
+        &self.index_stats
     }
 
     /// Whether the run reads the accelerator's RAM copy.
@@ -551,7 +628,7 @@ impl<'a> DataView<'a> {
         match sel {
             GraphSel::One(i) => {
                 let m = maps.get(i)?.get(predicate)?;
-                Some(m.get(from).cloned().unwrap_or_default())
+                Some(m.get(from).map(Neighbours::to_vec).unwrap_or_default())
             }
             GraphSel::All => {
                 if !maps.iter().all(|g| g.contains_key(predicate)) {
@@ -560,7 +637,7 @@ impl<'a> DataView<'a> {
                 let mut out = Vec::new();
                 for g in maps {
                     if let Some(v) = g.get(predicate).and_then(|m| m.get(from)) {
-                        out.extend(v.iter().cloned());
+                        v.extend_into(&mut out);
                     }
                 }
                 Some(out)
@@ -572,8 +649,9 @@ impl<'a> DataView<'a> {
     /// targets already resolved: skipped on the mirror source, below the
     /// policy's probe threshold, or (on the live memory source) when a write
     /// overlaps the scans. Each (graph, predicate, direction) pair is one scan;
-    /// pairs that would push the index over its quad budget are dropped and
-    /// answered from the raw source instead.
+    /// a pair whose scan does not fit in the run's memory budget (or, with
+    /// `OTS_SHACL_RUN_INDEX_MAX_QUADS` set, under that many quads) is dropped,
+    /// its bytes given back, and answered from the raw source instead.
     pub(crate) fn build_index(&mut self, shapes: &[Shape], targeted: &[(&Shape, Vec<Term>)]) {
         if self.is_mirror() {
             return;
@@ -597,18 +675,17 @@ impl<'a> DataView<'a> {
         if !self.consistent_source() && self.store.writes_in_flight() > 0 {
             return;
         }
-        let used = std::sync::atomic::AtomicUsize::new(0);
-        let budget = policy.max_quads;
+        let quads = std::sync::atomic::AtomicUsize::new(0);
         let mut pairs: Vec<(String, bool)> = pairs.into_iter().collect();
         pairs.sort();
         let graph_count = self.graphs.len();
         // (pair, graph) -> adjacency, or None when the budget ran out.
-        type Built = ((String, bool), usize, Option<HashMap<Term, Vec<Term>>>);
+        type Built = ((String, bool), usize, Option<HashMap<Term, Neighbours>>);
         let built: Vec<Built> = pairs
             .par_iter()
             .flat_map_iter(|pair| (0..graph_count).map(move |gi| (pair.clone(), gi)))
             .map(|((pred, inverse), gi)| {
-                let map = self.scan_pair(&pred, inverse, gi, &used, budget);
+                let map = self.scan_pair(&pred, inverse, gi, &quads, policy.max_quads);
                 ((pred, inverse), gi, map)
             })
             .collect();
@@ -616,10 +693,13 @@ impl<'a> DataView<'a> {
             && (self.store.write_generation() != gen_before || self.store.writes_in_flight() > 0)
         {
             tracing::debug!("SHACL run index dropped: a write overlapped its scans");
+            drop(built);
+            self.budget
+                .release(Part::Index, self.budget.held(Part::Index));
             return;
         }
         let mut fwd: Vec<Adjacency> = (0..graph_count).map(|_| HashMap::new()).collect();
-        let mut inv = fwd.clone();
+        let mut inv: Vec<Adjacency> = (0..graph_count).map(|_| HashMap::new()).collect();
         let mut dropped = Vec::new();
         for ((pred, inverse), gi, map) in built {
             match map {
@@ -630,15 +710,24 @@ impl<'a> DataView<'a> {
                 None => dropped.push(format!("{}{pred}", if inverse { "^" } else { "" })),
             }
         }
+        let quads = quads.load(std::sync::atomic::Ordering::Relaxed);
         if !dropped.is_empty() {
             dropped.sort();
             dropped.dedup();
+            let bound = match policy.max_quads {
+                Some(cap) => format!("the {cap}-quad OTS_SHACL_RUN_INDEX_MAX_QUADS"),
+                None => format!(
+                    "the {} MiB SHACL run memory budget",
+                    super::budget::mib(self.budget.capacity() as u64)
+                ),
+            };
             tracing::info!(
-                "SHACL run index: {} quads held; over the {budget}-quad budget, answered from the store instead: {}",
-                used.load(std::sync::atomic::Ordering::Relaxed),
+                "SHACL run index: {quads} quads held (~{} MiB); over {bound}, answered from the store instead: {}",
+                super::budget::mib(self.budget.held(Part::Index) as u64),
                 dropped.join(", ")
             );
         }
+        self.index_stats = IndexStats { quads, dropped };
         self.index = Some(RunIndex { fwd, inv });
     }
 
@@ -649,70 +738,81 @@ impl<'a> DataView<'a> {
     }
 
     /// One `?s <pred> ?o` scan of graph `gi`, into `subject -> objects`
-    /// (`inverse`: `object -> subjects`). `None` once the shared quad budget is
-    /// exhausted — the partial map is discarded.
+    /// (`inverse`: `object -> subjects`), its estimated bytes reserved from
+    /// the run's budget as it grows (charged, with `max_quads` set, and the
+    /// quads counted against that cap instead). `None` once the budget (or
+    /// the cap) refuses: the partial map is discarded and what it held given
+    /// back.
     fn scan_pair(
         &self,
         predicate: &str,
         inverse: bool,
         gi: usize,
-        used: &std::sync::atomic::AtomicUsize,
-        budget: usize,
-    ) -> Option<HashMap<Term, Vec<Term>>> {
+        quads: &std::sync::atomic::AtomicUsize,
+        max_quads: Option<usize>,
+    ) -> Option<HashMap<Term, Neighbours>> {
         let Ok(pred) = NamedNodeRef::new(predicate) else {
             // Not an IRI: no quad can carry it; an empty, authoritative map.
             return Some(HashMap::new());
         };
         let graph = self.graph_ref(gi);
-        let mut map: HashMap<Term, Vec<Term>> = HashMap::new();
-        let mut n = 0usize;
-        let mut push = |subject: Term, object: Term| -> bool {
-            n += 1;
-            if n.is_multiple_of(1024)
-                && used.fetch_add(1024, std::sync::atomic::Ordering::Relaxed) + 1024 > budget
-            {
-                return false;
-            }
-            if inverse {
-                map.entry(object).or_default().push(subject);
-            } else {
-                map.entry(subject).or_default().push(object);
-            }
-            true
+        let mut scan = PairScan {
+            map: HashMap::new(),
+            budget: &self.budget,
+            quads,
+            max_quads,
+            n: 0,
+            counted: 0,
+            reserved: 0,
+            pending: 0,
         };
         // The scan itself, not the seek, is what a run pays for here: a
         // projected query decodes the two variables only (see `select`). The
         // raw scan stays as the fallback for anything the query path declines.
-        let query = format!(
-            "SELECT ?s ?o WHERE {{ {} }}",
-            graph_scoped_pattern(graph, &format!("?s <{}> ?o", pred.as_str()))?
-        );
-        if let Some(rows) = self.select(&query) {
-            for row in rows.flatten() {
-                let (Some(s), Some(o)) = (row.get("s"), row.get("o")) else {
-                    continue;
-                };
-                if !push(s.clone(), o.clone()) {
-                    return None;
+        let pattern = graph_scoped_pattern(graph, &format!("?s <{}> ?o", pred.as_str()))?;
+        let complete =
+            if let Some(rows) = self.select(&format!("SELECT ?s ?o WHERE {{ {pattern} }}")) {
+                let mut ok = true;
+                for row in rows.flatten() {
+                    let (Some(s), Some(o)) = (row.get("s"), row.get("o")) else {
+                        continue;
+                    };
+                    let (key, value) = if inverse { (o, s) } else { (s, o) };
+                    if !scan.push(key.clone(), value.clone()) {
+                        ok = false;
+                        break;
+                    }
                 }
-            }
+                ok
+            } else {
+                let mut ok = true;
+                for q in self
+                    .raw
+                    .quads_for_pattern(None, Some(pred), None, Some(graph))
+                    .flatten()
+                {
+                    let subject = match q.subject {
+                        oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+                        oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
+                    };
+                    let (key, value) = if inverse {
+                        (q.object, subject)
+                    } else {
+                        (subject, q.object)
+                    };
+                    if !scan.push(key, value) {
+                        ok = false;
+                        break;
+                    }
+                }
+                ok
+            };
+        if complete && scan.finish() {
+            Some(scan.map)
         } else {
-            for q in self
-                .raw
-                .quads_for_pattern(None, Some(pred), None, Some(graph))
-                .flatten()
-            {
-                let subject = match q.subject {
-                    oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
-                    oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
-                };
-                if !push(subject, q.object) {
-                    return None;
-                }
-            }
+            scan.abandon();
+            None
         }
-        used.fetch_add(n % 1024, std::sync::atomic::Ordering::Relaxed);
-        Some(map)
     }
 
     // ------------------------------------------------------------------
@@ -848,6 +948,19 @@ impl<'a> DataView<'a> {
                 )
             })
             .collect();
+        // Charged, not reserved: the targets are read from these sets. The
+        // run index, built next, gets what they leave of the budget.
+        let bytes: usize = computed
+            .iter()
+            .map(|(_, info)| {
+                term_set_bytes(info.closure.iter())
+                    + info
+                        .instances
+                        .as_ref()
+                        .map_or(0, |set| term_set_bytes(set.iter()))
+            })
+            .sum();
+        self.budget.charge(Part::Classes, bytes);
         self.classes.extend(computed);
     }
 
@@ -890,8 +1003,93 @@ impl<'a> DataView<'a> {
     }
 }
 
-/// Terms a run's [`ClosureMemo`] may hold in total, and in one closure.
-const CLOSURE_MEMO_MAX_TERMS: usize = 2_000_000;
+/// One (graph, predicate) scan of the run index: its adjacency map, and what
+/// it has drawn from the run's budget (or counted against the quad cap).
+struct PairScan<'b> {
+    map: HashMap<Term, Neighbours>,
+    budget: &'b RunBudget,
+    quads: &'b std::sync::atomic::AtomicUsize,
+    max_quads: Option<usize>,
+    /// Rows pushed.
+    n: usize,
+    /// Rows counted in `quads` so far.
+    counted: usize,
+    /// Bytes reserved (with a quad cap: charged) from the budget.
+    reserved: usize,
+    /// Estimated bytes not yet reserved.
+    pending: usize,
+}
+
+impl PairScan<'_> {
+    /// Add one row; `false` when the budget or the quad cap refuses it.
+    fn push(&mut self, key: Term, value: Term) -> bool {
+        use std::collections::hash_map::Entry;
+        use std::sync::atomic::Ordering;
+        self.n += 1;
+        if let Some(cap) = self.max_quads {
+            if self.n.is_multiple_of(1024) {
+                self.counted += 1024;
+                if self.quads.fetch_add(1024, Ordering::Relaxed) + 1024 > cap {
+                    return false;
+                }
+            }
+        }
+        self.pending += term_heap_bytes(&value);
+        match self.map.entry(key) {
+            Entry::Occupied(mut e) => {
+                self.pending += INDEX_MORE_BYTES;
+                e.get_mut().push(value);
+            }
+            Entry::Vacant(e) => {
+                self.pending += INDEX_SLOT_BYTES + term_heap_bytes(e.key());
+                e.insert(Neighbours::One(value));
+            }
+        }
+        self.pending < INDEX_RESERVE_STEP || self.reserve()
+    }
+
+    /// Move the pending estimate into the budget; `false` when it refuses.
+    fn reserve(&mut self) -> bool {
+        let bytes = std::mem::take(&mut self.pending);
+        if self.max_quads.is_some() {
+            // An explicit quad cap decides the index's size; its bytes still
+            // count against what the memo and the results may take.
+            self.budget.charge(Part::Index, bytes);
+        } else if !self.budget.try_reserve(Part::Index, bytes) {
+            return false;
+        }
+        self.reserved += bytes;
+        true
+    }
+
+    /// The scan is complete: trim the neighbour lists' growth room, reserve
+    /// the rest of the estimate and count the quads; `false` when the budget
+    /// refuses the rest.
+    fn finish(&mut self) -> bool {
+        for v in self.map.values_mut() {
+            v.shrink();
+        }
+        if !self.reserve() {
+            return false;
+        }
+        self.quads
+            .fetch_add(self.n - self.counted, std::sync::atomic::Ordering::Relaxed);
+        self.counted = self.n;
+        true
+    }
+
+    /// Give up the scan: free the partial map and give back what it held.
+    fn abandon(&mut self) {
+        self.map = HashMap::new();
+        self.budget.release(Part::Index, self.reserved);
+        self.reserved = 0;
+        self.quads
+            .fetch_sub(self.counted, std::sync::atomic::Ordering::Relaxed);
+        self.counted = 0;
+    }
+}
+
+/// Terms one memoised closure may hold.
 const CLOSURE_MEMO_MAX_SET: usize = 100_000;
 /// Distinct closure paths a run memoises.
 const CLOSURE_MEMO_MAX_PATHS: usize = 64;
@@ -900,13 +1098,14 @@ const CLOSURE_MEMO_MAX_PATHS: usize = 64;
 /// per (path, graph selection, start node), so a closure that reaches a node
 /// whose own closure is known adds that set instead of walking it again: focus
 /// nodes on one `ex:partOf` chain share every ancestor's walk, and a value node
-/// checked under several shapes is walked once. Bounded by
-/// [`CLOSURE_MEMO_MAX_TERMS`]; past it closures are still computed, not kept.
+/// checked under several shapes is walked once. Bounded by the run's memory
+/// budget ([`super::budget`], which it shares with the run index and the
+/// results; it used to be 2 M terms of its own): past it closures are still
+/// computed, not kept.
 #[derive(Default)]
 pub(crate) struct ClosureMemo {
     paths: std::sync::RwLock<Vec<PropertyPath>>,
     sets: dashmap::DashMap<(usize, GraphSel, Term), Arc<[Term]>>,
-    held: std::sync::atomic::AtomicUsize,
 }
 
 impl ClosureMemo {
@@ -933,20 +1132,46 @@ impl ClosureMemo {
             .map(|e| e.value().clone())
     }
 
-    pub(crate) fn insert(&self, path: usize, sel: GraphSel, start: Term, reach: Arc<[Term]>) {
-        use std::sync::atomic::Ordering;
+    /// Keep `reach` as the closure of `start`, if `budget` has room for it.
+    pub(crate) fn insert(
+        &self,
+        path: usize,
+        sel: GraphSel,
+        start: Term,
+        reach: Arc<[Term]>,
+        budget: &RunBudget,
+    ) {
         if reach.len() > CLOSURE_MEMO_MAX_SET {
             return;
         }
-        if self.held.fetch_add(reach.len(), Ordering::Relaxed) + reach.len()
-            > CLOSURE_MEMO_MAX_TERMS
-        {
-            self.held.fetch_sub(reach.len(), Ordering::Relaxed);
+        let key = (path, sel, start);
+        if self.sets.contains_key(&key) {
             return;
         }
-        self.sets.insert((path, sel, start), reach);
+        // The map slot (key and `Arc` inline), the `Arc`'s allocation, and
+        // the strings of the start node and of every reached term.
+        let bytes = MEMO_SLOT_BYTES
+            + term_heap_bytes(&key.2)
+            + super::budget::alloc_bytes(16 + reach.len() * std::mem::size_of::<Term>())
+            + reach.iter().map(term_heap_bytes).sum::<usize>();
+        if !budget.try_reserve(Part::Memo, bytes) {
+            return;
+        }
+        match self.sets.entry(key) {
+            // Another worker kept the same closure first.
+            dashmap::mapref::entry::Entry::Occupied(_) => budget.release(Part::Memo, bytes),
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(reach);
+            }
+        }
     }
 }
+
+/// Estimated bytes of a memo slot besides the strings: key and value inline
+/// at the map's average occupancy.
+const MEMO_SLOT_BYTES: usize =
+    (std::mem::size_of::<(usize, GraphSel, Term)>() + std::mem::size_of::<Arc<[Term]>>() + 1) * 3
+        / 2;
 
 fn sel_order(sel: GraphSel) -> usize {
     match sel {

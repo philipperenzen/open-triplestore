@@ -214,6 +214,43 @@ integer types back as `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime` and
 valid data and a `"1"` flag acted as `true`. Data stored then still reads that
 way; reload it (`PUT`) to have it checked as written.
 
+### What a run holds in memory
+
+Besides the data it reads, a whole-dataset run holds four things that grow
+with the data, and all four count against one memory budget,
+`OTS_SHACL_RUN_MEMORY_BYTES`: by default a quarter of the memory limit (the
+container's cgroup limit), 1 GiB where none can be detected, never below
+64 MiB or above 8 GiB. Runs that overlap share it rather than each taking a
+full share.
+
+| What | Without room in the budget |
+|---|---|
+| **The class sets and focus lists.** The `rdfs:subClassOf*` closure of every class a shape names, the instances of every target class, the focus nodes of every shape. | Never dropped (the targets are read from them). They are counted first, so the index gets what they leave. |
+| **The run index.** On the RocksDB snapshot (the accelerator off), a run large enough to pay for it scans each (data graph, predicate) its shapes traverse once into an in-memory adjacency, so a value lookup is a hash probe instead of an index seek. It may fill the budget to three quarters, leaving the rest to the results. | A pair that does not fit is dropped as soon as its scan crosses the budget, what it held is given back, and its lookups go to the store: the same answer, slower. |
+| **The closure memo.** The reach sets of `sh:zeroOrMorePath` and `sh:oneOrMorePath` the run computed, so focus nodes on one chain share one walk. | Closures are still computed, not kept. |
+| **The results.** | Never dropped. They are counted against the budget, so the closure memo of the same run and the index of an overlapping one make room for them. |
+
+The sizes are estimates from the strings each structure keeps (a long literal
+counts in full), checked against the process's anonymous memory on BSBM 10k
+([performance.md](performance.md#shacl-run-memory-budget-bsbm-10k-in-4-gib-2026-10-15-x86)).
+`OTS_SHACL_RUN_INDEX_MAX_QUADS`, when set, sizes the index in quads instead, as
+before 0.8.1; its bytes still count against the budget. A run that held more
+than 64 MiB hands the memory it freed back to the system when it ends (glibc
+keeps freed memory in its arenas otherwise, and each whole-dataset run started
+from the high-water mark of the one before).
+
+A run that did without something logs one line at `info` (at `debug`
+otherwise):
+
+```text
+SHACL run memory: budget … MiB; class sets and targets … MiB, index … MiB (… quads, … pairs from the store), closure memo … MiB, results … MiB (…); process anon MiB after start …, class sets …, targets …, index …, results …
+```
+
+The JSON answer of `POST /api/datasets/{id}/validate` is written result by
+result as it goes out, the same bytes as before; it is no longer built as a
+value tree and a buffer beside the report, which at 50 000 results held the
+report three times over.
+
 ## On-Demand Validation
 
 ```bash
@@ -365,6 +402,24 @@ Three things can gate a write to a graph: SHACL Studio pipelines with `gate_writ
 
 The write lands only when every gate passes. When several would refuse it, the 422 carries the report of the first in this order, so fixing that one may reveal the next. Each gate is evaluated once per write; a shapes graph named by more than one gate is still checked by each, at that gate's own threshold. Every run of the dataset gate, passing or not, is kept in the dataset's report history as an `on-write` report.
 
+A datasource run into a dataset, and the promotion of a kept candidate after review, meet the same gates in the same order, over the candidate graph before it joins the dataset ([sources](sources.md)). There every gate is evaluated rather than only up to the first refusal: the results of each gate that refuses go into the run's report and open review items, so one refusal shows them all. The run keeps its own record of the outcome, not an `on-write` report.
+
+### What a gate validates
+
+A `PUT` and a validate-and-commit replace the graph, so the gates validate the payload, which is the graph's whole future; a bulk import's gates validate the imported quads. A `POST`, an RDF Patch and a repair apply change part of a graph. For these the gates do not copy the graph: they work out from the shapes which nodes the write can affect, and validate those nodes against the graph as it will be, staging only the write's triples and what those nodes read. A 1 000-quad `POST` into a large graph costs about what validating its own nodes costs, not a copy of the graph ([#534](https://github.com/philipperenzen/open-triplestore/issues/534); figures in [performance](performance.md)).
+
+A node can be affected when the write adds or removes a triple about it, makes it a target or stops it being one (`sh:targetClass` through its `rdf:type`, `sh:targetSubjectsOf`, `sh:targetObjectsOf`), or reaches a changed triple through what its shapes read: a property path (inverse and sequence paths, alternatives and `sh:zeroOrMorePath`/`sh:oneOrMorePath` included), `sh:class` on its value nodes, nested `sh:node`, `sh:property` and `sh:qualifiedValueShape` shapes, the logical constraints, `sh:closed`, and `sh:equals`, `sh:disjoint`, `sh:lessThan` and `sh:lessThanOrEquals`. Removing `ex:x a ex:Person` affects every node whose `sh:class ex:Person` reaches `ex:x`; adding a third `ex:memberOf ex:t1` affects `ex:t1` under a shape that counts `[ sh:inversePath ex:memberOf ]`.
+
+The gates copy the whole graph instead, as they used to, when that cannot be bounded:
+
+- a shape uses a SPARQL constraint (`sh:sparql`) or a SPARQL target, a SHACL-AF constraint component or a node expression (`sh:expression`), or refers back to itself through `sh:node` or a logical constraint;
+- a shapes graph declares `sh:entailment`;
+- the write adds or removes an `rdfs:subClassOf` triple while a shape uses `sh:targetClass` or `sh:class`;
+- the graph written holds one of the gates' shapes graphs;
+- finding the affected nodes and what they read takes more reads of the graph than it holds quads (and at least 100 000).
+
+What the gates report is what validating the whole graph says about the affected nodes. A graph that conformed before the write, as one written only through its gates does, is therefore judged exactly as before. A graph that already holds violations (written through SPARQL Update, or before the gate or its shapes existed) used to have every `POST` and patch refused until all of them were repaired; now a write is refused only when a node it can affect does not conform, and the 422 and the dataset gate's `on-write` report list those nodes only. Run the pipeline, or `POST /api/datasets/{id}/validate`, to see the whole graph.
+
 ### Limitations
 
 These apply to every write gate: this per-dataset `shacl_on_write` gate, and the SHACL Studio gates below (validation-layer bindings and pipelines with `gate_writes`).
@@ -372,7 +427,6 @@ These apply to every write gate: this per-dataset `shacl_on_write` gate, and the
 - Writes are validated on Graph Store `PUT` and `POST` (`/store`), bulk import (`/api/import/bulk`) and `POST /api/datasets/validate-and-commit`.
 - SPARQL Update (`/sparql`, `/sparql/batch`) is still not validated, Studio gates included: an update can write data that a gate would refuse on `/store`. To keep a gated graph valid, write it through one of the paths above, or run the pipeline (or `POST /api/datasets/{id}/validate`) after the update.
 - Only graphs a gate covers are validated: graphs registered to the dataset, graphs that carry a binding, and graphs in a gating pipeline's scope. Writes to other graphs pass through unchecked.
-- A datasource run that promotes its graph into a dataset is checked against the mapping's shapes and the dataset's `shacl_on_write` shapes ([sources](sources.md)), not yet against the dataset's `gate_writes` pipelines and bindings ([#503](https://github.com/philipperenzen/open-triplestore/issues/503)).
 
 ---
 

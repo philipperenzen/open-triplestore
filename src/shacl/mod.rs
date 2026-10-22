@@ -1,7 +1,9 @@
+pub(crate) mod budget;
 pub mod constraints;
 pub mod engine;
 pub(crate) mod entailment;
 pub mod node_expr;
+pub(crate) mod reach;
 pub mod report;
 pub mod shapes;
 pub mod sparql_functions;

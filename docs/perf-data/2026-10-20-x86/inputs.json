@@ -1,0 +1,55 @@
+{
+ "date": "2026-10-20",
+ "datasets": {
+  "1k": {
+   "generator": "BSBM tools 0.2, Generator -fc -pc 1000 -s nt",
+   "triples": 374911,
+   "bytes": 95715671,
+   "sha256": "6f19f6aeba949d0869434b582c8c9ee503b5c7de90b5ec80fae0a1bb0612912f"
+  },
+  "10k": {
+   "generator": "BSBM tools 0.2, Generator -fc -pc 10000 -s nt",
+   "triples": 3564773,
+   "bytes": 919087340,
+   "sha256": "72309dd91f82545d8a379675ff72bebd0aea2dfd9cc61e410ebad539def5c7b5"
+  }
+ },
+ "query_instances": "bench.py params --seed 20261003 --warmup 20 --mixes 100 --concurrent-mixes 200 (the 2026-10-13 instances; params.json SHA-256 1k f47ef68a9a371e480f1bef417f652023ed53e482b3fc08b4998dae4c033666eb, 10k f0184f7ae8a526caacf508539da5b46c4cfd3d06c69f57d9cf13b18eb69b5a19)",
+ "stores": {
+  "ots-before": {
+   "name": "Open Triplestore",
+   "version": "0.8.0",
+   "commit": "462b206c (develop)",
+   "build": "scripts/bench-compare/Dockerfile.ots (fat LTO) with every .rs source touched before cargo build, so the shared target/ cache cannot hand back another checkout's binary; rust:1.94-bookworm",
+   "image": "ots-bench:462b206c-t (local)",
+   "engine": "oxigraph 0.5.11, vendored (vendor/README.md)"
+  },
+  "ots-after": {
+   "name": "Open Triplestore",
+   "version": "0.8.0",
+   "commit": "757c2489 (perf/468-rocksdb-query-path on 462b206c)",
+   "build": "as ots-before",
+   "image": "ots-bench:468-757c2489 (local); its COUNT(*) of the dataset answered in milliseconds (probes/s3/f14.json), which only this branch's code does",
+   "engine": "oxigraph 0.5.11, vendored, with change 15"
+  },
+  "oxigraph": {
+   "name": "Oxigraph server",
+   "version": "0.5.11",
+   "image": "ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767"
+  }
+ },
+ "client_image": "python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9 (the local python:3.12-slim; campaign.py pins 78387bc3…, which was not on this machine; the client is the standard-library bench.py under Python 3.12 either way)",
+ "limits": {
+  "memory": "4g (memswap 4g)",
+  "cpus": 4,
+  "client_cpus": 2
+ },
+ "commands": [
+  "docker build -f <Dockerfile.ots with sources touched> -t ots-bench:<tag> .",
+  "campaign.py --data-root ~/bench-work/data --cache ~/bench-work/cache --out ~/bench-work/results-468/<run> --ots-image <image> --stores <ots|oxigraph> --scales 1k,10k --workloads explore,features --skip-http-load --poll 20 --max-wait 600 (run from WSL Ubuntu with CLIENT_IMAGE, host_info and swap_used replaced for Linux)",
+  "bench.py report --results <run tree> --out <dir> --stores ots,oxigraph --triples 1k=374911,10k=3564773",
+  "probes/: an interleaved probe (both Open Triplestore builds and Oxigraph running at once, query by query, round by round) from a client container on the same Docker network"
+ ],
+ "order": "2026-10-20: ots-before 1k, 10k; ots-after 1k, 10k; oxigraph 1k, 10k (one machine-lock window, about 45 minutes), after the paired probes of probes/s3. probes/s4 (1k) right after. probes/s1 and s2 are the 2026-10-15 diagnostics, run on the coordinator's ots-bench:462b206c image (built without touching the sources), and are used only for ratios within one run.",
+ "note": "Concurrency, SHACL and the HTTP load comparison were not run. The machine ran about twice as slowly on 2026-10-20 as on 2026-10-15 (Oxigraph's trivial ASK: 0.56 against 0.20 ms); compare figures within one run only."
+}

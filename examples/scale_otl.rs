@@ -48,10 +48,10 @@ use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
 
-const EX: &str = "https://example.org/otl/";
-const DATA: &str = "https://example.org/otl/instances";
-const MODEL: &str = "https://example.org/otl/model";
-const SHAPES: &str = "https://example.org/otl/shapes";
+pub(crate) const EX: &str = "https://example.org/otl/";
+pub(crate) const DATA: &str = "https://example.org/otl/instances";
+pub(crate) const MODEL: &str = "https://example.org/otl/model";
+pub(crate) const SHAPES: &str = "https://example.org/otl/shapes";
 
 fn consume(r: QueryResults) -> usize {
     match r {
@@ -73,7 +73,7 @@ fn median_ms(store: &TripleStore, q: &str, runs: usize) -> (f64, usize) {
     (ms[ms.len() / 2], n)
 }
 
-fn model_ttl() -> String {
+pub(crate) fn model_ttl() -> String {
     let mut s = String::new();
     s.push_str("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix owl: <http://www.w3.org/2002/07/owl#> .\n");
     s.push_str(&format!(
@@ -87,7 +87,7 @@ fn model_ttl() -> String {
     s
 }
 
-fn shapes_ttl() -> String {
+pub(crate) fn shapes_ttl() -> String {
     format!(
         r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -105,7 +105,7 @@ ex:AssetShape a sh:NodeShape ; sh:targetClass ex:Asset ;
 
 /// `count` assets starting at `from`, ~10 quads each; every 10 000th asset
 /// violates a shape (a bad code), so the validator has something to find.
-fn assets_ttl(from: usize, count: usize) -> String {
+pub(crate) fn assets_ttl(from: usize, count: usize) -> String {
     let mut s = String::with_capacity(count * 420);
     s.push_str(&format!(
         "@prefix ex: <{EX}> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n"

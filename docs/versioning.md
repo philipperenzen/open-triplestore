@@ -43,10 +43,15 @@ once `OTS_CHECKPOINT_EVERY` (100) deltas chain from the same base, or when
 the changes since the base exceed `OTS_CHECKPOINT_FRACTION` (0.25) of its
 size (and more than 1 000 quads).
 
-**Backups.** A backup holds the store and the identity database, not the
-change log, so an unpublished delta is not in it: after a restore it answers
-`410`. Publish a version, or cut it with `"checkpoint": true`, before a
-backup it must survive.
+**Backups.** A backup holds the change log beside the store and the identity
+database, so an unpublished delta survives one: after a restore it reads as
+it did, built forward from its base. The restored log goes on in a new
+epoch, so nothing from before the restore is built backward from the live
+graphs, restored by inverse, or used as the base of a new delta — a
+dataset's first version cut after a restore is a checkpoint. A backup made
+before 0.8.1 holds no change log; its unpublished deltas answer `410` once
+restored, unless the data directory's own log still holds their rows (see
+[Backups](administration.md#backups)).
 
 **Building a delta.** The first read of a delta's data — `…/versions/:ver/data`,
 a `versions=` pin in browse, a dataset service's `?version=`, a saved query
@@ -107,7 +112,7 @@ back to the version, in one of two ways — `tier` in the response says which:
 
 - **Tier 1** — when the version is anchored in the change log's current
   epoch, the chain from it to now is intact, and its inverse fits
-  `OTS_APPLY_DELTA_TX_MAX_QUADS` (50 000) quads: the inverse of everything
+  `OTS_APPLY_DELTA_TX_MAX_QUADS` (200 000) quads: the inverse of everything
   since the version is applied in **one transaction across all its graphs**,
   then each graph is checked against the version's content hash. Nothing is
   copied, and no reader ever sees the version half-restored.
@@ -514,15 +519,23 @@ less; the scan cost does not shrink.
   rows per graph.
 - **Crashes.** A row is written *before* its write runs and finalised with
   the sequence number right after the commit. A crash between the two
-  leaves it `pending`; the next start probes the store for the intended
-  quads and settles the row as `committed`, `aborted`, or `unknown` when it
-  cannot tell (a payload was never recorded). At the same start every
+  leaves it `pending`, and the next start settles it as `unknown`: the
+  payload is recorded only with the commit, so there is nothing to probe the
+  store against, and the row closes the chains through it rather than guess
+  whether the write landed (60 `kill -9`s during writes found no other
+  outcome, see [performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15)). At the same start every
   graph's count is compared with the last count the log recorded for it; a
   graph that changed outside the log gets an `unknown` row (`origin` =
   `reconcile`), so a consumer sees that its chain broke.
 - **Caps.** `OTS_CHANGE_CAPTURE_MAX_SCAN` (250 000) bounds the before-image
   scan; `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` (250 000) bounds the quads a
-  `full` row may carry — above it the row is `counts`.
+  `full` row may carry — above it the row is `counts`. Measured at 0.9M and
+  9M quads in [performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15):
+  a before-image costs about 5 µs and 0.8 KiB per quad of the target graph,
+  a payload about 370 bytes of memory per quad and little time. Keep
+  `OTS_APPLY_DELTA_TX_MAX_QUADS` (200 000) at or below the payload cap: a
+  tier-1 restore larger than it is recorded as `counts` and closes the
+  chains it crosses.
 - **Off by default.** A node records only when asked
   (`OTS_CHANGE_CAPTURE_ENABLED=on`); a replication leader or cluster member records
   regardless, because its followers read this log and the role means nothing
