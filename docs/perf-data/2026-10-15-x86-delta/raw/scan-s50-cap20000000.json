@@ -1,0 +1,91 @@
+{
+  "args": [
+    "scan",
+    "/data/run",
+    "https://example.org/otl/s50",
+    "10000000",
+    "5556",
+    "5"
+  ],
+  "command": "scan",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_CHANGE_CAPTURE_MAX_SCAN": "20000000",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "added_ms": 252.1,
+    "before_image_collect_ms": 191.28,
+    "changed_quads": 200,
+    "diff_ms": 16.54,
+    "graph": "https://example.org/otl/s50",
+    "graph_quads": 50004,
+    "max_scan": 20000000,
+    "off": {
+      "max_ms": 191.53,
+      "median_ms": 188.36,
+      "min_ms": 182.04,
+      "n": 5,
+      "values_ms": [
+        190.44,
+        188.36,
+        191.53,
+        183.45,
+        182.04
+      ]
+    },
+    "on": {
+      "max_ms": 470.38,
+      "median_ms": 440.45,
+      "min_ms": 430.23,
+      "n": 5,
+      "values_ms": [
+        470.38,
+        444.89,
+        436.88,
+        430.23,
+        440.45
+      ]
+    },
+    "on_peak_rss_mib": [
+      38.44,
+      20.25,
+      0.56,
+      0.19,
+      0.19
+    ],
+    "on_rows_first_rep": [
+      {
+        "added_n": 100,
+        "extent": "full",
+        "graph": "https://example.org/otl/s50",
+        "removed_n": 100,
+        "seq": 6,
+        "state": "committed"
+      },
+      {
+        "added_n": 100,
+        "extent": "full",
+        "graph": "https://example.org/otl/s50",
+        "removed_n": 100,
+        "seq": 7,
+        "state": "committed"
+      }
+    ],
+    "on_undo": {
+      "max_ms": 466.95,
+      "median_ms": 435.65,
+      "min_ms": 419.03,
+      "n": 5,
+      "values_ms": [
+        435.65,
+        432.3,
+        419.03,
+        466.95,
+        440.46
+      ]
+    },
+    "ratio_on_off": 2.34
+  }
+}

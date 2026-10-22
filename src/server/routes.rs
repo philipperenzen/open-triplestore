@@ -9246,13 +9246,15 @@ pub async fn validate_dataset(
         ));
     }
     if q.test.unwrap_or(false) || partial {
-        return Ok(Json(serde_json::json!({
-            "report": report,
-            "run_id": null,
-            "ran_at": null,
-            "test": true,
-            "partial": partial,
-        })));
+        return validation_report_response(
+            serde_json::json!({
+                "run_id": null,
+                "ran_at": null,
+                "test": true,
+                "partial": partial,
+            }),
+            report,
+        );
     }
 
     // Best-effort private usage telemetry. Only real (non-test) runs count.
@@ -9323,11 +9325,43 @@ pub async fn validate_dataset(
         }
     }
 
-    Ok(Json(serde_json::json!({
-        "report": report,
-        "run_id": summary.id,
-        "ran_at": summary.run_timestamp,
-    })))
+    validation_report_response(
+        serde_json::json!({
+            "run_id": summary.id,
+            "ran_at": summary.run_timestamp,
+        }),
+        report,
+    )
+}
+
+/// The response of `validate_dataset`: `fields` and `"report": report` as
+/// one JSON object, the same bytes `Json(json!({..}))` gave, streamed: the
+/// report is never converted into a value tree and written into one buffer
+/// beside itself, which at 50 000 results held it three times over (issue
+/// #532; see [`crate::shacl::report::ReportJson`]).
+fn validation_report_response(
+    fields: serde_json::Value,
+    report: crate::shacl::report::ValidationReport,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let serde_json::Value::Object(fields) = fields else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "validation response fields are not an object".to_string(),
+        ));
+    };
+    let pieces = crate::shacl::report::ReportJson::new(fields, report)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let stream = futures::stream::iter(
+        pieces.map(|piece| piece.map(bytes::Bytes::from).map_err(std::io::Error::other)),
+    );
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }
 
 /// Query params for `validate_dataset`. `test=true` runs a non-persisted

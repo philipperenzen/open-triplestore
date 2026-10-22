@@ -1004,6 +1004,436 @@ termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is
 ~0.15 Mt/s here (disk-bound; the in-memory bulk loader is ~0.5–0.9 Mt/s at the
 smaller tiers).
 
+#### Delta versions at scale — change capture on, 0.9M to 9M quads (2026-10-15)
+
+Change capture is off by default, so neither CI nor the perf gate ran any
+delta path, and every cap of the delta-versions design
+(`docs/notes/delta-versioning-design.md` §8.2) was the value the design
+proposed. These are the §8.2 measurements, taken once, and what they set.
+
+**Host.** The reference system above: AMD Ryzen 9 7900X3D (12 cores, 24
+threads), Windows 11, Docker Desktop's WSL2 VM with 24 CPUs and 54.9 GiB
+(kernel 6.6.87.2), the builder image (Debian 12, rustc 1.94.1, `--release`
+with the project's LTO profile), stores on an ext4 Docker volume. The machine
+also ran other, idle containers. **Not** the Apple M1 Pro of the 2026-10 rows
+above: compare figures inside this section only. Raw output, the series
+script and the host record are in
+[`docs/perf-data/2026-10-15-x86-delta/`](perf-data/2026-10-15-x86-delta/).
+
+**How.** [`examples/scale_delta.rs`](../examples/scale_delta.rs), one command
+per §8.2 item, on the OTL data of `examples/scale_otl.rs` (the same
+generator, ~9 quads per asset) in a persistent store. A comparison of
+capture off with capture on opens the store once with capture on — an on-disk
+`changes.db`, as the server keeps it — and runs its off side on a clone whose
+log is switched off: one RocksDB, one process, one build, the two sides
+alternating run by run. Every measurement starts from a copy of a base store
+loaded with capture off. A cell is the median of *n* runs with the range in
+brackets; *×* is on ÷ off. Peak memory is the resident set above the start
+of the operation, sampled every 2 ms after the heap is trimmed. The project's
+write-path budget is +20 % with capture on; a figure over it is called out,
+not hidden.
+
+##### 1. The before-image of a `WHERE` update
+
+A `DELETE`/`INSERT … WHERE` changing 100 assets' status (200 quads) in one
+graph of the given size, n = 5 (9M: n = 3):
+
+| target graph | capture off | on, before-image taken | × | added | peak memory, on | on, over the default cap |
+|--:|--:|--:|--:|--:|--:|--:|
+| 50 004 quads | 188 ms (182–192) | 440 ms (430–470) | ×2.34 | +0.25 s | +38 MiB | — (under the cap) |
+| 250 002 | 708 ms (676–751) | 1.88 s (1.82–1.94) | ×2.65 | +1.17 s | +197 MiB | 680 ms, ×1.01, `unknown` row |
+| 899 999 | 2.58 s (2.56–2.71) | 7.29 s (7.20–7.43) | ×2.82 | +4.70 s | +697 MiB | 2.61 s, ×1.01, `unknown` row |
+| 8 999 999 | 25.4 s (24.9–26.3) | 74.9 s (74.4–78.6) | ×2.95 | +49.5 s | +6.9 GiB | 24.0 s, ×0.98, `unknown` row |
+
+The before-image costs about **5 µs and 0.8 KiB per quad of the target
+graph**, whatever the change: reading the graph (2.8 s at 0.9M), reading it
+again through the transaction, and the diff (0.67 s at 0.9M). No graph size
+meets the 20 % budget, so the cap is a bound on cost, not a budget line: at
+the default `OTS_CHANGE_CAPTURE_MAX_SCAN` (250 000 quads) a `WHERE` update
+pays at most about 1.2 s and 200 MiB for its row; above it the row says
+`unknown` and the update costs what it costs with capture off. Note the off
+column: a `WHERE` update into a large graph is already O(graph) with capture
+off — the count index recounts the target graph after the write (2.6 µs per
+quad; 24 s at 9M). A scanned row reads the count off the after-image and
+skips the recount, which is why the added cost is about twice the off cost,
+not three times.
+
+##### 2. Probes
+
+A 1M-quad payload into a new named graph, n = 5:
+
+| path | capture off | on | × |
+|---|--:|--:|--:|
+| `bulk_insert_quads` (no probe off; a `contains` per quad on) | 12.3 s (10.7–12.7) | 14.6 s (13.5–15.4) | ×1.19 |
+| named-graph load (`insert_quads_and_reindex_into`, probes either way) | 14.8 s (13.6–17.8) | 14.4 s (13.8–14.8) | ×0.97 |
+| `bulk_insert_quads`, 9M quads, n = 2 | 46.4–46.9 s | 57.0–57.1 s | **×1.22** |
+
+The probe costs about 1.2 µs per quad. A named-graph load already probes to
+keep the count index exact, so capture adds nothing there. `bulk_insert_quads`
+— the bulk import (`/api/import/bulk`), model uploads, the version copies —
+probes only for the row, with no budget, and its row above the payload cap is
+`counts` anyway: **at 9M quads that is +22 %, over the budget.** The streamed
+load bounds its probes by `OTS_CHANGE_CAPTURE_MAX_SCAN`; `bulk_insert_quads`
+does not (a follow-up, not changed here). A first series with n = 3 read ×1.11
+at 1M with a range wide enough to include ×1.37; the n = 5 series above
+replaces it (both are in the raw data).
+
+##### 3. The mixed phase
+
+`scale_otl 100000 --skip-load` (0.9M quads; four writers loading 500-quad
+batches into the instance graph next to four readers, 20 s), capture off and
+on alternately, three runs each, each on a fresh copy of the store:
+
+| | capture off | on | × |
+|---|--:|--:|--:|
+| quads written per second | 8 550 (8 400–9 175) | 2 400 (2 300–4 200) | **×0.28** |
+| write p95 | 389 ms (294–399) | 1 049 ms (720–1 103) | ×2.7 |
+| reads per second | 47 543 (45 225–47 950) | 56 461 (52 519–56 530) | ×1.19 |
+| read p95 | 0.13 ms | 0.11 ms | — |
+| queries, SHACL (run before the phase) | unchanged within ±5 % | | |
+
+**Concurrent writers are where capture costs most: throughput falls to a
+quarter to a half, far over the budget.** Each write's commit runs inside
+the log's sequence section together with its row's finalisation — the
+section is what makes `seq` order commit order (note §4.3) — and a bulk-load
+commit is an SST ingest, so the four writers' ingests and their rows
+serialise behind one another. A single writer pays a few percent (items 2, 4
+and 9); four pay this. The readers gain what the writers lose. This host
+writes about a fifth as fast as the M1 Pro rows above with capture off as
+well. Measured once, here; not changed (a follow-up: finalising rows outside
+the section, in `seq` order, would keep the order without holding the
+ingest).
+
+##### 4. The Graph Store `PUT`-replace pre-image
+
+900 000 quads replaced by 900 000 of which 1 % changed, n = 3:
+
+| | capture off | on | × | row |
+|---|--:|--:|--:|---|
+| default cap (900k is over it) | 56.7 s (55.1–59.3) | 58.4 s (56.2–61.9) | ×1.03 | `unknown` |
+| cap lifted (`OTS_CHANGE_CAPTURE_MAX_SCAN=20000000`) | 57.0 s (55.4–58.6) | 60.8 s (60.5–61.5) | ×1.07 | `full`, 1 000 + 1 000 quads |
+
+Unlike a `WHERE` update, a replace already holds the new content and walks the
+old to clear it, so the pre-image costs **+7 %**: inside the budget, and a
+`full` row that a chain can cross. The two share one cap, which the `WHERE`
+update bounds; a separate cap for the replace would let it take its pre-image
+at any size (a follow-up). The first `PUT` into an empty graph, on the bulk
+loader, takes 6.3 s. This host's replace is about twice the M1 Pro figure
+above (32 s).
+
+##### 5. Transaction memory, restores and builds
+
+`apply_quad_ops` with *n* added quads in one transaction, capture on (each
+size in its own process, n = 3):
+
+| quads staged | time | peak memory | per quad |
+|--:|--:|--:|--:|
+| 50 000 | 1.65 s | 136 MiB | 2.8 KiB |
+| 200 000 | 7.41 s | 530 MiB | 2.8 KiB |
+| 500 000 | 24.2 s | 1.29 GiB | 2.8 KiB |
+| 1 000 000 | 60.4 s | 2.58 GiB | 2.8 KiB |
+| 1 000 000 in 50 000-quad transactions | 33.8 s | 1.66 GiB | 1.7 KiB |
+
+With capture off the transaction alone is 2.4 KiB a quad (116 MiB at 50 000,
+453 MiB at 200 000); the row's payload adds the rest. A first series without
+the heap trim under-read this (raw/superseded).
+
+Restore of a 0.9M-quad graph to a checkpoint after *k* changed quads in each
+of three later writes (the inverse is 3*k* + 20 quads), n = 3:
+
+| inverse | tier 1: one transaction + hash check | of which the hash check | tier 2: copy + `MOVE` | tier-2 peak memory |
+|--:|--:|--:|--:|--:|
+| 3 020 | 3.43 s (3.38–3.47) | 3.37 s | 87.2 s (85.4–89.6) | 3.1 GiB |
+| 27 000 | 3.59 s (3.42–3.72) | 2.88 s | 87.7 s (87.1–91.2) | 3.2 GiB |
+| 300 020 | 18.9 s (18.5–19.0), 0.8 GiB | 3.25 s | 148 s (120–198) | 2.8 GiB |
+
+At 9M quads (inverse 30 020): tier 1 took 36.4 s, 35.8 s of it the hash
+check; tier 2 copied the graph into its staging graph in about 7 minutes,
+then its `MOVE` — one transaction holding the old graph's removal and the
+new graph's insertion — grew past **36 GiB** resident in 23 minutes and was
+stopped by hand to protect the shared host. Tier 2 also writes the whole
+staging copy into the change log (8–12 MiB per 0.9M-quad restore, kept a day).
+
+So tier 1 is 4–25× faster than tier 2 and needs less memory whenever the
+inverse is no larger than the graph; tier 2 is the path to avoid. **A tier-1
+restore whose inverse is over the payload cap writes a `counts` row**, which
+closes every chain through it (seen here: the 300 020-quad restore left the
+next plan without an intact chain). The tier-1 limit must therefore stay at or
+below `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`.
+
+Builds and cuts at 0.9M, n = 3: a checkpoint cut 39–46 s; a delta cut 7 ms
+(*k* = 1 000), 41 ms (10 000), 0.3–0.7 s (100 000); a cold build 40–58 s
+either direction, peak 0.3 GiB at *k* = 100 000. Both the cut and the build
+are dominated by copying the graph, and **the copy is quadratic**: each
+50 000-quad batch into a version graph is recorded `unknown` (no payload is
+kept for a version's own graph), so the count index recounts the growing
+target after every batch. The 9M checkpoint cut took **48 minutes** (2 901 s)
+against 39 s at 0.9M — 74× for 10× the data. It happens with capture off as
+well. The design (§2.2) has those rows `counts`, which would keep the copy
+linear; a follow-up.
+
+##### 6. Annotation storage and the blank-node census
+
+0.9M quads loaded in 20 000-asset batches (each row under the payload cap, so
+every statement is annotated), then the statement-provenance consumer run to
+the head:
+
+| profile | annotation quads | per statement | consumer | data directory | after `optimize` |
+|---|--:|--:|--:|--:|--:|
+| off | 0 | — | — | 261 MiB | 287 MiB |
+| minimal | 4 500 000 | 5 | 177 s | 3 975 MiB (×15.2) | 3 845 MiB |
+| full | 5 400 000 | 6 | 201 s | 4 385 MiB (×16.8) | 4 223 MiB |
+
+About 0.8 KiB on disk per annotation quad, and the consumer takes 22–25× as
+long as the load it annotates — which is why provenance is a per-dataset
+opt-in (the note had derived 6 and 8 quads per statement; it is 5 and 6).
+
+Seed bundles (all 25 RDF files of `examples/seed-bundles`, 984 quads; the
+fetched GWSW and IMBOR payloads are not in the repository and not counted):
+29 % of the quads have a blank node, every one of them in a shapes graph
+(property shapes, `sh:in` lists) except the eight blank nodes of
+`nen2660-relations/instances.ttl`. The deepest blank node is **5 steps** from
+the IRI that owns it (an `sh:in` list of four values); the IFC lift and its
+seed bundle mint IRIs, not blank nodes.
+
+##### 7. `kill -9` in the middle of writes
+
+`scale_delta crash` runs six writers at once in a child process — a
+10 000-quad `INSERT DATA` (one transaction), a 50 000-quad named-graph load
+and a 30 000-quad `bulk_insert_quads` (bulk loader, SST ingest), a
+20 000-quad `apply_quad_ops` (transaction), a 20 000-quad Graph Store `PUT`
+replace (transaction with its pre-image) and a 30 000-quad streamed N-Quads
+load (bulk loader) — with capture on, each write tagged with its batch,
+kills the child with `SIGKILL` 0.3–3 s after it opened the store, reopens the
+store and checks it against what the writers had finished and what the log
+says: every batch whole or absent; every returned write present with a
+`committed` row; no row `committed` whose data is absent, none `aborted` or
+missing whose data is present; no row left `pending`; dense sequence numbers;
+three index families and the count index agreeing; and every chain the log
+calls intact replaying to exactly what its graph holds. 60 kills, a fresh
+store every 10:
+
+| | |
+|---|--:|
+| writes returned before a kill | 421 |
+| writes in flight at a kill | 360 |
+| … their data absent, row `unknown` | 344 |
+| … their data present, row `unknown` | 16 |
+| … any other outcome | 0 |
+| violations of the checks above | **0** |
+| bulk-load staging files left beside the database | 14–40 per kill, 7.7–20.4 MiB (901 MiB over the 60) |
+
+So `kill -9` lost no data, broke no atomicity and left no row that lies.
+What it leaves: the interrupted write's rows become `unknown` — always,
+whether the write landed or not, because the intent row is written before
+the data and the payload only with the commit, so the open-time probe of
+§2.4 has nothing to compare (it never resolved a row to `committed` or
+`aborted`). An `unknown` row closes every chain through it: correct and
+conservative, the next cut is a checkpoint. A streamed load's intent row is
+store-scoped (its graphs are known only once the data is in), so a kill
+during one closed the chains of every graph — every chain in these stores
+ended closed. And every kill left the bulk loader's sorted runs,
+`bulk-<n>.sst`, beside the database: written before the ingest, removed only
+after it or when the loader is dropped, which `SIGKILL` skips. Nothing
+reclaimed them; a killed 9M-quad import would leave gigabytes. The store now
+deletes them when it opens, holding the database's lock (no load can be
+running); the run above was made with that change, and found none left after
+any open (`orphan_bulk_ssts_after_open`).
+
+##### 9. Payload serialisation
+
+The row's own work, isolated (OTL quads; gzip at the fast level, as the log
+writes it), and a `PUT` into an empty graph — the free path, where the row
+carries every quad — off against on with the payload cap lifted (n = 7 at
+250k and 900k, n = 3 at 50k):
+
+| quads in the row | N-Quads | gzipped | serialise + gzip | read back | `PUT`, off | on | × |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 49 995 | 7.1 MB | 0.51 MB | 11 ms | 56 ms | 487 ms (316–566) | 583 ms (514–597) | ×1.20 |
+| 249 993 | 35.7 MB | 2.53 MB | 79 ms | 265 ms | 2.35 s (2.03–2.50) | 2.55 s (2.45–2.75) | ×1.09 |
+| 900 000 | 128.6 MB | 9.12 MB | 263 ms | 1.02 s | 7.89 s (7.66–8.30) | 8.45 s (8.36–8.80) | ×1.07 |
+| 900 000, default cap (`counts` row) | | | | | 7.38 s (6.26–7.40) | 7.56 s (7.55–7.68) | ×1.02 |
+
+A 9M-quad `bulk_insert_quads` with the cap lifted to 10M: 59.1–60.1 s against
+57.0–57.1 s for its `counts` row (+4 %), but **+3.2 GiB** more peak memory
+(7.7–7.9 GiB against 4.6 GiB above the start) and a 90.6 MB blob (174 MiB of
+`changes.db` growth). OTL data gzips to 10.1 bytes a quad. Time does not
+bound the payload cap — the 50k row's ×1.20 is the spread of a 0.5 s write —
+memory does: about 370 bytes of peak memory per payload quad, and a reader
+pays 1 µs a quad to decode it. 250 000 quads keeps a row under 2.6 MB here
+and its peak under about 90 MiB.
+
+`changes.db` after the payload series: 44 MiB; after the 0.9M-quad load in
+20 000-asset rows: 11 MiB. In the mixed phase above, `changes.db` with its write-ahead log grew 6.1–11.1
+MB per 20-second run, about 130 bytes per quad written (500-quad rows are at
+the gzip threshold, and each page is written twice through the WAL): at that
+rate about 1.1–2.0 GB an hour of sustained writing, kept for
+`OTS_CHANGE_RETENTION_DAYS` (90) — an extrapolation, not a measurement. A 24-hour run of the mixed phase,
+which §8.2 asks for, was not made; the rate above is the basis for sizing
+instead.
+
+##### 10. A cold read of a delta version, as other readers see it
+
+A 0.9M-quad delta version built on first read (`materialise::build`), while
+four threads look up assets and one runs a filter-and-count over another
+graph, 20 s before and after:
+
+| store | build | scan p95 before → during → until the mirror is back → after | lookups p95 | mirror back after |
+|---|--:|---|--:|--:|
+| 2.6M quads, mirror on | 51.7 s | 6.9 → 31 → 30 → 7.6 ms | ≤ 0.2 ms throughout | 55 s |
+| 10.8M quads, mirror on (cap 12M) | 56.6 s | 33 → 349 → 346 → 32 ms | ≤ 0.2 ms (one 1.4 s outlier) | 234 s |
+| 10.8M quads, mirror off | 48.9 s | 311 → 318 → — → 313 ms | ≤ 0.1 ms | — |
+
+(The store sizes include the version's checkpoint, 0.9M quads, which the
+setup cuts first.) A build is a store write: the accelerator is dropped for
+the whole store, scans fall back to RocksDB for the build and the rebuild
+after it — about 2 minutes at 2.6M, 5 at 10.8M, at RocksDB speed rather than
+an error — and point lookups do not notice. Eager materialisation at cut time
+(rule (iv) of the note's §3.3) would pay the same copy and the same
+invalidation at the cut, and the copy for every draft rather than for the
+ones read: it moves the cost without removing it, so it stays unbuilt. What
+would help is the linear copy of item 5, which is most of the build.
+
+##### 11. LDES and blank-node owners
+
+Entities with a chain of *d* blank nodes below them, a write changing the
+innermost value of *m* entities, the stream capturing it from the write's
+rows (owners walked up the tree) against indexing the graph before and after
+(n = 3; n = 2 at *m* ≥ 4 000):
+
+| *d* | *m* | graph | rows path | scan path | members, rows / scan |
+|--:|--:|--:|--:|--:|---|
+| 1 | 100 | 100k | 5.3 ms | 664 ms | 100 / 100 |
+| 4 | 100 | 220k | 9.2 ms | 1.68 s | 100 / 100 |
+| 8 | 100 | 380k | 15 ms | 3.19 s | 100 / 100 |
+| **9** | 100 | 420k | 5.7 ms | 3.34 s | **0** / 100 |
+| 4 | 4 000 | 220k | 382 ms | 2.20 s | 4 000 / 4 000 |
+| 4 | 6 000 | 220k | 2.19 s (republished whole) | 2.31 s | 20 000 / 6 000 |
+
+The rows path is 100–200× cheaper. Two limits show: past
+`OTS_LDES_BNODE_DEPTH` the owner is not found and **the change is not
+published at all** (depth 9 against the default 8: no members); and past
+`OTS_LDES_BNODE_SUBJECTS_MAX` the graph is republished whole, every entity a
+member. The subject count is of the rows' quads, not of distinct nodes — a
+changed value is a removal and an addition, so 6 000 entities are 12 000. A
+walk costs about 0.05 ms per changed subject, a whole republish of this
+220k-quad graph 2.3 s, growing with the graph: the 10 000 cap bounds a walk to
+about half a second. The census above puts the deepest owner of the seed data
+at 5 steps, inside the default 8 (an RDF list needs its length plus one).
+
+##### Item 8 and item 3's in-memory log
+
+Item 8, the RDF 1.2 behaviour tests, is in `tests/statement_provenance_http.rs`
+and `two_concurrent_cuts_of_one_label_make_one_version`. The per-test overhead
+of the in-memory log was not measured separately; the capture-on Criterion
+benchmarks below are its nearest figure.
+
+##### What the defaults are, and why
+
+| setting | was | now | evidence |
+|---|--:|--:|---|
+| `OTS_CHANGE_CAPTURE_MAX_SCAN` | 250 000 | 250 000 | item 1: 5 µs and 0.8 KiB per scanned quad, no size within budget; 250k bounds a row's before-image to about 1.2 s and 200 MiB (5 % of the shipped 4 GiB container); 9M would need 7 GiB |
+| `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | 250 000 | 250 000 | item 9: serialisation is cheap (+7–9 % at 250k–900k), memory is not (about 370 B per payload quad; +3.2 GiB at 9M) |
+| `OTS_APPLY_DELTA_TX_MAX_QUADS` | 50 000 | **200 000** | item 5: tier 1 is 4–25× faster than tier 2 and lighter (530 MiB for 200 000 quads, against 3 GiB for a tier-2 restore of 0.9M); 200 000 stays under the payload cap, so a tier-1 restore's rows stay `full` |
+| `OTS_LDES_BNODE_DEPTH` | 8 | 8 | item 11 and the census: the seed data's deepest owner is 5 steps away; deeper trees are missed silently, so raise it for data with long lists |
+| `OTS_LDES_BNODE_SUBJECTS_MAX` | 10 000 | 10 000 | item 11: a walk of 10 000 subjects is about 0.5 s, a whole republish of a 220k-quad graph 2.3 s |
+
+##### What the measurements turned up
+
+- **Concurrent writers serialise on the sequence section** (item 3):
+  write throughput ×0.28 with four writers — far over the budget.
+- **`bulk_insert_quads` probes without a budget** (item 2): +22 % on a 9M-quad
+  import with capture on — over the budget.
+- **Version copies are quadratic** (item 5): 39 s at 0.9M, 48 minutes at 9M,
+  capture on or off.
+- **A tier-2 restore of a 9M-quad graph does not fit** (item 5): its `MOVE`
+  transaction passed 36 GiB.
+- **A tier-1 restore over the payload cap closes the chains it crosses**
+  (item 5); the new tier-1 default stays under the cap, and the two settings
+  are documented together.
+- **A changed blank node deeper than `OTS_LDES_BNODE_DEPTH` is not published**
+  (item 11).
+- **A `WHERE` update recounts its target graph with capture off** (item 1):
+  2.6 µs per quad, 24 s at 9M.
+- **A crash always leaves an `unknown` row** (item 7): the intent row carries
+  no payload, so the open-time probe has nothing to compare.
+- **A killed bulk load left its staging files** (item 7); fixed (below).
+
+None of the first seven is changed here; each is a follow-up.
+
+##### The perf-gate scenario
+
+Nine Criterion benchmarks in `benches/performance.rs` run the write path
+with capture on (an in-memory log, the default caps), next to the
+capture-off benchmarks they mirror. Their names fall under the gate's filter
+(`query|path|geosparql|insert|update|shacl|concurrent`; `--list` confirms all
+nine) and under its existing `update_`, `insert_` and `concurrent_` tolerance
+prefixes, so no workflow or baseline change is needed: the PR that adds them
+reports them as new, every later PR is gated on them against its merge base,
+and the next baseline refresh records them. Fastest of two passes, same
+build, this host, `--features full`:
+
+| benchmark | capture off | capture on | × |
+|---|--:|--:|--:|
+| `update/{,capture_}insert_where/1000` | 2.91 ms | 7.26 ms | ×2.50 |
+| `update/{,capture_}insert_where/10000` | 53.3 ms | 108.4 ms | ×2.03 |
+| `update/{,capture_}delete_where/1000` | 1.77 ms | 5.20 ms | ×2.93 |
+| `update/{,capture_}delete_where/10000` | 26.1 ms | 77.6 ms | ×2.98 |
+| `update/{,capture_}ground_delta/insert_data/1` | 26.1 µs | 25.3 µs | ×0.97 |
+| `update/{,capture_}ground_delta/insert_data/100` | 312 µs | 310 µs | ×0.99 |
+| `insert/{,capture_}named_graph/10000` | 51.6 ms | 97.5 ms | **×1.89** |
+| `concurrent/{,capture_}writes/threads/4` | 1.09 ms | 4.00 ms | **×3.67** |
+| `insert/capture_graph_store_put/10000` (a 30 000-quad replace, 1 % changed) | — | 54.8 ms | — |
+
+The bench-scale shape matches the scale runs: a ground update pays nothing
+measurable, a `WHERE` update pays its before-image (×2–3), a streamed
+multi-graph load pays its probes (×1.9 at 30 000 quads in memory), and
+concurrent writers pay the sequence section (×3.7, item 3). Raw medians:
+`docs/perf-data/2026-10-15-x86-delta/criterion/`.
+
+#### SHACL run memory budget: BSBM 10k in 4 GiB (2026-10-15, x86)
+
+Issue [#532](https://github.com/philipperenzen/open-triplestore/issues/532):
+whole-dataset validation of BSBM 10k (3.56 M triples, 51,690 results) in the
+4 GiB container of the store comparison peaked near the limit. Measured on the
+reference system above (Docker Desktop on WSL 2), with the comparison harness
+(`scripts/bench-compare`, `--stores ots --workloads shacl`), before
+(`462b206c`, 0.8.0) and after (`2342e3f9`) back to back in one quiet window.
+Data, per-run files and the method: [`perf-data/2026-10-15-x86/`](perf-data/2026-10-15-x86/before-after.md).
+
+**What the peak was.** Anonymous memory, not page cache: before the change a
+10k run peaked at 3,279–3,573 MiB anonymous (3,734–4,080 MiB by `docker stats`)
+with 500–650 MiB of active file cache. Of the anonymous memory, the server
+held 1.3 GiB before the run; the class sets and focus lists added about
+290 MiB, the run index about 1.1 GiB (1.79 M quads at about 600 bytes each,
+twice what its quad cap assumed), the results about 30 MiB over what the
+index scans had freed, converting the report to a JSON value tree about
+170 MiB more; and the allocator kept what each run freed, so six runs in a row
+climbed from 2.8 to 3.6 GiB.
+
+**What changed.** One memory budget, `OTS_SHACL_RUN_MEMORY_BYTES` (a quarter
+of the limit: 1 GiB here), that the class sets, the run index (three quarters
+at most), the closure memo and the results count against; a node with one
+neighbour kept inline in the index; the freed memory handed back to the system
+after a large run; the JSON response streamed
+([shacl.md](shacl.md#what-a-run-holds-in-memory)).
+
+| BSBM, 4 GiB, 4 CPUs | Before | After |
+| --- | --: | --: |
+| 10k SHACL peak, `docker stats` (MiB), two paired runs | 4,080 / 3,734 | 2,931 / 2,881 |
+| 10k SHACL peak, anonymous (MiB) | 3,573 / 3,279 | 2,399 / 2,350 |
+| 10k validation, median of the 10 measured runs (s) | 7.60 | 6.98 |
+| 10k run index | 1.79 M quads, 2–3 pairs from the store | 1.40–1.59 M quads in ~590–660 MiB, 3–4 pairs from the store |
+| 1k SHACL peak, `docker stats` / anonymous (MiB) | 1,082 / 1,047 | 959 / 927 |
+| 1k validation, median of 5 (s) | 0.158 | 0.137 |
+| Results (count, content digest) | 51,690 and 5,245 | the same, same digests |
+| Repeated-load check, 10k, 80 % of 4 GiB | fails (4,021 MiB) | passes 3 of 3 (2,914–3,079 MiB) |
+
+The 1k store fits the query accelerator, so a 1k run reads its RAM copy and
+builds no index; only the results and the streamed response differ there.
+The 9M configuration B above (`docker run -m 4g`, run index capped at
+`memory/8/300`) now sizes its index by the same budget; it was not re-measured.
+
 ---
 
 ## Comparison with Apache Jena Fuseki and QLever
@@ -1706,6 +2136,14 @@ replication follower, the dataset history, an audit. A replication leader
 keeps it on regardless. The table and the reasoning are in
 [versioning.md](versioning.md#what-it-costs).
 
+Since 2026-10-15 the gate also runs the write path with capture on —
+`update/capture_insert_where`, `update/capture_delete_where`,
+`update/capture_ground_delta`, `insert/capture_named_graph`,
+`insert/capture_graph_store_put` and `concurrent/capture_writes` — so a
+regression in capture itself fails a PR like any other. What they and the
+scale measurements found is under
+[Delta versions at scale](#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15).
+
 ### `geosparql/sf_contains` and `geosparql/distance`
 
 GeoSPARQL custom functions are called once per binding via GEOS C++ library.
@@ -2094,12 +2532,15 @@ focus node (`sh:sparql` constraints and SPARQL targets query the same source).
 What a run does cache:
 
 - **Transitive path closures**: the `p+` reach sets the run computes, in a
-  `ClosureMemo` shared by all workers and capped at 2 M terms (PR #467; see
-  optimisation 6).
+  `ClosureMemo` shared by all workers (PR #467; see optimisation 6).
 - **Class sets**: target instance sets and subclass closures, computed per run
   before the parallel fan-out, plus a per-run adjacency for the shape
   predicates when a run off the snapshot or live store is large enough to pay
   for it.
+
+Since PR #532 the class sets, the run index, the closure memo and the
+results all count against one memory budget per run,
+`OTS_SHACL_RUN_MEMORY_BYTES` ([`src/shacl/budget.rs`](../src/shacl/budget.rs)).
 - **`sh:pattern` regexes**: compiled once per thread
   ([`src/shacl/constraints.rs`](../src/shacl/constraints.rs)).
 - **Constraint-component declarations**: those of the last shapes graph loaded,
@@ -2115,9 +2556,11 @@ The per-thread property-path cache that predates this engine
 transitive path it walks, per (path, graph selection, start node), in the
 run's shared `ClosureMemo`. A closure that reaches a node whose own closure is
 already known adds that set instead of walking it again; `*` adds the start
-node. The memo is bounded (2 M terms in total, 100 000 per set, 64 distinct
-paths; past that, closures are still computed but not kept) and is dropped when
-the run ends, so it needs no write invalidation.
+node. The memo is bounded: 100 000 terms per set, 64 distinct paths, and the
+run's memory budget, `OTS_SHACL_RUN_MEMORY_BYTES`, which it shares with the
+run index and the results (PR #532; before that it had 2 M terms of its own).
+Past those bounds closures are still computed but not kept. The memo is
+dropped when the run ends, so it needs no write invalidation.
 
 **Still open.** Nothing is kept across SHACL runs, and SPARQL property paths in
 queries are not memoised; the per-query or per-session cache below is not

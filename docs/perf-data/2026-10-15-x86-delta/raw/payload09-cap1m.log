@@ -1,0 +1,19 @@
+  payload 50000 rep 0 capture=false: 316 ms
+  payload 50000 rep 0 capture=true: 583 ms
+  payload 50000 rep 1 capture=true: 597 ms
+  payload 50000 rep 1 capture=false: 487 ms
+  payload 50000 rep 2 capture=false: 566 ms
+  payload 50000 rep 2 capture=true: 514 ms
+  payload 250000 rep 0 capture=false: 1793 ms
+  payload 250000 rep 0 capture=true: 2395 ms
+  payload 250000 rep 1 capture=true: 2341 ms
+  payload 250000 rep 1 capture=false: 2062 ms
+  payload 250000 rep 2 capture=false: 1899 ms
+  payload 250000 rep 2 capture=true: 2199 ms
+  payload 900000 rep 0 capture=false: 6539 ms
+  payload 900000 rep 0 capture=true: 8405 ms
+  payload 900000 rep 1 capture=true: 8616 ms
+  payload 900000 rep 1 capture=false: 7669 ms
+  payload 900000 rep 2 capture=false: 7718 ms
+  payload 900000 rep 2 capture=true: 8379 ms
+(228.6s)

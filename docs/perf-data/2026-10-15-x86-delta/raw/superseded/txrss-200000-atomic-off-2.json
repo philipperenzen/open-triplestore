@@ -1,0 +1,27 @@
+{
+  "args": [
+    "txrss",
+    "/data/run",
+    "200000",
+    "atomic",
+    "off"
+  ],
+  "command": "txrss",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "bytes_per_staged_quad": 634.06,
+    "capture": "off",
+    "inserted": 200000,
+    "mode": "atomic",
+    "ms": 4777.82,
+    "peak_above_start_mib": 120.94,
+    "quads": 200000,
+    "resident_at_start_mib": 570.18,
+    "resident_before_mib": 570.18,
+    "tx_max_quads": 50000
+  }
+}

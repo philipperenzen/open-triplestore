@@ -1,0 +1,8 @@
+put: first PUT (empty target) 6317 ms
+  rep 0 capture=false: 58599 ms
+  rep 0 capture=true: 60767 ms
+  rep 1 capture=true: 61464 ms
+  rep 1 capture=false: 55427 ms
+  rep 2 capture=false: 57016 ms
+  rep 2 capture=true: 60548 ms
+(389.7s)
