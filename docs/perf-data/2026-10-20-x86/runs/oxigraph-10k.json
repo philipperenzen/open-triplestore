@@ -1,0 +1,68 @@
+{
+ "store": "oxigraph",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`",
+ "phases": {
+  "load": {
+   "seconds": 32.123,
+   "peak_mem_bytes": 2432025231.36,
+   "load_after": [
+    4.5791015625,
+    3.77099609375,
+    4.4306640625
+   ],
+   "method": "`oxigraph load` (offline bulk loader) + `oxigraph optimize`"
+  },
+  "explore": {
+   "seconds": 23.906,
+   "peak_mem_bytes": 156028108.8,
+   "load_after": [
+    2.7001953125,
+    3.40283203125,
+    4.2451171875
+   ]
+  },
+  "features": {
+   "seconds": 505.856,
+   "peak_mem_bytes": 273888051.2,
+   "load_after": [
+    3.8115234375,
+    3.6796875,
+    4.06005859375
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load run --rm optimize",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/oxigraph.yml -p benchcmp up -d oxigraph",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare:/h:ro -v /home/philippe/bench-work/data/bsbm-10k:/bench:ro -v /home/philippe/bench-work/results-468/ox/oxigraph/10k:/out python:3.12-slim python /h/bench.py client --store oxigraph --workload explore --out /out/explore.json --endpoint http://oxigraph:7878/query --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare:/h:ro -v /home/philippe/bench-work/data/bsbm-10k:/bench:ro -v /home/philippe/bench-work/results-468/ox/oxigraph/10k:/out python:3.12-slim python /h/bench.py client --store oxigraph --workload features --out /out/features.json --endpoint http://oxigraph:7878/query --features /h/queries/features --feature-runs 10",
+  "docker compose -f /mnt/c/Users/phili/Code/ots-468/scripts/bench-compare/compose/oxigraph.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   2.85791015625,
+   3.3466796875,
+   4.3212890625
+  ],
+  "waited_s": 0,
+  "free_gib": 891.0,
+  "swap": ""
+ },
+ "started": "2026-10-20T23:23:36+0200",
+ "optimize_seconds": 6.415,
+ "db_bytes_after_load": 667058176,
+ "image": "sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767 ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767",
+ "finished": "2026-10-20T23:34:00+0200",
+ "load_after": [
+  3.8115234375,
+  3.6796875,
+  4.06005859375
+ ]
+}

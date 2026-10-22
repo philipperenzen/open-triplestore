@@ -1138,6 +1138,113 @@ fn bench_query_over_cap(c: &mut Criterion) {
     group.finish();
 }
 
+/// BSBM-shaped products (Turtle): a label, eight features from a pool of
+/// 400 (so each feature is shared by about 80 products) and two numeric
+/// properties each, as the explore mix's Q5 reads them.
+fn gen_products_ttl(n: usize) -> String {
+    let mut s = String::from(
+        "@prefix p: <http://example.org/bsbm/> .\n\
+         @prefix v: <http://example.org/bsbm/vocabulary/> .\n\
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n",
+    );
+    for i in 0..n {
+        s.push_str(&format!(
+            "p:product{i} a v:Product ; rdfs:label \"Product {i}\" ; \
+             v:productPropertyNumeric1 {} ; v:productPropertyNumeric2 {} ;\n  v:productFeature ",
+            (i * 37) % 2000,
+            (i * 53) % 2000
+        ));
+        let features: Vec<String> = (0..8)
+            .map(|k| format!("p:feature{}", (i * 7 + k * 13) % 400))
+            .collect();
+        s.push_str(&features.join(", "));
+        s.push_str(" .\n");
+    }
+    s
+}
+
+/// The engine path of a dataset service on a store over the accelerator's
+/// cap (issue #468): a RocksDB store, the data in one named graph and a small
+/// shapes graph beside it, and every query scoped the way the dataset
+/// endpoint scopes it — `FROM` and `FROM NAMED` both graphs, so the default
+/// graph is their RDF merge. `q5_merged` is BSBM explore Q5 (the query that
+/// dominated the 10k mix), `q5_one_graph` the same over the data graph alone
+/// (the merge should cost next to nothing over it), `describe_merged` BSBM's
+/// Q9 shape and `count_merged` a `COUNT(*)` over the merge, which the
+/// evaluator answered by scanning and merging both graphs.
+fn bench_query_over_cap_dataset(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query/over_cap_dataset");
+    group.sample_size(30);
+    let data = "http://example.org/bench/data";
+    let shapes = "http://example.org/bench/shapes";
+    let dir = tempfile::tempdir().unwrap();
+    let store = TripleStore::open(dir.path())
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(true, 2, 1_000);
+    let n = 4_000;
+    store
+        .load_str(&gen_products_ttl(n), RdfFormat::Turtle, Some(data))
+        .unwrap();
+    store
+        .load_str(
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+             @prefix v: <http://example.org/bsbm/vocabulary/> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://example.org/bench/shapes#ProductShape> a sh:NodeShape ;\n\
+               sh:targetClass v:Product ;\n\
+               sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:datatype xsd:string ] ;\n\
+               sh:property [ sh:path v:productFeature ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ;\n\
+               sh:property [ sh:path v:productPropertyNumeric1 ; sh:datatype xsd:integer ] .\n",
+            RdfFormat::Turtle,
+            Some(shapes),
+        )
+        .unwrap();
+    let merged = format!("FROM <{data}> FROM <{shapes}> FROM NAMED <{data}> FROM NAMED <{shapes}>");
+    let one_graph = format!("FROM <{data}> FROM NAMED <{data}>");
+    let q5 = |dataset: &str| {
+        format!(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+             PREFIX v: <http://example.org/bsbm/vocabulary/>\n\
+             SELECT DISTINCT ?product ?productLabel {dataset} WHERE {{\n\
+               ?product rdfs:label ?productLabel .\n\
+               FILTER (<http://example.org/bsbm/product42> != ?product)\n\
+               <http://example.org/bsbm/product42> v:productFeature ?prodFeature .\n\
+               ?product v:productFeature ?prodFeature .\n\
+               <http://example.org/bsbm/product42> v:productPropertyNumeric1 ?origProperty1 .\n\
+               ?product v:productPropertyNumeric1 ?simProperty1 .\n\
+               FILTER (?simProperty1 < (?origProperty1 + 120) && ?simProperty1 > (?origProperty1 - 120))\n\
+               <http://example.org/bsbm/product42> v:productPropertyNumeric2 ?origProperty2 .\n\
+               ?product v:productPropertyNumeric2 ?simProperty2 .\n\
+               FILTER (?simProperty2 < (?origProperty2 + 170) && ?simProperty2 > (?origProperty2 - 170))\n\
+             }}\n\
+             ORDER BY ?productLabel LIMIT 5"
+        )
+    };
+    for (id, q) in [
+        ("q5_merged", q5(&merged)),
+        ("q5_one_graph", q5(&one_graph)),
+        (
+            "describe_merged",
+            format!("DESCRIBE <http://example.org/bsbm/product42> {merged}"),
+        ),
+        (
+            "count_merged",
+            format!("SELECT (COUNT(*) AS ?n) {merged} WHERE {{ ?s ?p ?o }}"),
+        ),
+    ] {
+        // The first query settles the accelerator's "over the cap" verdict.
+        assert!(consume_solutions(store.query(&q).unwrap()) > 0, "{id}");
+        group.bench_function(id, |b| {
+            b.iter(|| consume_solutions(store.query(&q).unwrap()))
+        });
+    }
+    group.finish();
+    drop(store);
+    drop(dir);
+}
+
 /// One HTTP round trip for a streamed response, served the way the server
 /// serves (`open_triplestore::server::serve_on`) over a kept-alive loopback
 /// connection: the head is written as soon as the handler returns, the body a
@@ -2207,6 +2314,7 @@ criterion_group!(
         bench_query_not_exists,
         bench_query_not_exists_correlated,
         bench_query_over_cap,
+        bench_query_over_cap_dataset,
         bench_query_http_stream,
         bench_query_construct,
         bench_query_named_graph

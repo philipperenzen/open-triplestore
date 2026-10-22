@@ -463,6 +463,10 @@ type VoidScopedCache = std::collections::HashMap<Vec<String>, (u64, VoidStats)>;
 /// Graph sets whose statistics are kept at once; one more clears them all.
 const VOID_SCOPED_CACHE_CAP: usize = 64;
 
+/// The most triples [`TripleStore::merged_count`] reads outside the largest
+/// graph (one existence probe each) before it leaves the count to the evaluator.
+const MERGED_COUNT_MAX_READS: usize = 100_000;
+
 /// VoID class and property partitions of a set of graphs (see
 /// [`TripleStore::void_partitions_over`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1604,15 +1608,18 @@ impl TripleStore {
         // relations. The cache stays keyed by the text the caller sent.
         let rewritten = self.geo_rewrite_query_text(sparql);
         let eval = rewritten.as_deref().unwrap_or(sparql);
-        // The shape bits, once per uncached evaluation: the classifier parses
-        // (the mirror reuses its verdict rather than parsing again), and the
-        // bits are stamped on the cache entry so a hit inherits them.
-        let class = parallel::classify(eval);
+        // The shape bits, once per uncached evaluation: the classifier reads
+        // the syntax tree (the mirror reuses its verdict rather than parsing
+        // again), and the bits are stamped on the cache entry so a hit
+        // inherits them. The tree is kept for the engine at the end of the
+        // pipeline, which used to parse the text a second time.
+        let parsed = crate::sparql::parser().parse_query(eval).ok();
+        let class = parsed.as_ref().and_then(parallel::classify_query);
         let shape = QueryShape {
             analytical: class == Some(ParClass::Aggregate),
             aggregate_text: QueryShape::mentions_aggregate(eval),
         };
-        let (results, served) = self.query_uncached(eval, class, cancel)?;
+        let (results, served) = self.query_uncached(eval, class, parsed, cancel)?;
         let results = self.query_cache.put(sparql, gen, results, shape);
         self.telemetry
             .record_query(served, t0.map(|t| t.elapsed()), shape);
@@ -1621,11 +1628,13 @@ impl TripleStore {
 
     /// The evaluation pipeline behind [`Self::query`], without the result cache,
     /// naming the exit that answered. `class` is the parallel classifier's
-    /// verdict, computed by the caller.
+    /// verdict and `parsed` the syntax tree it read (`None` when the text
+    /// does not parse), both computed by the caller.
     fn query_uncached(
         &self,
         sparql: &str,
         class: Option<ParClass>,
+        parsed: Option<SpargebraQuery>,
         cancel: Option<&oxigraph::sparql::CancellationToken>,
     ) -> Result<(QueryResults<'static>, Served), StoreError> {
         let options = || match cancel {
@@ -1685,10 +1694,14 @@ impl TripleStore {
         {
             return Ok((full, Served::FullCopy));
         }
-        let results = options()
-            .parse_query(sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // The shared parser reads a query exactly as the evaluator's own does
+        // (`crate::sparql::parser`); a text it refused is parsed again here
+        // only to report the error the way the evaluator words it.
+        let prepared = match parsed {
+            Some(query) => options().for_query(query),
+            None => options().parse_query(sparql)?,
+        };
+        let results = prepared.on_store(&self.store).execute()?;
         Ok((results, Served::Engine))
     }
 
@@ -1759,6 +1772,11 @@ impl TripleStore {
             }
         };
         let count = match scope {
+            // `{ ?s ?p ?o }` over several `FROM` graphs — their RDF merge, a
+            // triple two of them hold counted once.
+            CountScope::Default if dataset.as_ref().is_some_and(|ds| ds.default.len() > 1) => {
+                self.merged_count(&dataset.as_ref()?.default)?
+            }
             // `{ ?s ?p ?o }` — the query's default graph.
             CountScope::Default => {
                 let graph: Option<String> = match dataset {
@@ -1767,7 +1785,7 @@ impl TripleStore {
                         [] if ds.named.is_some() => return None,
                         [] => None,
                         [g] => Some(g.as_str().to_string()),
-                        _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+                        _ => return None, // several: the arm above
                     },
                 };
                 self.graph_count_cached(graph.as_deref())
@@ -1800,6 +1818,63 @@ impl TripleStore {
         let sol = QuerySolution::from((vars.clone(), vec![Some(Term::Literal(lit))]));
         let iter = QuerySolutionIter::new(vars, std::iter::once(Ok(sol)));
         Some(QueryResults::Solutions(iter))
+    }
+
+    /// The number of triples in the RDF merge of `graphs` — `COUNT(*)` over a
+    /// default graph of several `FROM` graphs, such as a dataset service's data
+    /// graph and its shapes graph. The largest graph's count comes from the
+    /// count index; every triple of the others is read and counted unless a
+    /// graph before it in that order holds it too. `None` (the evaluator
+    /// answers) when the other graphs hold more than [`MERGED_COUNT_MAX_READS`]
+    /// triples together, or on a read error. The evaluator scanned and merged
+    /// every graph: 2.8 s for a 3.5M-triple data graph and its shapes graph.
+    fn merged_count(&self, graphs: &[NamedNode]) -> Option<usize> {
+        let mut sized: Vec<(&NamedNode, usize)> = Vec::with_capacity(graphs.len());
+        for graph in graphs {
+            // `FROM <g> FROM <g>` merges a graph with itself.
+            if sized.iter().any(|(seen, _)| *seen == graph) {
+                continue;
+            }
+            let count = self
+                .graph_count_cached(Some(graph.as_str()))
+                .or_else(|| self.count_graph(Some(graph.as_str())).ok())?;
+            sized.push((graph, count));
+        }
+        sized.sort_by_key(|g| std::cmp::Reverse(g.1));
+        let ((_, largest), others) = sized.split_first()?;
+        if others.iter().map(|(_, count)| count).sum::<usize>() > MERGED_COUNT_MAX_READS {
+            return None;
+        }
+        let mut total = *largest;
+        for (i, (graph, _)) in others.iter().enumerate() {
+            // `others[i]` is `sized[i + 1]`: the graphs before it are `sized[..=i]`.
+            let before = &sized[..=i];
+            for quad in self.store.quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph.as_ref())),
+            ) {
+                let quad = quad.ok()?;
+                let mut held = false;
+                for (earlier, _) in before {
+                    let probe = QuadRef::new(
+                        quad.subject.as_ref(),
+                        quad.predicate.as_ref(),
+                        quad.object.as_ref(),
+                        GraphNameRef::NamedNode(earlier.as_ref()),
+                    );
+                    if self.store.contains(probe).ok()? {
+                        held = true;
+                        break;
+                    }
+                }
+                if !held {
+                    total += 1;
+                }
+            }
+        }
+        Some(total)
     }
 
     /// The query text with the GeoSPARQL Query Rewrite applied, or `None`
@@ -4664,38 +4739,57 @@ enum CountScope {
 }
 
 fn count_star_var(pattern: &GraphPattern) -> Option<(String, CountScope)> {
-    if let GraphPattern::Project { inner, variables } = pattern {
-        if variables.len() == 1 {
-            if let Some(scope) = count_star_scope(inner) {
-                return Some((variables[0].as_str().to_string(), scope));
-            }
-        }
-    }
-    None
+    let GraphPattern::Project { inner, variables } = pattern else {
+        return None;
+    };
+    let [variable] = variables.as_slice() else {
+        return None;
+    };
+    Some((
+        variable.as_str().to_string(),
+        count_star_scope(inner, variable)?,
+    ))
 }
 
-fn count_star_scope(p: &GraphPattern) -> Option<CountScope> {
-    match p {
-        GraphPattern::Extend {
-            inner,
-            expression: Expression::Variable(_),
-            ..
-        } => count_star_scope(inner),
+/// The scope of the `COUNT(*)` full scan whose count `p` binds to `variable`:
+/// the aggregate itself, `Extend(Group)`, or a sub-select of it,
+/// `Extend(Project(Extend(Group)))`. The second is how `Display` prints an
+/// aggregate query, so it is what a query scoped by the dataset endpoint
+/// (parsed, given its `FROM` clauses and printed again) reads as; only the
+/// first was recognised, so a dataset's `COUNT(*)` was always scanned.
+fn count_star_scope(
+    p: &GraphPattern,
+    variable: &opengraph::spargebra::term::Variable,
+) -> Option<CountScope> {
+    let GraphPattern::Extend {
+        inner,
+        variable: bound,
+        expression: Expression::Variable(source),
+    } = p
+    else {
+        return None;
+    };
+    if bound != variable {
+        return None;
+    }
+    match inner.as_ref() {
         GraphPattern::Group {
             inner,
             variables,
             aggregates,
         } => {
-            if !variables.is_empty()
-                || aggregates.len() != 1
-                || !matches!(
-                    &aggregates[0].1,
-                    AggregateExpression::CountSolutions { distinct: false }
-                )
-            {
+            let [(counted, AggregateExpression::CountSolutions { distinct: false })] =
+                aggregates.as_slice()
+            else {
+                return None;
+            };
+            if !variables.is_empty() || counted != source {
                 return None;
             }
             full_scan_scope(inner)
+        }
+        GraphPattern::Project { inner, variables } if variables.as_slice() == [source.clone()] => {
+            count_star_scope(inner, source)
         }
         _ => None,
     }
@@ -4800,6 +4894,126 @@ mod tests {
             "SELECT (COUNT(*) AS ?c) WHERE { ?s <http://e/p> ?o . ?s <http://e/p> ?o2 }"
         )
         .contains("\"3\""));
+    }
+
+    /// `COUNT(*)` over several `FROM` graphs counts their RDF merge — a triple
+    /// two of them hold counts once — as the evaluator does, and is answered
+    /// without it: a dataset service's default graph merges its data graph
+    /// with its shapes graph, and scanning the merge took 2.8 s at 3.5M
+    /// triples (issue #468).
+    #[test]
+    fn fast_count_of_several_from_graphs_is_their_merge() {
+        let dir = TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path())
+            .unwrap()
+            .with_query_cache(false, 0, 0)
+            .with_parallel_query(false, 1, 0);
+        store
+            .update(
+                "INSERT DATA {
+                   GRAPH <http://g/data> { <http://e/a> <http://e/p> 1 . <http://e/b> <http://e/p> 2 .
+                                           <http://e/c> <http://e/p> 3 . <http://e/d> <http://e/p> 4 }
+                   GRAPH <http://g/shapes> { <http://e/a> <http://e/p> 1 . <http://e/s> <http://e/q> 5 }
+                   GRAPH <http://g/vocab> { <http://e/s> <http://e/q> 5 . <http://e/t> <http://e/q> 6 }
+                 }",
+            )
+            .unwrap();
+        let count = |q: &str| -> String {
+            match store.query(q).unwrap() {
+                QueryResults::Solutions(s) => {
+                    let sol = s.into_iter().next().unwrap().unwrap();
+                    match sol.get("c") {
+                        Some(Term::Literal(l)) => l.value().to_string(),
+                        other => panic!("expected a count, got {other:?}"),
+                    }
+                }
+                _ => panic!("expected solutions"),
+            }
+        };
+        let fast_counts = || store.telemetry().summary().queries.by_served["fast_count"];
+        let before = fast_counts();
+        let cases = [
+            ("FROM <http://g/data> FROM <http://g/shapes>", "5"),
+            (
+                "FROM <http://g/shapes> FROM <http://g/data> FROM <http://g/vocab>",
+                "6",
+            ),
+            ("FROM <http://g/data> FROM <http://g/data>", "4"),
+            (
+                "FROM <http://g/shapes> FROM <http://g/vocab> FROM NAMED <http://g/data>",
+                "3",
+            ),
+            ("FROM <http://g/data> FROM <http://g/missing>", "4"),
+        ];
+        for (from, expected) in cases {
+            assert_eq!(
+                count(&format!(
+                    "SELECT (COUNT(*) AS ?c) {from} WHERE {{ ?s ?p ?o }}"
+                )),
+                expected,
+                "{from}"
+            );
+            // The same count through the evaluator (a FILTER is not the
+            // bare-scan shape).
+            assert_eq!(
+                count(&format!(
+                    "SELECT (COUNT(*) AS ?c) {from} WHERE {{ ?s ?p ?o FILTER(true) }}"
+                )),
+                expected,
+                "{from}: the evaluator's count"
+            );
+        }
+        assert_eq!(
+            fast_counts() - before,
+            cases.len() as u64,
+            "every merge was counted without the evaluator"
+        );
+    }
+
+    /// A `COUNT(*)` printed back from its syntax tree — the form the dataset
+    /// endpoint hands the store after giving a query its `FROM` clauses — is
+    /// counted without the evaluator too, and a sub-select count whose
+    /// variable the outer query does not project is not mistaken for one.
+    #[test]
+    fn fast_count_reads_a_count_printed_back_from_its_syntax_tree() {
+        let store = TripleStore::in_memory()
+            .unwrap()
+            .with_query_cache(false, 0, 0);
+        store
+            .load_str(
+                "<http://e/a> <http://e/p> 1 . <http://e/b> <http://e/p> 2 .",
+                RdfFormat::Turtle,
+                Some("http://g/data"),
+            )
+            .unwrap();
+        let printed = crate::sparql::parser()
+            .parse_query("SELECT (COUNT(*) AS ?c) FROM <http://g/data> WHERE { ?s ?p ?o }")
+            .unwrap()
+            .to_string();
+        assert!(printed.contains("SELECT"), "{printed}");
+        let fast_counts = || store.telemetry().summary().queries.by_served["fast_count"];
+        let before = fast_counts();
+        let QueryResults::Solutions(mut rows) = store.query(&printed).unwrap() else {
+            panic!("expected solutions");
+        };
+        let row = rows.next().unwrap().unwrap();
+        assert!(
+            matches!(row.get("c"), Some(Term::Literal(l)) if l.value() == "2"),
+            "{printed}: {row:?}"
+        );
+        assert_eq!(fast_counts() - before, 1, "{printed} was scanned");
+        // `?x` is never bound: the answer is one row without it.
+        let QueryResults::Solutions(mut rows) = store
+            .query(
+                "SELECT ?x FROM <http://g/data> \
+                 WHERE { { SELECT (COUNT(*) AS ?y) WHERE { ?s ?p ?o } } }",
+            )
+            .unwrap()
+        else {
+            panic!("expected solutions");
+        };
+        assert_eq!(rows.next().unwrap().unwrap().get("x"), None);
+        assert_eq!(fast_counts() - before, 1);
     }
 
     fn detect_format_from_mime(mime: &str) -> Result<RdfFormat, StoreError> {

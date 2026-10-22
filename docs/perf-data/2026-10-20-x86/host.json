@@ -1,0 +1,11 @@
+{
+ "platform": "Windows 11 Pro 10.0.26200 (host); Docker Desktop 28.5.1 on WSL 2, kernel 6.6.87.2-microsoft-standard-WSL2",
+ "harness_python": "3.12.3 (WSL Ubuntu, Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39)",
+ "cpu": "AMD Ryzen 9 7900X3D 12-Core Processor (24 logical CPUs)",
+ "arch": "x86_64",
+ "mem_bytes": "67792482304",
+ "ncpu": "24",
+ "docker": "28.5.1",
+ "docker_vm": "24 CPUs, 58967851008 bytes, kernel 6.6.87.2-microsoft-standard-WSL2, Docker Desktop",
+ "note": "A shared workstation: other agents' idle stacks ran beside the benchmark containers, and builds were kept off the machine during every run by a machine-wide lock. Not comparable with the Apple M1 Pro figures of docs/perf-data/2026-10-03 and 2026-10-13."
+}
