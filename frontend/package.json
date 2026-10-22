@@ -62,7 +62,7 @@
     "dompurify": "^3.4.17",
     "leaflet": "^1.9.4",
     "lucide-svelte": "npm:@lucide/svelte@^1.57.0",
-    "maplibre-gl": "^6.14.0",
+    "maplibre-gl": "^6.15.0",
     "marked": "^18.1.1",
     "n3": "^2.13.12",
     "pbf": "^5.1.2",
