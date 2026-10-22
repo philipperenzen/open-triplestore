@@ -1,0 +1,34 @@
+{
+  "args": [
+    "annotations",
+    "/data/run",
+    "100000",
+    "20000",
+    "full"
+  ],
+  "command": "annotations",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "after_optimize": {
+      "dir_mib": 4222.73,
+      "optimize_ms": 9879.46,
+      "rocksdb_mib": 4211.73
+    },
+    "annotation_quads": 5400000,
+    "annotation_quads_written": 5400000,
+    "assets": 100000,
+    "batch_assets": 20000,
+    "changes_db_mib": 11.0,
+    "consumer_ms": 201273.42,
+    "data_quads": 900000,
+    "dir_mib": 4385.28,
+    "load_ms": 19296.43,
+    "profile": "full",
+    "rocksdb_mib": 4374.27,
+    "seconds": 220.61
+  }
+}

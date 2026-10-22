@@ -1,0 +1,83 @@
+{
+  "args": [
+    "coldread",
+    "/data/run",
+    "https://example.org/otl/v09",
+    "20000000",
+    "100000",
+    "data",
+    "0",
+    "1000000",
+    "10000",
+    "20"
+  ],
+  "command": "coldread",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "true",
+    "OTS_PARALLEL_QUERY_MAX_TRIPLES": "12000000",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "build_ms": 56573.69,
+    "build_peak_rss_mib": 286.42,
+    "built_quads": 900000,
+    "latency": {
+      "after.filter_count": {
+        "max_ms": 45.56,
+        "n": 757,
+        "p50_ms": 25.54,
+        "p95_ms": 31.55
+      },
+      "after.lookup": {
+        "max_ms": 12.0,
+        "n": 4132068,
+        "p50_ms": 0.02,
+        "p95_ms": 0.03
+      },
+      "before.filter_count": {
+        "max_ms": 49.23,
+        "n": 740,
+        "p50_ms": 26.25,
+        "p95_ms": 32.51
+      },
+      "before.lookup": {
+        "max_ms": 14.8,
+        "n": 4041825,
+        "p50_ms": 0.02,
+        "p95_ms": 0.02
+      },
+      "during_build.filter_count": {
+        "max_ms": 429.73,
+        "n": 184,
+        "p50_ms": 308.95,
+        "p95_ms": 349.04
+      },
+      "during_build.lookup": {
+        "max_ms": 30.88,
+        "n": 2025283,
+        "p50_ms": 0.1,
+        "p95_ms": 0.18
+      },
+      "until_mirror_republished.filter_count": {
+        "max_ms": 1845.45,
+        "n": 767,
+        "p50_ms": 295.81,
+        "p95_ms": 345.86
+      },
+      "until_mirror_republished.lookup": {
+        "max_ms": 1422.62,
+        "n": 9474600,
+        "p50_ms": 0.09,
+        "p95_ms": 0.15
+      }
+    },
+    "mirror_enabled": true,
+    "mirror_published_before": true,
+    "mirror_republish_s": 233.61,
+    "phase_seconds": 20,
+    "settle_s": 187.13,
+    "store_quads": 10800192,
+    "version_graph_quads": 900000
+  }
+}

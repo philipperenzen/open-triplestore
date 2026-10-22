@@ -1,0 +1,15 @@
+{
+ "host_os": "Windows 11 Pro 10.0.26200 (10.0.26300 after an update during the run)",
+ "cpu": "AMD Ryzen 9 7900X3D 12-Core Processor",
+ "logical_cpus_visible_to_docker": 24,
+ "mem_visible_to_docker_kib": 57585792,
+ "docker_desktop_engine": "28.5.1",
+ "docker_vm_kernel": "6.6.87.2-microsoft-standard-WSL2",
+ "container_os": "Debian GNU/Linux 12 (bookworm)",
+ "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+ "build": "cargo build --release (profile.release: lto = true), features full,saml,test-utils,\u2026; Criterion: cargo bench --features full",
+ "stores": "Docker named volume (ext4)",
+ "image": "ots-chef-lint:081 (the builder image)",
+ "commit_base": "462b206c (develop, 0.8.0)",
+ "notes": "Other agents' idle containers (triplestore, MinIO, Ollama) ran on the same machine; no build or benchmark of theirs ran during a series (machine lock). Docker Desktop stopped once during series c; the steps it interrupted were re-run as series d."
+}

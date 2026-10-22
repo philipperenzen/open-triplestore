@@ -13,6 +13,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`OTS_APPLY_DELTA_TX_MAX_QUADS` defaults to 200 000 (was 50 000),** after
+  the delta-versions measurements of the design note's §8.2 were taken
+  (#536; `docs/performance.md`, "Delta versions at scale"): a tier-1 restore,
+  one transaction across the version's graphs, put a 0.9M-quad graph back in
+  3.4–19 s where tier 2 (copy and `MOVE`) took 87–148 s and 3 GiB, and at 9M
+  quads tier 2's transaction passed 36 GiB. A transaction holds about 2.8 KiB
+  per quad, 530 MiB at the new default, which stays under the payload cap so
+  that a tier-1 restore is still recorded as a `full` row. Every other cap
+  keeps its default, now with the measurement behind it in the configuration
+  docs. The perf gate gains capture-on benchmarks (`update/capture_*`,
+  `insert/capture_*`, `concurrent/capture_writes`), and
+  `examples/scale_delta.rs` runs the measurements.
+
 ### Deprecated
 
 ### Fixed
@@ -72,6 +86,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which HermiT did not decide in 15 minutes, are now decided in about 6 s per
   check and are no longer known failures. A request whose consistency test
   answers within the first 5 s runs as before.
+- **A bulk load killed mid-write no longer leaves its staging files behind.**
+  The bulk loader writes `bulk-<n>.sst` files beside the database and removes
+  them only after the ingest; a `kill -9` (or an OOM kill) left them for
+  good — 14–40 files (8–20 MiB) at every kill of the crash series (#536).
+  Opening the store now deletes them: its lock is held then, so no load of
+  it can be running.
 
 ### Security
 

@@ -488,8 +488,8 @@ settings! {
         .default("5000")
         .doc("Quiet period after a write before a large store's accelerator rebuilds in the background.");
     APPLY_DELTA_TX_MAX_QUADS: usize = Spec::new("OTS_APPLY_DELTA_TX_MAX_QUADS", at_least(1), "query")
-        .default("50000")
-        .doc("Quads one transaction of a non-atomic delta apply (a materialisation build) writes.");
+        .default("200000")
+        .doc("Quads a version restore applies in one transaction (tier 1), and one transaction of a delta build writes; keep it at or below OTS_CHANGE_CAPTURE_MAX_PAYLOAD.");
     CHECKPOINT_EVERY: usize = Spec::new("OTS_CHECKPOINT_EVERY", at_least(1), "query")
         .default("100")
         .doc("A dataset version is cut as a full checkpoint after this many delta versions.");
@@ -531,7 +531,7 @@ settings! {
         .doc("Keep the change log (always on for a replication leader).");
     CHANGE_CAPTURE_MAX_SCAN: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_SCAN", at_least(0), "query")
         .default("250000")
-        .doc("Quads a WHERE update's graphs may hold for a before-image to be taken.");
+        .doc("Quads a WHERE update's graphs may hold for a before-image to be taken (about 5 µs and 0.8 KiB each).");
     CHANGE_CAPTURE_MAX_PAYLOAD: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", at_least(0), "query")
         .default("250000")
         .doc("Quads a full change-log row may carry.");

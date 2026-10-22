@@ -1,0 +1,82 @@
+{
+  "args": [
+    "coldread",
+    "/data/run",
+    "https://example.org/otl/v09",
+    "20000000",
+    "100000",
+    "data",
+    "0",
+    "1000000",
+    "10000",
+    "20"
+  ],
+  "command": "coldread",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "build_ms": 48935.95,
+    "build_peak_rss_mib": 222.96,
+    "built_quads": 900000,
+    "latency": {
+      "after.filter_count": {
+        "max_ms": 340.1,
+        "n": 68,
+        "p50_ms": 291.77,
+        "p95_ms": 313.31
+      },
+      "after.lookup": {
+        "max_ms": 3.69,
+        "n": 915680,
+        "p50_ms": 0.08,
+        "p95_ms": 0.13
+      },
+      "before.filter_count": {
+        "max_ms": 339.24,
+        "n": 70,
+        "p50_ms": 286.77,
+        "p95_ms": 310.8
+      },
+      "before.lookup": {
+        "max_ms": 5.13,
+        "n": 895617,
+        "p50_ms": 0.08,
+        "p95_ms": 0.13
+      },
+      "during_build.filter_count": {
+        "max_ms": 375.98,
+        "n": 165,
+        "p50_ms": 294.78,
+        "p95_ms": 317.72
+      },
+      "during_build.lookup": {
+        "max_ms": 16.73,
+        "n": 2276728,
+        "p50_ms": 0.08,
+        "p95_ms": 0.13
+      },
+      "until_mirror_republished.filter_count": {
+        "max_ms": 0.0,
+        "n": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0
+      },
+      "until_mirror_republished.lookup": {
+        "max_ms": 0.22,
+        "n": 45,
+        "p50_ms": 0.08,
+        "p95_ms": 0.19
+      }
+    },
+    "mirror_enabled": false,
+    "mirror_published_before": false,
+    "mirror_republish_s": 0.0,
+    "phase_seconds": 20,
+    "settle_s": 0.0,
+    "store_quads": 10800192,
+    "version_graph_quads": 900000
+  }
+}
