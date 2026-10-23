@@ -34,6 +34,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Security
+- **The privacy-notice template now covers everything the store records
+  about a person.** `PRIVACY.md` said the word "telemetry" named only the
+  private usage tracking, and never mentioned the LLM request log, which
+  keeps each AI request's user ID, client IP address and, by default, a
+  200-character preview of the question for `OTS_LLM_LOG_RETENTION_DAYS`
+  (90 days) — personal data an operator's published notice left out. §2 now
+  tells the three kinds of instrumentation apart (memory-only workload
+  telemetry, usage tracking, the LLM request log), a new §4.7 documents the
+  log's fields, retention and the preview switch, §4.6 says what workload
+  telemetry and the validation-run rows hold, and the §7 retention
+  placeholder names the log. `docs/gdpr.md` gains the same, and says that
+  purging an account does not remove its rows from that log.
 
 ## [0.8.1] — 2026-10-22
 

@@ -39,8 +39,10 @@ graphs); account/identity data lives in a local metadata database.
 - **Whole graphs/datasets:** export a named graph or a dataset via the Graph
   Store and dataset/DCAT endpoints.
 - **Account data:** an operator/admin can retrieve a user's profile and an export
-  of audit entries relating to them (§2 of [PRIVACY.md](../PRIVACY.md) lists the
+  of audit entries relating to them (§4 of [PRIVACY.md](../PRIVACY.md) lists the
   stored fields).
+- **LLM request log:** an admin can list a user's rows
+  (`GET /api/admin/llm/requests?user_id=…`; PRIVACY.md §4.7 lists the fields).
 
 ### Art. 16 — Right to rectification
 
@@ -61,6 +63,9 @@ graphs); account/identity data lives in a local metadata database.
   (`admin_delete_user` → `purge`); a user can **self-deactivate** their own
   account (`DELETE /api/auth/account`). Plan for erasure in **backups** too
   (re-export or age them out per your retention policy).
+- **LLM request log rows** are not removed with the account: they age out
+  after `OTS_LLM_LOG_RETENTION_DAYS` (default 90), or remove them from the
+  metadata database directly (`DELETE FROM llm_request_log WHERE user_id = …`).
 
 ### Art. 18 — Right to restriction of processing
 
@@ -103,7 +108,10 @@ graphs); account/identity data lives in a local metadata database.
   unnecessarily sent to a third-party LLM (see [PRIVACY.md](../PRIVACY.md) §5).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
   RDF data, accounts, audit logs (which include IP/user-agent), the private
-  usage-tracking events, and backups.
+  usage-tracking events, the LLM request log (user ID, IP address and, by
+  default, a question preview; pruned after `OTS_LLM_LOG_RETENTION_DAYS`,
+  default 90, preview off with `OTS_LLM_LOG_PREVIEW_ENABLED=false`), and
+  backups.
 - **Special-category data (Art. 9).** If you load special-category data, ensure
   an Art. 9 condition applies and apply heightened safeguards.
 
@@ -130,6 +138,12 @@ operating them correctly is the operator's responsibility** (see
 - **Privacy-respecting usage tracking:** per-user data is visible only to that
   user; cross-user aggregates are restricted to `super_admin`; nothing leaves the
   instance.
+- **LLM request log** (administrators only): one metadata row per AI request —
+  user ID, client IP, endpoint, model, outcome, timings and, by default, a
+  200-character question preview; pruned after `OTS_LLM_LOG_RETENTION_DAYS`
+  (default 90), preview off with `OTS_LLM_LOG_PREVIEW_ENABLED=false`. Workload
+  telemetry (`GET /api/admin/telemetry`) is memory-only and holds no personal
+  data (PRIVACY.md §2).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
@@ -182,7 +196,7 @@ an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the ass
       reverse proxy; review bind addresses and CORS.
 - [ ] Configure **roles, ACLs, and dataset visibility**; apply least privilege.
 - [ ] Define **retention periods** (RDF data, accounts, audit logs, usage events,
-      backups) and enforce them.
+      the LLM request log, backups) and enforce them.
 - [ ] Establish a **data-subject-request** procedure mapped to the features in §2.
 - [ ] Establish an **incident-response & breach-notification** process; enable
       audit log review and alerting.

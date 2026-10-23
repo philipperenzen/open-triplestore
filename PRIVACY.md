@@ -35,10 +35,18 @@ mechanism that sends data to the project maintainers or to any third party
 chosen by the project.** There is no embedded analytics SDK, no crash reporter,
 and no background reporting endpoint controlled by the project.
 
-The word "telemetry" appears in the source code only in reference to a **private,
-local** usage-tracking feature (see §4) that records data in your own database
-on your own infrastructure. It is never transmitted off your instance by the
-software.
+The word "telemetry" appears in the source code only for instrumentation that
+stays on your instance:
+
+- **Workload telemetry** (`GET /api/admin/telemetry`, administrators only;
+  `src/store/telemetry.rs`) keeps exact query counters and fixed-size
+  in-memory samples of query latencies, SHACL validation timings and write
+  spacing. It holds no query text, user identifiers or IP addresses, is never
+  written to disk, and is lost on restart.
+- The **usage tracking** of §4.5 and the **LLM request log** of §4.7 are
+  stored in your own metadata database on your own infrastructure.
+
+None of it is ever transmitted off your instance by the software.
 
 All network calls the software can make are **either local to your own
 infrastructure or directed at endpoints that you explicitly configure**. They
@@ -123,7 +131,33 @@ A local, privacy-respecting feature records lightweight per-user usage events
 
 Application logs, optional backups, and (if configured) outbound operational
 alerts (§5) may incidentally contain identifiers. Treat backups as containing
-every category above.
+every category above. Workload telemetry (§2) is memory-only and holds no
+personal data; each SHACL validation run's row (`shacl_validation_runs`) also
+records the run's duration, quad count and data source — operational figures,
+not personal data.
+
+### 4.7 LLM request log
+
+When an LLM endpoint is configured (§5), every AI-backed request (a chat
+turn, natural-language→SPARQL, the SHACL assistant) lands one row in the
+`llm_request_log` table (`src/server/llm_guard.rs`), shown to administrators
+under **Admin → AI Requests** (`/admin/llm`, `GET /api/admin/llm/requests`).
+Each row holds: a timestamp, the **user ID** (empty for an anonymous caller),
+the **client IP address**, the endpoint and model, the outcome (`ok` /
+`error` / `blocked`) and the guard rule that fired, latency and
+time-to-first-token, prompt/answer sizes and query rounds, an error message
+if any, and — by default — a **short preview of the question** (its first
+200 characters). Message contents and answers are not stored.
+
+- **Retention:** rows older than `OTS_LLM_LOG_RETENTION_DAYS` (default
+  **90** days) are pruned each time a row is written.
+- **Preview switch:** set `OTS_LLM_LOG_PREVIEW_ENABLED=false` to keep no
+  question text at all; a row then holds only the metadata above.
+- User ID and IP address are personal data, and the preview may contain
+  whatever the user typed. Set the retention period and the preview switch to
+  match your notice (§7), and cover the log in your retention schedule.
+- This log never leaves your instance. It is separate from whatever the LLM
+  provider you configured logs on its own side (§5).
 
 ## 5. External network calls and how to disable each
 
@@ -207,7 +241,9 @@ above are essential; document any others your customised deployment introduces.
 - **International transfers:** _[where your servers and any processors are located;
   safeguards used]_
 - **Retention periods:** _[per category — RDF data, accounts, audit logs (incl.
-  IP/user-agent), usage events, backups]_
+  IP/user-agent), usage events, the LLM request log (§4.7:
+  `OTS_LLM_LOG_RETENTION_DAYS`, default 90 days, and whether the question
+  preview is kept), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_
