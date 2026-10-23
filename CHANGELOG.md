@@ -81,6 +81,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two design notes point at the implicit class-target ASK where it now is.
 
 ### Security
+- **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
+  generation and `u128` comparisons in the constant-time helpers that
+  `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
 - **The privacy-notice template now covers everything the store records
   about a person.** `PRIVACY.md` said the word "telemetry" named only the
   private usage tracking, and never mentioned the LLM request log, which
