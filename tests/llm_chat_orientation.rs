@@ -543,6 +543,43 @@ async fn ask_fence_is_a_complete_reply_and_skips_the_nudge() {
     );
 }
 
+/// A greeting is answered as one — no tools offered, no retrieval nudge, and
+/// the prompt says this turn is small talk. ("hi" used to come back as a
+/// dataset summary plus a SPARQL card: the nudge talked the model into a query.)
+#[tokio::test]
+async fn greeting_is_answered_without_tools_or_nudge() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(
+        gw,
+        &["Hoi! Ik help je de linked data op dit platform te verkennen."],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "hi").await;
+    assert_eq!(
+        resp["answer"],
+        "Hoi! Ik help je de linked data op dit platform te verkennen."
+    );
+    assert!(resp["queries"].as_array().is_none_or(|q| q.is_empty()));
+    let prompts = gw.prompts.lock().unwrap();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "no retrieval nudge is spent on a greeting"
+    );
+    assert!(
+        prompts[0]["tools"].is_null(),
+        "a greeting is offered no tools"
+    );
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("# THIS TURN"),
+        "the prompt marks the turn as small talk"
+    );
+}
+
 /// A declared PLAN is repeated back with every round's results, and never
 /// shown to the user.
 #[tokio::test]

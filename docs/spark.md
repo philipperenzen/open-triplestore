@@ -208,8 +208,13 @@ cheap tasks while chat gets a stronger one.
 Two guards make weaker models useful anyway: a reply that writes the query in a
 ```` ```sparql ```` fence instead of the `SPARQL:` directive is still executed
 (while nothing has been retrieved yet that turn), and a turn that asks for no
-query at all gets one explicit nudge to query before answering — the model may
-decline, and its original answer is kept when it does.
+query at all gets one explicit nudge to retrieve before answering, naming the
+tool that fits (full-text search for a name, vocabulary search for a class or
+property, a query for values) — the model may decline, and its original answer
+is kept when it does. A greeting, thanks or acknowledgement ("hi", "dank je
+wel", "ok") is answered as one: that turn offers no tools, gets no nudge, and
+the prompt tells the model not to query. Only messages made entirely of such
+words count, so "hi, which datasets are there?" is still a question.
 
 Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE), so progress (each query and its result) shows while the turn is still running; `POST /api/llm/chat` is the buffered fallback. Whether the answer text itself streams token by token depends on the protocol: on the directive protocol (`OTS_LLM_CHAT_TOOLS=off`, or a gateway that rejects native tools) the rounds after the first retrieval stream token by token; with native tools active every completion is a single request and the answer arrives when its round completes.
 
