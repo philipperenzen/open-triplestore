@@ -3120,7 +3120,7 @@ impl TripleStore {
             }
             loader.load_quads(std::mem::take(&mut chunk))?;
             // The SST files are written here, outside the sequence section,
-            // which then holds only their ingestion.
+            // which then holds only their ingestion, shared with other loads.
             loader.prepare()?;
             Ok(())
         })();
@@ -3152,7 +3152,7 @@ impl TripleStore {
             .map(|d| CountChange::By(d.graph.clone(), d.added_n as i64))
             .collect();
         self.changes
-            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            .commit_additive_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
         info!("Data loaded successfully (streamed, recorded)");
         match counts {
             Some(counts) => self.apply_count_changes(&counts),
@@ -3323,9 +3323,9 @@ impl TripleStore {
             return Err(e.into());
         }
         // oxigraph 0.5: stage-then-commit (see load_reader_with_base); the
-        // section holds the ingestion only.
+        // ingestion holds the section shared with other loads.
         self.changes
-            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            .commit_additive_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
         info!("Data loaded successfully");
         let delta = match (to_graph, fresh_mask) {
@@ -4214,10 +4214,11 @@ impl TripleStore {
                 }
                 return Err(e.into());
             }
-            // oxigraph 0.5: stage-then-commit; the section holds the
-            // ingestion only.
-            self.changes
-                .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            // oxigraph 0.5: stage-then-commit; the ingestion holds the section
+            // shared with other loads.
+            self.changes.commit_additive_with(intent, deltas, || {
+                loader.commit().map_err(StoreError::from)
+            })?;
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();
@@ -6015,7 +6016,11 @@ mod delta_primitive_tests {
         let before = store.changes().last_seq();
         store.bulk_insert_quads(quads, &affected).unwrap();
         let rows = store.changes().rows_after(before, 10);
-        let row = |g: &str| rows.iter().find(|r| r.graph_iri.as_deref() == Some(g)).unwrap();
+        let row = |g: &str| {
+            rows.iter()
+                .find(|r| r.graph_iri.as_deref() == Some(g))
+                .unwrap()
+        };
         assert_eq!((row(small).extent, row(small).added_n), (Extent::Full, 3));
         assert_eq!((row(big).extent, row(big).added_n), (Extent::Counts, 6));
         assert!(row(big).added.is_none());

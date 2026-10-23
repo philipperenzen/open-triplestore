@@ -411,10 +411,15 @@ pub struct ChangeLog {
     /// persisted in `meta` before a sweep (which may empty the table) and by
     /// the open-time repair, and recomputed from `MAX(seq)` at open.
     next_seq: AtomicI64,
-    /// Brackets the data commit and hands out the ticket that orders its
-    /// rows' finalisation, so `seq` order is commit order without
-    /// serialising evaluation (§4.3). Holds the next ticket.
-    section: Mutex<u64>,
+    /// Brackets the data commit, so `seq` order is commit order without
+    /// serialising evaluation (§4.3). A commit that only adds quads (a bulk
+    /// load's SST ingestion) holds it shared, any other commit exclusively:
+    /// additions commute, so concurrent ingestions need no order among
+    /// themselves, only against a write that may remove.
+    section: RwLock<()>,
+    /// The next ticket, taken inside the section once the commit is in. It
+    /// orders the rows' finalisation.
+    next_ticket: AtomicU64,
     /// The ticket whose rows are finalised next. Writers finalise in ticket
     /// order outside the section, so one write's rows are written while the
     /// next one commits.
@@ -696,7 +701,8 @@ impl ChangeLog {
             recording,
             epoch: RwLock::new(epoch),
             next_seq: AtomicI64::new(meta_next.max(max_seq + 1)),
-            section: Mutex::new(0),
+            section: RwLock::new(()),
+            next_ticket: AtomicU64::new(0),
             turn: (Mutex::new(0), std::sync::Condvar::new()),
             max_scan: crate::config::CHANGE_CAPTURE_MAX_SCAN.get(),
             max_payload: crate::config::CHANGE_CAPTURE_MAX_PAYLOAD.get(),
@@ -716,7 +722,8 @@ impl ChangeLog {
             recording: false,
             epoch: RwLock::new(String::new()),
             next_seq: AtomicI64::new(0),
-            section: Mutex::new(0),
+            section: RwLock::new(()),
+            next_ticket: AtomicU64::new(0),
             turn: (Mutex::new(0), std::sync::Condvar::new()),
             max_scan: 0,
             max_payload: 0,
@@ -852,34 +859,61 @@ impl ChangeLog {
     /// through. Rows for graphs the intent did not know are added. Returns
     /// once the rows are finalised.
     ///
-    /// The section holds the commit alone. The payloads are serialised
-    /// before it, and the rows are finalised after it in the order of the
-    /// tickets it hands out, which is commit order: while one write's rows
-    /// are numbered the next write commits, and `seq` order stays commit
-    /// order.
+    /// The section holds the commit alone, exclusively. The payloads are
+    /// serialised before it, and the rows are finalised after it in the
+    /// order of the tickets taken in it, which is commit order: while one
+    /// write's rows are numbered the next write commits, and `seq` order
+    /// stays commit order.
     pub fn commit_with<E>(
         &self,
         intent: Option<Intent>,
         deltas: Vec<GraphDelta>,
         commit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
+        self.commit_in_section(intent, deltas, commit, false)
+    }
+
+    /// As [`Self::commit_with`] for a commit that only adds quads, as a bulk
+    /// load's SST ingestion does: it holds the section shared, so concurrent
+    /// ingestions run side by side (each takes about as long as staging the
+    /// batch did). Their relative order is whichever finished first; it
+    /// cannot matter, because additions commute. Against a write that may
+    /// remove quads, which holds the section exclusively, the order is still
+    /// commit order.
+    pub fn commit_additive_with<E>(
+        &self,
+        intent: Option<Intent>,
+        deltas: Vec<GraphDelta>,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.commit_in_section(intent, deltas, commit, true)
+    }
+
+    fn commit_in_section<E>(
+        &self,
+        intent: Option<Intent>,
+        deltas: Vec<GraphDelta>,
+        commit: impl FnOnce() -> Result<(), E>,
+        additive: bool,
+    ) -> Result<(), E> {
         let Some(intent) = intent else {
             return commit();
         };
         let rows: Vec<RowValues> = deltas.into_iter().map(|d| self.row_values(d)).collect();
-        let ticket = {
-            let mut next = self.section.lock().unwrap_or_else(|p| p.into_inner());
-            match commit() {
-                Ok(()) => {
-                    let ticket = *next;
-                    *next += 1;
-                    ticket
-                }
-                Err(e) => {
-                    drop(next);
-                    self.abort(intent);
-                    return Err(e);
-                }
+        // The ticket is taken before the section is left, so a head read,
+        // which takes it exclusively, sees every committed write's ticket.
+        let committed = if additive {
+            let _section = self.section.read().unwrap_or_else(|p| p.into_inner());
+            commit().map(|()| self.next_ticket.fetch_add(1, Ordering::SeqCst))
+        } else {
+            let _section = self.section.write().unwrap_or_else(|p| p.into_inner());
+            commit().map(|()| self.next_ticket.fetch_add(1, Ordering::SeqCst))
+        };
+        let ticket = match committed {
+            Ok(ticket) => ticket,
+            Err(e) => {
+                self.abort(intent);
+                return Err(e);
             }
         };
         let _turn = self.take_turn(ticket);
@@ -899,7 +933,7 @@ impl ChangeLog {
     }
 
     /// Wait until every write that committed before `next_ticket` was handed
-    /// out has its rows finalised. Called inside the section, so no ticket
+    /// out has its rows finalised. Called holding the section exclusively, so no ticket
     /// is handed out meanwhile.
     fn drain(&self, next_ticket: u64) {
         let (lock, cv) = &self.turn;
@@ -1315,10 +1349,10 @@ impl ChangeLog {
     /// and its sequence number, so a store snapshot `f` opens holds exactly
     /// the writes at or below the head. A backup opens its dump here.
     pub fn at_head<T>(&self, f: impl FnOnce() -> T) -> (i64, T) {
-        let section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        let _section = self.section.write().unwrap_or_else(|p| p.into_inner());
         // Every write that committed has its rows numbered before the head
         // is read.
-        self.drain(*section);
+        self.drain(self.next_ticket.load(Ordering::SeqCst));
         let head = if self.conn.is_none() {
             0
         } else {
@@ -2119,8 +2153,8 @@ impl ChangeLog {
     /// open does: what this run still writes goes unrecorded. `Ok(false)`
     /// when there is nowhere to put it (an in-memory store, capture off).
     pub fn restore_from(&self, src: &Path) -> Result<bool, StoreError> {
-        let section = self.section.lock().unwrap_or_else(|p| p.into_inner());
-        self.drain(*section);
+        let _section = self.section.write().unwrap_or_else(|p| p.into_inner());
+        self.drain(self.next_ticket.load(Ordering::SeqCst));
         let source = Connection::open(src).map_err(sql_err)?;
         if let Some(mut conn) = self.lock() {
             copy_database(&source, &mut conn)?;
@@ -2543,8 +2577,9 @@ mod tests {
         let _ = again;
     }
 
-    /// §4.3 with the rows finalised outside the section: concurrent writers
-    /// still get `seq` in commit order, and a head read while they run
+    /// §4.3 with the rows finalised outside the section and bulk ingestions
+    /// sharing it: against any write that may remove, `seq` order is still
+    /// commit order, the sequence stays dense, and a head read while they run
     /// never runs ahead of the rows the log holds.
     #[test]
     fn concurrent_writes_are_sequenced_in_commit_order() {
@@ -2569,16 +2604,28 @@ mod tests {
             .map(|t| {
                 let (log, committed) = (log.clone(), committed.clone());
                 std::thread::spawn(move || {
+                    // Even threads commit additively (shared), odd ones
+                    // exclusively.
+                    let additive = t % 2 == 0;
                     for i in 0..25 {
                         let g = Some(format!("http://g/{t}/{i}"));
                         let intent = log
                             .begin("test", Some(std::slice::from_ref(&g)), &|_| Some(0))
                             .unwrap();
                         leave_write();
-                        log.commit_with::<()>(Some(intent), vec![], || {
+                        let commit = || {
                             committed.lock().unwrap().push(g.clone().unwrap());
+                            if additive {
+                                // Long enough for two to overlap.
+                                std::thread::sleep(std::time::Duration::from_micros(200));
+                            }
                             Ok(())
-                        })
+                        };
+                        if additive {
+                            log.commit_additive_with::<()>(Some(intent), vec![], commit)
+                        } else {
+                            log.commit_with::<()>(Some(intent), vec![], commit)
+                        }
                         .unwrap();
                     }
                 })
@@ -2590,10 +2637,23 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         reader.join().unwrap();
         let rows = log.rows_after(0, 10_000);
-        let by_seq: Vec<String> = rows.iter().filter_map(|r| r.graph_iri.clone()).collect();
-        assert_eq!(by_seq, *committed.lock().unwrap());
         let seqs: Vec<i64> = rows.iter().filter_map(|r| r.seq).collect();
         assert_eq!(seqs, (1..=200).collect::<Vec<i64>>());
+        // Against an exclusive commit, seq order is commit order; two
+        // additive commits may be in either order.
+        let by_seq: Vec<String> = rows.iter().filter_map(|r| r.graph_iri.clone()).collect();
+        let committed = committed.lock().unwrap();
+        let at = |list: &[String], g: &str| list.iter().position(|x| x == g).unwrap();
+        let exclusive = |g: &str| g.split('/').nth(3).unwrap().parse::<usize>().unwrap() % 2 == 1;
+        for a in committed.iter() {
+            for b in committed.iter().filter(|b| exclusive(b) || exclusive(a)) {
+                assert_eq!(
+                    at(&committed, a) < at(&committed, b),
+                    at(&by_seq, a) < at(&by_seq, b),
+                    "{a} and {b}"
+                );
+            }
+        }
     }
 
     #[test]
