@@ -33,6 +33,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **A demo refresh keeps the files operators added to the demo dataset.**
+  When the bundled 3D demo's content version moved (the first boot of a new
+  release), the refresh purged every asset of the `viewer-3d-demo` dataset
+  before reseeding, the seeder's own files and an operator's uploads alike;
+  the graphs imported from an operator's IFC file stayed, so the 3D viewer
+  could no longer load its geometry. The refresh now removes only what the
+  seeder created — the landmark STLs by their stable ids, the demo IFC
+  buildings (current and withdrawn) by filename at the root of the file
+  manager — and logs the count at `warn`; everything else in the dataset
+  stays. Upgrades before this change (0.7.x → 0.8.0 among them) may already
+  have removed such files: their asset rows and objects are gone, and the
+  files have to be uploaded again.
 ### Security
 - **The privacy-notice template now covers everything the store records
   about a person.** `PRIVACY.md` said the word "telemetry" named only the

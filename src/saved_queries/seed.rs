@@ -750,6 +750,25 @@ fn seed_bag_buildings(state: &AppState) {
 // stayed on its side and no bearing ever appeared.
 const DEMO_CONTENT_VERSION: u32 = 18;
 
+/// Files earlier releases seeded into the demo dataset and later withdrew;
+/// a refresh still removes them.
+const WITHDRAWN_SEED_FILENAMES: &[&str] = &["Schependomlaan.ifc"];
+
+/// Whether `asset` is one the demo seeders created: a landmark STL (by its
+/// stable id) or an IFC building the seed imported, current or withdrawn
+/// (by its filename at the root of the file manager — the IFC importer
+/// mints a fresh id per import, so an earlier reseed's duplicate is known
+/// only by name). An operator's own upload into the demo dataset is
+/// neither, and a refresh leaves it alone.
+fn is_seeded_demo_asset(asset: &crate::auth::models::Asset) -> bool {
+    if STL_LANDMARKS.iter().any(|(id, _, _)| *id == asset.id) {
+        return true;
+    }
+    asset.folder.is_empty()
+        && (IFC_BUILDINGS.iter().any(|b| b.name == asset.filename)
+            || WITHDRAWN_SEED_FILENAMES.contains(&asset.filename.as_str()))
+}
+
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
 /// back-fills any bundled graph found empty on the same pass.
@@ -848,14 +867,17 @@ fn refresh_demo_content(state: &AppState) {
             }
         }
     }
-    // Purge ALL of the demo dataset's assets: the seeders recreate the current
-    // set this boot, and anything not recreated is by definition withdrawn
-    // (Schependomlaan's academic-use IFC) or a duplicate from an earlier
-    // reseed (every version bump re-imported the IFC buildings into fresh
-    // asset rows without removing the previous ones).
+    // Purge the assets the seeders created, and only those: the seeders
+    // recreate the current set this boot, and a seeded asset not recreated is
+    // withdrawn (Schependomlaan's academic-use IFC) or a duplicate from an
+    // earlier reseed (every version bump re-imported the IFC buildings into
+    // fresh asset rows without removing the previous ones). Anything else in
+    // the dataset is an operator's own upload and stays — up to 0.8.0 this
+    // purged every asset of the dataset, operators' files included.
     if let Ok(assets) = state.auth_db.list_dataset_assets(DS) {
-        let n = assets.len();
-        for a in assets {
+        let (seeded, kept): (Vec<_>, Vec<_>) = assets.into_iter().partition(is_seeded_demo_asset);
+        let n = seeded.len();
+        for a in seeded {
             let storage = state.object_store.clone();
             let key = a.s3_key.clone();
             // Best-effort object delete on the blocking-safe path; the DB row
@@ -866,7 +888,10 @@ fn refresh_demo_content(state: &AppState) {
             }
         }
         if n > 0 {
-            tracing::info!("demo refresh: purged {n} demo assets before reseed");
+            tracing::warn!(
+                "demo refresh: purged {n} seeded demo assets before reseed ({} operator-added assets kept)",
+                kept.len()
+            );
         }
     }
     tracing::info!(
@@ -1211,6 +1236,71 @@ mod tests {
 
         run_seed(&state).await;
         assert_eq!(icdd_grade(&state), vec!["Partial".to_string()]);
+    }
+
+    /// The refresh purges what the seeders created and nothing else: an
+    /// operator's own upload into the demo dataset survives a content-version
+    /// bump (up to 0.8.0 the refresh wiped every asset of the dataset), while
+    /// a seeded landmark (its stable id) and a demo IFC left by an earlier
+    /// reseed (a seeded filename at the root) go.
+    #[tokio::test]
+    async fn version_refresh_keeps_operator_added_assets() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        run_seed(&state).await;
+        const DS: &str = "viewer-3d-demo";
+        let operator = state
+            .auth_db
+            .create_user("op-1", "operator", "op@x.test", "hash", SystemRole::Admin)
+            .unwrap();
+        let add = |id: &str, filename: &str, folder: &str| {
+            state
+                .auth_db
+                .create_asset(
+                    id,
+                    DS,
+                    filename,
+                    "application/x-step",
+                    &format!("datasets/{DS}/{id}/{filename}"),
+                    1,
+                    &operator.id,
+                    true,
+                    folder,
+                )
+                .unwrap();
+        };
+        add("op-survey", "site-survey.ifc", "");
+        // The operator's own copy of a demo file, in a folder of their own.
+        add("op-duplex", "Duplex.ifc", "my-models");
+        // What earlier reseeds left: a demo IFC, a landmark, a withdrawn file.
+        add("old-reseed-duplex", "Duplex.ifc", "");
+        add("demo-stl-sanno-shrine", "Nagasaki_torii_shrine.stl", "");
+        add("old-schependomlaan", "Schependomlaan.ifc", "");
+
+        // An install one content version behind: the refresh runs this boot.
+        let meta = format!("{}/{DS}/seed-meta", seed_data::DEMO_BASE);
+        state
+            .store
+            .graph_store_put(
+                Some(meta.as_str()),
+                &format!(
+                    "<{}/{DS}> <https://opentriplestore.org/ns#demoContentVersion> \
+                     \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                    seed_data::DEMO_BASE,
+                    DEMO_CONTENT_VERSION - 1
+                ),
+                oxigraph::io::RdfFormat::NTriples,
+            )
+            .unwrap();
+        run_seed(&state).await;
+
+        let left: Vec<String> = state
+            .auth_db
+            .list_dataset_assets(DS)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, vec!["op-survey".to_string(), "op-duplex".to_string()]);
     }
 
     /// A stand-in S3 endpoint on its own runtime, alive for the rest of the test
