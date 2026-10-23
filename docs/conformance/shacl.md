@@ -290,10 +290,11 @@ fixed real engine bugs:
 - **Node-level `sh:nodeKind`**: `sh:Literal` could never match (focus nodes were
   strings); focus nodes are now typed terms, so classification is exact.
 - **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
-  keyed by `(focus, path)` only and rayon worker caches survive across validation passes,
+  keyed by `(focus, path)` only and rayon worker caches survived across validation passes,
   so two stores in one process sharing a focus IRI + path could serve each other stale
-  values — nondeterministic validation results. Cache keys now include a process-unique
-  per-store id.
+  values — nondeterministic validation results. Cache keys were given a process-unique
+  per-store id; the cache itself went with the engine rebuild (#347), which reads one
+  `DataView` per run instead of caching per worker.
 - **`sh:value` of SPARQL-based results** (2026-10-02, found by the full-report
   level): when a `sh:sparql` constraint or a `sh:select` validator on a node
   shape leaves `?value` unbound, SHACL §5.3.2 makes the focus node the value;

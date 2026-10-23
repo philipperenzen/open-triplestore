@@ -116,7 +116,7 @@ curl -s -X POST http://localhost:7878/api/admin/users \
   -d '{"username":"bob","email":"bob@example.com","password":"secret123","role":"user"}'
 ```
 
-Valid roles: `user`, `admin`. You cannot create a user with a higher role than your own.
+Valid roles: `guest`, `user` (the default), `admin` and `super_admin` (the last only by a super_admin). You cannot create a user with a higher role than your own.
 
 ### Change a user's role
 

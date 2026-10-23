@@ -7,7 +7,9 @@ The next version is the bump applied to the latest `vX.Y.Z` tag, or with
 `--line X.Y` (a `release/X.Y` maintenance branch, patch only) to the latest
 `vX.Y.*` tag. The script then:
 
-- sets `[package] version` in Cargo.toml and the matching Cargo.lock entry;
+- sets `[package] version` in Cargo.toml and the matching Cargo.lock entry, and
+  the `"version"` of frontend/package.json and frontend/package-lock.json (its
+  top-level field and the root `packages[""]` entry, as `npm version` would);
 - updates the "current release" line and the sample version response in
   README.md (a maintenance line leaves README alone);
 - on a minor or major release, rewrites the supported-versions tables in
@@ -98,6 +100,37 @@ def bump_cargo(old, new):
         "the open-triplestore entry in Cargo.lock",
     )
     write("Cargo.lock", lock)
+
+
+def bump_frontend(new):
+    """The frontend is a private package, so its version only mirrors the
+    release. npm keeps the two root fields of package-lock.json in step with
+    package.json, and so does this."""
+    text = read("frontend/package.json")
+    text = sub_once(
+        r'(^  "version": ")[^"]+(")',
+        rf"\g<1>{new}\g<2>",
+        text,
+        "the version field in frontend/package.json",
+        flags=re.M,
+    )
+    write("frontend/package.json", text)
+    lock = read("frontend/package-lock.json")
+    lock = sub_once(
+        r'(^  "version": ")[^"]+(")',
+        rf"\g<1>{new}\g<2>",
+        lock,
+        "the top-level version in frontend/package-lock.json",
+        flags=re.M,
+    )
+    lock = sub_once(
+        r'(^    "": \{\n      "name": "open-triplestore-frontend",\n      "version": ")[^"]+(")',
+        rf"\g<1>{new}\g<2>",
+        lock,
+        'the root packages[""] version in frontend/package-lock.json',
+        flags=re.M,
+    )
+    write("frontend/package-lock.json", lock)
 
 
 def bump_readme(new):
@@ -205,6 +238,7 @@ def main():
         fail(f"tag v{new} already exists")
 
     bump_cargo(old, new)
+    bump_frontend(new)
     if not args.line:
         bump_readme(new)
     if args.bump != "patch":

@@ -58,7 +58,8 @@ the bump level; the workflows do the rest. It takes three clicks and two PR revi
    which:
    - takes the latest `vX.Y.Z` tag and applies the bump, so `minor` after `v0.7.0`
      gives `0.8.0`;
-   - sets the version in `Cargo.toml`, `Cargo.lock` and `README.md`;
+   - sets the version in `Cargo.toml`, `Cargo.lock`, `README.md`,
+     `frontend/package.json` and `frontend/package-lock.json`;
    - turns `[Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md) into a dated
      `## [X.Y.Z] — YYYY-MM-DD` section. It adds `None.` for a missing
      `### Deprecated` or `### Security` group, opens a fresh `[Unreleased]` and
@@ -191,19 +192,26 @@ and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). For each release tag,
   the intro, one line per entry, `### Security` and `### Deprecated` in full, and a
   link to the whole section in `CHANGELOG.md`. The tag message always carries the
   section whole.
-- **`perf-baseline.yml`** — re-anchors the authoritative performance baseline
-  ([`benches/perf_baseline.json`](../benches/perf_baseline.json)) by running the full
-  Criterion suite and opening a `chore/perf-baseline-refresh` PR back to `develop`
-  (`auto-tag.yml` dispatches it on the new tag). The
-  baseline is refreshed **only** here (and on manual dispatch), never from PR runs, so
-  in-flight changes can't drift the reference the gate checks against.
+- **`perf-baseline.yml`** — refreshes the committed performance baseline
+  ([`benches/perf_baseline.json`](../benches/perf_baseline.json)): the `tolerances`
+  map the PR gate reads, plus the tracked absolute medians per benchmark — the
+  record of where performance is over time, which an A/B gate cannot give. It runs
+  the full Criterion suite, re-measures the gated subset twice under gate conditions,
+  and opens a `chore/perf-baseline-refresh` PR back to `develop` (`auto-tag.yml`
+  dispatches it on the new tag). The baseline's numbers are refreshed **only** here
+  (and on manual dispatch), never from PR runs, so in-flight changes can't drift the
+  tracked record; the tolerances are kept as committed.
 
 On every PR, and on pushes to `main`/`release/**`, the standing gates run:
 
 - **`ci.yml`** — build, Clippy, tests, conformance suites, the named **security**
   regression gate, a dependency audit (cargo-deny + `npm audit`), and a secret scan.
-- **`perf.yml`** — the performance-**regression gate**: a fast subset of the
-  Criterion suite compared against the committed baseline; a regression fails the job.
+- **`perf.yml`** — the performance-**regression gate**: the gated Criterion subset is
+  benched alternately for the PR's base commit and the change on one runner (two
+  passes each, plus a third pass for the benchmarks the first two flag), and the two
+  sides are compared by `scripts/perf_regression.py` with the tolerances from
+  `benches/perf_baseline.json`; a confirmed regression fails the job. The baseline's
+  own numbers are not what a PR is graded against.
 
 `develop` is deliberately **not** in the push lists: every change reaches it through a
 PR (which runs the gates), and the `develop → main` release PR runs them again — so a
@@ -253,10 +261,10 @@ Released images are published to the GitHub Container Registry:
 docker pull ghcr.io/philipperenzen/open-triplestore:latest
 
 # a specific release
-docker pull ghcr.io/philipperenzen/open-triplestore:0.2.1
+docker pull ghcr.io/philipperenzen/open-triplestore:0.8.1
 
 # the latest patch on a minor line
-docker pull ghcr.io/philipperenzen/open-triplestore:0.2
+docker pull ghcr.io/philipperenzen/open-triplestore:0.8
 ```
 
 The image is built with `--features image` — `full`, `saml` and the three SQL

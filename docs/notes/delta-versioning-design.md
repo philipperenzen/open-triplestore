@@ -314,7 +314,7 @@ Conventions, from the read-boundary follow-up: read routes join `dataset_version
 | RocksDB bulk load, 1M / 10M / 100M | 7.1 s / 59 s / 734 s; 0.14–0.17 Mt/s | `docs/performance.md:585-586` |
 | PUT replace, 900k quads | 17.7 s / 18.8 s before, 32.3 s / 30.2 s as one transaction; "+70 %" accepted | `docs/performance.md:678`, `:680` |
 | SHACL, 0.9M, 6 shapes | 10.8 s pre-rebuild; 0.64–0.93 s HTTP / 0.72 s in-process after | `docs/performance.md:624`, `:657` |
-| SHACL, 9M, 6 shapes | 118 s pre-rebuild; **post-rebuild unmeasured** (no SHACL row at `:687-697`) | `:624` |
+| SHACL, 9M, 6 shapes | 118 s pre-rebuild; **6.29 s on the mirror / 13.5 s at 4 GB** after (2026-09-16, `tests/scale_shacl_9m.rs`) | `:624`; `docs/performance.md`, "The 9M SHACL measurement"; `analytical-mirror-design.md` §1.5 |
 | mirror rebuild, 1.7M | ~29 s inline, on a laptop | `src/store/parallel_mirror.rs:88-90` |
 | write-path budget | no benchmark may slow by more than 20 % | the programme brief (not in the repository) |
 
@@ -344,7 +344,7 @@ The maintainer's steer replaces the author's draft position ("not a good fit"): 
 
 *The gating experiment.* Harness: `examples/scale_otl.rs` (usage `scale_otl <assets> <data_dir> [writers] [readers] [seconds]`, `:17`; 1M assets ≈ 9M quads, six property shapes at `:69`, in-process `shacl::engine::validate` at `:194`), plus the same store over HTTP through a Studio pipeline (`POST /api/shacl/pipelines/:id/run`, `spawn_blocking` at `src/shacl_studio/handlers.rs:1341`), the path users take. Two configurations: (A) the mirror source, `OTS_PARALLEL_QUERY_MAX_TRIPLES` raised above 9M (default cap 2M, `src/store/parallel_mirror.rs:56`; the RAM-derived cap admits 9M only at roughly 36.9 GB); (B) the RocksDB snapshot source with the run index at its defaults (`OTS_SHACL_RUN_INDEX_MAX_QUADS` = memory/8/300 clamped 250k..8M, `OTS_SHACL_RUN_INDEX_MIN_PROBES` 20 000, `src/shacl/view.rs:141-153`) and disabled. Record per run: wall time, source taken, peak RSS, indexed versus dropped (predicate, direction, graph) pairs, `duration_ms` and `results_count` from `pipeline_runs` (`src/auth/db.rs:949-962`). Then the **gate-sandbox cost**: one Graph Store POST of 1 000 quads into the 9M graph with a gating pipeline, which dumps and re-parses the whole graph as Turtle before validating (`seed_existing_graph`, `src/shacl_studio/gate.rs:55`). Finally the **shape-update revalidation**, workload (ii): edit one property shape and re-run.
 
-*Decision thresholds*, proposed for the maintainer to confirm. Linear scaling from 0.72 s in-process predicts about 7 s at 9M on the mirror (`docs/performance.md:767-768` claims linearity). SHACL→SQL is **taken up** if configuration (B), the default at 9M, exceeds 60 s on the whole-dataset run *and* (A) cannot be reached within the deployment's RAM budget, or if the shape-update revalidation exceeds 60 s on whichever source is in use. It is **closed** if (B) comes in under 20 s: a second validator whose semantics must match the engine byte-for-byte is then a liability without a payoff. Between 20 and 60 s the decision waits for the analytical-mirror telemetry to show how often (ii) runs. The gate-sandbox number is reported separately: a compilation does not touch that path, and if the sandbox dominates the fix is the change log (validate the merged delta's focus nodes), not SQL. (It did dominate, about five whole validations; since #534 the gate validates the focus nodes of a merge or a delta without copying the graph, §9.5.)
+*Decision thresholds.* The thresholds are the ones [`analytical-mirror-design.md`](analytical-mirror-design.md) §1.5 fixes, and that section is the single source for them: (A) ≤ 15 s and (B) ≤ 60 s keeps SHACL→SQL deferred, (A) > 30 s or (B) > 120 s opens T4. Its run of 2026-09-16 (`tests/scale_shacl_9m.rs`: 6.29 s on the mirror, 13.5 s at 4 GB) settled the question — the translator stays deferred. One clause is this note's own and stands beside §1.5: SHACL→SQL is also **taken up** if the shape-update revalidation, workload (ii), exceeds 60 s on whichever source is in use. The 9M run did not time it separately; a shape edit re-runs at most the whole dataset, so the whole-run figures bound it from above. The gate-sandbox number is reported separately: a compilation does not touch that path, and if the sandbox dominates the fix is the change log (validate the merged delta's focus nodes), not SQL. (It did dominate, about five whole validations; since #534 the gate validates the focus nodes of a merge or a delta without copying the graph, §9.5.)
 
 ### 8.4 Phasing and approval
 
@@ -374,7 +374,7 @@ About 9 weeks against the painpoints document's 4-week Tier A estimate, which as
 6. **Materialisation budget.** Is the §8.6 default for `OTS_MATERIALISATION_MAX_QUADS` right, and is 507 right when exceeded?
 7. **Commit messages.** Only `/sparql` reads `x-commit-message` (`src/server/routes.rs:186`); should every path carry one?
 8. **Reasoner provenance.** Attribute derived-triple events to the regime IRI, the triggering commit, or both?
-9. **SHACL thresholds.** Are 20 s and 60 s at 9M right, and whose RAM budget defines "cannot reach configuration (A)"?
+9. **SHACL thresholds.** Which thresholds govern at 9M — this note's draft 20 s / 60 s or `analytical-mirror-design.md` §1.5's (A ≤ 15 s and B ≤ 60 s deferred; A > 30 s or B > 120 s opens T4) — and whose RAM budget defines "cannot reach configuration (A)"?
 10. **Import archives.** Should a replace-import archive whose pre-image was captured exactly (below the scan cap) be cut as a Published *delta* on the previous archive, relaxing "publish ⇒ physical" for that one producer? It removes the copy for small graphs at the price of Q1's backup gap for those archives; above the cap nothing changes either way.
 
 ### 8.6 Memory and disk sizing
@@ -427,7 +427,7 @@ Tests: `tests/delta_versions_http.rs` (14), `tests/delta_versions_budget.rs` (1)
 6. 2 million quads, and 507 when a build would exceed it.
 7. No change: only `/sparql` reads `x-commit-message`.
 8. Both: an event carries its commit when the write had one, and a statement of an entailment graph adds `ots:derivedBy` its regime.
-9. Answered by the 9M measurement of 2026-09-16 (`docs/performance.md`, "The 9M SHACL measurement"): 6.3 s on the mirror, 13.5 s in the 4 GB container, both under the 20 s at which §8.3 closes SHACL→SQL. The translator stays deferred.
+9. §1.5 of `analytical-mirror-design.md` governs (A ≤ 15 s and B ≤ 60 s keeps the translator deferred; A > 30 s or B > 120 s opens T4); §8.3 now points there and drops its draft 20 s / 60 s. Answered by the 9M measurement of 2026-09-16 (`tests/scale_shacl_9m.rs`; `docs/performance.md`, "The 9M SHACL measurement"): 6.29 s on the mirror (A), 13.5 s in the 4 GB container (B), both inside the deferral bounds. The translator stays deferred. The RAM-budget half falls away: §1.5 measures (B) on the shipped 4 GB default directly, so no "cannot reach (A)" clause is needed.
 10. No. Publish implies physical, so the replace-import archive stays a full copy above and below the cap.
 
 ### 9.4 Measurements

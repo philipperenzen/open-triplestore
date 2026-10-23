@@ -24,9 +24,10 @@ CityGML) parses the ISO-13249 **WKT-Z** forms that the 2D GEOS path leaves alone
 | Family | Functions |
 |---|---|
 | Metric | `distance3d`, `volume`, `area3d`, `zMin`, `zMax`, `height` |
-| Constructive | `boundingBox3d`, `centroid3d`, `footprint2d`, `extrude` |
-| Topological (AABB broad-phase) | `sf3dIntersects`, `sf3dDisjoint` |
+| Constructive | `boundingBox3d`, `centroid3d`, `footprint2d`, `extrude`, `convexHull3d` |
+| Topological (AABB broad phase + exact narrow phase) | `sf3dIntersects`, `sf3dDisjoint` (triangle-mesh test), `sf3dContains`, `sf3dWithin` (point-in-solid) |
 | Validity | `isClosed3d` — watertightness: every edge shared by exactly two faces (unbound for face-less geometry) |
+| Constructive solid geometry (`sfcgal3d` feature only) | `union3d`, `intersection3d`, `difference3d`, `volumeExact` |
 
 ```sparql
 PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
@@ -41,9 +42,17 @@ WHERE { ?b geo:hasGeometry/geo:asWKT ?w .
 Volumetric literals: `geo:asWKT` (`POLYHEDRALSURFACE Z`, for 1.1 clients) plus a
 loss-free `ots:cityjsonGeometryLiteral`. A 3D R*-tree (`[f64;3]` AABBs) backs the
 two-phase broad/narrow query. CRS: `EPSG:28992` (RD New), `EPSG:7415` (RD New +
-NAP), `CRS84`/`CRS84h`, Web Mercator; the kernel is pure-Rust (the exact
-`parry3d`/SFCGAL solid algebra is gated behind a future feature). Enabled by the
-`geometry3d` cargo feature (part of `full`).
+NAP), `CRS84`/`CRS84h`, Web Mercator.
+
+Feature gating: the whole `ots-geof:` surface is enabled by the `geometry3d` cargo
+feature (part of `full`, so in a plain `cargo build` and in the published image).
+WKT-Z parsing and the measures are pure Rust; the exact narrow phase — the
+triangle-mesh test behind `sf3dIntersects`/`sf3dDisjoint`, the point-in-solid test
+behind `sf3dContains`/`sf3dWithin`, and `convexHull3d` — is backed by `parry3d-f64`,
+also pure Rust with no native dependency. The boolean solid algebra (`union3d`,
+`intersection3d`, `difference3d`) and the certified `volumeExact` sit behind the
+separate `sfcgal3d` feature, which links the native libSFCGAL C library (≥ 2.0) and
+is in neither `full` nor the image; see [build features](build-features.md).
 
 ## 2. CityJSON (3D BAG) ingestion
 

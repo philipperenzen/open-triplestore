@@ -1,10 +1,14 @@
-# Refreshes the AUTHORITATIVE performance baseline (benches/perf_baseline.json).
+# Refreshes the committed performance baseline (benches/perf_baseline.json).
 #
-# The baseline is refreshed ONLY here — never from PR/push perf runs (perf.yml) —
-# so the reference point can't drift from in-flight changes. Runs the FULL
-# Criterion suite (not the subset the gate uses) for a complete, low-noise
-# measurement, then opens a PR to `develop` with the regenerated baseline so the
-# update is reviewed before it lands.
+# The baseline is not what a PR is graded against: perf.yml benches the PR's
+# base commit and the change on one runner and compares those two. The baseline
+# holds the `tolerances` map that comparison reads, plus the absolute medians
+# that track where performance is over time. Those numbers are refreshed ONLY
+# here — never from PR/push perf runs — so in-flight changes can't drift the
+# tracked record (the tolerances are kept as committed). Runs the FULL Criterion
+# suite (not the subset the gate uses) for a complete, low-noise measurement,
+# then opens a PR to `develop` with the regenerated baseline so the update is
+# reviewed before it lands.
 #
 # Triggers: manual (workflow_dispatch) for an on-demand refresh, and on each
 # released `v*` tag so every release re-anchors the baseline.

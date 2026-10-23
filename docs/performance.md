@@ -38,9 +38,9 @@ baseline. The HTML report includes interactive plots.
 
 > The `--save-baseline main` / `--baseline main` flow above is Criterion's own
 > *local* A/B comparison — handy for measuring a change on your own machine. It
-> is unrelated to the committed regression gate, which compares against
-> [`benches/perf_baseline.json`](../benches/perf_baseline.json) instead (next
-> section).
+> is unrelated to the committed regression gate, which benches the change and
+> its merge base itself and reads only the tolerances from
+> [`benches/perf_baseline.json`](../benches/perf_baseline.json) (next section).
 
 ---
 
@@ -2535,18 +2535,22 @@ HTTP `COUNT(*)` now beat Fuseki (see the comparison section).
 
 ### 5. Parallel SHACL evaluation — ✅ implemented
 
-`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
-parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
+`shacl::engine::validate` evaluates shapes (and their focus nodes) in parallel
+via `rayon::par_iter()`. There is no per-worker query cache: since the engine
+rebuild (#347) one `DataView` per run is shared by every rayon worker and no
+SPARQL runs on the per-focus-node path at all
+([`src/shacl/view.rs`](../src/shacl/view.rs)). What is cached is narrower: a
+per-run `ClosureMemo` of the `p+`/`p*` reach sets, shared across the workers
+and bounded by the run's memory budget (#467, `view.rs`); compiled `sh:pattern`
+regexes per thread (`cached_regex_match`,
+[`src/shacl/constraints.rs`](../src/shacl/constraints.rs)); and the shapes
+graph's constraint-component declarations per thread
+([`src/shacl/engine.rs`](../src/shacl/engine.rs)). The throughput figures that
+used to sit here were taken on the pre-rebuild engine; the current numbers are
+the 0.9M and 9M rows of the Fuseki comparison and "The 9M SHACL measurement
+(2026-09-16)" above.
 
-### 5. Parallel SHACL evaluation — ✅ implemented
-
-`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
-parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
-SHACL throughput climbs from 85 K to 286 K nodes/s as the dataset grows (the
-fixed shapes-loading cost amortizes across cores). Remaining headroom is in the
-fixed ~1 ms shapes-loading floor, not the per-node evaluation.
-
-### 6. Property path memoisation
+### 6. Property path memoisation — partly implemented (#467, per run)
 
 **Impact:** 2–5× improvement for repeated transitive path evaluations over
 the same graph.
@@ -2555,9 +2559,18 @@ the same graph.
 subgraph across multiple query invocations. A per-query or per-session
 visited-set cache would avoid redundant index probes on stable data.
 
-**Implementation:** Add a `PathCache` struct that stores `(start_node,
-property) → reachable_set` mappings; invalidate on writes to affected
-triples.
+**What exists:** the within-run half, for SHACL. #467 added the per-run
+`ClosureMemo` ([`src/shacl/view.rs`](../src/shacl/view.rs)): the reach sets
+one validation computed, per (path, graph selection, start node), so a closure
+that reaches a node whose own closure is known adds that set instead of
+walking it again. It lives and dies with the run and is bounded by the run's
+memory budget, so nothing is invalidated on write. Nothing is kept across runs
+or for SPARQL property paths; an earlier `src/store/path_cache.rs` went with
+the engine rebuild (#347).
+
+**Still open:** a cross-invocation `PathCache` storing `(start_node,
+property) → reachable_set` for the query path, invalidated on writes to the
+affected triples.
 
 ### 7. Named-graph index
 

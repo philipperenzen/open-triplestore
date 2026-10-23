@@ -56,6 +56,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the typo check knows them. A declaration that collides with a server
   setting or another plugin's is ignored with a warning. See
   [docs/plugins.md](docs/plugins.md#plugin-settings).
+- **Documentation brought back in line with the code.**
+  `docs/release-process.md` and the `perf-baseline.yml` header describe the
+  perf gate as it runs: the PR's base commit and the change benched
+  alternately on one runner and compared by `scripts/perf_regression.py` with
+  the baseline's tolerances — the baseline is the tolerance map plus the
+  tracked medians, not what a PR is graded against. `docs/performance.md`
+  loses a duplicated, half-finished SHACL section and the per-worker query
+  cache it claimed, which the engine rebuild (#347) removed (one `DataView`
+  per run, a per-run closure memo, per-thread regex and component caches),
+  and `docs/conformance/shacl.md` says the same; the SHACL→SQL decision
+  thresholds live in `analytical-mirror-design.md` §1.5 alone, with the
+  delta-versioning note pointing there and the 9M measurement filled in.
+  `docs/geo-3d-platform.md` lists the exact narrow phase `geometry3d` ships
+  and the four functions behind `sfcgal3d`; `docs/windows.md` says `saml` is
+  in `image`, not `full`; the modelling styleguide drops the `/vocabulary/`
+  IRIs the store never mints; `docs/owl2-dl.md` and the `owl2-rl` feature
+  comment describe the rules that exist (keys go to RL's `prp-key`; 78
+  rules); `docs/triplestore-comparison.md` grades RL Full, rescores SPARQL
+  1.2 readiness, fixes the cloud-native gaps line and ranks this store among
+  the reasoning-heavy stores; `docs/administration.md` lists every role
+  `POST /api/admin/users` accepts; `frontend/package.json` carries the
+  release version, which `release_prepare.py` now bumps with `Cargo.toml`;
+  two design notes point at the implicit class-target ASK where it now is.
+
 ### Security
 - **The privacy-notice template now covers everything the store records
   about a person.** `PRIVACY.md` said the word "telemetry" named only the
