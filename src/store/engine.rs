@@ -2150,34 +2150,48 @@ impl TripleStore {
         }
     }
 
-    /// The quads that would be new in each graph of `quads` (duplicates
-    /// within the batch and quads already stored do not count). A
-    /// version-snapshot graph is reported unknown rather than have its copy
-    /// stored a second time (delta note §2.2).
+    /// Whether `g` is a version's own graph, whose rows keep counts only.
+    fn is_snapshot_key(g: &Option<String>) -> bool {
+        g.as_deref().is_some_and(|g| g.contains("/version/"))
+    }
+
+    /// The quads that would be new in each graph of `graphs` (duplicates
+    /// within the batch and quads already stored do not count; quads of
+    /// other graphs are not probed). A version-snapshot graph gets exact
+    /// counts and no payload: its copy is not worth storing twice, and the
+    /// count lets the count index follow a copy batch by batch instead of
+    /// recounting the growing graph after each one (delta note §2.2).
     fn fresh_by_graph(
         &self,
         quads: &[Quad],
         graphs: &[Option<String>],
     ) -> Result<Vec<GraphDelta>, StoreError> {
+        let wanted: std::collections::HashSet<&Option<String>> = graphs.iter().collect();
         let mut seen: std::collections::HashSet<&Quad> =
             std::collections::HashSet::with_capacity(quads.len());
         let mut fresh: std::collections::BTreeMap<Option<String>, Vec<Quad>> =
             std::collections::BTreeMap::new();
-        let snapshot = |g: &Option<String>| g.as_deref().is_some_and(|g| g.contains("/version/"));
+        let mut fresh_n: std::collections::HashMap<Option<String>, usize> =
+            std::collections::HashMap::new();
         for q in quads {
             let g = Self::graph_key_of(q);
-            if snapshot(&g) || !seen.insert(q) {
+            if !wanted.contains(&g) || !seen.insert(q) {
                 continue;
             }
             if !self.store.contains(q.as_ref())? {
-                fresh.entry(g).or_default().push(q.clone());
+                if Self::is_snapshot_key(&g) {
+                    *fresh_n.entry(g).or_default() += 1;
+                } else {
+                    fresh.entry(g).or_default().push(q.clone());
+                }
             }
         }
         Ok(graphs
             .iter()
             .map(|g| {
-                if snapshot(g) {
-                    return GraphDelta::unknown(g.clone());
+                if Self::is_snapshot_key(g) {
+                    let n = fresh_n.get(g).copied().unwrap_or(0);
+                    return GraphDelta::counts(g.clone(), n, 0, None);
                 }
                 let quads = fresh.remove(g).unwrap_or_default();
                 if quads.len() <= self.changes.max_payload() {
@@ -4119,8 +4133,8 @@ impl TripleStore {
         let mut known: std::collections::HashMap<Option<String>, i64> =
             std::collections::HashMap::new();
         if !quads.is_empty() {
-            // The rows: per graph, the quads that were new (probed); unknown
-            // for a version-snapshot graph (see `fresh_by_graph`).
+            // The rows: per graph, the quads that were new (probed); counts
+            // only for a version-snapshot graph (see `fresh_by_graph`).
             let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
             graphs.sort();
             graphs.dedup();
@@ -4129,10 +4143,22 @@ impl TripleStore {
             let intent = self
                 .changes
                 .begin("bulk_insert_quads", Some(&graphs), &pre_count);
+            // A version copy arrives here batch by batch: its graph is
+            // probed with the log off too, so the count index adds each
+            // batch rather than recount the growing copy (quadratic).
             let deltas = if intent.is_some() {
                 self.fresh_by_graph(&quads, &graphs)?
             } else {
-                Vec::new()
+                let snapshots: Vec<Option<String>> = graphs
+                    .iter()
+                    .filter(|g| Self::is_snapshot_key(g))
+                    .cloned()
+                    .collect();
+                if snapshots.is_empty() {
+                    Vec::new()
+                } else {
+                    self.fresh_by_graph(&quads, &snapshots)?
+                }
             };
             // What the rows know about each graph's new count.
             for d in &deltas {
@@ -5918,6 +5944,51 @@ mod delta_primitive_tests {
             .unwrap();
         assert_eq!((ins.len(), del.len()), (2, 1));
         assert_eq!(store.graph_count_cached(Some(g)), Some(exact(&store, g)));
+    }
+
+    /// Delta note §2.2: a version copy goes into its snapshot graph in
+    /// batches, and each batch's row is `counts`, not `unknown`, so the count
+    /// index adds the batch instead of recounting the growing copy — which
+    /// made a 9M-quad checkpoint cut quadratic (48 minutes). With the log off
+    /// the copy is counted the same way.
+    #[test]
+    fn a_version_copy_is_counted_batch_by_batch_without_a_rescan() {
+        let snap = "http://localhost/dataset/d1/version/1.0.0/g";
+        let batch = |from: usize| -> Vec<Quad> {
+            (from..from + 10)
+                .map(|i| {
+                    Quad::new(
+                        NamedNode::new(format!("http://e/s{i}")).unwrap(),
+                        NamedNode::new("http://e/p").unwrap(),
+                        Literal::from(i.to_string()),
+                        GraphName::NamedNode(NamedNode::new(snap).unwrap()),
+                    )
+                })
+                .collect()
+        };
+        let off = TripleStore::in_memory()
+            .unwrap()
+            .with_change_capture_disabled();
+        for store in [recording(), off] {
+            let affected = [snap.to_string()];
+            store.bulk_insert_quads(batch(0), &affected).unwrap();
+            let scans = store.graph_index.scan_count();
+            store.bulk_insert_quads(batch(10), &affected).unwrap();
+            // Five fresh, five already copied (a retried batch).
+            store.bulk_insert_quads(batch(15), &affected).unwrap();
+            assert_eq!(store.graph_index.scan_count(), scans, "no recount");
+            assert_eq!(store.graph_count_cached(Some(snap)), Some(25));
+            assert_eq!(exact(&store, snap), 25);
+            if store.changes().enabled() {
+                let rows = store.changes().rows_after(0, 10);
+                assert_eq!(rows.len(), 3);
+                for (row, n) in rows.iter().zip([10i64, 10, 5]) {
+                    assert_eq!(row.extent, Extent::Counts);
+                    assert_eq!(row.added_n, n);
+                    assert!(row.added.is_none(), "a version's graph keeps no payload");
+                }
+            }
+        }
     }
 
     /// Delta note §8.5 Q2: a streamed default-graph load used to be one
