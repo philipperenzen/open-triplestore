@@ -46,6 +46,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The slot is now held by the blocking task itself.
 
 ### Security
+- `ctutils` 0.4.3 → 0.4.4 for RUSTSEC-2026-0385 (non-constant-time mask
+  generation and `u128` comparisons).
 
 ## [0.8.1] — 2026-10-22
 
