@@ -79,6 +79,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows guide's sample response, in step.
 
 ### Security
+- **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
+  generation and `u128` comparisons in the constant-time helpers that
+  `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
