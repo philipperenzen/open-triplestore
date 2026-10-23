@@ -4,9 +4,16 @@
   //   bindings → the app-wide DataTable (RdfTerm cells, IRI navigation)
   //   boolean  → an ASK badge
   //   graph    → highlighted N-Triples
+  // Bindings and graphs sit inside ResultVisual, which adds a tab per visual
+  // the rows support (chart / map / SHACL summary; node-link graph for
+  // CONSTRUCT/DESCRIBE, which also opens on it). The table stays the default
+  // for SELECT results.
   import { t } from 'svelte-i18n';
   import DataTable from '../DataTable.svelte';
+  import ResultVisual from './ResultVisual.svelte';
   import { highlightRdf } from '../../lib/resultHighlight.js';
+  import { parseNTriplesToBindings } from '../../lib/rdf-utils.js';
+  import { tableFromBindings, tableFromTripleBindings, graphFromBindings } from '../../lib/chatViz';
   import { CheckCircle2, XCircle } from 'lucide-svelte';
 
   export let result = null;
@@ -18,6 +25,13 @@
   $: shownBindings = bindings.slice(0, maxRows);
   $: graphLines = result?.kind === 'graph' ? result.ntriples.split('\n').filter((l) => l.trim()) : [];
   $: shownGraph = graphLines.slice(0, maxRows).join('\n');
+  $: tripleBindings = result?.kind === 'graph' ? parseNTriplesToBindings(result.ntriples).results.bindings : [];
+  $: visualTable = result?.kind === 'bindings'
+    ? tableFromBindings(result.vars, shownBindings)
+    : result?.kind === 'graph'
+      ? tableFromTripleBindings(tripleBindings)
+      : null;
+  $: typedGraph = result?.kind === 'graph' ? graphFromBindings(tripleBindings) : null;
 </script>
 
 {#if error}
@@ -28,17 +42,21 @@
     <span>{$t('components.chat.askResult')}: <strong>{result.value ? $t('components.chat.yes') : $t('components.chat.no')}</strong></span>
   </div>
 {:else if result?.kind === 'graph'}
-  <!-- highlightRdf HTML-escapes all source text (resultHighlight.js), so {@html} is safe. -->
-  <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-  <pre class="graph-result"><code>{@html highlightRdf(shownGraph)}</code></pre>
+  <ResultVisual table={visualTable} graph={typedGraph} preferred="auto">
+    <!-- highlightRdf HTML-escapes all source text (resultHighlight.js), so {@html} is safe. -->
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+    <pre slot="table" class="graph-result"><code>{@html highlightRdf(shownGraph)}</code></pre>
+  </ResultVisual>
   <p class="result-note">
     {$t('components.chat.graphTriples', { values: { count: graphLines.length } })}
     {#if graphLines.length > maxRows}· {$t('components.chat.showingFirst', { values: { count: maxRows } })}{/if}
   </p>
 {:else if result?.kind === 'bindings'}
-  <div class="table-host">
-    <DataTable mode="bindings" vars={result.vars} bindings={shownBindings} maxHeight="300px" emptyText={$t('components.chat.noRows')} />
-  </div>
+  <ResultVisual table={visualTable} preferred="table" truncated={bindings.length > maxRows}>
+    <div slot="table" class="table-host">
+      <DataTable mode="bindings" vars={result.vars} bindings={shownBindings} maxHeight="300px" emptyText={$t('components.chat.noRows')} />
+    </div>
+  </ResultVisual>
   <p class="result-note">
     {$t('components.chat.rowCount', { values: { count: bindings.length } })}
     {#if bindings.length > maxRows}· {$t('components.chat.showingFirst', { values: { count: maxRows } })}{/if}

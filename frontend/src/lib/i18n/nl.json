@@ -3806,7 +3806,40 @@
       "fileTitle": "Bestand",
       "fileOpen": "Openen",
       "filePreviewUnavailable": "Geen voorbeeldweergave voor dit bestandstype.",
-      "fileBlockedUrl": "Link geblokkeerd (niet-ondersteund URL-schema)"
+      "fileBlockedUrl": "Link geblokkeerd (niet-ondersteund URL-schema)",
+      "graphFailed": "De grafiekweergave kon niet worden geladen",
+      "graphCounts": "{nodes} knopen · {edges} verbindingen",
+      "graphCapped": "getekend uit de eerste triples van {count}",
+      "graphEmpty": "Deze triples konden niet als graaf worden getekend.",
+      "mapFailed": "De kaart kon niet worden geladen",
+      "mapSkipped": "{count} rijen zonder WGS84-geometrie niet getoond",
+      "views": {
+        "label": "Resultaatweergave",
+        "table": "Tabel",
+        "bar": "Staafdiagram",
+        "line": "Tijdlijn",
+        "map": "Kaart",
+        "graph": "Graaf",
+        "shacl": "SHACL-samenvatting",
+        "stat": "Kerncijfers",
+        "fellBack": "Een {view}-weergave past niet bij deze rijen, daarom staan ze in een tabel.",
+        "chartShown": "{shown} van {total} rijen getoond.",
+        "capped": "De query gaf meer rijen terug dan de chat bewaart."
+      },
+      "shacl": {
+        "conforms": "De data voldoet aan de shapes",
+        "doesNotConform": "De data voldoet niet aan de shapes",
+        "results": "{count, plural, one {# validatieresultaat} other {# validatieresultaten}}",
+        "violation": "Overtredingen",
+        "warning": "Waarschuwingen",
+        "info": "Info",
+        "byPath": "Meest getroffen paden",
+        "byShape": "Shapes",
+        "byFocus": "Meest getroffen knopen",
+        "samples": "Voorbeelden",
+        "noMessage": "(geen melding)",
+        "truncated": "Geteld over de teruggegeven rijen; de query bereikte zijn rijlimiet."
+      }
     },
     "edgeInfo": {
       "predicateBadge": "Predicaat",
