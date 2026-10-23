@@ -9,6 +9,9 @@
 //! * [`publish`] — the HTTP surface: the `ldes:EventStream` and its nodes.
 //! * [`client`]  — the sync client: follow `tree:view` / `tree:relation`,
 //!   keep the newest version per entity, materialise into a graph.
+//! * [`schedule`] — sync jobs that run on their own: due runs on the node
+//!   that writes, as the job's owner, a few at a time, backing off after
+//!   failures.
 //!
 //! Domain-neutral by construction: members are whatever IRI-subject entities a
 //! graph holds. See docs/ldes.md.
@@ -16,6 +19,7 @@
 pub mod capture;
 pub mod client;
 pub mod publish;
+pub mod schedule;
 pub mod store;
 
 pub const LDES: &str = "https://w3id.org/ldes#";

@@ -783,6 +783,16 @@ impl AuthDb {
                 last_status TEXT,
                 last_error TEXT,
                 last_report TEXT,
+                -- When the job runs on its own: 'off', 'auto' (the stream's
+                -- ldes:pollingInterval) or 'interval' (schedule_secs), the
+                -- next run, the failures in a row behind it (each doubles the
+                -- wait), and when it was paused because its owner could no
+                -- longer write (last_error says why).
+                schedule TEXT NOT NULL DEFAULT 'off',
+                schedule_secs INTEGER,
+                next_run_at TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                paused_at TEXT,
                 PRIMARY KEY (dataset_id, source_url)
             );
             -- LDES client state per page of a synced stream (LDES 1.0 §3.2):
@@ -1581,6 +1591,13 @@ impl AuthDb {
             "ALTER TABLE ldes_sync_state ADD COLUMN last_status TEXT",
             "ALTER TABLE ldes_sync_state ADD COLUMN last_error TEXT",
             "ALTER TABLE ldes_sync_state ADD COLUMN last_report TEXT",
+            // LDES client: the sync job's schedule (#530). Existing jobs keep
+            // running only when someone runs them.
+            "ALTER TABLE ldes_sync_state ADD COLUMN schedule TEXT NOT NULL DEFAULT 'off'",
+            "ALTER TABLE ldes_sync_state ADD COLUMN schedule_secs INTEGER",
+            "ALTER TABLE ldes_sync_state ADD COLUMN next_run_at TEXT",
+            "ALTER TABLE ldes_sync_state ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ldes_sync_state ADD COLUMN paused_at TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors

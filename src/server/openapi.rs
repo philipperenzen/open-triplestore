@@ -2618,7 +2618,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Admin",
                     "LDES sync jobs",
-                    "Every `(dataset, source)` sync `POST /api/ldes/sync` has run: `[{dataset_id, dataset_name, source_url, graph_iri, created_by, last_timestamp, members_applied, synced_at, last_run_at, last_status, last_error, last_report}]`, most recently run first. `last_status` is `ok` or `error`; a failed run keeps the previous bookmark and report, so the next run resumes. Admin only.",
+                    "Every `(dataset, source)` sync `POST /api/ldes/sync` has run: `[{dataset_id, dataset_name, source_url, graph_iri, created_by, last_timestamp, members_applied, synced_at, last_run_at, last_status, last_error, last_report, schedule, interval_secs, next_run_at, consecutive_failures, paused_at}]`, most recently run first. `last_status` is `ok` or `error`; a failed run keeps the previous bookmark and report, so the next run resumes. `schedule` is `off`, `auto` or `interval` (`interval_secs`); `next_run_at` is when the scheduler runs the job next (null while it is off or paused); `consecutive_failures` doubles the wait before it; `paused_at` is set when the job's owner could no longer have it run, with the reason in `last_error`. Admin only.",
                     vec![],
                     vec![("200", "Sync jobs"), ("401", "Authentication required"), ("403", "Admin role required")],
                     true,
@@ -2639,6 +2639,38 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ),
             ),
         ],
+    );
+    mount(
+        paths,
+        "/api/admin/ldes/syncs/schedule",
+        vec![(
+            M::Put,
+            ob(
+                "Admin",
+                "Schedule an LDES sync job",
+                "When a sync job runs on its own: `off` (only when someone runs it; every job's default), `auto` (every `ldes:pollingInterval` the stream declared at its last successful run, 60 s when it declares none) or `interval` with `interval_secs`. A job never runs more often than every 60 s. Runs start on the node that writes (not on a follower), at most `OTS_LDES_SYNC_CONCURRENCY` at once, as the job's owner (`created_by`), whose write access to the dataset and the target graph are checked at every run; a run the owner may no longer have pauses the job (`paused_at`, `last_error`). After a failure the wait doubles, up to 6 hours (or the interval when longer), until a run succeeds. Setting the schedule, to anything, resumes a paused job and forgets its failures. Answers the job as `GET /api/admin/ldes/syncs` lists it. Admin only.",
+                vec![
+                    qp("dataset_id", true, "The dataset the job writes to"),
+                    qp("url", true, "The job's source URL, as it was synced"),
+                ],
+                json_body(
+                    ObjectBuilder::new()
+                        .property("schedule", ObjectBuilder::new().schema_type(Type::String).enum_values(Some(["off", "auto", "interval"])))
+                        .property("interval_secs", ObjectBuilder::new().schema_type(Type::Integer).description(Some("Seconds between runs of an `interval` schedule, 60 to 31622400")))
+                        .required("schedule"),
+                    json!({ "schedule": "interval", "interval_secs": 900 }),
+                ),
+                vec![
+                    ("200", "The job, with its schedule and `next_run_at`"),
+                    ("400", "Not off, auto or interval, or an interval under 60 s"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                    ("404", "No such sync job"),
+                    ("409", "The job predates recorded target graphs and owners: run it once first"),
+                ],
+                true,
+            ),
+        )],
     );
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -2156,10 +2156,24 @@ export interface LdesSyncJob {
   last_status: 'ok' | 'error' | null;
   last_error: string | null;
   last_report: Record<string, any> | null;
+  /** When the job runs on its own: `auto` waits the stream's ldes:pollingInterval, `interval` `interval_secs`. */
+  schedule?: LdesSchedule;
+  interval_secs?: number | null;
+  /** The scheduler's next run; null while the schedule is off or paused. */
+  next_run_at?: string | null;
+  consecutive_failures?: number;
+  /** Set when the owner could no longer have the job run; `last_error` says why. */
+  paused_at?: string | null;
 }
+export type LdesSchedule = 'off' | 'auto' | 'interval';
 export const adminListLdesSyncs = (): Promise<LdesSyncJob[]> => request('GET', '/api/admin/ldes/syncs');
 export const adminForgetLdesSync = (datasetId: string, url: string) =>
   request('DELETE', `/api/admin/ldes/syncs?dataset_id=${encodeURIComponent(datasetId)}&url=${encodeURIComponent(url)}`);
+/** Set when a job runs on its own (at least every 60 s); also resumes a paused job. Answers the job. */
+export const adminSetLdesSyncSchedule = (
+  datasetId: string, url: string, body: { schedule: LdesSchedule; interval_secs?: number },
+): Promise<LdesSyncJob> =>
+  request('PUT', `/api/admin/ldes/syncs/schedule?dataset_id=${encodeURIComponent(datasetId)}&url=${encodeURIComponent(url)}`, body);
 
 // ─── Linked-document containers (ICDD) ───────────────────────────────────────
 export const listContainerProfiles = () => request('GET', '/api/containers/profiles');

@@ -3666,10 +3666,28 @@
       "updatedDeleted": "Updated / deleted",
       "pollingInterval": "Polling interval (s)",
       "ranSummary": "Synced: {updated} updated, {deleted} deleted, {nodes} page(s) read.",
+      "schedule": "Schedule",
+      "scheduleOff": "Off",
+      "scheduleAuto": "Auto: the stream’s polling interval",
+      "scheduleInterval": "A fixed interval",
+      "intervalSecs": "Every (seconds)",
+      "scheduleHint": "Auto waits the ldes:pollingInterval the stream declares; no job runs more often than once a minute. A failed run doubles the wait until one succeeds. Runs act as the job’s owner; saving resumes a paused job.",
+      "saveSchedule": "Save schedule",
+      "scheduleSaved": "Schedule saved",
+      "autoEvery": "Auto, every {interval}",
+      "every": "Every {interval}",
+      "nextRun": "Next: {when}",
+      "nextRunLabel": "Next run",
+      "paused": "Paused",
+      "failures": "Failures in a row",
+      "unitSeconds": "{n} s",
+      "unitMinutes": "{n} min",
+      "unitHours": "{n} h",
       "errors": {
         "url": "Enter the stream’s http(s) URL.",
         "dataset": "Choose the dataset to mirror into.",
-        "graph": "Enter the graph IRI to mirror into."
+        "graph": "Enter the graph IRI to mirror into.",
+        "interval": "Enter a whole number of seconds, at least 60."
       }
     },
     "datasetReasoning": {
