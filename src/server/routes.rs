@@ -11456,16 +11456,22 @@ where
         return Ok(super::reasoning_jobs::accepted(&id));
     }
     // Bound concurrent expensive operations so a burst of reasoning calls can't
-    // occupy every Tokio worker and starve the runtime (held until handler return).
-    let _permit = state
+    // occupy every Tokio worker and starve the runtime.
+    let permit = state
         .expensive_semaphore
-        .acquire()
+        .clone()
+        .acquire_owned()
         .await
         .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
     // The rules are synchronous store work that can run for minutes: keep it
-    // off the async workers.
-    let body = tokio::task::spawn_blocking(work)
-        .await
+    // off the async workers. The permit moves into the blocking task, so a
+    // client that disconnects (dropping this handler) does not free the slot
+    // while the work — and any sidecar call it makes — is still running.
+    let body = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
         .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
@@ -12911,6 +12917,69 @@ mod asset_etag_tests {
         let c = asset("a1", "datasets/ds/a1/f.ifc", 999, "2026-01-01T00:00:00Z");
         assert_ne!(asset_etag(&a), asset_etag(&b));
         assert_ne!(asset_etag(&a), asset_etag(&c));
+    }
+}
+
+#[cfg(test)]
+mod reasoning_permit_tests {
+    use super::run_reasoning_work;
+    use crate::auth::middleware::AuthenticatedUser;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "u".to_string(),
+            role: crate::auth::models::SystemRole::User,
+            can_publish: false,
+            write_access: true,
+            can_mint_api_tokens: false,
+            scopes: Vec::new(),
+        }
+    }
+
+    // A client that disconnects drops the handler future, but blocking work
+    // cannot be cancelled: the reasoning (and its sidecar call) runs on. Its
+    // expensive-operations slot must stay taken until the work ends, or the
+    // server admits more concurrent reasoning than its capacity allows.
+    #[tokio::test]
+    async fn disconnected_request_holds_its_slot_until_the_work_ends() {
+        let mut state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        state.expensive_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let sem = state.expensive_semaphore.clone();
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move {
+                run_reasoning_work(&state, &user(), "check", None, false, move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    done_tx.send(()).unwrap();
+                    Ok(serde_json::json!({}))
+                })
+                .await
+            }
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        // The client goes away while the work is running.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(sem.available_permits(), 0, "slot freed while work still runs");
+
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || done_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let reacquired = tokio::time::timeout(Duration::from_secs(5), sem.acquire()).await;
+        assert!(reacquired.is_ok(), "slot not returned once the work ended");
     }
 }
 
