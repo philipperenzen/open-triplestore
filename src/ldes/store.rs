@@ -986,6 +986,77 @@ pub struct SyncJob {
     pub last_error: Option<String>,
     /// The latest successful run's report (`SyncReport` as JSON).
     pub last_report: Option<serde_json::Value>,
+    /// When the job runs on its own: `off` (only when someone runs it),
+    /// `auto` (the stream's `ldes:pollingInterval`) or `interval`.
+    pub schedule: String,
+    /// The seconds between runs of an `interval` schedule.
+    pub interval_secs: Option<u64>,
+    /// When the scheduler runs the job next; `None` while it is off or
+    /// paused.
+    pub next_run_at: Option<String>,
+    /// Failed runs in a row; each doubles the wait before the next, and a
+    /// success resets it.
+    pub consecutive_failures: u32,
+    /// When the schedule was paused because the job's owner could no longer
+    /// have it run (`last_error` says why); setting the schedule resumes it.
+    pub paused_at: Option<String>,
+}
+
+/// When a sync job runs without being asked to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Schedule {
+    /// Only when someone runs it: every job's default.
+    Off,
+    /// Every `ldes:pollingInterval` the stream declares.
+    Auto,
+    /// Every so many seconds.
+    Every(u64),
+}
+
+impl Schedule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Schedule::Off => "off",
+            Schedule::Auto => "auto",
+            Schedule::Every(_) => "interval",
+        }
+    }
+
+    /// The schedule a job is on, as its row stores it.
+    pub fn of(job: &SyncJob) -> Self {
+        match (job.schedule.as_str(), job.interval_secs) {
+            ("auto", _) => Schedule::Auto,
+            ("interval", Some(s)) if s > 0 => Schedule::Every(s),
+            _ => Schedule::Off,
+        }
+    }
+}
+
+const SYNC_JOB_COLUMNS: &str = "dataset_id, source_url, graph_iri, created_by, last_timestamp, \
+     members_applied, synced_at, last_run_at, last_status, last_error, last_report, \
+     schedule, schedule_secs, next_run_at, consecutive_failures, paused_at";
+
+fn sync_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJob> {
+    Ok(SyncJob {
+        dataset_id: r.get(0)?,
+        source_url: r.get(1)?,
+        graph_iri: r.get(2)?,
+        created_by: r.get(3)?,
+        last_timestamp: r.get(4)?,
+        members_applied: r.get::<_, i64>(5)?.max(0) as u64,
+        synced_at: r.get(6)?,
+        last_run_at: r.get(7)?,
+        last_status: r.get(8)?,
+        last_error: r.get(9)?,
+        last_report: r
+            .get::<_, Option<String>>(10)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        schedule: r.get(11)?,
+        interval_secs: r.get::<_, Option<i64>>(12)?.map(|n| n.max(0) as u64),
+        next_run_at: r.get(13)?,
+        consecutive_failures: r.get::<_, i64>(14)?.clamp(0, u32::MAX as i64) as u32,
+        paused_at: r.get(15)?,
+    })
 }
 
 /// Record how a sync run ended. A success stores its report and clears the
@@ -1025,32 +1096,120 @@ pub fn record_sync_outcome(
 /// Every sync job, most recently run first.
 pub fn sync_jobs(db: &AuthDb) -> anyhow::Result<Vec<SyncJob>> {
     let conn = db.pool().get()?;
-    let mut stmt = conn.prepare(
-        "SELECT dataset_id, source_url, graph_iri, created_by, last_timestamp, members_applied, \
-                synced_at, last_run_at, last_status, last_error, last_report \
-         FROM ldes_sync_state \
-         ORDER BY COALESCE(last_run_at, synced_at) DESC, dataset_id, source_url",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SYNC_JOB_COLUMNS} FROM ldes_sync_state \
+         ORDER BY COALESCE(last_run_at, synced_at) DESC, dataset_id, source_url"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(SyncJob {
-                dataset_id: r.get(0)?,
-                source_url: r.get(1)?,
-                graph_iri: r.get(2)?,
-                created_by: r.get(3)?,
-                last_timestamp: r.get(4)?,
-                members_applied: r.get::<_, i64>(5)?.max(0) as u64,
-                synced_at: r.get(6)?,
-                last_run_at: r.get(7)?,
-                last_status: r.get(8)?,
-                last_error: r.get(9)?,
-                last_report: r
-                    .get::<_, Option<String>>(10)?
-                    .and_then(|s| serde_json::from_str(&s).ok()),
-            })
-        })?
+        .query_map([], sync_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// One sync job.
+pub fn sync_job(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+) -> anyhow::Result<Option<SyncJob>> {
+    let conn = db.pool().get()?;
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {SYNC_JOB_COLUMNS} FROM ldes_sync_state \
+                 WHERE dataset_id = ?1 AND source_url = ?2"
+            ),
+            params![dataset_id, source_url],
+            sync_job_row,
+        )
+        .optional()?)
+}
+
+/// The jobs on a schedule that is not paused, the earliest due first.
+pub fn scheduled_sync_jobs(db: &AuthDb) -> anyhow::Result<Vec<SyncJob>> {
+    let conn = db.pool().get()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SYNC_JOB_COLUMNS} FROM ldes_sync_state \
+         WHERE schedule <> 'off' AND paused_at IS NULL \
+         ORDER BY next_run_at, dataset_id, source_url"
+    ))?;
+    let rows = stmt
+        .query_map([], sync_job_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Put a job on `schedule`, first due at `next_run_at` (`None` for `Off`).
+/// Setting a schedule also resumes a paused job and forgets its failures.
+/// `false` when there is no such job.
+pub fn set_sync_schedule(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    schedule: Schedule,
+    next_run_at: Option<DateTime<Utc>>,
+) -> anyhow::Result<bool> {
+    let conn = db.pool().get()?;
+    let secs = match schedule {
+        Schedule::Every(s) => Some(s.min(i64::MAX as u64) as i64),
+        _ => None,
+    };
+    let n = conn.execute(
+        "UPDATE ldes_sync_state SET schedule = ?3, schedule_secs = ?4, next_run_at = ?5, \
+           consecutive_failures = 0, paused_at = NULL \
+         WHERE dataset_id = ?1 AND source_url = ?2",
+        params![
+            dataset_id,
+            source_url,
+            schedule.as_str(),
+            secs,
+            next_run_at.map(|t| t.to_rfc3339())
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// Plan a scheduled job's next run, after `failures` failed runs in a row.
+/// A job that is off or paused meanwhile is left alone.
+pub fn set_sync_next_run(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    failures: u32,
+    next_run_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let conn = db.pool().get()?;
+    conn.execute(
+        "UPDATE ldes_sync_state SET consecutive_failures = ?3, next_run_at = ?4 \
+         WHERE dataset_id = ?1 AND source_url = ?2 AND schedule <> 'off' AND paused_at IS NULL",
+        params![
+            dataset_id,
+            source_url,
+            failures as i64,
+            next_run_at.to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Pause a job's schedule: its owner may no longer have it run, and `reason`
+/// says why. Nothing ran, so the bookmark, report and last run stay; the
+/// schedule itself is kept for when it is set again.
+pub fn pause_sync_schedule(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    reason: &str,
+    at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let conn = db.pool().get()?;
+    conn.execute(
+        "UPDATE ldes_sync_state SET paused_at = ?3, next_run_at = NULL, \
+           last_status = 'error', last_error = ?4 \
+         WHERE dataset_id = ?1 AND source_url = ?2",
+        params![dataset_id, source_url, at.to_rfc3339(), reason],
+    )?;
+    Ok(())
 }
 
 /// Forget a sync job and everything its client state remembers (bookmark,

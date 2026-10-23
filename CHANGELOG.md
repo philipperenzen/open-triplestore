@@ -13,6 +13,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
+  schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
+  (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
+  job more often than once a minute; `off` stays every job's default,
+  existing jobs included. Set it in **Admin → Event stream sync**, which now
+  shows each job's next run and why a job is paused, or with
+  `PUT /api/admin/ldes/syncs/schedule`; `GET /api/admin/ldes/syncs` gains
+  `schedule`, `interval_secs`, `next_run_at`, `consecutive_failures` and
+  `paused_at`. A scheduled run acts as the job's owner, whose write access to
+  the dataset and its graph is checked at every run: an owner who has lost it,
+  or no longer exists, pauses the job with the reason in `last_error`, until
+  its schedule is set again. Each failure in a row doubles the wait, up to six
+  hours, and a success resets it. At most `OTS_LDES_SYNC_CONCURRENCY`
+  (default 2) scheduled runs go at once, never two of one job, and only on the
+  node that writes: a replication follower, or a cluster member that does not
+  lead, runs none.
+
 ### Deprecated
 
 ### Security
