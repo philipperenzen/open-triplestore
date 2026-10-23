@@ -1268,6 +1268,88 @@ async fn an_edit_inside_a_blank_node_publishes_a_version_and_a_relabel_does_not(
     );
 }
 
+/// With change capture on, members come from the write's rows, and a
+/// changed blank node's entity is found by walking up its tree at most
+/// `OTS_LDES_BNODE_DEPTH` (8) levels. An edit deeper than that used to
+/// publish nothing; the graph is now republished whole, so the entity still
+/// gets its new version.
+#[tokio::test]
+async fn an_edit_deeper_than_the_owner_walk_still_publishes_a_version() {
+    let store = TripleStore::in_memory().unwrap().with_change_capture(
+        open_triplestore::store::changes::DEFAULT_MAX_SCAN,
+        open_triplestore::store::changes::DEFAULT_MAX_PAYLOAD,
+    );
+    let (state, token) = admin_state_with_store(store);
+    setup(&state, "deep");
+    let app = test_app(state.clone());
+    // b1's lat sits ten blank nodes below it.
+    let nested = (0..9).fold(format!("[ <{EX}lat> 52 ]"), |inner, _| {
+        format!("[ <{EX}next> {inner} ]")
+    });
+    put_entity(
+        &app,
+        &token,
+        format!(
+            "<{EX}b1> a <{EX}Bridge> ; <{EX}name> \"one\" ; <{EX}address> {nested} . \
+             <{EX}b2> a <{EX}Bridge> ; <{EX}name> \"two\" ."
+        ),
+    )
+    .await;
+    let (st, txt) = put_stream(
+        &app,
+        &token,
+        "deep",
+        json!({ "enabled": true, "page_size": 10 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let members = |app: Router| async move {
+        let (st, _, ttl) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/deep/ldes/nodes/1",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{ttl}");
+        ttl
+    };
+    let base = format!("{}/api/datasets/deep/ldes/nodes/1", state.base_url);
+    assert_eq!(
+        member_ids(&doc(&members(app.clone()).await, &base)).len(),
+        2
+    );
+
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/sparql",
+        Some(&token),
+        Some((
+            "application/sparql-update",
+            format!(
+                "DELETE {{ GRAPH <{G}> {{ ?g <{EX}lat> 52 }} }} INSERT {{ GRAPH <{G}> {{ ?g <{EX}lat> 53 }} }} \
+                 WHERE {{ GRAPH <{G}> {{ ?g <{EX}lat> 52 }} }}"
+            ),
+        )),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    let ttl = members(app.clone()).await;
+    let d = doc(&ttl, &base);
+    assert!(
+        ask(
+            &d,
+            &format!(
+                "?m <http://purl.org/dc/terms/isVersionOf> <{EX}b1> ; <{EX}address>/<{EX}next>* ?x . \
+                 ?x <{EX}lat> 53"
+            )
+        ),
+        "b1 has a version with the edited lat: {ttl}"
+    );
+}
+
 /// LDES §4.3: a stream whose members include deletes declares
 /// `ldes:versionDeletePath` / `ldes:versionDeleteObject`, and each delete
 /// carries that object on that path. Server Primer §6.1 puts them on the
