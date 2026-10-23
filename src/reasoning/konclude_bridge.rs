@@ -25,15 +25,26 @@
 //! single OWLlink request. Axioms without such a reduction (data sub-property,
 //! keys, datatype definitions, anonymous individuals) answer `unknown`.
 //!
-//! Konclude v0.7.0 misses the clash of some `DataComplementOf` shapes:
-//! `∃p.(D ⊓ ¬D)`, `∃p.¬rdfs:Literal`, a complement range against an asserted
-//! value. Every wrong answer seen says "satisfiable" where the right one is
-//! "unsatisfiable", never the reverse. So when the input itself keeps a data
-//! complement, an answer that rests on a knowledge base being satisfiable
-//! (consistent, not entailed, satisfiable class) is `unknown`, and a run is
-//! marked incomplete; the answers that rest on a clash stand. The bridge's
-//! own negations (`∀p.¬{v}`, `∃p.¬R` for a range `R`) probe correct, and
-//! [`super::owl_fs`] writes `¬rdfs:Literal` as an empty range.
+//! Every OWLlink run passes [`CONFIG`], which turns off two ABox optimisations that
+//! lose clashes (asserted edges against asymmetric, irreflexive or disjoint
+//! properties; an inverse predecessor merged back into an individual).
+//!
+//! Konclude v0.7.0 still gets some inputs wrong, and the bridge then answers
+//! `unknown` instead ([`Gaps`]). It misses the clash ("satisfiable" where the
+//! right answer is "unsatisfiable") of some `DataComplementOf` shapes
+//! (`∃p.(D ⊓ ¬D)`, `∃p.¬rdfs:Literal`, a complement range against an
+//! asserted value), of disjoint data properties, of keys (which it ignores),
+//! of float ranges with no float in them, of `rdf:XMLLiteral` values, and of
+//! nominals with inverses and counting. So when the input has one of these,
+//! an answer that rests on a knowledge base being satisfiable (consistent,
+//! not entailed, satisfiable class) is `unknown`, and a run is marked
+//! incomplete. The one wrong clash seen is a complement of a number datatype:
+//! Konclude reads `¬xsd:positiveInteger` as holding no number at all. Then an
+//! answer that rests on a clash is `unknown` too, and a run derives nothing.
+//! The bridge's own negations `∀p.¬{v}` and `∃p.¬R` (for a range `R` that is
+//! not a number datatype) probe correct, and [`super::owl_fs`] writes
+//! `¬rdfs:Literal` as an empty range. A check on which Konclude crashes
+//! answers `unknown` as well.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -48,6 +59,7 @@ use super::dl_config::DlConfig;
 use super::owl_fs::FsWriter;
 use super::owl_mapping::map_triples;
 use super::owl_model::*;
+use super::owl_profile::visit_exprs;
 use crate::spec_import::ids::{parse_xml, El};
 
 const NAME: &str = "konclude";
@@ -62,6 +74,50 @@ const MAX_SUBCHECKS: usize = 64;
 /// `DataComplementOf` (see the module comment).
 const DATA_COMPLEMENT: &str = "the input uses owl:datatypeComplementOf, and Konclude v0.7.0 can \
      miss the inconsistency some data complements cause";
+/// … has disjoint data properties: two of them sharing a value never clash
+/// for Konclude.
+const DISJOINT_DATA: &str = "the input has disjoint data properties, and Konclude v0.7.0 misses \
+     the inconsistency of two disjoint data properties sharing a value";
+/// … uses `owl:hasKey`, which Konclude v0.7.0 does not reason with at all.
+const KEYS: &str = "the input uses owl:hasKey, and Konclude v0.7.0 does not reason with keys";
+/// … combines nominals, inverse properties and number restrictions.
+const NOMINAL_COUNTING: &str = "the input combines owl:oneOf in class axioms with inverse \
+     properties and functional properties or cardinality restrictions, and Konclude v0.7.0 can \
+     miss the inconsistency these cause together";
+/// … restricts `xsd:float` or `xsd:double`, which Konclude treats as dense.
+const FLOAT_FACETS: &str = "the input restricts xsd:float or xsd:double with facets, and \
+     Konclude v0.7.0 treats their value spaces as dense, so it misses a range with no float in it";
+/// … has `rdf:XMLLiteral` values.
+const XML_LITERALS: &str = "the input has rdf:XMLLiteral values, and Konclude v0.7.0 can take \
+     two different ones for the same value";
+/// … complements a number datatype: the one known source of a wrong clash.
+const NUMERIC_COMPLEMENT: &str = "the input or the check complements a number datatype \
+     (owl:datatypeComplementOf of xsd:decimal, xsd:integer or a type derived from them), and \
+     Konclude v0.7.0 reads such a complement as holding no number at all";
+/// Konclude's configuration for the OWLlink runs (`-c`), which decide
+/// consistency, classification and types. Its ABox optimisations,
+/// the individuals backend cache and individual saturation, lose clashes:
+/// with them on, Konclude v0.7.0-1138 calls these consistent:
+/// `AsymmetricObjectProperty(p)` with `p(a, b)` and `p(b, a)`;
+/// `IrreflexiveObjectProperty(p)` with `p(a, a)`; disjoint `p`, `q` with
+/// `p(a, b)` and `q(a, b)`; `a : A ⊓ ∃r⁻.(∃r.B ⊓ ≤1 r)` with `A`, `B`
+/// disjoint (WebOnt-description-logic-008 and the other DL98 cases of that
+/// shape), although it finds that class unsatisfiable when classifying.
+/// With both off they come out right (`dl_konclude_live_abox_clashes`).
+/// The SPARQL runs keep the defaults: with individual saturation off,
+/// Konclude's SPARQL answers lose entailed property assertions (a property
+/// chain's), and by then consistency has been decided.
+pub const CONFIG: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<RequestMessage xmlns="http://www.owllink.org/owllink-xml#" xmlns:owl="http://www.w3.org/2002/07/owl#">
+<Set key="Konclude.Calculation.Optimization.IndividualsBackendCacheLoading"><Literal>false</Literal></Set>
+<Set key="Konclude.Calculation.Optimization.IndividualSaturation"><Literal>false</Literal></Set>
+</RequestMessage>
+"#;
+/// How [`KoncludeBackend::run`] reports a run killed by a signal.
+const CRASHED: &str = "crashed";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XML_LITERAL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
 
 pub struct KoncludeBackend {
     bin: String,
@@ -138,9 +194,15 @@ impl KoncludeBackend {
                             .rev()
                             .collect::<Vec<_>>()
                             .join(" | ");
+                        // No exit code: killed by a signal (SIGSEGV).
+                        let how = if status.code().is_none() {
+                            CRASHED
+                        } else {
+                            "exited"
+                        };
                         return Err(ReasoningError::Backend {
                             backend: NAME.into(),
-                            detail: format!("exited with {status}: {tail}"),
+                            detail: format!("{how} with {status}: {tail}"),
                         });
                     }
                     return Ok(text);
@@ -182,9 +244,14 @@ impl KoncludeBackend {
         );
         std::fs::write(&req, body)
             .map_err(|e| ReasoningError::Store(format!("OWLlink request: {e}")))?;
+        let config = dir.join("konclude-config.xml");
+        std::fs::write(&config, CONFIG)
+            .map_err(|e| ReasoningError::Store(format!("Konclude config: {e}")))?;
         let log = self.run(
             &[
                 "owllinkfile".into(),
+                "-c".into(),
+                config.display().to_string(),
                 "-i".into(),
                 req.display().to_string(),
                 "-o".into(),
@@ -222,9 +289,19 @@ impl DlBackend for KoncludeBackend {
     fn reason(&self, input: &DlInput) -> Result<DlOutcome, ReasoningError> {
         let deadline = Instant::now() + self.timeout;
         let dir = self.scratch()?;
-        let mut writer = FsWriter::new();
-        let text = writer.ontology(&input.ontology, &[]);
-        let complement = writer.wrote_data_complement();
+        let (text, gaps) = write_kb(&input.ontology, &[]);
+        if !gaps.false_clash.is_empty() {
+            // Every subsumption, unsatisfiable class and type Konclude
+            // reports may rest on a clash that is not there.
+            return Ok(DlOutcome {
+                incomplete: true,
+                warnings: vec![format!(
+                    "{}: nothing is derived, and consistency is unknown",
+                    gaps.false_clash.join("; ")
+                )],
+                ..Default::default()
+            });
+        }
         let mut req = Self::load(&dir.0, "input.ofn", &text, KB)?;
         req.push_str(&format!(
             "<IsKBSatisfiable kb=\"{KB}\"/>\n<GetSubClassHierarchy kb=\"{KB}\"/>\n"
@@ -267,13 +344,14 @@ impl DlBackend for KoncludeBackend {
                 Some("Konclude: the ontology is inconsistent (IsKBSatisfiable = false)".into());
             return Ok(out);
         }
-        if complement {
+        if !gaps.missed_clash.is_empty() {
             // Konclude's "consistent" may be a missed clash, and so may every
             // subsumption or type it did not report.
             out.consistent = None;
             out.incomplete = true;
             out.warnings.push(format!(
-                "{DATA_COMPLEMENT}: consistency is unknown and entailments may be missing"
+                "{}: consistency is unknown and entailments may be missing",
+                gaps.missed_clash.join("; ")
             ));
         }
         let (unsat, edges, synsets) = hierarchy(&resp[3])?;
@@ -296,8 +374,18 @@ impl DlBackend for KoncludeBackend {
                 }
             }
         }
-        out.inferred
-            .extend(self.property_assertions(&dir.0, &input.ontology, deadline)?);
+        match self.property_assertions(&dir.0, &input.ontology, deadline) {
+            Ok(triples) => out.inferred.extend(triples),
+            // Konclude's SPARQL interface crashes on some inputs (an
+            // irreflexive super-property); what OWLlink reported stands.
+            Err(ReasoningError::Backend { detail, .. }) if detail.starts_with(CRASHED) => {
+                out.incomplete = true;
+                out.warnings.push(format!(
+                    "Konclude crashed answering the property assertion queries ({detail});                      no entailed object property assertions are reported"
+                ));
+            }
+            Err(e) => return Err(e),
+        }
         if input
             .ontology
             .axioms
@@ -320,7 +408,7 @@ impl DlBackend for KoncludeBackend {
         let mut kbs: Vec<Vec<Axiom>> = Vec::new();
         let mut unknown = false;
         // A data complement in the conclusion reaches Konclude inside `¬α`.
-        let mut conclusion_complement = false;
+        let mut conclusion_gaps = Gaps::default();
         match task {
             CheckTask::Consistency => kbs.push(Vec::new()),
             CheckTask::Satisfiability { class } => {
@@ -343,7 +431,7 @@ impl DlBackend for KoncludeBackend {
                         None => unknown = true,
                     }
                 }
-                conclusion_complement = writer.wrote_data_complement();
+                conclusion_gaps = Gaps::of_complements(&writer);
                 if kbs.len() > MAX_SUBCHECKS {
                     let mut o = CheckOutcome::of(Tri::Unknown);
                     o.detail = Some(format!(
@@ -357,9 +445,7 @@ impl DlBackend for KoncludeBackend {
         }
         // Premise consistency first: an inconsistent premise entails
         // everything and satisfies nothing.
-        let mut writer = FsWriter::new();
-        let premise = writer.ontology(&input.ontology, &[]);
-        let complement = conclusion_complement || writer.wrote_data_complement();
+        let (premise, mut gaps) = write_kb(&input.ontology, &[]);
         let mut req = Self::load(&dir.0, "premise.ofn", &premise, KB)?;
         req.push_str(&format!(
             "<IsKBSatisfiable kb=\"{KB}\"/>\n<ReleaseKB kb=\"{KB}\"/>\n"
@@ -367,14 +453,29 @@ impl DlBackend for KoncludeBackend {
         let mut extra_kbs = Vec::new();
         for (k, extra) in kbs.iter().enumerate().filter(|(_, e)| !e.is_empty()) {
             let kb = format!("{KB}:{k}");
-            let text = FsWriter::new().ontology(&input.ontology, extra);
+            let (text, mut extra_gaps) = write_kb(&input.ontology, extra);
+            // The bridge's own `∀p.¬{v}` and `∃p.¬R` do not hide clashes
+            // from Konclude (`dl_konclude_live_data_complements`); a
+            // complement of a number datatype still makes clashes up.
+            extra_gaps
+                .missed_clash
+                .retain(|why| *why != DATA_COMPLEMENT);
+            gaps.add(extra_gaps);
             req.push_str(&Self::load(&dir.0, &format!("check-{k}.ofn"), &text, &kb)?);
             req.push_str(&format!(
                 "<IsKBSatisfiable kb=\"{kb}\"/>\n<ReleaseKB kb=\"{kb}\"/>\n"
             ));
             extra_kbs.push(k);
         }
-        let (resp, version) = self.owllink(&dir.0, &req, deadline)?;
+        let (resp, version) = match self.owllink(&dir.0, &req, deadline) {
+            // A crash is no answer either way.
+            Err(ReasoningError::Backend { detail, .. }) if detail.starts_with(CRASHED) => {
+                let mut o = CheckOutcome::of(Tri::Unknown);
+                o.detail = Some(format!("Konclude crashed on this check: {detail}"));
+                return Ok(o);
+            }
+            r => r?,
+        };
         if resp.len() != 4 + 4 * extra_kbs.len() {
             return Err(ReasoningError::Backend {
                 backend: NAME.into(),
@@ -425,14 +526,23 @@ impl DlBackend for KoncludeBackend {
                     .into(),
             );
         }
-        // Only a clash is trusted: inconsistent, entailed, unsatisfiable.
-        let trusted = match task {
-            CheckTask::Consistency | CheckTask::Satisfiability { .. } => o.result != Tri::True,
-            _ => o.result != Tri::False,
+        // Inconsistent, entailed and unsatisfiable rest on a clash.
+        let rests_on_clash = match task {
+            CheckTask::Consistency | CheckTask::Satisfiability { .. } => o.result == Tri::False,
+            _ => o.result == Tri::True,
         };
-        if complement && !trusted {
+        gaps.add(conclusion_gaps);
+        // A "yes"/"no" that rests on Konclude finding no clash can be a missed
+        // clash; one that rests on a clash, a clash that is not there.
+        let doubts = if rests_on_clash {
+            &gaps.false_clash
+        } else {
+            &gaps.missed_clash
+        };
+        if !doubts.is_empty() && o.result != Tri::Unknown {
             o.detail = Some(format!(
-                "{DATA_COMPLEMENT}, so its \"{}\" answer is not trusted",
+                "{}, so its \"{}\" answer is not trusted",
+                doubts.join("; "),
                 if o.result == Tri::True { "yes" } else { "no" }
             ));
             o.result = Tri::Unknown;
@@ -762,6 +872,141 @@ fn split_documents(text: &str) -> Vec<&str> {
     out
 }
 
+/// Why Konclude's answer about a knowledge base may be wrong.
+#[derive(Default)]
+struct Gaps {
+    /// It may say "satisfiable" where the knowledge base is not.
+    missed_clash: Vec<&'static str>,
+    /// It may say "unsatisfiable" where the knowledge base is satisfiable.
+    false_clash: Vec<&'static str>,
+}
+
+impl Gaps {
+    fn of_complements(writer: &FsWriter) -> Gaps {
+        let mut g = Gaps::default();
+        if writer.wrote_data_complement() {
+            g.missed_clash.push(DATA_COMPLEMENT);
+        }
+        if writer.wrote_numeric_complement() {
+            g.false_clash.push(NUMERIC_COMPLEMENT);
+        }
+        g
+    }
+
+    fn add(&mut self, other: Gaps) {
+        for (mine, theirs) in [
+            (&mut self.missed_clash, other.missed_clash),
+            (&mut self.false_clash, other.false_clash),
+        ] {
+            for why in theirs {
+                if !mine.contains(&why) {
+                    mine.push(why);
+                }
+            }
+        }
+    }
+}
+
+/// One knowledge base, the ontology plus `extra`, as functional syntax for
+/// Konclude, and the reasons (if any) not to trust Konclude's answer.
+fn write_kb(ont: &Ontology, extra: &[Axiom]) -> (String, Gaps) {
+    let mut writer = FsWriter::new();
+    let text = writer.ontology(ont, extra);
+    let mut gaps = Gaps::of_complements(&writer);
+    let axioms = || ont.axioms.iter().chain(extra).map(|a| &a.kind);
+    if axioms().any(|k| matches!(k, AxiomKind::DisjointDataProperties(_))) {
+        gaps.missed_clash.push(DISJOINT_DATA);
+    }
+    if axioms().any(|k| matches!(k, AxiomKind::HasKey(..))) {
+        gaps.missed_clash.push(KEYS);
+    }
+    if nominals_inverses_counting(axioms) {
+        gaps.missed_clash.push(NOMINAL_COUNTING);
+    }
+    if uses_float_facets(axioms) {
+        gaps.missed_clash.push(FLOAT_FACETS);
+    }
+    if text.contains(XML_LITERAL) {
+        gaps.missed_clash.push(XML_LITERALS);
+    }
+    (text, gaps)
+}
+
+/// Whether a class axiom uses `ObjectOneOf` while the knowledge base also has
+/// inverse properties and bounds how many neighbours an individual has
+/// (functional or inverse functional properties, cardinality restrictions):
+/// the combination that needs a tableau's NN-rule. Konclude v0.7.0 misses
+/// clashes there (the `one=two` W3C test case).
+fn nominals_inverses_counting<'a, I: Iterator<Item = &'a AxiomKind>>(
+    axioms: impl Fn() -> I,
+) -> bool {
+    let (mut nominal, mut inverse, mut counting) = (false, false, false);
+    let inv = |p: &ObjectProp| matches!(p, ObjectProp::Inverse(_));
+    for k in axioms() {
+        match k {
+            AxiomKind::FunctionalObjectProperty(p) => {
+                counting = true;
+                inverse |= inv(p);
+            }
+            AxiomKind::InverseFunctionalObjectProperty(_) => {
+                counting = true;
+                inverse = true;
+            }
+            AxiomKind::InverseObjectProperties(..) | AxiomKind::SymmetricObjectProperty(_) => {
+                inverse = true
+            }
+            AxiomKind::SubObjectPropertyOf(p, q) => inverse |= inv(p) || inv(q),
+            AxiomKind::EquivalentObjectProperties(v) => inverse |= v.iter().any(inv),
+            _ => {}
+        }
+        // Assertions name individuals, not nominal classes.
+        let tbox = !matches!(k, AxiomKind::ClassAssertion(..));
+        visit_exprs(k, &mut |c| match c {
+            ClassExpr::OneOf(_) if tbox => nominal = true,
+            ClassExpr::SomeValuesFrom(p, _)
+            | ClassExpr::AllValuesFrom(p, _)
+            | ClassExpr::HasValue(p, _)
+            | ClassExpr::HasSelf(p) => inverse |= inv(p),
+            ClassExpr::MinCardinality(_, p, _)
+            | ClassExpr::MaxCardinality(_, p, _)
+            | ClassExpr::ExactCardinality(_, p, _) => {
+                counting = true;
+                inverse |= inv(p);
+            }
+            _ => {}
+        });
+    }
+    nominal && inverse && counting
+}
+
+/// Whether a datatype restriction on `xsd:float` or `xsd:double` is in use.
+fn uses_float_facets<'a, I: Iterator<Item = &'a AxiomKind>>(axioms: impl Fn() -> I) -> bool {
+    fn float(r: &DataRange) -> bool {
+        match r {
+            DataRange::Restriction(d, _) => d == XSD_FLOAT || d == XSD_DOUBLE,
+            DataRange::IntersectionOf(v) | DataRange::UnionOf(v) => v.iter().any(float),
+            DataRange::ComplementOf(x) => float(x),
+            DataRange::Datatype(_) | DataRange::OneOf(_) => false,
+        }
+    }
+    axioms().any(|k| {
+        let mut found = match k {
+            AxiomKind::DataPropertyRange(_, r) | AxiomKind::DatatypeDefinition(_, r) => float(r),
+            _ => false,
+        };
+        visit_exprs(k, &mut |c| match c {
+            ClassExpr::DataSomeValuesFrom(_, r) | ClassExpr::DataAllValuesFrom(_, r) => {
+                found |= float(r)
+            }
+            ClassExpr::DataMinCardinality(_, _, Some(r))
+            | ClassExpr::DataMaxCardinality(_, _, Some(r))
+            | ClassExpr::DataExactCardinality(_, _, Some(r)) => found |= float(r),
+            _ => {}
+        });
+        found
+    })
+}
+
 /// Named individuals in the signature (declared or used in assertions).
 fn named_individuals(ont: &Ontology) -> Vec<String> {
     let mut out = BTreeSet::new();
@@ -1064,6 +1309,124 @@ mod tests {
         ));
         assert!(ts.contains(&"<http://e/D> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2002/07/owl#Nothing>".to_string()));
         assert!(!ts.iter().any(|t| t.ends_with("#Thing>")), "{ts:?}");
+    }
+
+    #[test]
+    fn gaps_name_what_konclude_gets_wrong() {
+        let p = || ObjectProp::Named("http://e/p".into());
+        let a = || Individual::Named("http://e/a".into());
+        let class = |i: &str| ClassExpr::Class(format!("http://e/{i}"));
+        let dt = |d: &str| DataRange::Datatype(format!("{XSD}{d}"));
+        let gaps = |kinds: Vec<AxiomKind>, extra: Vec<AxiomKind>| {
+            let ont = Ontology {
+                axioms: kinds.into_iter().map(ax).collect(),
+                ..Default::default()
+            };
+            let extra: Vec<Axiom> = extra.into_iter().map(ax).collect();
+            write_kb(&ont, &extra).1
+        };
+        let nominal =
+            || AxiomKind::EquivalentClasses(vec![class("A"), ClassExpr::OneOf(vec![a()])]);
+        // Nothing to doubt.
+        let g = gaps(
+            vec![
+                nominal(),
+                AxiomKind::FunctionalObjectProperty(p()),
+                AxiomKind::AsymmetricObjectProperty(p()),
+                AxiomKind::DataPropertyRange("http://e/d".into(), dt("integer")),
+            ],
+            vec![],
+        );
+        assert!(g.missed_clash.is_empty() && g.false_clash.is_empty());
+        // Each reason for a missed clash, from the ontology or the check.
+        for (kinds, extra, why) in [
+            (
+                vec![AxiomKind::DisjointDataProperties(vec![
+                    "http://e/d".into(),
+                    "http://e/e".into(),
+                ])],
+                vec![],
+                DISJOINT_DATA,
+            ),
+            (
+                vec![AxiomKind::HasKey(thing(), vec![p()], vec![])],
+                vec![],
+                KEYS,
+            ),
+            (
+                vec![nominal(), AxiomKind::InverseFunctionalObjectProperty(p())],
+                vec![],
+                NOMINAL_COUNTING,
+            ),
+            (
+                vec![nominal()],
+                vec![AxiomKind::ClassAssertion(
+                    ClassExpr::MaxCardinality(1, p().inverse(), None),
+                    a(),
+                )],
+                NOMINAL_COUNTING,
+            ),
+            (
+                vec![AxiomKind::DataPropertyRange(
+                    "http://e/d".into(),
+                    DataRange::Restriction(
+                        XSD_FLOAT.into(),
+                        vec![(
+                            format!("{XSD}minExclusive"),
+                            Literal {
+                                lexical: "0".into(),
+                                datatype: XSD_FLOAT.into(),
+                                lang: None,
+                            },
+                        )],
+                    ),
+                )],
+                vec![],
+                FLOAT_FACETS,
+            ),
+            (
+                vec![AxiomKind::DataPropertyAssertion(
+                    "http://e/d".into(),
+                    a(),
+                    Literal {
+                        lexical: "<b/>".into(),
+                        datatype: XML_LITERAL.into(),
+                        lang: None,
+                    },
+                )],
+                vec![],
+                XML_LITERALS,
+            ),
+        ] {
+            let g = gaps(kinds, extra);
+            assert_eq!(g.missed_clash, vec![why]);
+            assert!(g.false_clash.is_empty(), "{why}");
+        }
+        // A complement of a number datatype doubts both ways; of a string
+        // datatype or of a value list, only "satisfiable".
+        let range = |r: DataRange| {
+            vec![AxiomKind::DataPropertyRange(
+                "http://e/d".into(),
+                DataRange::ComplementOf(Box::new(r)),
+            )]
+        };
+        let g = gaps(range(dt("positiveInteger")), vec![]);
+        assert_eq!(
+            (g.missed_clash, g.false_clash),
+            (vec![DATA_COMPLEMENT], vec![NUMERIC_COMPLEMENT])
+        );
+        for r in [
+            dt("string"),
+            DataRange::OneOf(vec![Literal {
+                lexical: "1".into(),
+                datatype: format!("{XSD}integer"),
+                lang: None,
+            }]),
+        ] {
+            let g = gaps(range(r), vec![]);
+            assert_eq!(g.missed_clash, vec![DATA_COMPLEMENT]);
+            assert!(g.false_clash.is_empty());
+        }
     }
 
     #[test]

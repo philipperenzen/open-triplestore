@@ -534,7 +534,7 @@ fn class_exprs_of(k: &AxiomKind) -> Vec<&ClassExpr> {
 }
 
 /// Every class expression in `k`, nested ones included.
-fn visit_exprs<'a>(k: &'a AxiomKind, f: &mut dyn FnMut(&'a ClassExpr)) {
+pub(crate) fn visit_exprs<'a>(k: &'a AxiomKind, f: &mut dyn FnMut(&'a ClassExpr)) {
     fn walk<'a>(c: &'a ClassExpr, f: &mut dyn FnMut(&'a ClassExpr)) {
         f(c);
         match c {

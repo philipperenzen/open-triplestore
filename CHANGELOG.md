@@ -33,6 +33,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **Konclude backend: no more wrong answers on the W3C OWL 2 DL test cases.**
+  Konclude v0.7.0-1138 called inconsistent premises consistent (asymmetric,
+  irreflexive and disjoint properties against asserted edges, and DL98 cases
+  where an inverse predecessor must merge back into an individual): the
+  bridge now runs it with its individuals backend cache and individual
+  saturation off, which finds those clashes. Where Konclude is wrong in any
+  configuration (disjoint data properties, keys, float facet ranges,
+  `rdf:XMLLiteral` values, nominals with inverses and counting, and the
+  complement of a number datatype, which it reads as holding no number), a
+  check answers `unknown` with the reason instead of a wrong `true`/`false`,
+  and a materialisation is marked incomplete. A check on which Konclude
+  crashes answers `unknown`. The W3C OWL 2 DL runner gains a Konclude mode
+  (`OTS_TEST_KONCLUDE_BIN`). See docs/owl2-dl.md.
+
 ### Security
 
 ## [0.8.1] — 2026-10-22

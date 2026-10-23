@@ -58,7 +58,8 @@ OTS_TEST_REASONER_URL=http://127.0.0.1:8090 OTS_TEST_REASONER_TOKEN=<token> carg
 
 Without `OTS_TEST_REASONER_URL` the run is skipped (`w3c_owl2_dl_manifest_selection`,
 which checks the selection, runs everywhere). `OTS_TEST_W3C_OWL2_DUMP=<dir>`
-writes each premise, as sent, to `<dir>/<identifier>.nt`, and
+writes each premise, as sent, to `<dir>/<identifier>.nt` (and as the
+functional syntax the Konclude bridge writes for it, to `<identifier>.ofn`), and
 `OTS_TEST_W3C_OWL2_TIMEOUT_SECS=<n>` sets the per-check budget (default 60).
 
 ## Known failures
@@ -109,6 +110,33 @@ limit of 300 s.
 Konclude is not needed for these cases any more and is not run in CI, which
 installs no Konclude binary. The Konclude Linux release binary also needs
 `libpcre.so.3` (PCRE 1) at run time.
+
+## Through Konclude
+
+`w3c_owl2_dl_suite_against_konclude` runs the same cases through the
+Konclude bridge (`OTS_DL_BACKEND=konclude`) when `OTS_TEST_KONCLUDE_BIN`
+points at a binary; CI installs none. Konclude is an optional backend with
+known engine limits, so the bar there is "never wrong": every check answers
+as expected or `unknown`, never the opposite, and never fails outright; a
+check that runs out of time (Konclude hangs now and then) counts as `unknown`.
+
+The first such run, on 2026-10-23 with Konclude v0.7.0-1138, found wrong
+answers. None was the mapping losing an axiom: each was reproduced on the
+input's functional syntax with Konclude alone. They were:
+
+| Cases | What Konclude did | Now |
+|---|---|---|
+| `New-Feature-AsymmetricProperty-001`, `New-Feature-IrreflexiveProperty-001`, and the WebOnt-description-logic cases whose individual has an inverse predecessor bounded by a maximum cardinality (`-008`, `-012`, `-013`, `-015`, `-017`, `-105`, `-612`, `-613`, `-615`, `-617`) | "consistent" for an inconsistent premise: two ABox optimisations lose the clash | right: the bridge turns those optimisations off |
+| `New-Feature-DisjointDataProperties-*`, `New-Feature-Keys-*` | "consistent": disjoint data properties sharing a value, and keys, are not reasoned with | `unknown` |
+| `one=two`, `WebOnt-description-logic-035` | "consistent": nominals with inverse properties and counting | `unknown` |
+| `Datatype-Float-Discrete-001` | "consistent": floats taken as dense | `unknown` |
+| `WebOnt-miscellaneous-203`, `-204` | "consistent": two different `rdf:XMLLiteral` values taken as one | `unknown` |
+| `Datatype-DataComplementOf-001`, `WebOnt-I5.8-007` | a clash that is not there: the complement of a number datatype read as holding no number | `unknown` |
+| `WebOnt-description-logic-661`, `-665` | crashed (SIGSEGV), or hung, at random on an entailment check that carries several knowledge bases | `unknown` (a hang: `unknown` once the time budget runs out); trying again usually answers right |
+
+[owl2-dl.md](../owl2-dl.md#konclude-ots_dl_backendkonclude) has the
+details, and `dl_konclude_live_still_misses_these_clashes` in
+`tests/owl2_dl_conformance.rs` watches the engine for each kind.
 
 ## What the run found
 
