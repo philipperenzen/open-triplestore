@@ -116,7 +116,7 @@ curl -s -X POST http://localhost:7878/api/admin/users \
   -d '{"username":"bob","email":"bob@example.com","password":"secret123","role":"user"}'
 ```
 
-Valid roles: `user`, `admin`. You cannot create a user with a higher role than your own.
+Valid roles: `guest`, `user` (the default), `admin` and `super_admin` (only a super_admin may grant it). You cannot create a user with a higher role than your own.
 
 ### Change a user's role
 
@@ -325,11 +325,12 @@ start on any problem, listing every one**:
 - **Empty means unset.** `NAME=` (what compose passes for `${NAME:-}`) gives
   the default.
 - **Renamed or removed names stop the start** with the name to use instead
-  (for example `OTS_SECURE_COOKIES_ENABLED` → `OTS_SECURE_COOKIES_ENABLED`, or
+  (for example `SECURE_COOKIES` → `OTS_SECURE_COOKIES_ENABLED`, or
   `RATE_LIMIT_DISABLED` → `OTS_RATE_LIMIT_ENABLED` with the opposite sense),
   so an old `.env` can never be silently ignored. The full list is in the
-  changelog. An `OTS_*` variable no setting reads is
-  logged as a warning (a typo, or a secret reference's target).
+  changelog. An `OTS_*` variable no setting reads — neither the server's
+  own nor one a compiled-in plugin declares ([plugins.md](plugins.md#plugin-settings)) —
+  is logged as a warning (a typo, or a secret reference's target).
 - **Secrets** (`OTS_JWT_SECRET`, `OTS_LLM_API_KEY`, `OTS_SMTP_PASSWORD`, …) take a
   reference (`env:NAME`, `file:/path`, `vault:…`); a malformed reference is an
   error.
@@ -391,8 +392,9 @@ would serve nothing either: a corrupt store cannot be opened.) Restore a
 backup with `--restore`, or set `OTS_STORE_AUTO_RECOVER_ENABLED=true` to accept the
 rebuild.
 
-`GET /api/admin/config` (admin only) answers every setting with its effective
-value, default, kind, documentation and source — `cli`, `env`, `file` (a
+`GET /api/admin/config` (admin only) answers every setting, the compiled-in
+plugins' included, with its effective value, default, kind, documentation and
+source — `cli`, `env`, `file` (a
 secret given as a `file:` reference), `profile` (the production profile's
 default) or `default`. Secret values are shown as `[redacted]`; a secret given
 as a reference shows the reference.
