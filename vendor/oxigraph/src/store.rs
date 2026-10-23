@@ -2195,6 +2195,13 @@ impl BulkLoader<'_> {
         Ok(())
     }
 
+    /// Finishes writing everything loaded so far to its staging files, so
+    /// that [`Self::commit`] has only to make it visible. Calling it is
+    /// optional: `commit` does the same first.
+    pub fn prepare(&mut self) -> Result<(), StorageError> {
+        self.storage.prepare()
+    }
+
     /// Saves all the quads loaded using the bulk loader into the store.
     pub fn commit(self) -> Result<(), StorageError> {
         self.storage.commit()

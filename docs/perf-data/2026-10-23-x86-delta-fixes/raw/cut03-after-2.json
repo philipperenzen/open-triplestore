@@ -1,0 +1,90 @@
+{
+  "args": [
+    "restore",
+    "/data/run",
+    "data",
+    "0",
+    "33334",
+    "1000",
+    "1",
+    "--skip-tier2",
+    "--skip-builds"
+  ],
+  "command": "restore",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "build": {},
+    "build_peak_rss_mib": {},
+    "chain_intact": true,
+    "chain_intact_before_each_tier1": [
+      true
+    ],
+    "cut_checkpoint_ms": 4680.44,
+    "cut_delta_ms": [
+      4.77,
+      7.59
+    ],
+    "graph": "https://example.org/otl/instances",
+    "graph_quads": 300005,
+    "inverse_ops": 3020,
+    "k_changed": 1000,
+    "max_payload": 250000,
+    "tier1_apply": {
+      "max_ms": 32.56,
+      "median_ms": 32.56,
+      "min_ms": 32.56,
+      "n": 1,
+      "values_ms": [
+        32.56
+      ]
+    },
+    "tier1_hash_check": {
+      "max_ms": 967.07,
+      "median_ms": 967.07,
+      "min_ms": 967.07,
+      "n": 1,
+      "values_ms": [
+        967.07
+      ]
+    },
+    "tier1_peak_rss_mib": [
+      10.88
+    ],
+    "tier1_plan": {
+      "max_ms": 5.48,
+      "median_ms": 5.48,
+      "min_ms": 5.48,
+      "n": 1,
+      "values_ms": [
+        5.48
+      ]
+    },
+    "tier1_total": {
+      "max_ms": 1005.67,
+      "median_ms": 1005.67,
+      "min_ms": 1005.67,
+      "n": 1,
+      "values_ms": [
+        1005.67
+      ]
+    },
+    "tier2_change_log_growth_mib": [],
+    "tier2_copy_move": {
+      "max_ms": 0.0,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "n": 0,
+      "values_ms": []
+    },
+    "tier2_peak_rss_mib": [],
+    "tx_max_quads": 200000,
+    "v2_changes": 1010,
+    "v2_is_delta": true,
+    "v3_changes": 2010,
+    "v3_is_delta": true
+  }
+}

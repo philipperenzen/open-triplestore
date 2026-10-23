@@ -1,0 +1,15 @@
+# Per-write phase timings of scale_otl's mixed phase, from a build of c4f241f1 with temporary
+# timers in ChangeLog::commit_with and insert_quads_and_reindex_into (not committed).
+# Capture off: 'commits 1' because commit_with returns early; the totals are over all writes.
+== writers 1 capture off
+DBG commits 1: per commit ms: begin 0.02 probe 83.34 stage 7588.57 rows_prep 0.00 sec_wait 0.00 sec_hold 0.00 turn_wait 0.00 finalise 0.00 total_load 20015.20 written 27000
+"quads_written_per_s": 1350.0 "write_p95_ms": 575.4156449999999 
+== writers 1 capture on
+DBG commits 61: per commit ms: begin 0.29 probe 1.56 stage 123.87 rows_prep 0.22 sec_wait 0.00 sec_hold 202.16 turn_wait 0.00 finalise 0.77 total_load 328.89 written 30500
+"quads_written_per_s": 1525.0 "write_p95_ms": 473.145213 
+== writers 4 capture off
+DBG commits 1: per commit ms: begin 0.04 probe 410.70 stage 28664.38 rows_prep 0.00 sec_wait 0.00 sec_hold 0.00 turn_wait 0.00 finalise 0.00 total_load 80613.18 written 100000
+"quads_written_per_s": 5000.0 "write_p95_ms": 510.87121 
+== writers 4 capture on
+DBG commits 84: per commit ms: begin 0.38 probe 1.71 stage 147.42 rows_prep 0.21 sec_wait 583.07 sec_hold 247.95 turn_wait 0.00 finalise 1.12 total_load 981.88 written 42000
+"quads_written_per_s": 2100.0 "write_p95_ms": 1394.5562040000002 
