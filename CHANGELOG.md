@@ -46,6 +46,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Security
+- **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
+  generation and `u128` comparisons in the constant-time helpers that
+  `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
 
 ## [0.8.1] — 2026-10-22
 
