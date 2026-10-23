@@ -1159,7 +1159,9 @@ inverse is no larger than the graph; tier 2 is the path to avoid. **A tier-1
 restore whose inverse is over the payload cap writes a `counts` row**, which
 closes every chain through it (seen here: the 300 020-quad restore left the
 next plan without an intact chain). The tier-1 limit must therefore stay at or
-below `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`.
+below `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`. (Since 2026-10-23 the plan sends a
+restore whose inverse for one graph is over the payload cap to tier 2,
+whatever the tier-1 limit says.)
 
 Builds and cuts at 0.9M, n = 3: a checkpoint cut 39–46 s; a delta cut 7 ms
 (*k* = 1 000), 41 ms (10 000), 0.3–0.7 s (100 000); a cold build 40–58 s
@@ -1312,7 +1314,8 @@ rows (owners walked up the tree) against indexing the graph before and after
 
 The rows path is 100–200× cheaper. Two limits show: past
 `OTS_LDES_BNODE_DEPTH` the owner is not found and **the change is not
-published at all** (depth 9 against the default 8: no members); and past
+published at all** (depth 9 against the default 8: no members; since
+2026-10-23 such a change republishes the graph whole instead); and past
 `OTS_LDES_BNODE_SUBJECTS_MAX` the graph is republished whole, every entity a
 member. The subject count is of the rows' quads, not of distinct nodes — a
 changed value is a removal and an addition, so 6 000 entities are 12 000. A
@@ -1335,7 +1338,7 @@ benchmarks below are its nearest figure.
 | `OTS_CHANGE_CAPTURE_MAX_SCAN` | 250 000 | 250 000 | item 1: 5 µs and 0.8 KiB per scanned quad, no size within budget; 250k bounds a row's before-image to about 1.2 s and 200 MiB (5 % of the shipped 4 GiB container); 9M would need 7 GiB |
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | 250 000 | 250 000 | item 9: serialisation is cheap (+7–9 % at 250k–900k), memory is not (about 370 B per payload quad; +3.2 GiB at 9M) |
 | `OTS_APPLY_DELTA_TX_MAX_QUADS` | 50 000 | **200 000** | item 5: tier 1 is 4–25× faster than tier 2 and lighter (530 MiB for 200 000 quads, against 3 GiB for a tier-2 restore of 0.9M); 200 000 stays under the payload cap, so a tier-1 restore's rows stay `full` |
-| `OTS_LDES_BNODE_DEPTH` | 8 | 8 | item 11 and the census: the seed data's deepest owner is 5 steps away; deeper trees are missed silently, so raise it for data with long lists |
+| `OTS_LDES_BNODE_DEPTH` | 8 | 8 | item 11 and the census: the seed data's deepest owner is 5 steps away; a deeper change republishes its graph whole (until 2026-10-23 it was missed silently), so raise it for data with long lists |
 | `OTS_LDES_BNODE_SUBJECTS_MAX` | 10 000 | 10 000 | item 11: a walk of 10 000 subjects is about 0.5 s, a whole republish of a 220k-quad graph 2.3 s |
 
 ##### What the measurements turned up
@@ -1350,9 +1353,9 @@ benchmarks below are its nearest figure.
   transaction passed 36 GiB.
 - **A tier-1 restore over the payload cap closes the chains it crosses**
   (item 5); the new tier-1 default stays under the cap, and the two settings
-  are documented together.
+  are documented together. Fixed 2026-10-23: the plan takes tier 2 instead.
 - **A changed blank node deeper than `OTS_LDES_BNODE_DEPTH` is not published**
-  (item 11).
+  (item 11). Fixed 2026-10-23: the graph is republished whole.
 - **A `WHERE` update recounts its target graph with capture off** (item 1):
   2.6 µs per quad, 24 s at 9M.
 - **A crash always leaves an `unknown` row** (item 7): the intent row carries
