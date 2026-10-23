@@ -22,7 +22,7 @@
 //! lookup, on paths that are not hot (a guest's request, an OIDC token, an
 //! AI request, an `/embed` page, a registration).
 
-use super::{parse, FromSetting, Key, Source, Spec, SPECS};
+use super::{parse, FromSetting, Key, Source, Spec};
 use crate::auth::db::AuthDb;
 
 /// The `app_settings` key prefix of runtime overrides.
@@ -34,7 +34,7 @@ fn row_key(name: &str) -> String {
 
 /// The runtime-editable settings, in registry order.
 pub fn specs() -> impl Iterator<Item = &'static Spec> {
-    SPECS.iter().filter(|s| s.runtime)
+    super::all_specs().filter(|s| s.runtime)
 }
 
 /// The administrator's stored override of `spec`, normalised, if any. A row

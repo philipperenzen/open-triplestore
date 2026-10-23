@@ -115,6 +115,60 @@ impl PluginAuth for NoAuth {
     }
 }
 
+/// What values a plugin setting takes. The host validates a configured
+/// value against it at startup exactly as it validates its own settings, and
+/// refuses to start on one that does not fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingKind {
+    /// `1/0/true/false/yes/no/on/off`, any case.
+    Bool,
+    /// A non-negative integer, at least `min`.
+    Int { min: u64 },
+    /// Free text.
+    Text,
+    /// A comma-separated list.
+    List,
+    /// An absolute `http(s)` URL.
+    Url,
+    /// A credential: a reference (`env:NAME`, `file:/path`, `vault:…`) that
+    /// [`PluginSecrets::env_secret`] resolves. The host never shows it.
+    Secret,
+}
+
+/// One setting a plugin reads from the environment, declared through
+/// [`Plugin::settings`] so the host knows it: the startup check no longer
+/// reports the variable as a typo, its value is validated like any other
+/// setting, and `GET /api/admin/config` lists it under the plugin's name.
+/// *(ots-plugin-api 0.4)*
+#[derive(Clone, Copy, Debug)]
+pub struct Setting {
+    /// The variable, `OTS_<PLUGIN>_…`. The host ignores (with a log line) a
+    /// name without the `OTS_` prefix, one it declares itself, or one another
+    /// plugin declared first.
+    pub name: &'static str,
+    pub kind: SettingKind,
+    /// The value that applies when the variable is unset, if any.
+    pub default: Option<&'static str>,
+    /// One line, as the admin view shows it.
+    pub doc: &'static str,
+}
+
+impl Setting {
+    pub const fn new(name: &'static str, kind: SettingKind, doc: &'static str) -> Self {
+        Setting {
+            name,
+            kind,
+            default: None,
+            doc,
+        }
+    }
+
+    pub const fn default(mut self, value: &'static str) -> Self {
+        self.default = Some(value);
+        self
+    }
+}
+
 /// A compile-time Open Triplestore plugin.
 ///
 /// Implement this trait, register an instance in the host's plugin registry
@@ -150,6 +204,14 @@ pub trait Plugin: Send + Sync + 'static {
     /// at boot with a log line, not silently overridden. Default: none.
     fn connectors(&self) -> Vec<Arc<dyn sources::SourceConnector>> {
         Vec::new()
+    }
+
+    /// The settings this plugin reads from the environment (see
+    /// [`Setting`]). Declare every `OTS_*` variable the plugin reads, the
+    /// ones it hands to [`PluginSecrets::env_secret`] included. Default:
+    /// none.
+    fn settings(&self) -> &'static [Setting] {
+        &[]
     }
 }
 
@@ -190,5 +252,16 @@ mod tests {
         p.on_boot(&ctx);
         p.spawn_background(ctx);
         let _router: axum::Router<PluginContext> = p.routes();
+        assert!(p.settings().is_empty());
+        assert!(p.connectors().is_empty());
+    }
+
+    #[test]
+    fn a_setting_declares_its_default() {
+        let s = Setting::new("OTS_MINIMAL_LIMIT", SettingKind::Int { min: 1 }, "how many");
+        assert_eq!(s.default, None);
+        let s = s.default("10");
+        assert_eq!(s.default, Some("10"));
+        assert_eq!(s.kind, SettingKind::Int { min: 1 });
     }
 }

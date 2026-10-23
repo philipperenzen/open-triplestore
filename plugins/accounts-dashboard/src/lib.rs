@@ -28,9 +28,30 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ots_plugin_api::{Plugin, PluginContext};
+use ots_plugin_api::{Plugin, PluginContext, Setting, SettingKind};
 
 const UI_HTML: &str = include_str!("ui.html");
+
+/// The settings this plugin reads, declared so the host validates them at
+/// startup, lists them in `GET /api/admin/config` and does not report them
+/// as typos.
+const SETTINGS: &[Setting] = &[
+    Setting::new(
+        "OTS_ACCOUNTS_DASHBOARD_APP_GROUPS",
+        SettingKind::List,
+        "Comma-separated `app=group` pairs shown under per-app entitlements, e.g. `validation=data-stewards`.",
+    ),
+    Setting::new(
+        "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+        SettingKind::Url,
+        "Base URL of an external LLM gateway whose `GET /v1/usage` ledger the dashboard merges in; unset: the store's own aggregates only.",
+    ),
+    Setting::new(
+        "OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY",
+        SettingKind::Secret,
+        "Bearer for that gateway, as a secret reference (`env:NAME`, `file:/path`).",
+    ),
+];
 
 /// The dashboard plugin (feature `plugin-accounts-dashboard`, off by default).
 #[derive(Default)]
@@ -43,6 +64,10 @@ impl Plugin for AccountsDashboardPlugin {
 
     fn version(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+
+    fn settings(&self) -> &'static [Setting] {
+        SETTINGS
     }
 
     fn routes(&self) -> Router<PluginContext> {
@@ -241,6 +266,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Every variable the plugin reads is declared to the host, under the
+    /// plugin's own prefix.
+    #[test]
+    fn every_variable_read_is_declared() {
+        let names: Vec<&str> = AccountsDashboardPlugin
+            .settings()
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "OTS_ACCOUNTS_DASHBOARD_APP_GROUPS",
+                "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+                "OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY",
+            ]
+        );
+        assert!(names
+            .iter()
+            .all(|n| n.starts_with("OTS_ACCOUNTS_DASHBOARD_")));
     }
 
     #[test]

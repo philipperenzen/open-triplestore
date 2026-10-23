@@ -13,12 +13,15 @@
 use std::sync::Arc;
 
 use axum::Router;
-use ots_plugin_api::{Plugin, PluginAuth, PluginContext, PluginSecrets, PluginStore};
+use ots_plugin_api::{
+    Plugin, PluginAuth, PluginContext, PluginSecrets, PluginStore, Setting, SettingKind,
+};
 use serde::Serialize;
 
 use crate::auth::handlers::{GUEST_DISABLED_MESSAGE, GUEST_DISABLED_REASON};
 use crate::auth::jwt::{hash_token, verify_token};
 use crate::auth::models::User;
+use crate::config::{Kind, Spec};
 use crate::server::content_negotiation::{serialize_results_to, ResultFormat};
 use crate::server::AppState;
 
@@ -212,6 +215,62 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
     plugins
 }
 
+/// The settings every registered plugin declares ([`Plugin::settings`]), as
+/// the registry's specs so the configuration validates, describes and
+/// recognises them like its own, and the declarations refused — a line for
+/// the log each. The registry reads this once, at its first use.
+pub fn declared_settings() -> (Vec<Spec>, Vec<String>) {
+    declared_settings_of(&registered_plugins())
+}
+
+fn declared_settings_of(plugins: &[Arc<dyn Plugin>]) -> (Vec<Spec>, Vec<String>) {
+    let mut specs: Vec<Spec> = Vec::new();
+    let mut refused = Vec::new();
+    for p in plugins {
+        for s in p.settings() {
+            // Core's own declarations only (`SPECS`, not `config::spec`):
+            // the registry is being built from this very call.
+            let problem = if !s.name.starts_with("OTS_") {
+                Some("its name does not start with OTS_")
+            } else if crate::config::SPECS.iter().any(|c| c.name == s.name) {
+                Some("the server declares that setting itself")
+            } else if specs.iter().any(|c| c.name == s.name) {
+                Some("another plugin declares it already")
+            } else {
+                None
+            };
+            if let Some(why) = problem {
+                refused.push(format!(
+                    "plugin '{}' declares the setting {}, which is ignored: {why}",
+                    p.name(),
+                    s.name
+                ));
+                continue;
+            }
+            specs.push(spec_of(p.name(), s));
+        }
+    }
+    (specs, refused)
+}
+
+/// A plugin's declaration as a registry spec, grouped under the plugin's
+/// name in the admin view.
+fn spec_of(plugin: &'static str, s: &Setting) -> Spec {
+    let kind = match s.kind {
+        SettingKind::Bool => Kind::Bool,
+        SettingKind::Int { min } => Kind::Int { min, max: u64::MAX },
+        SettingKind::Text => Kind::Text,
+        SettingKind::List => Kind::List,
+        SettingKind::Url => Kind::Url,
+        SettingKind::Secret => Kind::Secret,
+    };
+    let spec = Spec::new(s.name, kind, plugin).doc(s.doc);
+    match s.default {
+        Some(v) => spec.default(v),
+        None => spec,
+    }
+}
+
 /// Run each registered plugin's `on_boot` then `spawn_background` hook.
 /// Called once at server boot, after the context is ready. `Plugin` hook
 /// implementations are expected to log and swallow their own errors — a
@@ -299,5 +358,69 @@ mod tests {
         // Just confirms this builds without panicking — per-plugin route
         // behavior is covered in each plugin crate's own tests.
         let _router: Router = mount_plugins(Router::new(), &ctx);
+    }
+
+    /// A plugin that declares settings and nothing else.
+    struct Declares(&'static str, &'static [Setting]);
+
+    impl Plugin for Declares {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn version(&self) -> &'static str {
+            "0.0.0"
+        }
+        fn settings(&self) -> &'static [Setting] {
+            self.1
+        }
+    }
+
+    /// A declared setting becomes a spec under the plugin's name, with its
+    /// kind, doc and default; a name outside `OTS_`, one core declares, or
+    /// one another plugin declared first is refused with a reason.
+    #[test]
+    fn declared_settings_become_specs_and_collisions_are_refused() {
+        const A: &[Setting] = &[
+            Setting::new(
+                "OTS_A_GATEWAY_URL",
+                SettingKind::Url,
+                "where a's gateway is",
+            )
+            .default("http://localhost:9"),
+            Setting::new("OTS_A_LIMIT", SettingKind::Int { min: 1 }, "how many"),
+            Setting::new(
+                "OTS_BASE_URL",
+                SettingKind::Text,
+                "collides with the server",
+            ),
+            Setting::new("A_FLAG", SettingKind::Bool, "no OTS_ prefix"),
+        ];
+        const B: &[Setting] = &[Setting::new(
+            "OTS_A_LIMIT",
+            SettingKind::Int { min: 0 },
+            "a declared it first",
+        )];
+        let a: Arc<dyn Plugin> = Arc::new(Declares("a", A));
+        let b: Arc<dyn Plugin> = Arc::new(Declares("b", B));
+        let (specs, refused) = declared_settings_of(&[a, b]);
+
+        let names: Vec<(&str, &str)> = specs.iter().map(|s| (s.name, s.group)).collect();
+        assert_eq!(
+            names,
+            vec![("OTS_A_GATEWAY_URL", "a"), ("OTS_A_LIMIT", "a")]
+        );
+        assert!(matches!(specs[0].kind, Kind::Url));
+        assert_eq!(specs[0].doc, "where a's gateway is");
+        assert_eq!(
+            specs[0].default_label(false).as_deref(),
+            Some("http://localhost:9")
+        );
+        assert!(matches!(specs[1].kind, Kind::Int { min: 1, .. }));
+        assert_eq!(specs[1].default_label(false), None);
+
+        assert_eq!(refused.len(), 3, "{refused:?}");
+        assert!(refused[0].contains("OTS_BASE_URL") && refused[0].contains("server declares"));
+        assert!(refused[1].contains("A_FLAG") && refused[1].contains("OTS_"));
+        assert!(refused[2].contains("'b'") && refused[2].contains("another plugin"));
     }
 }

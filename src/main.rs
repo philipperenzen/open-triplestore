@@ -284,6 +284,11 @@ async fn main() -> anyhow::Result<()> {
     for name in config::unknown_names(std::env::vars().map(|(k, _)| k)) {
         tracing::warn!("{name} is set but is not a setting this version reads (a typo?)");
     }
+    // A plugin's setting declaration the registry refused (a name the server
+    // declares itself, one without the OTS_ prefix, a duplicate).
+    for w in &settings.warnings {
+        tracing::warn!("{w}");
+    }
 
     info!("Starting open-triplestore v{}", env!("CARGO_PKG_VERSION"));
 

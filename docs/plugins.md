@@ -361,6 +361,8 @@ pub trait Plugin: Send + Sync + 'static {
     fn routes(&self) -> axum::Router<PluginContext> { axum::Router::new() }
     fn on_boot(&self, ctx: &PluginContext) {}
     fn spawn_background(&self, ctx: PluginContext) {}
+    fn connectors(&self) -> Vec<Arc<dyn SourceConnector>> { Vec::new() }
+    fn settings(&self) -> &'static [Setting] { &[] }
 }
 ```
 
@@ -402,8 +404,37 @@ dependency on this project's internal types:
 
 ### Plugin settings
 
-Plugins read their settings from the environment. The shipped plugins use
-these:
+A plugin reads its settings from the environment and declares them to the
+host through `Plugin::settings` *(ots-plugin-api 0.4)*: a `&'static [Setting]`
+of name, kind (`Bool`, `Int { min }`, `Text`, `List`, `Url` or `Secret`), an
+optional default and a line of documentation. The host then treats them as
+its own: a configured value is validated at startup (a malformed one refuses
+the start, like any other setting), `GET /api/admin/config` lists them under
+the plugin's name, and the startup check that warns about an `OTS_*` variable
+no setting reads ("a typo?") knows them. A declaration whose name lacks the
+`OTS_` prefix, matches a setting the server declares itself, or repeats
+another plugin's is ignored with a warning in the log. The declaration does
+not change where the value comes from: the plugin still reads it itself
+(`std::env::var`, or `PluginSecrets::env_secret` for a `Secret`).
+
+```rust
+use ots_plugin_api::{Setting, SettingKind};
+
+const SETTINGS: &[Setting] = &[
+    Setting::new("OTS_MY_PLUGIN_PAGE_SIZE", SettingKind::Int { min: 1 }, "Rows per page.")
+        .default("50"),
+    Setting::new("OTS_MY_PLUGIN_KEY", SettingKind::Secret, "API key, as a secret reference."),
+];
+
+impl Plugin for MyPlugin {
+    fn settings(&self) -> &'static [Setting] {
+        SETTINGS
+    }
+    // …
+}
+```
+
+The shipped plugins declare these:
 
 | Plugin | Variable | Default | Meaning |
 |---|---|---|---|
@@ -412,8 +443,10 @@ these:
 | `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
 | SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
 
-The `plugin-*` features are not part of `full`, so the published image
-contains none of these plugins. Build with the feature to use one.
+The `plugin-*` features are not part of `full`. The published image is built
+with `image`, which adds the three SQL connectors (`plugin-postgres`,
+`plugin-mysql`, `plugin-mssql`) and no other plugin; build with the feature
+to use another.
 
 ### Writing a new plugin (cookiecutter flow)
 

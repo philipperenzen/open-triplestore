@@ -46,6 +46,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stays. Upgrades before this change (0.7.x → 0.8.0 among them) may already
   have removed such files: their asset rows and objects are gone, and the
   files have to be uploaded again.
+- **A compiled-in plugin's settings are no longer reported as typos at
+  startup.** The startup check warned "`X` is set but is not a setting this
+  version reads (a typo?)" for every `OTS_*` variable the settings registry
+  did not declare, the three the bundled accounts dashboard reads included.
+  A plugin now declares its settings (`Plugin::settings`, ots-plugin-api
+  0.4: name, kind, default, doc); the registry validates them at startup
+  like its own, `GET /api/admin/config` lists them under the plugin's name,
+  and the typo check knows them. A declaration that collides with a server
+  setting or another plugin's is ignored with a warning. See
+  [docs/plugins.md](docs/plugins.md#plugin-settings).
 ### Security
 - **The privacy-notice template now covers everything the store records
   about a person.** `PRIVACY.md` said the word "telemetry" named only the

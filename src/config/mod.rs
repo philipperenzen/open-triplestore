@@ -419,9 +419,22 @@ impl Ctx<'_> {
     }
 }
 
+/// The settings compiled-in plugins declare
+/// ([`ots_plugin_api::Plugin::settings`]), as specs, with the declarations
+/// the registry refused and why; worked out once, at first use.
+fn plugin_settings() -> &'static (Vec<Spec>, Vec<String>) {
+    static PLUGIN: OnceLock<(Vec<Spec>, Vec<String>)> = OnceLock::new();
+    PLUGIN.get_or_init(crate::plugins::declared_settings)
+}
+
+/// Every setting: the server's own, in registry order, then the plugins'.
+pub fn all_specs() -> impl Iterator<Item = &'static Spec> {
+    SPECS.iter().chain(plugin_settings().0.iter())
+}
+
 /// The declaration of the setting called `name`.
 pub fn spec(name: &str) -> Option<&'static Spec> {
-    SPECS.iter().find(|s| s.name == name)
+    all_specs().find(|s| s.name == name)
 }
 
 /// The configured value of `spec` as given, before validation (`None`:
@@ -539,7 +552,7 @@ impl Config {
             production,
         };
         let mut entries = BTreeMap::new();
-        for spec in SPECS {
+        for spec in all_specs() {
             match resolve(spec, &ctx) {
                 Ok((value, source)) => {
                     entries.insert(spec.name, Entry { value, source });
@@ -562,7 +575,7 @@ impl Config {
             entries,
             live: None,
             production,
-            warnings: Vec::new(),
+            warnings: plugin_settings().1.clone(),
         };
         if errors.is_empty() {
             errors.extend(registry::checks(&config));
@@ -649,8 +662,7 @@ impl Config {
     /// ones.
     pub fn describe_with(&self, overlay: impl Fn(&Spec) -> Option<String>) -> Vec<Described> {
         let production = self.production();
-        SPECS
-            .iter()
+        all_specs()
             .map(|spec| {
                 let entry = match overlay(spec) {
                     Some(v) => Entry {
@@ -745,8 +757,9 @@ pub fn current() -> &'static Arc<Config> {
 }
 
 /// The `OTS_*` names among `names` that no setting declares (a typo, or a
-/// name from another version), for a startup warning. A secret reference
-/// may point at any variable (`env:OTS_SOMETHING`), so these only warn.
+/// name from another version), for a startup warning. The settings a
+/// compiled-in plugin declares count as declared. A secret reference may
+/// point at any variable (`env:OTS_SOMETHING`), so these only warn.
 pub fn unknown_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = names
         .into_iter()

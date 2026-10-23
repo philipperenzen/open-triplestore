@@ -454,3 +454,32 @@ fn an_unknown_profile_stops_the_start() {
     let e = errors_of(&[("OTS_ENV", "prod")]);
     assert_eq!(e[0].name, "OTS_ENV");
 }
+
+/// A setting a compiled-in plugin declares is one the registry knows: it is
+/// validated like the server's own, described under the plugin's name, and
+/// not reported as a typo at startup.
+#[cfg(feature = "plugin-accounts-dashboard")]
+#[test]
+fn plugin_settings_are_registered() {
+    assert!(unknown_names(["OTS_ACCOUNTS_DASHBOARD_APP_GROUPS".to_string()]).is_empty());
+    let c = load(&[(
+        "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+        "https://gateway.example/",
+    )])
+    .unwrap();
+    let d = c
+        .describe()
+        .into_iter()
+        .find(|d| d.name == "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL")
+        .expect("a plugin's setting is described");
+    assert_eq!(d.group, "accounts-dashboard");
+    assert_eq!(d.kind, "url");
+    assert_eq!(d.source, Source::Env);
+    assert_eq!(
+        c.value("OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL")
+            .as_deref(),
+        Some("https://gateway.example/")
+    );
+    let errors = errors_of(&[("OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL", "not a url")]);
+    assert_eq!(errors[0].name, "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL");
+}
