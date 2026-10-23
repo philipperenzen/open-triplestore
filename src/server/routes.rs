@@ -11472,7 +11472,7 @@ where
         work()
     })
     .await
-        .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -12972,7 +12972,11 @@ mod reasoning_permit_tests {
         // The client goes away while the work is running.
         request.abort();
         assert!(request.await.unwrap_err().is_cancelled());
-        assert_eq!(sem.available_permits(), 0, "slot freed while work still runs");
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "slot freed while work still runs"
+        );
 
         release_tx.send(()).unwrap();
         tokio::task::spawn_blocking(move || done_rx.recv().unwrap())
