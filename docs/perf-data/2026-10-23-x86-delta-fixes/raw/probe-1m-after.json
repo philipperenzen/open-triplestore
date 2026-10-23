@@ -1,0 +1,93 @@
+{
+  "args": [
+    "probe",
+    "/data/run",
+    "1000000",
+    "5"
+  ],
+  "command": "probe",
+  "env": {
+    "OTS_CHANGE_CAPTURE_ENABLED": "on",
+    "OTS_PARALLEL_QUERY_ENABLED": "false",
+    "OTS_QUERY_CACHE_ENABLED": "false"
+  },
+  "results": {
+    "quads": 999999,
+    "results": {
+      "bulk_insert_quads_off": {
+        "max_ms": 12403.01,
+        "median_ms": 11824.9,
+        "min_ms": 9720.94,
+        "n": 5,
+        "values_ms": [
+          9720.94,
+          11975.21,
+          11795.06,
+          12403.01,
+          11824.9
+        ]
+      },
+      "bulk_insert_quads_on": {
+        "max_ms": 13680.13,
+        "median_ms": 12640.53,
+        "min_ms": 12298.81,
+        "n": 5,
+        "values_ms": [
+          12640.53,
+          12298.81,
+          13680.13,
+          12843.38,
+          12579.27
+        ]
+      },
+      "load_named_off": {
+        "max_ms": 14056.8,
+        "median_ms": 13979.54,
+        "min_ms": 13588.72,
+        "n": 5,
+        "values_ms": [
+          14018.07,
+          13979.54,
+          13588.72,
+          14056.8,
+          13595.43
+        ]
+      },
+      "load_named_on": {
+        "max_ms": 15609.01,
+        "median_ms": 14614.07,
+        "min_ms": 13837.12,
+        "n": 5,
+        "values_ms": [
+          15240.15,
+          14614.07,
+          14232.9,
+          13837.12,
+          15609.01
+        ]
+      }
+    },
+    "rows": {
+      "bulk_insert_quads_on": [
+        {
+          "added_n": 999999,
+          "extent": "counts",
+          "graph": "https://example.org/otl/probe",
+          "removed_n": 0,
+          "seq": 12,
+          "state": "committed"
+        }
+      ],
+      "load_named_on": [
+        {
+          "added_n": 999999,
+          "extent": "counts",
+          "graph": "https://example.org/otl/probe",
+          "removed_n": 0,
+          "seq": 13,
+          "state": "committed"
+        }
+      ]
+    }
+  }
+}

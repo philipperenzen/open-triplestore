@@ -1,0 +1,39 @@
+Gnuplot not found, using plotters backend
+Benchmarking concurrent/writes/threads/1
+Benchmarking concurrent/writes/threads/1: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/1: Collecting 20 samples in estimated 5.0067 s (12k iterations)
+Benchmarking concurrent/writes/threads/1: Analyzing
+concurrent/writes/threads/1
+                        time:   [375.21 µs 381.95 µs 389.89 µs]
+                        thrpt:  [25.648 Kelem/s 26.181 Kelem/s 26.652 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking concurrent/writes/threads/2
+Benchmarking concurrent/writes/threads/2: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/2: Collecting 20 samples in estimated 5.0063 s (9380 iterations)
+Benchmarking concurrent/writes/threads/2: Analyzing
+concurrent/writes/threads/2
+                        time:   [470.48 µs 481.37 µs 493.22 µs]
+                        thrpt:  [40.550 Kelem/s 41.548 Kelem/s 42.509 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking concurrent/writes/threads/4
+Benchmarking concurrent/writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/4: Collecting 20 samples in estimated 5.0139 s (5540 iterations)
+Benchmarking concurrent/writes/threads/4: Analyzing
+concurrent/writes/threads/4
+                        time:   [812.75 µs 847.92 µs 893.14 µs]
+                        thrpt:  [44.786 Kelem/s 47.174 Kelem/s 49.215 Kelem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking concurrent/capture_writes/threads/4
+Benchmarking concurrent/capture_writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/capture_writes/threads/4: Collecting 20 samples in estimated 5.0103 s (1740 iterations)
+Benchmarking concurrent/capture_writes/threads/4: Analyzing
+concurrent/capture_writes/threads/4
+                        time:   [2.3915 ms 2.4892 ms 2.5920 ms]
+                        thrpt:  [15.432 Kelem/s 16.069 Kelem/s 16.726 Kelem/s]
+

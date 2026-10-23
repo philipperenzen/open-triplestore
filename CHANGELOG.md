@@ -31,6 +31,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node that writes: a replication follower, or a cluster member that does not
   lead, runs none.
 
+### Changed
+- **Change capture costs concurrent bulk writers almost nothing now.** With
+  `OTS_CHANGE_CAPTURE_ENABLED=on`, four writers loading 500-quad batches ran
+  at 0.44 of their capture-off throughput, because the change log's sequence
+  section ran their SST ingestions one at a time. Bulk loads, which only add
+  quads, now share the section; every other write still holds it alone, so
+  `seq` order is still commit order. The same mixed phase runs at 0.99
+  (`docs/performance.md`, "Delta-versions fixes, measured").
+- **A checkpoint version is copied in linear time.** Each 50 000-quad batch of
+  a version copy made the count index recount the growing snapshot graph, with
+  capture on or off: a 0.9M-quad checkpoint cut took 43 s and a 9M one 48
+  minutes. The batch is now counted as it goes in: 16 s at 0.9M, and delta
+  builds 45 s → 17 s.
+- **A bulk import into a new graph no longer probes every quad** with capture
+  on: ×1.13 → ×1.04 for 1M quads. A graph that already holds quads is still
+  probed.
+
 ### Deprecated
 
 ### Security
