@@ -421,8 +421,10 @@ Plugins read their settings from the environment and declare them through
 | `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
 | SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
 
-The `plugin-*` features are not part of `full`, so the published image
-contains none of these plugins. Build with the feature to use one.
+The `plugin-*` features are not part of `full`. The published image is built
+with `image`, which adds the three SQL connectors (`plugin-postgres`,
+`plugin-mysql`, `plugin-mssql`) and no other plugin; build with the feature
+to use another.
 
 ### Writing a new plugin (cookiecutter flow)
 
