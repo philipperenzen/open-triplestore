@@ -3119,6 +3119,9 @@ impl TripleStore {
                 }
             }
             loader.load_quads(std::mem::take(&mut chunk))?;
+            // The SST files are written here, outside the sequence section,
+            // which then holds only their ingestion.
+            loader.prepare()?;
             Ok(())
         })();
         if let Err(e) = staged {
@@ -3310,13 +3313,17 @@ impl TripleStore {
         let pre_count = self.pre_count();
         let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
-        if let Err(e) = loader.load_quads(quads.iter().cloned()) {
+        if let Err(e) = loader
+            .load_quads(quads.iter().cloned())
+            .and_then(|()| loader.prepare())
+        {
             if let Some(intent) = intent {
                 self.changes.abort(intent);
             }
             return Err(e.into());
         }
-        // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        // oxigraph 0.5: stage-then-commit (see load_reader_with_base); the
+        // section holds the ingestion only.
         self.changes
             .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
@@ -4201,13 +4208,14 @@ impl TripleStore {
                 }
             }
             let mut loader = self.store.bulk_loader();
-            if let Err(e) = loader.load_quads(quads) {
+            if let Err(e) = loader.load_quads(quads).and_then(|()| loader.prepare()) {
                 if let Some(intent) = intent {
                     self.changes.abort(intent);
                 }
                 return Err(e.into());
             }
-            // oxigraph 0.5: stage-then-commit.
+            // oxigraph 0.5: stage-then-commit; the section holds the
+            // ingestion only.
             self.changes
                 .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
             self.spatial_index.mark_dirty();

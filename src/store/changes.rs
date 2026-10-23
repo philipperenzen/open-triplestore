@@ -6,7 +6,7 @@
 //! Every engine primitive that mutates the store writes one row per graph it
 //! touches into `{data_dir}/changes/changes.db` (an in-memory SQLite for an
 //! in-memory store): the *intent* row goes in before the store is touched,
-//! the data commits, and inside a short critical section the row is
+//! the data commits inside a short critical section, and the row is then
 //! finalised with its payload — the added and removed quads as N-Quads — and
 //! a sequence number handed out in commit order. `seq` is the durable cursor
 //! oxigraph does not expose; `row` only identifies the intent.
@@ -178,6 +178,46 @@ impl GraphDelta {
             matches!(q.subject, NamedOrBlankNode::BlankNode(_))
                 || matches!(q.object, Term::BlankNode(_))
         })
+    }
+}
+
+/// A row's finalised values, prepared from its [`GraphDelta`] before the
+/// sequence section is taken.
+struct RowValues {
+    graph: Option<String>,
+    extent: Extent,
+    added: Option<Vec<u8>>,
+    removed: Option<Vec<u8>>,
+    added_n: usize,
+    removed_n: usize,
+    post_count: Option<usize>,
+    has_bnode: bool,
+}
+
+impl RowValues {
+    /// A target the write did not change: an empty full row.
+    fn unchanged(graph: Option<String>) -> Self {
+        Self {
+            graph,
+            extent: Extent::Full,
+            added: Some(Vec::new()),
+            removed: Some(Vec::new()),
+            added_n: 0,
+            removed_n: 0,
+            post_count: None,
+            has_bnode: false,
+        }
+    }
+}
+
+/// The finalisation turn of one write (see [`ChangeLog::commit_with`]).
+struct Turn<'a>(&'a ChangeLog);
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        let (lock, cv) = &self.0.turn;
+        *lock.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        cv.notify_all();
     }
 }
 
@@ -367,13 +407,18 @@ pub struct ChangeLog {
     /// The epoch new rows carry. Behind a lock because a restore replaces
     /// it under a log that stays open ([`Self::restore_from`]).
     epoch: RwLock<String>,
-    /// The next sequence number. Handed out under `section`; persisted in
-    /// `meta` before a sweep (which may empty the table) and by the open-time
-    /// repair, and recomputed from `MAX(seq)` at open.
+    /// The next sequence number. Handed out in `section`'s ticket order;
+    /// persisted in `meta` before a sweep (which may empty the table) and by
+    /// the open-time repair, and recomputed from `MAX(seq)` at open.
     next_seq: AtomicI64,
-    /// Brackets the data commit and the row finalisation, so `seq` order is
-    /// commit order without serialising evaluation (§4.3).
-    section: Mutex<()>,
+    /// Brackets the data commit and hands out the ticket that orders its
+    /// rows' finalisation, so `seq` order is commit order without
+    /// serialising evaluation (§4.3). Holds the next ticket.
+    section: Mutex<u64>,
+    /// The ticket whose rows are finalised next. Writers finalise in ticket
+    /// order outside the section, so one write's rows are written while the
+    /// next one commits.
+    turn: (Mutex<u64>, std::sync::Condvar),
     max_scan: usize,
     max_payload: usize,
     retention_days: u64,
@@ -651,7 +696,8 @@ impl ChangeLog {
             recording,
             epoch: RwLock::new(epoch),
             next_seq: AtomicI64::new(meta_next.max(max_seq + 1)),
-            section: Mutex::new(()),
+            section: Mutex::new(0),
+            turn: (Mutex::new(0), std::sync::Condvar::new()),
             max_scan: crate::config::CHANGE_CAPTURE_MAX_SCAN.get(),
             max_payload: crate::config::CHANGE_CAPTURE_MAX_PAYLOAD.get(),
             retention_days: crate::config::CHANGE_RETENTION_DAYS.get(),
@@ -670,7 +716,8 @@ impl ChangeLog {
             recording: false,
             epoch: RwLock::new(String::new()),
             next_seq: AtomicI64::new(0),
-            section: Mutex::new(()),
+            section: Mutex::new(0),
+            turn: (Mutex::new(0), std::sync::Condvar::new()),
             max_scan: 0,
             max_payload: 0,
             retention_days: 0,
@@ -802,7 +849,14 @@ impl ChangeLog {
     /// Run the data commit inside the sequence section and finalise the rows
     /// with `deltas` — one per graph; a graph with an intent row but no delta
     /// is committed unchanged. A commit error aborts the rows and is passed
-    /// through. Rows for graphs the intent did not know are added.
+    /// through. Rows for graphs the intent did not know are added. Returns
+    /// once the rows are finalised.
+    ///
+    /// The section holds the commit alone. The payloads are serialised
+    /// before it, and the rows are finalised after it in the order of the
+    /// tickets it hands out, which is commit order: while one write's rows
+    /// are numbered the next write commits, and `seq` order stays commit
+    /// order.
     pub fn commit_with<E>(
         &self,
         intent: Option<Intent>,
@@ -812,16 +866,46 @@ impl ChangeLog {
         let Some(intent) = intent else {
             return commit();
         };
-        let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
-        match commit() {
-            Ok(()) => {
-                self.finalise(intent, deltas);
-                Ok(())
+        let rows: Vec<RowValues> = deltas.into_iter().map(|d| self.row_values(d)).collect();
+        let ticket = {
+            let mut next = self.section.lock().unwrap_or_else(|p| p.into_inner());
+            match commit() {
+                Ok(()) => {
+                    let ticket = *next;
+                    *next += 1;
+                    ticket
+                }
+                Err(e) => {
+                    drop(next);
+                    self.abort(intent);
+                    return Err(e);
+                }
             }
-            Err(e) => {
-                self.abort(intent);
-                Err(e)
-            }
+        };
+        let _turn = self.take_turn(ticket);
+        self.finalise(intent, rows);
+        Ok(())
+    }
+
+    /// Wait until `ticket` is the one to finalise. The returned guard passes
+    /// the turn on when it is dropped, a panic included.
+    fn take_turn(&self, ticket: u64) -> Turn<'_> {
+        let (lock, cv) = &self.turn;
+        let mut serving = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while *serving != ticket {
+            serving = cv.wait(serving).unwrap_or_else(|p| p.into_inner());
+        }
+        Turn(self)
+    }
+
+    /// Wait until every write that committed before `next_ticket` was handed
+    /// out has its rows finalised. Called inside the section, so no ticket
+    /// is handed out meanwhile.
+    fn drain(&self, next_ticket: u64) {
+        let (lock, cv) = &self.turn;
+        let mut serving = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while *serving != next_ticket {
+            serving = cv.wait(serving).unwrap_or_else(|p| p.into_inner());
         }
     }
 
@@ -857,7 +941,32 @@ impl ChangeLog {
         }
     }
 
-    fn finalise(&self, intent: Intent, mut deltas: Vec<GraphDelta>) {
+    /// What a row's finalisation writes, taken from its delta before the
+    /// sequence section: the payload serialised, or none when it is over
+    /// the cap.
+    fn row_values(&self, delta: GraphDelta) -> RowValues {
+        let (extent, added, removed) = match delta.extent {
+            Extent::Full if delta.added.len() + delta.removed.len() <= self.max_payload => (
+                Extent::Full,
+                encode_quads(&delta.added),
+                encode_quads(&delta.removed),
+            ),
+            Extent::Full => (Extent::Counts, None, None),
+            other => (other, None, None),
+        };
+        RowValues {
+            has_bnode: delta.has_bnode(),
+            graph: delta.graph,
+            extent,
+            added,
+            removed,
+            added_n: delta.added_n,
+            removed_n: delta.removed_n,
+            post_count: delta.post_count,
+        }
+    }
+
+    fn finalise(&self, intent: Intent, mut rows: Vec<RowValues>) {
         let Some(mut conn) = self.lock() else { return };
         let Ok(tx) = conn.transaction() else { return };
         let mut next: i64 = self.next_seq.load(Ordering::Relaxed);
@@ -866,7 +975,7 @@ impl ChangeLog {
         // A store-scoped intent finalises as one unknown row unless the
         // primitive learnt its graphs after the fact.
         if let Some(store_row) = intent.store_row {
-            if deltas.is_empty() {
+            if rows.is_empty() {
                 let _ = exec(&tx,
                     "UPDATE changes SET seq = ?2, extent = 'unknown', state = 'unknown' WHERE row = ?1",
                     params![store_row, next],
@@ -885,31 +994,31 @@ impl ChangeLog {
         // Every intent row: its delta, or "unchanged".
         let mut pending: Vec<(Option<String>, i64, Option<usize>)> = intent.rows;
         for (graph, row, pre) in pending.drain(..) {
-            let delta = match deltas.iter().position(|d| d.graph == graph) {
-                Some(i) => deltas.swap_remove(i),
-                None => GraphDelta::full(graph.clone(), Vec::new(), Vec::new()),
+            let values = match rows.iter().position(|d| d.graph == graph) {
+                Some(i) => rows.swap_remove(i),
+                None => RowValues::unchanged(graph.clone()),
             };
-            self.write_row(&tx, row, &delta, pre, next);
+            self.write_row(&tx, row, &values, pre, next);
             next += 1;
             written += 1;
         }
         // Deltas for graphs the intent did not know (a primitive that
         // discovered its targets while running).
         let epoch = self.epoch();
-        for delta in deltas {
+        for values in rows {
             let ctx = context();
             if tx
                 .execute(
                     "INSERT INTO changes (epoch, txn, scope, graph_iri, origin, kind, commit_iri, actor_iri, extent, state, created_at) \
                      VALUES (?1, ?2, 'graph', ?3, ?4, ?5, ?6, ?7, 'unknown', 'pending', ?8)",
-                    params![epoch, intent.txn, delta.graph, intent.origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
+                    params![epoch, intent.txn, values.graph, intent.origin, ctx.kind, ctx.commit_iri, ctx.actor_iri, now()],
                 )
                 .is_err()
             {
                 continue;
             }
             let row = tx.last_insert_rowid();
-            self.write_row(&tx, row, &delta, None, next);
+            self.write_row(&tx, row, &values, None, next);
             next += 1;
             written += 1;
         }
@@ -928,26 +1037,17 @@ impl ChangeLog {
         &self,
         tx: &rusqlite::Transaction<'_>,
         row: i64,
-        delta: &GraphDelta,
+        values: &RowValues,
         pre: Option<usize>,
         seq: i64,
     ) {
-        let (extent, added, removed) = match delta.extent {
-            Extent::Full if delta.added.len() + delta.removed.len() <= self.max_payload => (
-                Extent::Full,
-                encode_quads(&delta.added),
-                encode_quads(&delta.removed),
-            ),
-            Extent::Full => (Extent::Counts, None, None),
-            other => (other, None, None),
-        };
+        let extent = values.extent;
         // An unknown row keeps only a count the primitive stated outright.
         let post_count: Option<i64> = match extent {
-            Extent::Unknown => delta.post_count.map(|n| n as i64),
-            _ => delta
-                .post_count
-                .map(|n| n as i64)
-                .or_else(|| pre.map(|p| p as i64 + delta.added_n as i64 - delta.removed_n as i64)),
+            Extent::Unknown => values.post_count.map(|n| n as i64),
+            _ => values.post_count.map(|n| n as i64).or_else(|| {
+                pre.map(|p| p as i64 + values.added_n as i64 - values.removed_n as i64)
+            }),
         };
         let state = if extent == Extent::Unknown {
             State::Unknown
@@ -961,12 +1061,12 @@ impl ChangeLog {
                 row,
                 seq,
                 extent.as_str(),
-                added,
-                removed,
-                delta.added_n as i64,
-                delta.removed_n as i64,
+                values.added,
+                values.removed,
+                values.added_n as i64,
+                values.removed_n as i64,
                 post_count,
-                delta.has_bnode() as i32,
+                values.has_bnode as i32,
                 state.as_str()
             ],
         );
@@ -975,7 +1075,7 @@ impl ChangeLog {
             "INSERT INTO graph_state (graph_key, last_seq, post_count) VALUES (?1, ?2, ?3) \
              ON CONFLICT(graph_key) DO UPDATE SET last_seq = excluded.last_seq, \
              post_count = COALESCE(excluded.post_count, graph_state.post_count)",
-            params![graph_key(delta.graph.as_deref()), seq, post_count],
+            params![graph_key(values.graph.as_deref()), seq, post_count],
         );
     }
 
@@ -1215,7 +1315,10 @@ impl ChangeLog {
     /// and its sequence number, so a store snapshot `f` opens holds exactly
     /// the writes at or below the head. A backup opens its dump here.
     pub fn at_head<T>(&self, f: impl FnOnce() -> T) -> (i64, T) {
-        let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        let section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        // Every write that committed has its rows numbered before the head
+        // is read.
+        self.drain(*section);
         let head = if self.conn.is_none() {
             0
         } else {
@@ -2016,7 +2119,8 @@ impl ChangeLog {
     /// open does: what this run still writes goes unrecorded. `Ok(false)`
     /// when there is nowhere to put it (an in-memory store, capture off).
     pub fn restore_from(&self, src: &Path) -> Result<bool, StoreError> {
-        let _section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        let section = self.section.lock().unwrap_or_else(|p| p.into_inner());
+        self.drain(*section);
         let source = Connection::open(src).map_err(sql_err)?;
         if let Some(mut conn) = self.lock() {
             copy_database(&source, &mut conn)?;
@@ -2437,6 +2541,59 @@ mod tests {
         leave_write();
         let _ = outer;
         let _ = again;
+    }
+
+    /// §4.3 with the rows finalised outside the section: concurrent writers
+    /// still get `seq` in commit order, and a head read while they run
+    /// never runs ahead of the rows the log holds.
+    #[test]
+    fn concurrent_writes_are_sequenced_in_commit_order() {
+        let log = std::sync::Arc::new(log());
+        let committed = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (log, stop) = (log.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let head = log.head_seq();
+                    let rows = log.rows_after(0, 10_000);
+                    let seqs: Vec<i64> = rows.iter().filter_map(|r| r.seq).collect();
+                    assert!(
+                        (1..=head).all(|s| seqs.contains(&s)),
+                        "every row at or below the head {head} is in the log"
+                    );
+                }
+            })
+        };
+        let writers: Vec<_> = (0..8)
+            .map(|t| {
+                let (log, committed) = (log.clone(), committed.clone());
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        let g = Some(format!("http://g/{t}/{i}"));
+                        let intent = log
+                            .begin("test", Some(std::slice::from_ref(&g)), &|_| Some(0))
+                            .unwrap();
+                        leave_write();
+                        log.commit_with::<()>(Some(intent), vec![], || {
+                            committed.lock().unwrap().push(g.clone().unwrap());
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+        let rows = log.rows_after(0, 10_000);
+        let by_seq: Vec<String> = rows.iter().filter_map(|r| r.graph_iri.clone()).collect();
+        assert_eq!(by_seq, *committed.lock().unwrap());
+        let seqs: Vec<i64> = rows.iter().filter_map(|r| r.seq).collect();
+        assert_eq!(seqs, (1..=200).collect::<Vec<i64>>());
     }
 
     #[test]

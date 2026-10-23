@@ -1677,12 +1677,19 @@ impl RocksDbStorageBulkLoader<'_> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), StorageError> {
+    /// Waits for every staged batch to be written to its SST files, without
+    /// ingesting them: what is left for `commit` is the ingestion alone.
+    pub fn prepare(&mut self) -> Result<(), StorageError> {
         while let Some(thread) = self.threads.pop_front() {
             self.sst_files
                 .extend(map_thread_result(thread.join()).map_err(StorageError::Io)??);
             self.on_possible_progress()?;
         }
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<(), StorageError> {
+        self.prepare()?;
         self.do_commit()
     }
 }
