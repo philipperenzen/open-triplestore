@@ -31,9 +31,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node that writes: a replication follower, or a cluster member that does not
   lead, runs none.
 
+### Fixed
+- **Spark answers a greeting instead of running a query.** "hi" came back as
+  a dataset summary plus a SPARQL card: every reply without retrieval got a
+  "retrieve it now" nudge, which a small model obeys whatever the message
+  was. A message made only of greeting, thanks or acknowledgement words (en/nl)
+  now gets no tools, no nudge and a short instruction to reply in kind; any
+  other message is unchanged. The nudge itself now names the tool that fits
+  (`text_search`, `vocab_term_search`, `run_sparql`) and says that what the
+  platform context already lists needs no retrieval.
+
 ### Deprecated
 
 ### Security
+- **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
+  generation and `u128` comparisons in the constant-time helpers that
+  `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
 
 ## [0.8.1] — 2026-10-22
 
