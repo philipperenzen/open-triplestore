@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Spark draws query results in the visual their rows fit.** A new ` ```view `
+  widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
+  chart (label + number), a chronological timeline (date + number), a map on
+  the MapLibre viewer (WGS84 WKT or lat/lon), a node-link graph on the cytoscape
+  canvas (`CONSTRUCT`/`DESCRIBE` triples), a SHACL summary (validation results)
+  or figure tiles (one aggregate row), and falls back to the table when the rows
+  support none of them or not the one asked for. The same tabs appear on the
+  retrieval trail, on Run results of query cards and on CSV API results; an API
+  call returning a validation report gets the SHACL summary above its JSON.
+  Everything is built from the returned cells only. Row-bound ` ```chart `
+  blocks now keep a time axis chronological and skip empty values instead of
+  drawing them as 0.
 - **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
   schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
   (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
@@ -34,6 +46,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Security
+- **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
+  generation and `u128` comparisons in the constant-time helpers that
+  `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
 
 ## [0.8.1] — 2026-10-22
 

@@ -5,7 +5,7 @@
   // visual the answer should hand the user a query or CSV instead.
   import { t } from 'svelte-i18n';
 
-  /** @type {{type: 'bar'|'line'|'pie', title?: string, xLabel?: string, yLabel?: string, series: Array<{name: string, data: Array<{label: string, value: number}>}>}} */
+  /** @type {{type: 'bar'|'line'|'pie', title?: string, xLabel?: string, yLabel?: string, labels?: string[], series: Array<{name: string, data: Array<{label: string, value: number}>}>}} */
   export let spec;
 
   const PALETTE = ['#6d4ad9', '#0ea5e9', '#16a34a', '#f59e0b', '#dc2626', '#0d9488', '#c026d3', '#64748b'];
@@ -18,8 +18,11 @@
   const PLOT_H = 170;
 
   $: series = spec?.series || [];
-  // X categories: first-seen label order across all series.
-  $: labels = [...new Set(series.flatMap((s) => s.data.map((d) => d.label)))];
+  // X categories: the spec's explicit order (chronological for a time series
+  // whose series start at different dates), else first-seen order across series.
+  $: labels = spec?.labels?.length
+    ? spec.labels
+    : [...new Set(series.flatMap((s) => s.data.map((d) => d.label)))];
   $: allValues = series.flatMap((s) => s.data.map((d) => d.value));
   $: yMax = niceCeil(Math.max(0, ...allValues));
   $: yMin = Math.min(0, niceFloor(Math.min(0, ...allValues)));

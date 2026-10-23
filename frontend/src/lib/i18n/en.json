@@ -3806,7 +3806,40 @@
       "fileTitle": "File",
       "fileOpen": "Open",
       "filePreviewUnavailable": "No inline preview for this file type.",
-      "fileBlockedUrl": "Link blocked (unsupported URL scheme)"
+      "fileBlockedUrl": "Link blocked (unsupported URL scheme)",
+      "graphFailed": "Could not load the graph view",
+      "graphCounts": "{nodes} nodes · {edges} edges",
+      "graphCapped": "drawn from the first triples of {count}",
+      "graphEmpty": "These triples could not be drawn as a graph.",
+      "mapFailed": "Could not load the map",
+      "mapSkipped": "{count} rows without WGS84 geometry not shown",
+      "views": {
+        "label": "Result view",
+        "table": "Table",
+        "bar": "Bar chart",
+        "line": "Timeline",
+        "map": "Map",
+        "graph": "Graph",
+        "shacl": "SHACL summary",
+        "stat": "Figures",
+        "fellBack": "A {view} view does not fit these rows, so they are shown as a table.",
+        "chartShown": "Showing {shown} of {total} rows.",
+        "capped": "The query returned more rows than the chat keeps."
+      },
+      "shacl": {
+        "conforms": "The data conforms to the shapes",
+        "doesNotConform": "The data does not conform to the shapes",
+        "results": "{count, plural, one {# validation result} other {# validation results}}",
+        "violation": "Violations",
+        "warning": "Warnings",
+        "info": "Info",
+        "byPath": "Most affected paths",
+        "byShape": "Shapes",
+        "byFocus": "Most affected nodes",
+        "samples": "Examples",
+        "noMessage": "(no message)",
+        "truncated": "Counted from the rows returned; the query hit its row limit."
+      }
     },
     "edgeInfo": {
       "predicateBadge": "Predicate",

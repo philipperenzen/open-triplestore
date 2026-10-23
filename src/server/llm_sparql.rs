@@ -1537,6 +1537,11 @@ WKT must be WGS84 with longitude before latitude. Prefer points or centroids; sk
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
 real 3D geometry on the basemap.\n\
+- ```view — the platform draws a query result in the visual its rows fit: {\"source\":\"query\",\"as\":\"auto\"}. \
+auto picks from the row shape: counts per label → bar, dates with numbers → line, WKT → map, \
+CONSTRUCT/DESCRIBE triples → graph, SHACL results → shacl summary, one aggregate row → stat, else table. \
+Set \"as\" (bar|line|map|graph|shacl|stat|table) to choose; a choice the rows cannot support shows a table. \
+Add \"query\":N for the Nth query of this turn (default: the last with rows).\n\
 - ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}; \
 asset download paths carry no file extension, so give those an explicit format: \
 {\"models\":[{\"label\":\"…\",\"url\":\"/api/datasets/<id>/assets/<id>/download\",\"format\":\"ifc\"}]}. \
@@ -1560,8 +1565,8 @@ also render well.\n\
 - Entity links: link the key entities you name to their detail page as \
 `[label](/resource?iri=<percent-encoded IRI>)` — it opens the platform's resource inspector with the \
 full RDF, geometry and 3D view. Use these in prose and in table cells whenever a result row has an IRI.\n\n\
-Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
-locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
+Pick at most a couple of widgets per answer, chosen for the question: a query result to show → view, \
+trends or comparisons → chart, locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
 map with models when georeferenced, files → file, raw listings → markdown table or csv, \"how do I \
 get this myself\" → sparql or api block. Every fence must open on its own line, contain real content on the \
 following lines, and close with ``` on its own line — never write a one-line or empty fence. Widget \
@@ -3212,7 +3217,16 @@ fn opens_data_widget_fence(line: &str) -> bool {
     }
     matches!(
         t[run..].trim().to_ascii_lowercase().as_str(),
-        "chart" | "map" | "geo" | "card" | "infocard" | "info-card" | "csv" | "model3d" | "file"
+        "chart"
+            | "map"
+            | "geo"
+            | "card"
+            | "infocard"
+            | "info-card"
+            | "csv"
+            | "model3d"
+            | "file"
+            | "view"
     )
 }
 
@@ -5366,8 +5380,15 @@ mod tests {
 ```",
             &[]
         ));
+        // A ```view only ever binds to this turn's query rows.
+        assert!(widgets_without_retrieval(
+            "```view\n{\"source\":\"query\"}
+```",
+            &[]
+        ));
         // A tag that merely starts with a widget name is not a widget fence.
         assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
+        assert!(!widgets_without_retrieval("```viewport\ncode\n```", &[]));
         // Two characters are not a fence.
         assert!(!widgets_without_retrieval("``map``", &[]));
     }

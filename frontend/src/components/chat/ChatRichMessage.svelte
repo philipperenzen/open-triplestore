@@ -17,10 +17,12 @@
   import ChatModel3D from './ChatModel3D.svelte';
   import ChatFileCard from './ChatFileCard.svelte';
   import CsvPreview from './CsvPreview.svelte';
+  import ResultVisual from './ResultVisual.svelte';
 
   export let content = '';
   /** The turn's executed SPARQL runs (LlmChat's msg.queries) — the LAST
-   *  successful one backs `"source":"query"` chart/map widgets. */
+   *  successful one backs `"source":"query"` chart/map widgets; a ```view
+   *  block may name any of them by its 1-based round number. */
   export let queries = null;
 
   const dispatch = createEventDispatcher();
@@ -28,6 +30,7 @@
   $: lastRun = (queries || []).filter((q) => q && q.ok !== false && q.rows?.length).at(-1) || null;
   $: segments = parseChatBlocks(content, {
     queryRows: lastRun ? { columns: lastRun.columns || [], rows: lastRun.rows || [] } : null,
+    queryRuns: queries || [],
   });
 
   function mdHtml(src) {
@@ -87,6 +90,15 @@
     <ChatModel3D models={seg.models} />
   {:else if seg.kind === 'file'}
     <ChatFileCard file={seg.file} />
+  {:else if seg.kind === 'view'}
+    <ResultVisual
+      table={seg.view.table}
+      preferred={seg.view.as}
+      title={seg.view.title}
+      x={seg.view.x}
+      y={seg.view.y}
+      truncated={seg.view.truncated}
+    />
   {:else if seg.kind === 'csv'}
     <CsvPreview columns={seg.columns} rows={seg.rows} raw={seg.raw} />
   {:else if seg.kind === 'ask'}

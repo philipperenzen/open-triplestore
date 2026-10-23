@@ -5,6 +5,9 @@
 //   ```api     → runnable GET /api/... call     ```map     → JSON WKT feature map
 //   ```csv     → table preview with download    ```card    → entity info card
 //   ```file    → downloadable file card         ```model3d → 3D model orbit viewer
+//   ```view    → the best visual for a query result this turn (chart / map /
+//                node-link graph / SHACL summary / KPI tiles / table), picked
+//                from the rows' shape by lib/chatViz.ts
 //
 // A ```map spec may also carry "models": URL-referenced 3D models anchored at a
 // WKT POINT, rendered on the georeferenced MapLibre viewer instead of Leaflet.
@@ -21,6 +24,7 @@ import { modelFormatFromUrl } from './viewer/detect';
 import { parseWktGeometry } from './ontology/valueType';
 import { safeExternalUrl } from './safeUrl';
 import { stripBase } from './basePath';
+import { temporalValue } from './chatViz';
 
 /** A fence opener/closer: ``` or ~~~, optionally with a language tag. */
 const FENCE_RE = /^\s*(```+|~~~+)\s*([\w+-]*)\s*$/;
@@ -44,6 +48,7 @@ const MAX_3D_MODELS = 8;
  */
 export function parseChatBlocks(source, opts = {}) {
   const queryRows = opts.queryRows ?? null;
+  const queryRuns = opts.queryRuns ?? null;
   const lines = String(source ?? '').split('\n');
   const segments = [];
   let md = [];
@@ -71,7 +76,7 @@ export function parseChatBlocks(source, opts = {}) {
       }
     }
     const body = lines.slice(i + 1, close === -1 ? lines.length : close).join('\n');
-    const seg = specialSegment(lang, body, queryRows);
+    const seg = specialSegment(lang, body, queryRows, queryRuns);
     if (seg) {
       flushMd();
       segments.push(seg);
@@ -87,7 +92,7 @@ export function parseChatBlocks(source, opts = {}) {
 }
 
 /** Map one fenced block to a widget segment, or null to leave it as markdown. */
-function specialSegment(lang, body, queryRows = null) {
+function specialSegment(lang, body, queryRows = null, queryRuns = null) {
   const code = body.trim();
   if (!code) return null;
   const kind = lang || sniffLang(code);
@@ -113,6 +118,14 @@ function specialSegment(lang, body, queryRows = null) {
       return r.error
         ? { kind: 'broken', label: 'map', error: r.error, raw: code }
         : { kind: 'map', features: r.features, models: r.models };
+    }
+    // view fires on the explicit tag only and never carries data of its own:
+    // it points at a query run, so there is nothing to sniff.
+    case 'view': {
+      const r = parseViewSpec(code, queryRuns);
+      return r.error
+        ? { kind: 'broken', label: 'view', error: r.error, raw: code }
+        : { kind: 'view', view: r.view };
     }
     // model3d / file fire on the explicit fence tag only — sniffLang never
     // returns them, so untagged JSON stays in the markdown flow.
@@ -151,6 +164,52 @@ function specialSegment(lang, body, queryRows = null) {
     default:
       return null;
   }
+}
+
+const VIEW_KINDS = ['auto', 'table', 'bar', 'line', 'chart', 'map', 'graph', 'network', 'shacl', 'report', 'stat', 'kpi'];
+
+/**
+ * Parse a ```view widget: {"source":"query", "as"?: auto|bar|line|map|graph|
+ * shacl|stat|table, "query"?: N, "title"?, "x"?, "y"?}. It binds to a query
+ * run of this turn — the Nth (1-based, counting every round) or by default the
+ * last one that returned rows — and carries no data of its own, so whatever it
+ * draws came from the store. Which visual the rows actually support is decided
+ * at render time (chatViz.resolveView); a request they cannot support shows
+ * the table instead.
+ * @param {string} text
+ * @param {Array<{ok?: boolean, columns?: string[], rows?: string[][], truncated?: boolean}> | null} queryRuns
+ * @returns {{view?: {as: string, title: string, x: string, y: string, table: {columns: string[], rows: string[][]}, truncated: boolean, queryIndex: number}, error?: string}}
+ */
+export function parseViewSpec(text, queryRuns = null) {
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'not an object' };
+  const runs = Array.isArray(queryRuns) ? queryRuns : [];
+  const usable = (q) => q && q.ok !== false && Array.isArray(q.columns) && q.columns.length && Array.isArray(q.rows) && q.rows.length;
+  let index = -1;
+  const n = Number(raw.query);
+  if (raw.query != null && Number.isInteger(n) && n >= 1) {
+    if (!usable(runs[n - 1])) return { error: `query ${n} produced no rows this turn` };
+    index = n - 1;
+  } else {
+    for (let i = runs.length - 1; i >= 0; i--) {
+      if (usable(runs[i])) { index = i; break; }
+    }
+  }
+  if (index < 0) return { error: 'no query rows were produced this turn' };
+  const run = runs[index];
+  const want = str(raw.as ?? raw.type ?? raw.view).toLowerCase();
+  return {
+    view: {
+      as: VIEW_KINDS.includes(want) ? want : 'auto',
+      title: str(raw.title),
+      x: str(raw.x),
+      y: str(raw.y),
+      table: { columns: run.columns.map(String), rows: run.rows },
+      truncated: !!run.truncated,
+      queryIndex: index,
+    },
+  };
 }
 
 /**
@@ -356,7 +415,9 @@ function firstNumericColumn(columns, rows) {
  * Bind a `"source":"query"` chart to the executed rows: x = the named label
  * column (default: first non-numeric), y = the named value column (default:
  * first numeric). Sorted descending and capped so a 40-graph result stays a
- * readable chart.
+ * readable chart — except a time axis (dates, or years in a date-ish column),
+ * which keeps chronological order: a trend sorted by value is not a trend.
+ * An empty value cell is skipped, never charted as 0.
  */
 function chartFromQueryRows(raw, queryRows) {
   const columns = queryRows?.columns || [];
@@ -370,11 +431,16 @@ function chartFromQueryRows(raw, queryRows) {
   let xi = colIndex(columns, raw.x ?? raw.label);
   if (xi < 0) xi = columns.findIndex((_, i) => i !== yi);
   if (xi < 0) return { error: 'source:"query": no label column for x' };
-  const data = rows
+  const points = rows
+    .filter((r) => String(r[yi] ?? '').trim() !== '')
     .map((r) => ({ label: String(r[xi] ?? ''), value: Number(r[yi]) }))
-    .filter((d) => d.label && Number.isFinite(d.value))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, MAX_CHART_POINTS);
+    .filter((d) => d.label && Number.isFinite(d.value));
+  const times = points.map((d) => temporalValue(d.label, columns[xi]));
+  const temporal = points.length > 1 && times.every((t) => t !== null);
+  const data = (temporal
+    ? points.map((d, i) => ({ d, t: times[i] })).sort((a, b) => a.t - b.t).map((p) => p.d)
+    : points.sort((a, b) => b.value - a.value)
+  ).slice(0, MAX_CHART_POINTS);
   if (!data.length) return { error: 'source:"query": rows yielded no plottable points' };
   return { series: [{ name: '', data }] };
 }
