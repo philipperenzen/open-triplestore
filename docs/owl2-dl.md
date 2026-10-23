@@ -104,7 +104,34 @@ Every wrong answer seen so far is "consistent" where the right one is "inconsist
 - writes `¬rdfs:Literal` as the empty data range, `¬¬D` as `D`, and the complement of an empty range as `rdfs:Literal`, so these never reach Konclude as complements;
 - when the input still contains a data complement after that, gives no answer that depends on Konclude finding no clash. A check answers `unknown`, with a `detail` that says why, instead of `consistent: true`, `entailed: false` or `satisfiable: true`. A materialisation reports `complete: false` and a warning, and still writes what Konclude derived. Answers that rest on a clash are kept: inconsistent, entailed, unsatisfiable.
 
-A complement that only appears in an entailment conclusion is treated the same way. The bridge's own negations (`∀p.¬{v}` for a data assertion, `∃p.¬R` for a range) are not affected: they come out right in the probes, once `¬rdfs:Literal` is written as the empty range. The test `dl_konclude_live_still_misses_the_complement_clash` fails once the Konclude in use reads `∃p.(D ⊓ ¬D)` correctly, and that is the time to narrow this fallback.
+A complement that only appears in an entailment conclusion is treated the same way. The bridge's own negations (`∀p.¬{v}` for a data assertion, `∃p.¬R` for a range) are not affected: they come out right in the probes, once `¬rdfs:Literal` is written as the empty range, unless `R` is a number datatype (below). The test `dl_konclude_live_still_misses_the_complement_clash` fails once the Konclude in use reads `∃p.(D ⊓ ¬D)` correctly, and that is the time to narrow this fallback.
+
+**Complements of number datatypes.** Here Konclude errs the other way: it reads the complement of `xsd:decimal`, `xsd:integer` or a type derived from them as holding no number at all. A property with range `¬xsd:positiveInteger` and the value `-1` is consistent, and Konclude says inconsistent; so does `xsd:short ⊓ ¬xsd:unsignedByte` look empty to it. (Complements of a value list, `¬{1}`, and of non-number datatypes are read right.) When such a complement is in the input, in the conclusion, or in the bridge's own `∃p.¬R` for a range `R`, an answer that rests on a clash is `unknown` too, so every answer is; and a materialisation derives nothing, with `complete: false` and a warning.
+
+**Other clashes Konclude misses.** Running the W3C OWL 2 DL test cases through the bridge found more wrong answers from Konclude v0.7.0-1138. Each one was reproduced on the functional syntax of the input alone, without the bridge, so none of them is a mapping loss:
+
+| Input | Right answer | Konclude | What the server does |
+|---|---|---|---|
+| `p` asymmetric, `p(a, b)`, `p(b, a)` | inconsistent | consistent | configuration (below) |
+| `p` irreflexive, `p(a, a)` | inconsistent | consistent | configuration |
+| `p`, `q` disjoint object properties, `p(a, b)`, `q(a, b)` | inconsistent | consistent | configuration |
+| `a : ¬∃p.Self`, `p(a, a)` | inconsistent | consistent | configuration |
+| `x : A ⊓ ∃r⁻.(∃r.B ⊓ ≤1 r)`, `A`, `B` disjoint (the shape of several WebOnt-description-logic cases) | inconsistent | consistent, although it classifies that class as unsatisfiable | configuration |
+| `p`, `q` disjoint data properties, `p(a, "x")`, `q(a, "x")` | inconsistent | consistent | `unknown` |
+| `owl:hasKey`: two different individuals with the same key value | inconsistent | consistent (keys are ignored) | `unknown` |
+| `∃p.float(0, 1.4e-45)`: no float lies between 0 and the smallest positive float | inconsistent | consistent (floats taken as dense) | `unknown` |
+| a functional data property with two different `rdf:XMLLiteral` values | inconsistent | consistent | `unknown` |
+| `one=two`: nominals, inverse properties and functional properties that force a set of three to have six members | inconsistent | consistent | `unknown` |
+
+*Configuration.* The first five come from two of Konclude's ABox optimisations, its individuals backend cache and individual saturation. The bridge turns both off for its OWLlink runs, which decide consistency, classification and types (`Konclude owllinkfile -c <config>`, setting `Konclude.Calculation.Optimization.IndividualsBackendCacheLoading` and `…IndividualSaturation` to `false`), and these inputs then answer right. This costs speed on large ABoxes. The SPARQL runs for entailed property assertions keep the defaults: with individual saturation off, Konclude's SPARQL answers come back empty.
+
+*The rest* answer `unknown` where the answer rests on Konclude finding no clash, as for data complements: when the input (or a check's conclusion) has disjoint data properties, an `owl:hasKey`, a facet restriction of `xsd:float` or `xsd:double`, an `rdf:XMLLiteral` value, or an `owl:oneOf` in a class axiom together with inverse properties and a functional or inverse functional property or a cardinality restriction. The `detail` names the reason; a materialisation reports `complete: false` and a warning. The last condition is broad on purpose: it is the combination that needs a tableau's NN-rule, which `one=two` exercises.
+
+**Crashes.** Konclude v0.7.0-1138 crashed (SIGSEGV) on some entailment checks of the WebOnt-description-logic 66x cases, where one request carries several knowledge bases; each of those knowledge bases on its own is decided correctly. A check on which Konclude crashes answers `unknown`, with the crash in `detail`. Its SPARQL interface also crashes, in every configuration, on a sub-property of an irreflexive property with an asserted edge; a materialisation then keeps what the OWLlink run reported, leaves out the entailed object property assertions, and reports `complete: false` with a warning. A crash of the OWLlink run during a materialisation is a backend error (502).
+
+**Hangs.** Konclude v0.7.0-1138 also hangs now and then, at random: about one run in ten of an OWLlink request that carries the eight knowledge bases of a WebOnt-description-logic-661 entailment check, and about one in a hundred runs of a single knowledge base, whatever the configuration or the number of worker threads (`-w`). The bridge kills the run at `OTS_REASONER_TIMEOUT_SECS`, and the check answers `unknown` (504); trying again usually answers.
+
+`dl_konclude_live_still_misses_these_clashes` runs a sample of each row on Konclude itself, and fails once the Konclude in use gets one right; that is the time to drop the matching workaround.
 
 ---
 
@@ -238,7 +265,7 @@ The premise is one of:
 A check that ran answers **200** with `{task, result, backend, backend_version, complete, regime, sources, warnings}`. An inconsistent premise adds the materialisation 422's fields `consistent: false`, `rule`, `detail`. Errors use the same statuses as materialisation: 422 (not in OWL 2 DL), 503, 504 with `"result": "unknown"`, 413 and 502.
 
 How each backend answers:
-- **Konclude** reduces entailment to consistency (`O ⊨ α` iff `O ∪ ¬α` is inconsistent), one knowledge base per negated axiom. Axioms with no such reduction answer `unknown`: data sub-properties, keys, datatype definitions, conclusions with anonymous individuals. A premise or conclusion with `owl:datatypeComplementOf` answers `unknown` where Konclude found no clash; see "Data complements" under [Konclude](#konclude-ots_dl_backendkonclude).
+- **Konclude** reduces entailment to consistency (`O ⊨ α` iff `O ∪ ¬α` is inconsistent), one knowledge base per negated axiom. Axioms with no such reduction answer `unknown`: data sub-properties, keys, datatype definitions, conclusions with anonymous individuals. A premise or conclusion with `owl:datatypeComplementOf`, disjoint data properties, keys, float facets, `rdf:XMLLiteral` values, or nominals with inverses and counting answers `unknown` where Konclude found no clash, and one with a complement of a number datatype answers `unknown` where it found one; see [Konclude](#konclude-ots_dl_backendkonclude).
 - **Native** answers entailment `true` when the conclusion (blank nodes as variables) matches the premise plus its closure, and `unknown` otherwise.
 
 ### Jobs — `GET /api/reasoning/jobs/{job_id}`

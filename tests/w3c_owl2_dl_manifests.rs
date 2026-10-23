@@ -32,7 +32,10 @@
 //! The run needs a sidecar: it is skipped unless `OTS_TEST_REASONER_URL` is set
 //! (`OTS_TEST_REASONER_TOKEN`: its token). `w3c_owl2_dl_manifest_selection`
 //! needs none and runs everywhere. `OTS_TEST_W3C_OWL2_DUMP=<dir>` writes each
-//! premise, as N-Triples, to `<dir>/<identifier>.nt`.
+//! premise, as N-Triples, to `<dir>/<identifier>.nt`, and as the Konclude
+//! bridge's functional syntax to `<dir>/<identifier>.ofn`.
+//! `w3c_owl2_dl_suite_against_konclude` runs the cases through the Konclude
+//! bridge instead when `OTS_TEST_KONCLUDE_BIN` is set.
 
 #![cfg(feature = "owl2-dl")]
 
@@ -42,6 +45,8 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use open_triplestore::reasoning::dl_config::{DlBackendKind, DlConfig};
+use open_triplestore::reasoning::owl_fs::FsWriter;
+use open_triplestore::reasoning::owl_mapping::map_triples;
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::{Graph, NamedNode, NamedOrBlankNode, Term, Triple};
 use serde_json::{json, Value};
@@ -239,6 +244,8 @@ enum Outcome {
     Pass,
     Fail(String),
     Skip(&'static str),
+    /// The backend withheld an answer (`unknown`): not wrong, not a pass.
+    Unknown(String),
 }
 
 async fn check(app: &axum::Router, token: &str, body: Value) -> Result<String, String> {
@@ -282,11 +289,22 @@ async fn run(app: &axum::Router, token: &str, c: &Case) -> Outcome {
     }
     // Debugging aid: OTS_TEST_W3C_OWL2_DUMP=<dir> keeps each premise as sent.
     if let Some(dir) = std::env::var_os("OTS_TEST_W3C_OWL2_DUMP") {
-        let _ = std::fs::write(
-            std::path::Path::new(&dir).join(format!("{}.nt", c.id)),
-            &premise_nt,
-        );
+        let dir = std::path::Path::new(&dir);
+        let _ = std::fs::write(dir.join(format!("{}.nt", c.id)), &premise_nt);
+        // …and as the functional syntax the Konclude bridge writes for it.
+        if let Ok(g) = RdfParser::from_format(RdfFormat::NTriples)
+            .for_slice(premise_nt.as_bytes())
+            .map(|q| q.map(Triple::from))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            let m = map_triples(&g);
+            let _ = std::fs::write(
+                dir.join(format!("{}.ofn", c.id)),
+                FsWriter::new().ontology(&m.ontology, &[]),
+            );
+        }
     }
+    let mut unknown = None;
     for k in &c.kinds {
         let (task, conclusion, expected) = match k {
             Kind::Consistency => ("consistency", None, "true"),
@@ -306,11 +324,15 @@ async fn run(app: &axum::Router, token: &str, c: &Case) -> Outcome {
         }
         match check(app, token, body).await {
             Ok(r) if r == expected => {}
+            Ok(r) if r == "unknown" => unknown = Some(format!("{k:?}")),
             Ok(r) => return Outcome::Fail(format!("{k:?}: expected {expected}, got {r}")),
             Err(e) => return Outcome::Fail(format!("{k:?}: {e}")),
         }
     }
-    Outcome::Pass
+    match unknown {
+        Some(k) => Outcome::Unknown(k),
+        None => Outcome::Pass,
+    }
 }
 
 /// The selection itself, without a sidecar: the vendored file parses, the
@@ -360,12 +382,17 @@ async fn w3c_owl2_dl_suite_against_the_sidecar() {
         if known.is_some() {
             listed_seen += 1;
         }
-        match (run(&app, &token, &c).await, known) {
+        let outcome = match run(&app, &token, &c).await {
+            Outcome::Unknown(k) => Outcome::Fail(format!("{k}: answered unknown")),
+            o => o,
+        };
+        match (outcome, known) {
             (Outcome::Pass, None) => pass += 1,
             (Outcome::Pass, Some(_)) => fixed.push(c.id.clone()),
             (Outcome::Fail(_), Some(_)) => {}
             (Outcome::Fail(why), None) => unexpected.push(format!("{}: {why}", c.id)),
             (Outcome::Skip(why), _) => skips.push(format!("{} ({why})", c.id)),
+            (Outcome::Unknown(_), _) => unreachable!(),
         }
     }
     for s in &skips {
@@ -396,5 +423,62 @@ async fn w3c_owl2_dl_suite_against_the_sidecar() {
         pass >= PASS_FLOOR,
         "only {pass} W3C OWL 2 DL cases passed (floor {PASS_FLOOR}); skips: {}",
         skips.join(", ")
+    );
+}
+
+fn konclude() -> Option<DlConfig> {
+    let bin = std::env::var("OTS_TEST_KONCLUDE_BIN").ok()?;
+    let mut c = DlConfig::default().with_backend(DlBackendKind::Konclude);
+    c.konclude_bin = bin;
+    // Every case answers in about a second when Konclude does not hang.
+    c.timeout = Duration::from_secs(20);
+    Some(c)
+}
+
+/// The same cases through the Konclude bridge (`OTS_TEST_KONCLUDE_BIN`).
+/// Konclude is an optional backend with known engine limits, so the bar is
+/// "never wrong": every case answers as expected or `unknown`, never the
+/// opposite, and never fails outright (a check past its time budget counts
+/// as `unknown`). CI installs no Konclude; this runs where a binary is at
+/// hand.
+#[tokio::test]
+async fn w3c_owl2_dl_suite_against_konclude() {
+    let Some(cfg) = konclude() else { return };
+    let (mut state, token) = admin_state();
+    state.dl = Arc::new(cfg);
+    let app = test_app(state);
+
+    let (mut pass, mut unknown, mut wrong) = (0usize, Vec::new(), Vec::new());
+    for c in cases() {
+        match run(&app, &token, &c).await {
+            Outcome::Pass => pass += 1,
+            Outcome::Unknown(k) => unknown.push(format!("{} ({k})", c.id)),
+            // Konclude v0.7.0 now and then hangs (docs/owl2-dl.md): a check
+            // past its budget answers `unknown` with a 504, no answer either way.
+            Outcome::Fail(why) if why.contains("HTTP 504") => {
+                unknown.push(format!("{} (timed out)", c.id))
+            }
+            // The cases the server itself refuses fail on every backend.
+            Outcome::Fail(_) if KNOWN_FAILURES.iter().any(|(k, _)| *k == c.id) => {}
+            Outcome::Fail(why) => wrong.push(format!("{}: {why}", c.id)),
+            Outcome::Skip(_) => {}
+        }
+    }
+    for u in &unknown {
+        println!("  UNKNOWN {u}");
+    }
+    println!(
+        "W3C OWL 2 DL via Konclude: {pass} passed, {} unknown",
+        unknown.len()
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} cases answered wrongly or failed through Konclude:
+  {}",
+        wrong.len(),
+        wrong.join(
+            "
+  "
+        )
     );
 }
