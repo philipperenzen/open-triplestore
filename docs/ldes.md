@@ -57,9 +57,11 @@ graph is indexed before and after the write and the two compared, as
 before. Capturing from the rows costs 5–15 ms where the two indexings cost
 0.7–3.3 s ([performance.md](performance.md#delta-versions-at-scale--change-capture-on-09m-to-9m-quads-2026-10-15),
 item 11). A change to a blank node more than `OTS_LDES_BNODE_DEPTH` levels
-below its entity is **not published**: the walk stops without an owner. An
-RDF list needs its length plus one; raise the setting for data with long
-lists or deep trees (each level is one index lookup).
+below its entity republishes its graph whole, as the subject cap does: the
+walk stops without an owner, and dropping the change (as it once did) would
+leave the stream behind the data. An RDF list needs its length plus one;
+raise the setting for data with long lists or deep trees (each level is one
+index lookup) to keep their writes off the whole-graph path.
 
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):

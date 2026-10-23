@@ -33,6 +33,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **A deep blank-node edit is published to LDES again.** With change capture
+  on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
+  below its entity was not published at all, since the walk up to its owner
+  stopped without one. Its graph is now republished whole, as for a write
+  over `OTS_LDES_BNODE_SUBJECTS_MAX`.
+- **A tier-1 restore no longer closes its own chains.** A version restore
+  whose inverse for one graph was over `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`
+  applied it in one transaction and recorded a `counts` row, which no chain
+  crosses; such a restore now takes tier 2. The defaults already avoided it
+  (`OTS_APPLY_DELTA_TX_MAX_QUADS` is below the cap); a raised tier-1 limit no
+  longer can.
+
 ### Security
 
 ## [0.8.1] — 2026-10-22
