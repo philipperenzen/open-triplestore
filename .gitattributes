@@ -31,6 +31,11 @@ Dockerfile      text eol=lf
 *.py            text eol=lf
 # Extensionless shell scripts (git hooks) — must be LF so bash can run them.
 scripts/hooks/* text eol=lf
+# Maven wrapper of the reasoner sidecar: `./mvnw` runs inside a Linux image
+# during `docker build` and reads `distributionUrl` from the properties file,
+# so a CR in either breaks the build (`./mvnw: not found`).
+sidecars/reasoner/mvnw                                   text eol=lf
+sidecars/reasoner/.mvn/wrapper/maven-wrapper.properties  text eol=lf
 
 # ── RDF fixtures: loaded by the server and byte-compared in conformance tests,
 #    so keep them LF on every platform. ──

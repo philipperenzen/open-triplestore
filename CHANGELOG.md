@@ -33,7 +33,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+### Fixed
+- **The reasoner sidecar builds from a Windows checkout.** `.gitattributes`
+  now pins `sidecars/reasoner/mvnw` and its `maven-wrapper.properties` to LF,
+  so `docker build -f sidecars/reasoner/Dockerfile .` no longer fails with
+  `./mvnw: not found` when Git checked the wrapper out with CRLF.
+- **A reasoning request keeps its expensive-operations slot until its work
+  ends.** A client that disconnected during a synchronous reasoning call
+  (`/api/reasoning/materialize`, `/api/reasoning/check`) freed the slot at
+  once, while the blocking work and its sidecar call kept running, so the
+  server could run more reasoning at once than `expensive_semaphore` allows.
+  The slot is now held by the blocking task itself.
+
 ### Security
+- `ctutils` 0.4.3 → 0.4.4 for RUSTSEC-2026-0385 (non-constant-time mask
+  generation and `u128` comparisons).
 
 ## [0.8.1] — 2026-10-22
 
