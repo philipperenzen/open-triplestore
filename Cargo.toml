@@ -367,7 +367,7 @@ symphonia = { version = "0.6", default-features = false, features = ["mp3", "fla
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 
 # Full-text search (text-search feature)
-tantivy = { version = "0.26", optional = true }
+tantivy = { version = "0.27", optional = true }
 
 # SAML 2.0 SSO (saml feature). openssl is already linked through samael and
 # webauthn-rs; the SP uses it directly for XML decryption, redirect-binding
