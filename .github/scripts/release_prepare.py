@@ -7,9 +7,12 @@ The next version is the bump applied to the latest `vX.Y.Z` tag, or with
 `--line X.Y` (a `release/X.Y` maintenance branch, patch only) to the latest
 `vX.Y.*` tag. The script then:
 
-- sets `[package] version` in Cargo.toml and the matching Cargo.lock entry;
+- sets `[package] version` in Cargo.toml and the matching Cargo.lock entry,
+  and the web UI's version in frontend/package.json and the root entries of
+  frontend/package-lock.json, so the private frontend package moves with it;
 - updates the "current release" line and the sample version response in
-  README.md (a maintenance line leaves README alone);
+  README.md, and that response in docs/windows.md (a maintenance line leaves
+  both alone);
 - on a minor or major release, rewrites the supported-versions tables in
   SECURITY.md and SUPPORT.md: the new line is Active, the previous line is
   Security-only until the next minor, older lines fall under "older";
@@ -100,6 +103,29 @@ def bump_cargo(old, new):
     write("Cargo.lock", lock)
 
 
+def bump_frontend(new):
+    """Keep the private frontend package's version equal to Cargo.toml's.
+
+    Only the package's own entries: the top-level "version" (the one key
+    indented by two spaces) in package.json and package-lock.json, and the
+    lockfile's packages[""] entry. Every other "version" in the lockfile
+    belongs to a dependency.
+    """
+    top = r'^(  "version": ")[^"]+(")'
+    path = "frontend/package.json"
+    text = sub_once(top, rf"\g<1>{new}\g<2>", read(path), f"the version in {path}", flags=re.M)
+    write(path, text)
+    path = "frontend/package-lock.json"
+    text = sub_once(top, rf"\g<1>{new}\g<2>", read(path), f"the version in {path}", flags=re.M)
+    text = sub_once(
+        r'(\n    "": \{\n      "name": "open-triplestore-frontend",\n      "version": ")[^"]+(")',
+        rf"\g<1>{new}\g<2>",
+        text,
+        f'the packages[""] version in {path}',
+    )
+    write(path, text)
+
+
 def bump_readme(new):
     text = read("README.md")
     text = sub_once(
@@ -108,8 +134,11 @@ def bump_readme(new):
         text,
         'the "current release" line in README.md',
     )
-    text = re.sub(r'(\{"status":"ok","version":")[^"]+("\})', rf"\g<1>{new}\g<2>", text)
+    sample = r'(\{"status":"ok","version":")[^"]+("\})'
+    text = re.sub(sample, rf"\g<1>{new}\g<2>", text)
     write("README.md", text)
+    # docs/windows.md shows the same health response.
+    write("docs/windows.md", re.sub(sample, rf"\g<1>{new}\g<2>", read("docs/windows.md")))
 
 
 def bump_support_tables(old, new):
@@ -205,6 +234,7 @@ def main():
         fail(f"tag v{new} already exists")
 
     bump_cargo(old, new)
+    bump_frontend(new)
     if not args.line:
         bump_readme(new)
     if args.bump != "patch":
