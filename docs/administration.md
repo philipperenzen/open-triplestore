@@ -342,8 +342,8 @@ The storage directory, port and bind address are settings too:
 ### Runtime settings
 
 Some settings are policy rather than plumbing, and an administrator can change
-them without a restart, under **Admin → Settings** (`/admin/settings`) or with
-`PUT /api/admin/settings/{name}`:
+them without a restart, under **Admin → Workspace settings** (`/admin/settings`,
+the *Live settings* tab) or with `PUT /api/admin/settings/{name}`:
 
 | Setting | What it decides |
 |---|---|

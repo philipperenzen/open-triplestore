@@ -359,7 +359,7 @@
     font-size: 0.74rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
     white-space: nowrap;
   }
   .data-table tr:last-child td { border-bottom: none; }
