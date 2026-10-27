@@ -192,8 +192,7 @@ The store mints and serves IRIs in a fixed namespace anchored at the configured 
 | `{base}/dataset/{id}` | a registered dataset |
 | `{base}/org/{id}` | an organisation |
 | `{base}/user/{id}` · `{base}/group/{id}` | user / group owners |
-| `{base}/data-model/{id}` · `{base}/data-model/{id}/version/{semver}` | a data model and a specific version |
-| `{base}/vocabulary/{id}` · `{base}/vocabulary/{id}/version/{semver}` | a vocabulary and a specific version |
+| `{base}/data-model/{id}` · `{base}/data-model/{id}/version/{semver}` | a data model **or vocabulary** and a specific version (the registry entry's `kind` tells them apart) |
 | `{base}/sparql` · `{base}/store` | the SPARQL and Graph Store endpoints |
 | `{base}/resource/{local}` | a dereferenceable resource (content-negotiated) |
 

@@ -292,8 +292,9 @@ fixed real engine bugs:
 - **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
   keyed by `(focus, path)` only and rayon worker caches survive across validation passes,
   so two stores in one process sharing a focus IRI + path could serve each other stale
-  values — nondeterministic validation results. Cache keys now include a process-unique
-  per-store id.
+  values — nondeterministic validation results. The fix added a process-unique per-store
+  id to the cache keys; the cache itself was later removed with the engine rebuild
+  (#347), and path closures are now memoised per validation run only.
 - **`sh:value` of SPARQL-based results** (2026-10-02, found by the full-report
   level): when a `sh:sparql` constraint or a `sh:select` validator on a node
   shape leaves `?value` unbound, SHACL §5.3.2 makes the focus node the value;
