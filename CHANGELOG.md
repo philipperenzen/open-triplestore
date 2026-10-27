@@ -50,6 +50,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The reasoner sidecar builds from a Windows checkout.** `.gitattributes`
+  now pins `sidecars/reasoner/mvnw` and its `maven-wrapper.properties` to LF,
+  so `docker build -f sidecars/reasoner/Dockerfile .` no longer fails with
+  `./mvnw: not found` when Git checked the wrapper out with CRLF.
+- **A reasoning request keeps its expensive-operations slot until its work
+  ends.** A client that disconnected during a synchronous reasoning call
+  (`/api/reasoning/materialize`, `/api/reasoning/check`) freed the slot at
+  once, while the blocking work and its sidecar call kept running, so the
+  server could run more reasoning at once than `expensive_semaphore` allows.
+  The slot is now held by the blocking task itself.
 - **A demo content refresh no longer deletes files an operator added to the
   demo dataset.** When the recorded demo content version was behind, the
   refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
