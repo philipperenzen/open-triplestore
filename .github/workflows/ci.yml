@@ -436,7 +436,7 @@ jobs:
       # unit tests) and started, and OTS_TEST_LIVE_REQUIRED turns a missing
       # variable into a failure. The test-name filter leaves out the Konclude
       # live tests, which need a Konclude binary this job does not install.
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
