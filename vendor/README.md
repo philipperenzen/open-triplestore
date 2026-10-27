@@ -8,7 +8,7 @@ fixes for defects the W3C JSON-LD 1.1 API test suite exposes (third section).
 
 | Directory | Crate | Upstream (repository `oxigraph/oxigraph`) | Changes |
 | --- | --- | --- | --- |
-| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes; SPARQL UPDATE refuses ill-typed `rdf:JSON` literals |
+| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes; SPARQL UPDATE refuses ill-typed `rdf:JSON` literals; `BulkLoader::prepare` (see [below](#oxigraph--bulkloaderprepare)) |
 | `spareval/` | `spareval` 0.2.7 | `lib/spareval` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | triple terms are rebuilt without reading their literals as values; SPARQL 1.1 conformance fixes 1–5 |
 | `spargebra/` | `spargebra` 0.4.7 | `lib/spargebra` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 6 |
 | `sparopt/` | `sparopt` 0.3.7 | `lib/sparopt` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 1 |
@@ -397,6 +397,21 @@ commit above (the crates.io packages do not ship them).
 5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`,
    `tests/w3c_sparql12_manifests.rs`, `tests/sparql12_conformance.rs`, the
    parallel/columnar parity tests and the perf gate.
+
+## `oxigraph/` — `BulkLoader::prepare`
+
+`BulkLoader::commit` does two things: it waits for the threads that write each
+loaded batch to SST files, then ingests those files into RocksDB. With change
+capture on, OTS runs the commit inside the change log's sequence section, the
+critical section that makes `seq` order commit order
+(`docs/notes/delta-versioning-design.md` §4.3), so concurrent bulk writers
+queued behind one another's SST writing, not only their ingestion.
+`BulkLoader::prepare(&mut self)` (`src/store.rs`, `src/storage/mod.rs`,
+`src/storage/rocksdb.rs`) does the first half on its own: it joins the writer
+threads and keeps their files, and `commit` then has only the ingestion left.
+`commit` still calls it first, so a caller that never calls `prepare` sees no
+change; for the in-memory storage it does nothing. Not proposed upstream: it
+only matters to a caller that brackets the commit with its own lock.
 
 ## oxjsonld
 

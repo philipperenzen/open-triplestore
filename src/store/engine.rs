@@ -2150,40 +2150,88 @@ impl TripleStore {
         }
     }
 
-    /// The quads that would be new in each graph of `quads` (duplicates
-    /// within the batch and quads already stored do not count). A
-    /// version-snapshot graph is reported unknown rather than have its copy
-    /// stored a second time (delta note §2.2).
+    /// Whether `g` is a version's own graph, whose rows keep counts only.
+    fn is_snapshot_key(g: &Option<String>) -> bool {
+        g.as_deref().is_some_and(|g| g.contains("/version/"))
+    }
+
+    /// The quads that would be new in each graph of `graphs` (duplicates
+    /// within the batch and quads already stored do not count; quads of
+    /// other graphs are not probed). A version-snapshot graph gets exact
+    /// counts and no payload: its copy is not worth storing twice, and the
+    /// count lets the count index follow a copy batch by batch instead of
+    /// recounting the growing graph after each one (delta note §2.2).
+    ///
+    /// A named graph that holds nothing yet (one seek) is not probed: every
+    /// distinct quad of it is new. That is the common bulk load — a new
+    /// graph — where a probe per quad cost a fifth of the load at 9M quads.
+    /// A graph's new quads are kept only up to the payload cap; past it the
+    /// row has counts only and the copies would be dropped unread.
     fn fresh_by_graph(
         &self,
         quads: &[Quad],
         graphs: &[Option<String>],
     ) -> Result<Vec<GraphDelta>, StoreError> {
+        // Keyed by the quad's own graph IRI: no allocation per quad.
+        fn key(q: &Quad) -> Option<&str> {
+            match &q.graph_name {
+                GraphName::NamedNode(n) => Some(n.as_str()),
+                _ => None,
+            }
+        }
+        // Per wanted graph: whether its quads must be probed.
+        let mut probe: std::collections::HashMap<Option<&str>, bool> =
+            std::collections::HashMap::with_capacity(graphs.len());
+        for g in graphs {
+            let empty = match g.as_deref() {
+                Some(iri) => self
+                    .store
+                    .quads_for_pattern(
+                        None,
+                        None,
+                        None,
+                        Some(GraphNameRef::NamedNode(NamedNodeRef::new_unchecked(iri))),
+                    )
+                    .next()
+                    .is_none(),
+                // The default graph's key also stands for blank-node graphs.
+                None => false,
+            };
+            probe.insert(g.as_deref(), !empty);
+        }
+        let max_payload = self.changes.max_payload();
         let mut seen: std::collections::HashSet<&Quad> =
             std::collections::HashSet::with_capacity(quads.len());
-        let mut fresh: std::collections::BTreeMap<Option<String>, Vec<Quad>> =
-            std::collections::BTreeMap::new();
-        let snapshot = |g: &Option<String>| g.as_deref().is_some_and(|g| g.contains("/version/"));
+        let mut fresh: std::collections::HashMap<Option<&str>, Vec<Quad>> =
+            std::collections::HashMap::new();
+        let mut fresh_n: std::collections::HashMap<Option<&str>, usize> =
+            std::collections::HashMap::new();
         for q in quads {
-            let g = Self::graph_key_of(q);
-            if snapshot(&g) || !seen.insert(q) {
+            let g = key(q);
+            let Some(&must_probe) = probe.get(&g) else {
+                continue;
+            };
+            if !seen.insert(q) || (must_probe && self.store.contains(q.as_ref())?) {
                 continue;
             }
-            if !self.store.contains(q.as_ref())? {
+            let n = fresh_n.entry(g).or_default();
+            *n += 1;
+            // The quads themselves only while the row can still carry them.
+            if *n <= max_payload && !g.is_some_and(|g| g.contains("/version/")) {
                 fresh.entry(g).or_default().push(q.clone());
+            } else if *n == max_payload + 1 {
+                fresh.remove(&g);
             }
         }
         Ok(graphs
             .iter()
             .map(|g| {
-                if snapshot(g) {
-                    return GraphDelta::unknown(g.clone());
-                }
-                let quads = fresh.remove(g).unwrap_or_default();
-                if quads.len() <= self.changes.max_payload() {
-                    GraphDelta::full(g.clone(), quads, Vec::new())
+                let n = fresh_n.get(&g.as_deref()).copied().unwrap_or(0);
+                if Self::is_snapshot_key(g) || n > max_payload {
+                    GraphDelta::counts(g.clone(), n, 0, None)
                 } else {
-                    GraphDelta::counts(g.clone(), quads.len(), 0, None)
+                    let quads = fresh.remove(&g.as_deref()).unwrap_or_default();
+                    GraphDelta::full(g.clone(), quads, Vec::new())
                 }
             })
             .collect())
@@ -3071,6 +3119,9 @@ impl TripleStore {
                 }
             }
             loader.load_quads(std::mem::take(&mut chunk))?;
+            // The SST files are written here, outside the sequence section,
+            // which then holds only their ingestion, shared with other loads.
+            loader.prepare()?;
             Ok(())
         })();
         if let Err(e) = staged {
@@ -3101,7 +3152,7 @@ impl TripleStore {
             .map(|d| CountChange::By(d.graph.clone(), d.added_n as i64))
             .collect();
         self.changes
-            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            .commit_additive_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
         info!("Data loaded successfully (streamed, recorded)");
         match counts {
             Some(counts) => self.apply_count_changes(&counts),
@@ -3262,15 +3313,19 @@ impl TripleStore {
         let pre_count = self.pre_count();
         let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
-        if let Err(e) = loader.load_quads(quads.iter().cloned()) {
+        if let Err(e) = loader
+            .load_quads(quads.iter().cloned())
+            .and_then(|()| loader.prepare())
+        {
             if let Some(intent) = intent {
                 self.changes.abort(intent);
             }
             return Err(e.into());
         }
-        // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        // oxigraph 0.5: stage-then-commit (see load_reader_with_base); the
+        // ingestion holds the section shared with other loads.
         self.changes
-            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            .commit_additive_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
         info!("Data loaded successfully");
         let delta = match (to_graph, fresh_mask) {
@@ -4119,8 +4174,8 @@ impl TripleStore {
         let mut known: std::collections::HashMap<Option<String>, i64> =
             std::collections::HashMap::new();
         if !quads.is_empty() {
-            // The rows: per graph, the quads that were new (probed); unknown
-            // for a version-snapshot graph (see `fresh_by_graph`).
+            // The rows: per graph, the quads that were new (probed); counts
+            // only for a version-snapshot graph (see `fresh_by_graph`).
             let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
             graphs.sort();
             graphs.dedup();
@@ -4129,10 +4184,22 @@ impl TripleStore {
             let intent = self
                 .changes
                 .begin("bulk_insert_quads", Some(&graphs), &pre_count);
+            // A version copy arrives here batch by batch: its graph is
+            // probed with the log off too, so the count index adds each
+            // batch rather than recount the growing copy (quadratic).
             let deltas = if intent.is_some() {
                 self.fresh_by_graph(&quads, &graphs)?
             } else {
-                Vec::new()
+                let snapshots: Vec<Option<String>> = graphs
+                    .iter()
+                    .filter(|g| Self::is_snapshot_key(g))
+                    .cloned()
+                    .collect();
+                if snapshots.is_empty() {
+                    Vec::new()
+                } else {
+                    self.fresh_by_graph(&quads, &snapshots)?
+                }
             };
             // What the rows know about each graph's new count.
             for d in &deltas {
@@ -4141,15 +4208,17 @@ impl TripleStore {
                 }
             }
             let mut loader = self.store.bulk_loader();
-            if let Err(e) = loader.load_quads(quads) {
+            if let Err(e) = loader.load_quads(quads).and_then(|()| loader.prepare()) {
                 if let Some(intent) = intent {
                     self.changes.abort(intent);
                 }
                 return Err(e.into());
             }
-            // oxigraph 0.5: stage-then-commit.
-            self.changes
-                .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
+            // oxigraph 0.5: stage-then-commit; the ingestion holds the section
+            // shared with other loads.
+            self.changes.commit_additive_with(intent, deltas, || {
+                loader.commit().map_err(StoreError::from)
+            })?;
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();
@@ -5918,6 +5987,93 @@ mod delta_primitive_tests {
             .unwrap();
         assert_eq!((ins.len(), del.len()), (2, 1));
         assert_eq!(store.graph_count_cached(Some(g)), Some(exact(&store, g)));
+    }
+
+    /// A bulk insert into a graph that holds nothing is not probed quad by
+    /// quad, and its rows are what probing gave: duplicates within the batch
+    /// count once, and over the payload cap the row keeps counts only.
+    #[test]
+    fn a_bulk_insert_into_a_new_graph_is_counted_without_probes() {
+        let quad = |g: &str, i: usize| {
+            Quad::new(
+                NamedNode::new(format!("http://e/s{i}")).unwrap(),
+                NamedNode::new("http://e/p").unwrap(),
+                Literal::from(i.to_string()),
+                GraphName::NamedNode(NamedNode::new(g).unwrap()),
+            )
+        };
+        let store = TripleStore::in_memory()
+            .unwrap()
+            .with_change_capture(DEFAULT_MAX_SCAN, 4);
+        let (small, big, old) = ("http://e/small", "http://e/big", "http://e/old");
+        fill(&store, old, 2);
+        let mut quads: Vec<Quad> = (0..3).map(|i| quad(small, i)).collect();
+        quads.push(quad(small, 0));
+        quads.extend((0..6).map(|i| quad(big, i)));
+        // s1 is already in `old`, s5 is not.
+        quads.extend([quad(old, 1), quad(old, 5)]);
+        let affected = [small.to_string(), big.to_string(), old.to_string()];
+        let before = store.changes().last_seq();
+        store.bulk_insert_quads(quads, &affected).unwrap();
+        let rows = store.changes().rows_after(before, 10);
+        let row = |g: &str| {
+            rows.iter()
+                .find(|r| r.graph_iri.as_deref() == Some(g))
+                .unwrap()
+        };
+        assert_eq!((row(small).extent, row(small).added_n), (Extent::Full, 3));
+        assert_eq!((row(big).extent, row(big).added_n), (Extent::Counts, 6));
+        assert!(row(big).added.is_none());
+        assert_eq!((row(old).extent, row(old).added_n), (Extent::Full, 1));
+        for (g, n) in [(small, 3), (big, 6), (old, 3)] {
+            assert_eq!(store.graph_count_cached(Some(g)), Some(n), "{g}");
+            assert_eq!(exact(&store, g), n);
+        }
+    }
+
+    /// Delta note §2.2: a version copy goes into its snapshot graph in
+    /// batches, and each batch's row is `counts`, not `unknown`, so the count
+    /// index adds the batch instead of recounting the growing copy — which
+    /// made a 9M-quad checkpoint cut quadratic (48 minutes). With the log off
+    /// the copy is counted the same way.
+    #[test]
+    fn a_version_copy_is_counted_batch_by_batch_without_a_rescan() {
+        let snap = "http://localhost/dataset/d1/version/1.0.0/g";
+        let batch = |from: usize| -> Vec<Quad> {
+            (from..from + 10)
+                .map(|i| {
+                    Quad::new(
+                        NamedNode::new(format!("http://e/s{i}")).unwrap(),
+                        NamedNode::new("http://e/p").unwrap(),
+                        Literal::from(i.to_string()),
+                        GraphName::NamedNode(NamedNode::new(snap).unwrap()),
+                    )
+                })
+                .collect()
+        };
+        let off = TripleStore::in_memory()
+            .unwrap()
+            .with_change_capture_disabled();
+        for store in [recording(), off] {
+            let affected = [snap.to_string()];
+            store.bulk_insert_quads(batch(0), &affected).unwrap();
+            let scans = store.graph_index.scan_count();
+            store.bulk_insert_quads(batch(10), &affected).unwrap();
+            // Five fresh, five already copied (a retried batch).
+            store.bulk_insert_quads(batch(15), &affected).unwrap();
+            assert_eq!(store.graph_index.scan_count(), scans, "no recount");
+            assert_eq!(store.graph_count_cached(Some(snap)), Some(25));
+            assert_eq!(exact(&store, snap), 25);
+            if store.changes().enabled() {
+                let rows = store.changes().rows_after(0, 10);
+                assert_eq!(rows.len(), 3);
+                for (row, n) in rows.iter().zip([10i64, 10, 5]) {
+                    assert_eq!(row.extent, Extent::Counts);
+                    assert_eq!(row.added_n, n);
+                    assert!(row.added.is_none(), "a version's graph keeps no payload");
+                }
+            }
+        }
     }
 
     /// Delta note §8.5 Q2: a streamed default-graph load used to be one

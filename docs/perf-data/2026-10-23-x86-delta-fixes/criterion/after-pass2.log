@@ -1,0 +1,41 @@
+Gnuplot not found, using plotters backend
+Benchmarking concurrent/writes/threads/1
+Benchmarking concurrent/writes/threads/1: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/1: Collecting 20 samples in estimated 5.0022 s (12k iterations)
+Benchmarking concurrent/writes/threads/1: Analyzing
+concurrent/writes/threads/1
+                        time:   [375.51 µs 384.45 µs 394.82 µs]
+                        thrpt:  [25.328 Kelem/s 26.011 Kelem/s 26.631 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking concurrent/writes/threads/2
+Benchmarking concurrent/writes/threads/2: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/2: Collecting 20 samples in estimated 5.0098 s (9800 iterations)
+Benchmarking concurrent/writes/threads/2: Analyzing
+concurrent/writes/threads/2
+                        time:   [466.95 µs 482.28 µs 502.30 µs]
+                        thrpt:  [39.817 Kelem/s 41.470 Kelem/s 42.831 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking concurrent/writes/threads/4
+Benchmarking concurrent/writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/4: Collecting 20 samples in estimated 5.0160 s (5620 iterations)
+Benchmarking concurrent/writes/threads/4: Analyzing
+concurrent/writes/threads/4
+                        time:   [801.54 µs 834.39 µs 877.03 µs]
+                        thrpt:  [45.608 Kelem/s 47.939 Kelem/s 49.904 Kelem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking concurrent/capture_writes/threads/4
+Benchmarking concurrent/capture_writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/capture_writes/threads/4: Collecting 20 samples in estimated 5.0084 s (1780 iterations)
+Benchmarking concurrent/capture_writes/threads/4: Analyzing
+concurrent/capture_writes/threads/4
+                        time:   [2.5099 ms 2.6544 ms 2.8221 ms]
+                        thrpt:  [14.174 Kelem/s 15.069 Kelem/s 15.937 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+

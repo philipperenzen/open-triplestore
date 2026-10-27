@@ -1,0 +1,38 @@
+Gnuplot not found, using plotters backend
+Benchmarking concurrent/writes/threads/1
+Benchmarking concurrent/writes/threads/1: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/1: Collecting 20 samples in estimated 5.0009 s (12k iterations)
+Benchmarking concurrent/writes/threads/1: Analyzing
+concurrent/writes/threads/1
+                        time:   [377.54 µs 383.72 µs 390.49 µs]
+                        thrpt:  [25.609 Kelem/s 26.061 Kelem/s 26.487 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking concurrent/writes/threads/2
+Benchmarking concurrent/writes/threads/2: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/2: Collecting 20 samples in estimated 5.0054 s (9460 iterations)
+Benchmarking concurrent/writes/threads/2: Analyzing
+concurrent/writes/threads/2
+                        time:   [465.89 µs 473.31 µs 481.06 µs]
+                        thrpt:  [41.574 Kelem/s 42.255 Kelem/s 42.928 Kelem/s]
+Benchmarking concurrent/writes/threads/4
+Benchmarking concurrent/writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/writes/threads/4: Collecting 20 samples in estimated 5.0153 s (5880 iterations)
+Benchmarking concurrent/writes/threads/4: Analyzing
+concurrent/writes/threads/4
+                        time:   [801.33 µs 831.11 µs 866.14 µs]
+                        thrpt:  [46.182 Kelem/s 48.129 Kelem/s 49.917 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking concurrent/capture_writes/threads/4
+Benchmarking concurrent/capture_writes/threads/4: Warming up for 3.0000 s
+Benchmarking concurrent/capture_writes/threads/4: Collecting 20 samples in estimated 5.0426 s (1920 iterations)
+Benchmarking concurrent/capture_writes/threads/4: Analyzing
+concurrent/capture_writes/threads/4
+                        time:   [2.4568 ms 2.5841 ms 2.7337 ms]
+                        thrpt:  [14.632 Kelem/s 15.480 Kelem/s 16.281 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

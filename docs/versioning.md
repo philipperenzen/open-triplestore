@@ -376,7 +376,9 @@ applied, and retention keeps every row above the lowest live bookmark.
 
 One row per graph per write. `seq` is the position in commit order — the
 order the repo's own commit calls ran in, taken inside a critical section
-around the commit — so a consumer applying rows in `seq` order reproduces
+around the commit (bulk loads, which only add quads, share it with one
+another; every other write holds it alone) — so a consumer applying rows in
+`seq` order reproduces
 the store. `epoch` names the store's lineage: a store rebuilt after a
 quarantine (`OTS_STORE_AUTO_RECOVER_ENABLED`, see `docs/administration.md`) mints a new
 one, and a consumer holding rows of another epoch must resynchronise rather
