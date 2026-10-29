@@ -358,7 +358,7 @@ ots-plugin-mssql = { path = "plugins/mssql", optional = true }
 imagesize = "0.15"
 infer = "0.22"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
-lopdf = { version = "0.45", optional = true }
+lopdf = { version = "0.46", optional = true }
 kamadak-exif = { version = "0.6", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 calamine = { version = "0.37", optional = true }
