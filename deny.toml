@@ -29,6 +29,15 @@ ignore = [
     # last 0.37.x. Revisit on the next Oxigraph bump.
     "RUSTSEC-2026-0194",  # quick-xml — quadratic duplicate-attribute check (via oxigraph)
     "RUSTSEC-2026-0195",  # quick-xml — NsReader namespace-decl memory-exhaustion (via oxigraph)
+    # crypto-bigint 0.5.5 timing variability. The fix is in crypto-bigint >= 0.7.6 and
+    # there is no fixed 0.5.x; 0.5.5 comes in through p256/elliptic-curve 0.13, which
+    # `age` 0.12.1 (the latest) requires, so bumping aws-sigv4 to 1.6.5 (crypto-bigint
+    # 0.7) would add a second copy, not remove this one. Neither path does secret-key
+    # P-256 work here: the backup code uses only age's x25519 recipients and identities
+    # (`src/backup/mod.rs`), and aws-sigv4 signs with SigV4a only for endpoints whose
+    # auth scheme demands it (S3 Multi-Region Access Points), not a regular bucket or
+    # MinIO. Revisit when age moves to p256 0.14.
+    "RUSTSEC-2026-0387",  # crypto-bigint — non-constant-time operations (via age, aws-sigv4)
 ]
 
 [bans]

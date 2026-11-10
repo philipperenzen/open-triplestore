@@ -92,6 +92,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
+- **`zstd` 0.13.4, `zstd-safe` 7.4.0, `zstd-sys` 2.1.2** (RUSTSEC-2026-0391,
+  -0398, -0403, -0410: stream-context and seekable-decompression memory
+  issues in the compression `tantivy` uses for its search index). Lockfile
+  only. RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5, non-constant-time
+  operations) is ignored in `deny.toml` with its reasoning: no 0.5.x fix
+  exists, `age` 0.12.1 still requires it, and neither path does secret-key
+  P-256 work here.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
