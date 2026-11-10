@@ -50,6 +50,30 @@ fn names_and_flags_are_unique() {
     for (old, _) in RETIRED {
         assert!(spec(old).is_none(), "{old} is both retired and declared");
     }
+    // A plugin's setting that collides is dropped at load, so check the
+    // compiled-in plugins' declarations themselves.
+    for p in crate::plugins::registered_plugins() {
+        for s in p.settings() {
+            assert!(
+                s.name.starts_with("OTS_"),
+                "{}: {} is not OTS_*",
+                p.name(),
+                s.name
+            );
+            assert!(
+                names.insert(s.name),
+                "{}: {} declared twice",
+                p.name(),
+                s.name
+            );
+            assert!(
+                !s.doc.is_empty(),
+                "{}: {} has no documentation",
+                p.name(),
+                s.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -120,8 +144,7 @@ fn every_setting_is_documented() {
             text.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
         }
     }
-    let missing: Vec<&str> = SPECS
-        .iter()
+    let missing: Vec<&str> = all_specs()
         .map(|s| s.name)
         .filter(|n| !text.contains(n))
         .collect();
@@ -453,4 +476,64 @@ fn secure_cookies_follow_an_https_base_url() {
 fn an_unknown_profile_stops_the_start() {
     let e = errors_of(&[("OTS_ENV", "prod")]);
     assert_eq!(e[0].name, "OTS_ENV");
+}
+
+#[test]
+fn a_plugin_setting_takes_its_kind() {
+    let s = ots_plugin_api::PluginSetting {
+        name: "OTS_EXAMPLE_PLUGIN_URL",
+        kind: ots_plugin_api::SettingKind::Url,
+        doc: "An example.",
+    };
+    let spec = plugin_spec("example", &s);
+    assert_eq!(
+        (spec.group, spec.kind.label(), spec.doc),
+        ("example", "url", "An example.")
+    );
+    assert!(!spec.runtime && spec.cli.is_none());
+    assert!(parse::validate(&spec, "not a url").is_err());
+    assert!(parse::validate(&spec, "https://gateway.example.org").is_ok());
+}
+
+/// The settings a compiled-in plugin declares are not reported as typos at
+/// startup, are validated like the server's own, and show in the admin view.
+#[cfg(feature = "plugin-accounts-dashboard")]
+#[test]
+fn the_dashboard_plugin_settings_are_known() {
+    let names = [
+        "OTS_ACCOUNTS_DASHBOARD_APP_GROUPS",
+        "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+        "OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY",
+    ];
+    let unknown = unknown_names(
+        names
+            .iter()
+            .map(|n| n.to_string())
+            .chain(["OTS_ACCOUNTS_DASHBOARD_TYPO".to_string()]),
+    );
+    assert_eq!(unknown, ["OTS_ACCOUNTS_DASHBOARD_TYPO"]);
+
+    let e = errors_of(&[("OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL", "gateway:8080")]);
+    assert_eq!(e[0].name, "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL");
+    let e = errors_of(&[PROD, ("OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY", "raw-key")]);
+    assert_eq!(e[0].name, "OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY");
+
+    let c = load(&[
+        (
+            "OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL",
+            "https://gateway.example.org",
+        ),
+        ("OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY", "raw-key"),
+    ])
+    .unwrap();
+    let described = c.describe();
+    let get = |n: &str| described.iter().find(|d| d.name == n).unwrap();
+    let url = get("OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL");
+    assert_eq!(url.group, "accounts-dashboard");
+    assert_eq!(url.value.as_deref(), Some("https://gateway.example.org"));
+    assert_eq!(url.source, Source::Env);
+    let key = get("OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY");
+    assert!(key.secret);
+    assert_eq!(key.value.as_deref(), Some("[redacted]"));
+    assert_eq!(get("OTS_ACCOUNTS_DASHBOARD_APP_GROUPS").value, None);
 }

@@ -1385,7 +1385,7 @@
   .create-token-form {
     margin: 1rem 0;
     padding: 1rem;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
     border-radius: 12px;
   }
   .scope-chips {
@@ -1573,7 +1573,7 @@
   .totp-secret {
     display: block;
     padding: 0.5rem;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
     border: 1px solid var(--line-soft);
     border-radius: 8px;
     font-size: 0.82rem;
@@ -1589,7 +1589,7 @@
   }
   .recovery-codes code {
     padding: 0.35rem 0.5rem;
-    background: var(--bg-accent, #f8f9fa);
+    background: var(--bg-soft);
     border: 1px solid var(--line-soft);
     border-radius: 6px;
     font-size: 0.82rem;
@@ -1621,6 +1621,4 @@
   :global(:is([data-theme="dark"], .dark)) .email-status.verified,
   :global(:is([data-theme="dark"], .dark)) .twofa-status.on { color: #6ee7b7; }
   :global(:is([data-theme="dark"], .dark)) .email-status.unverified { color: #fcd34d; }
-  :global(:is([data-theme="dark"], .dark)) .totp-secret,
-  :global(:is([data-theme="dark"], .dark)) .recovery-codes code { background: var(--bg-soft); }
 </style>

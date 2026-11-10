@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { controlFor, groupSettings, isDirty, filterConfig, type ConfigSetting } from '../adminSettings';
+import { controlFor, groupSettings, isDirty, filterConfig, tabFromHash, configSummary, type ConfigSetting } from '../adminSettings';
 
 describe('controlFor', () => {
   it('edits a boolean with a toggle, an enum with a select, anything else as text', () => {
@@ -46,5 +46,26 @@ describe('filterConfig', () => {
 
   it('can show only what is not at its built-in default', () => {
     expect(filterConfig(all, '', true).map((s) => s.name)).toEqual(['OTS_BASE_URL']);
+  });
+});
+
+describe('tabFromHash', () => {
+  it('opens the tab the hash names, and the live settings otherwise', () => {
+    expect(tabFromHash('#config')).toBe('config');
+    expect(tabFromHash('#live')).toBe('live');
+    expect(tabFromHash('')).toBe('live');
+    expect(tabFromHash('#tokens')).toBe('live');
+  });
+});
+
+describe('configSummary', () => {
+  it('counts settings, changes from the default, overrides and secrets', () => {
+    const cfg = (source: ConfigSetting['source'], secret = false) => ({ source, secret });
+    expect(
+      configSummary(
+        [{ overridden: true }, { overridden: false }],
+        [cfg('default'), cfg('env', true), cfg('admin'), cfg('default', true)],
+      ),
+    ).toEqual({ total: 4, changed: 2, overrides: 1, secrets: 2 });
   });
 });

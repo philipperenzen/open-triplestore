@@ -24,9 +24,10 @@ CityGML) parses the ISO-13249 **WKT-Z** forms that the 2D GEOS path leaves alone
 | Family | Functions |
 |---|---|
 | Metric | `distance3d`, `volume`, `area3d`, `zMin`, `zMax`, `height` |
-| Constructive | `boundingBox3d`, `centroid3d`, `footprint2d`, `extrude` |
-| Topological (AABB broad-phase) | `sf3dIntersects`, `sf3dDisjoint` |
+| Constructive | `boundingBox3d`, `centroid3d`, `footprint2d`, `extrude`, `convexHull3d` |
+| Topological (AABB broad phase + exact narrow phase) | `sf3dIntersects`, `sf3dDisjoint` (triangle-mesh test), `sf3dContains`, `sf3dWithin` (point-in-solid test) |
 | Validity | `isClosed3d` — watertightness: every edge shared by exactly two faces (unbound for face-less geometry) |
+| Constructive solid geometry (`sfcgal3d` builds only) | `union3d`, `intersection3d`, `difference3d`, `volumeExact` |
 
 ```sparql
 PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
@@ -41,9 +42,17 @@ WHERE { ?b geo:hasGeometry/geo:asWKT ?w .
 Volumetric literals: `geo:asWKT` (`POLYHEDRALSURFACE Z`, for 1.1 clients) plus a
 loss-free `ots:cityjsonGeometryLiteral`. A 3D R*-tree (`[f64;3]` AABBs) backs the
 two-phase broad/narrow query. CRS: `EPSG:28992` (RD New), `EPSG:7415` (RD New +
-NAP), `CRS84`/`CRS84h`, Web Mercator; the kernel is pure-Rust (the exact
-`parry3d`/SFCGAL solid algebra is gated behind a future feature). Enabled by the
-`geometry3d` cargo feature (part of `full`).
+NAP), `CRS84`/`CRS84h`, Web Mercator.
+
+The whole `ots-geof:` surface is enabled by the `geometry3d` cargo feature
+(part of `full` and the image). Its kernel is pure Rust, with `parry3d-f64` for
+the convex hull, and needs no native library: `sf3dIntersects`/`sf3dDisjoint`
+run an exact triangle-mesh narrow phase after the AABB fast reject,
+`sf3dContains`/`sf3dWithin` are an exact point-in-solid test, and
+`convexHull3d` builds the hull. The certified boolean operations (`union3d`,
+`intersection3d`, `difference3d`) and `volumeExact` need the separate
+`sfcgal3d` feature, which links the native libSFCGAL (≥ 2.0) and is in neither
+`full` nor the image (see [build features](build-features.md)).
 
 ## 2. CityJSON (3D BAG) ingestion
 
