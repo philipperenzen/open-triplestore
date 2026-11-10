@@ -851,6 +851,68 @@ mod tests {
         assert_eq!(m.uncompressed_size, Some(12)); // 5 + 7
     }
 
+    #[cfg(all(feature = "asset-spreadsheet", feature = "asset-archive"))]
+    #[test]
+    fn xlsx_sheet_and_row_counts() {
+        use std::io::Write;
+        let sheet = |rows: u32| {
+            let cells: String = (1..=rows)
+                .map(|r| format!(r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c></row>"#))
+                .collect();
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{cells}</sheetData></worksheet>"#
+            )
+        };
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#.to_string(),
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string(),
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="One" sheetId="1" r:id="rId1"/><sheet name="Two" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_string(),
+            ),
+            ("xl/worksheets/sheet1.xml", sheet(3)),
+            ("xl/worksheets/sheet2.xml", sheet(2)),
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, body) in &parts {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let m = extract_for(
+            AssetKind::Spreadsheet,
+            &buf,
+            "application/octet-stream",
+            "book.xlsx",
+        );
+        assert_eq!(m.sheet_count, Some(2));
+        assert_eq!(m.row_count, Some(5));
+
+        // Not a workbook at all: no counts, and no panic.
+        let m = extract_for(
+            AssetKind::Spreadsheet,
+            b"\xd0\xcf\x11\xe0junk",
+            "application/octet-stream",
+            "fake.xlsx",
+        );
+        assert_eq!(m.sheet_count, None);
+    }
+
     #[test]
     fn zip_bomb_guard_flags_extreme_ratios() {
         // 1 GB claimed from a 1 KB archive → suspicious (over floor AND >1000×).

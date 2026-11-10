@@ -1,0 +1,5 @@
+  k1000-1792763412-v1: checkpoint (a checkpoint was asked for)
+restore: checkpoint cut 4680 ms
+  apply A 11 ms; delta cuts 5 / 8 ms; v2 delta=true v3 delta=true
+  tier 1: 1006 ms (plan 5, apply 33, hash 967)
+(6.8s)

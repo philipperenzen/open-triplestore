@@ -1341,11 +1341,13 @@ benchmarks below are its nearest figure.
 ##### What the measurements turned up
 
 - **Concurrent writers serialise on the sequence section** (item 3):
-  write throughput ×0.28 with four writers — far over the budget.
+  write throughput ×0.28 with four writers — far over the budget. Fixed
+  2026-10-23 for bulk-loaded writes (×0.99, [below](#delta-versions-fixes-measured-2026-10-23)).
 - **`bulk_insert_quads` probes without a budget** (item 2): +22 % on a 9M-quad
-  import with capture on — over the budget.
+  import with capture on — over the budget. Fixed 2026-10-23 for a new graph
+  (×1.04 at 1M).
 - **Version copies are quadratic** (item 5): 39 s at 0.9M, 48 minutes at 9M,
-  capture on or off.
+  capture on or off. Fixed 2026-10-23 (15.6 s at 0.9M, linear).
 - **A tier-2 restore of a 9M-quad graph does not fit** (item 5): its `MOVE`
   transaction passed 36 GiB.
 - **A tier-1 restore over the payload cap closes the chains it crosses**
@@ -1389,7 +1391,85 @@ The bench-scale shape matches the scale runs: a ground update pays nothing
 measurable, a `WHERE` update pays its before-image (×2–3), a streamed
 multi-graph load pays its probes (×1.9 at 30 000 quads in memory), and
 concurrent writers pay the sequence section (×3.7, item 3). Raw medians:
-`docs/perf-data/2026-10-15-x86-delta/criterion/`.
+`docs/perf-data/2026-10-15-x86-delta/criterion/`. (That last reading was
+wrong for this benchmark: its in-memory writes queue on the log's SQLite
+connection, not on the section, which is why freeing the section on
+2026-10-23 left it at ×3.1 — see below.)
+
+#### Delta-versions fixes, measured (2026-10-23)
+
+Five findings of the measurements above were followed up: the three costs over
+the budget (items 2, 3 and 5) and two correctness gaps (items 5 and 11). Each
+fix was measured against develop at `e6f55c62`, the two builds alternating run
+by run on fresh copies of one base store, on the same host as above but in a
+container limited to 8 CPUs and 8 GiB, because the machine was shared: compare
+within this section only, and no 9M-quad run was made. Raw output, the series
+script and the host record are in
+[`docs/perf-data/2026-10-23-x86-delta-fixes/`](perf-data/2026-10-23-x86-delta-fixes/).
+
+**Version copies are linear (item 5).** A checkpoint cut copies each graph
+into its snapshot graph in 50 000-quad `bulk_insert_quads` batches, and the
+rows of a version's own graph were `unknown`, so the count index recounted the
+growing snapshot after every batch. They are now `counts`, as the design has
+them (delta note §2.2): the snapshot graph is probed like any other graph, with
+capture off too, and the count index adds each batch. n = 3:
+
+| | develop | fixed |
+|---|--:|--:|
+| checkpoint cut, 0.3M quads | 8.59 s | 4.68 s |
+| checkpoint cut, 0.9M quads | 43.4 s | **15.6 s** |
+| 3× the data costs | ×5.0 | ×3.3 |
+| cold build of a delta, 0.9M (forward / backward) | 45.5 / 45.2 s | 17.0 / 17.2 s |
+
+At 9M the cut took 48 minutes; linear scaling from 15.6 s puts it near
+2.6 minutes, an extrapolation, not a measurement.
+
+**`bulk_insert_quads` into a new graph needs no probe (item 2).** A named
+graph holding nothing before the write (one seek) is not probed quad by quad:
+every distinct quad of it is new, so its row is what probing gives. The
+probes stay for a graph that already holds quads. A graph's new quads are also
+kept only up to the payload cap, past which the row has counts only. 1M quads
+into a new graph, capture on ÷ off:
+
+| | develop | fixed |
+|---|--:|--:|
+| separate processes, n = 3 | ×1.13 | **×1.04** |
+| one process, alternating, n = 5 | ×1.15 | ×1.07 |
+| named-graph load (probes either way), n = 5 | ×1.04 | ×1.05 |
+
+The 9M import (×1.22 on 2026-10-15) is the same path with no probe left; it
+was not re-run.
+
+**Concurrent bulk writers no longer queue on the sequence section (item 3).**
+A first change took the SST writing and the payload serialisation out of the
+section and finalised the rows after it, in commit order; it changed nothing
+(×0.45). An instrumented build showed why: a 500-quad load's SST ingestion
+takes about 200 ms with capture on or off, RocksDB runs concurrent
+ingestions side by side, and the section — holding the ingestion alone by then
+— still ran them one at a time (four writers: 583 ms waiting for the section,
+248 ms holding it, 1 ms writing the rows). A bulk load only adds quads, and
+additions commute, so two ingestions need no order between them, only against
+a write that may remove: bulk loads now hold the section shared, every other
+commit exclusively, and the rows are numbered in the order of a ticket taken
+inside it. The mixed phase (`scale_otl 100000 --skip-load`, four writers next
+to four readers, 20 s), n = 3:
+
+| | develop off | develop on | × | fixed off | fixed on | × |
+|---|--:|--:|--:|--:|--:|--:|
+| quads written per second | 5 200 | 2 300 | ×0.44 | 5 200 | 5 125 | **×0.99** |
+| write p95 | 554 ms | 1 048 ms | ×1.89 | 598 ms | 517 ms | ×0.86 |
+
+`kill -9` (item 7, 60 kills) found no violation with the new section. What
+it does not change is `concurrent/capture_writes` (×3.1 on both builds, 2.5–2.7
+ms against 0.83 ms with capture off): its in-memory `INSERT DATA` writes
+commit in microseconds and queue on the log's single SQLite connection, two
+statements per write (the intent row and the finalisation). That is the next
+follow-up (delta note §9.5).
+
+**Two gaps closed.** A tier-1 restore whose inverse for one graph is over the
+payload cap takes tier 2 instead of writing a `counts` row that closes its
+chains; a changed blank node deeper than `OTS_LDES_BNODE_DEPTH` republishes its
+graph whole instead of not being published (`docs/ldes.md`).
 
 #### SHACL run memory budget: BSBM 10k in 4 GiB (2026-10-15, x86)
 

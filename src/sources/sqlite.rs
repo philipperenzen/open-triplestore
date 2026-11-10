@@ -82,14 +82,14 @@ impl SqliteConnection {
     /// `n` VM steps; returning `true` aborts the statement, which surfaces as
     /// `SQLITE_INTERRUPT`. A statement never runs without its budget: if the
     /// handler cannot be installed, the query is refused.
-    fn arm_timeout(&self) -> Result<(), SourceError> {
+    fn arm_timeout(&mut self) -> Result<(), SourceError> {
         let deadline = Instant::now() + self.timeout;
         self.conn
             .progress_handler(1_000, Some(move || Instant::now() >= deadline))
             .map_err(|e| self.query_error(e))
     }
 
-    fn disarm(&self) {
+    fn disarm(&mut self) {
         // Only fails on a connection this process does not own, and then
         // there is no handler to remove either.
         let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
@@ -112,7 +112,7 @@ impl SqliteConnection {
         }
     }
 
-    fn strings(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, SourceError> {
+    fn strings(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, SourceError> {
         self.arm_timeout()?;
         let result = (|| -> Result<Vec<Vec<Option<String>>>, rusqlite::Error> {
             let mut stmt = self.conn.prepare(sql)?;
@@ -133,6 +133,58 @@ impl SqliteConnection {
         })();
         self.disarm();
         result.map_err(|e| self.query_error(e))
+    }
+
+    /// The body of `stream`, run while the timeout is armed: delivers every
+    /// full batch to `sink` and returns the row count and the last, partial
+    /// batch, which the caller delivers once the handler is off.
+    fn stream_armed(
+        &self,
+        query: &str,
+        batch_size: usize,
+        sink: BatchSink<'_>,
+    ) -> Result<(u64, Vec<Row>), SourceError> {
+        let mut stmt = self.conn.prepare(query).map_err(|e| self.query_error(e))?;
+        // Declared types come from the prepared statement, so a `rml:query`
+        // over real columns still reports what SQLite knows. Collected before
+        // `query()` takes the statement mutably.
+        let (names, declared): (Vec<String>, Vec<ValueKind>) = stmt
+            .columns()
+            .map(|c| {
+                (
+                    c.name().to_string(),
+                    c.decl_type().map(generic_type).unwrap_or(ValueKind::Other),
+                )
+            })
+            .unzip();
+
+        let mut delivered: u64 = 0;
+        let mut batch: Vec<Row> = Vec::with_capacity(batch_size);
+        let mut rows = stmt.query([]).map_err(|e| self.query_error(e))?;
+        while let Some(row) = rows.next().map_err(|e| self.query_error(e))? {
+            let mut out: Row = Row::with_capacity(names.len());
+            for (i, name) in names.iter().enumerate() {
+                let raw = row.get_ref(i).map_err(|e| self.query_error(e))?;
+                // A SQL NULL is an ABSENT key, not an empty value: a term
+                // map over it then produces no triple at all.
+                if matches!(raw, ValueRef::Null) {
+                    continue;
+                }
+                out.insert(
+                    name.clone(),
+                    Value::new(lexical(raw), value_kind_of(raw, declared[i])),
+                );
+            }
+            batch.push(out);
+            delivered += 1;
+            if batch.len() >= batch_size {
+                sink(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(batch_size),
+                ))?;
+            }
+        }
+        Ok((delivered, batch))
     }
 }
 
@@ -487,11 +539,7 @@ impl SourceConnection for SqliteConnection {
     fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
         self.arm_timeout()?;
         let names = match self.conn.prepare(query) {
-            Ok(stmt) => Ok(stmt
-                .column_names()
-                .into_iter()
-                .map(str::to_string)
-                .collect()),
+            Ok(stmt) => Ok(stmt.column_names().map(str::to_string).collect()),
             Err(e) => Err(self.query_error(e)),
         };
         self.disarm();
@@ -506,65 +554,14 @@ impl SourceConnection for SqliteConnection {
     ) -> Result<u64, SourceError> {
         let batch_size = batch_size.max(1);
         self.arm_timeout()?;
-        let mut stmt = match self.conn.prepare(query) {
-            Ok(s) => s,
-            Err(e) => {
-                self.disarm();
-                return Err(self.query_error(e));
-            }
-        };
-        // Declared types come from the prepared statement, so a `rml:query`
-        // over real columns still reports what SQLite knows. Collected before
-        // `query()` takes the statement mutably.
-        let (names, declared): (Vec<String>, Vec<ValueKind>) = stmt
-            .columns()
-            .iter()
-            .map(|c| {
-                (
-                    c.name().to_string(),
-                    c.decl_type().map(generic_type).unwrap_or(ValueKind::Other),
-                )
-            })
-            .unzip();
-
-        let mut delivered: u64 = 0;
-        let mut batch: Vec<Row> = Vec::with_capacity(batch_size);
-        let outcome = (|| -> Result<(), SourceError> {
-            let mut rows = stmt.query([]).map_err(|e| self.query_error(e))?;
-            loop {
-                let row = match rows.next() {
-                    Ok(Some(r)) => r,
-                    Ok(None) => break,
-                    Err(e) => return Err(self.query_error(e)),
-                };
-                let mut out: Row = Row::with_capacity(names.len());
-                for (i, name) in names.iter().enumerate() {
-                    let raw = row.get_ref(i).map_err(|e| self.query_error(e))?;
-                    // A SQL NULL is an ABSENT key, not an empty value: a term
-                    // map over it then produces no triple at all.
-                    if matches!(raw, ValueRef::Null) {
-                        continue;
-                    }
-                    out.insert(
-                        name.clone(),
-                        Value::new(lexical(raw), value_kind_of(raw, declared[i])),
-                    );
-                }
-                batch.push(out);
-                delivered += 1;
-                if batch.len() >= batch_size {
-                    sink(std::mem::replace(
-                        &mut batch,
-                        Vec::with_capacity(batch_size),
-                    ))?;
-                }
-            }
-            Ok(())
-        })();
+        // The statement borrows the connection, and taking the handler off
+        // needs it mutably (`progress_handler`), so the statement lives and
+        // dies inside its own call.
+        let outcome = self.stream_armed(query, batch_size, &mut *sink);
         self.disarm();
-        outcome?;
-        if !batch.is_empty() {
-            sink(batch)?;
+        let (delivered, rest) = outcome?;
+        if !rest.is_empty() {
+            sink(rest)?;
         }
         Ok(delivered)
     }
@@ -904,6 +901,32 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err, SourceError::Query("stop".into()));
+    }
+
+    #[test]
+    fn a_statement_past_its_budget_times_out_and_the_connection_recovers() {
+        let (_d, mut p) = fixture();
+        p.statement_timeout_ms = 50;
+        let mut c = SqliteConnector.connect(&p).unwrap();
+        // An unbounded recursive CTE: only the progress handler can stop it.
+        let forever = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                       SELECT max(i) FROM n";
+        let started = Instant::now();
+        let err = c.stream(forever, 10, &mut |_| Ok(())).unwrap_err();
+        assert_eq!(err, SourceError::Timeout);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "aborted promptly"
+        );
+        // The handler came off with the statement: the next query runs to the end.
+        assert_eq!(
+            c.max_watermark("child", "cid").unwrap().as_deref(),
+            Some("11")
+        );
+        let n = c
+            .stream("SELECT cid FROM child", 10, &mut |_| Ok(()))
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     #[test]
