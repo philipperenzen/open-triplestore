@@ -115,6 +115,40 @@ impl PluginAuth for NoAuth {
     }
 }
 
+/// What values a [`PluginSetting`] takes. The host validates the setting with
+/// the parser it uses for its own settings of that kind and refuses to start
+/// on a malformed value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingKind {
+    /// `1/0/true/false/yes/no/on/off`, any case.
+    Bool,
+    /// Free text.
+    Text,
+    /// An absolute `http(s)` URL.
+    Url,
+    /// A comma-separated list of words.
+    List,
+    /// A secret: a reference (`env:`, `file:`, `vault:`) or, outside the
+    /// production posture, a raw value. Never shown; a raw value is refused
+    /// at startup under `OTS_ENV=production`. Read it through
+    /// [`PluginSecrets::env_secret`].
+    Secret,
+}
+
+/// One environment variable a plugin reads, declared through
+/// [`Plugin::settings`]. The host validates it at startup with its own
+/// settings, lists it in `GET /api/admin/config` (in a section named after
+/// the plugin), and does not report it as an unknown name. Unset means not
+/// configured; the plugin keeps its own default.
+#[derive(Clone, Copy, Debug)]
+pub struct PluginSetting {
+    /// The variable, `OTS_<PLUGIN>_…`.
+    pub name: &'static str,
+    pub kind: SettingKind,
+    /// One line for the admin view.
+    pub doc: &'static str,
+}
+
 /// A compile-time Open Triplestore plugin.
 ///
 /// Implement this trait, register an instance in the host's plugin registry
@@ -150,6 +184,13 @@ pub trait Plugin: Send + Sync + 'static {
     /// at boot with a log line, not silently overridden. Default: none.
     fn connectors(&self) -> Vec<Arc<dyn sources::SourceConnector>> {
         Vec::new()
+    }
+
+    /// The environment variables this plugin reads. A name the host already
+    /// declares, or one an earlier plugin declared, is left out. Default:
+    /// none.
+    fn settings(&self) -> &'static [PluginSetting] {
+        &[]
     }
 }
 
@@ -190,5 +231,6 @@ mod tests {
         p.on_boot(&ctx);
         p.spawn_background(ctx);
         let _router: axum::Router<PluginContext> = p.routes();
+        assert!(p.settings().is_empty());
     }
 }

@@ -3047,7 +3047,7 @@
   .svc-slug {
     font-size: 0.77rem;
     color: var(--ink-500);
-    background: var(--bg-accent, #f0f4f8);
+    background: var(--bg-soft);
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
   }

@@ -400,10 +400,19 @@ dependency on this project's internal types:
   `ots_plugin_api::sources::catalogue`; a driver for another dialect
   implements `Executor` and `Dialect` there and owns only its wire protocol.
 
+- `Plugin::settings` *(ots-plugin-api 0.4)* — the environment variables the
+  plugin reads, each a `PluginSetting { name, kind, doc }` with `kind` one of
+  `Bool`, `Text`, `Url`, `List` or `Secret`. The host validates them at
+  startup with its own settings (a malformed URL, or a raw secret under
+  `OTS_ENV=production`, stops the start), lists them in
+  `GET /api/admin/config` in a section named after the plugin, and does not
+  warn that they are unknown names. A name the host already declares, or an
+  earlier plugin did, is left out.
+
 ### Plugin settings
 
-Plugins read their settings from the environment. The shipped plugins use
-these:
+Plugins read their settings from the environment and declare them through
+`Plugin::settings`. The shipped plugins use these:
 
 | Plugin | Variable | Default | Meaning |
 |---|---|---|---|
@@ -412,8 +421,10 @@ these:
 | `accounts-dashboard` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
 | SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
 
-The `plugin-*` features are not part of `full`, so the published image
-contains none of these plugins. Build with the feature to use one.
+The `plugin-*` features are not part of `full`. The published image is built
+with `image`, which adds the three SQL connectors (`plugin-postgres`,
+`plugin-mysql`, `plugin-mssql`) and no other plugin; build with the feature
+to use another.
 
 ### Writing a new plugin (cookiecutter flow)
 

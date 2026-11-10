@@ -1,10 +1,17 @@
-# Refreshes the AUTHORITATIVE performance baseline (benches/perf_baseline.json).
+# Refreshes the performance baseline (benches/perf_baseline.json).
+#
+# The PR gate (perf.yml) does not grade against this file's numbers: it benches
+# the change and its merge base on the same runner and compares the two. From
+# the baseline it reads only the per-benchmark tolerances. The absolute medians
+# recorded here are the tracked record of where performance stands over time
+# (and what the local pre-push hook, scripts/hooks/pre-push, checks under
+# OTS_PERF_FULL=1).
 #
 # The baseline is refreshed ONLY here — never from PR/push perf runs (perf.yml) —
-# so the reference point can't drift from in-flight changes. Runs the FULL
-# Criterion suite (not the subset the gate uses) for a complete, low-noise
-# measurement, then opens a PR to `develop` with the regenerated baseline so the
-# update is reviewed before it lands.
+# so in-flight changes can't drift the tracked numbers. Runs the FULL Criterion
+# suite (not the subset the gate uses) for a complete, low-noise measurement,
+# then opens a PR to `develop` with the regenerated baseline so the update is
+# reviewed before it lands.
 #
 # Triggers: manual (workflow_dispatch) for an on-demand refresh, and on each
 # released `v*` tag so every release re-anchors the baseline.
@@ -124,5 +131,6 @@ jobs:
             - Per-benchmark tolerances were preserved (`--keep-tolerances`); only
               the measured numbers changed.
 
-            Review the diff before merging — this becomes the reference the perf
-            gate (`perf.yml`) checks every PR against.
+            Review the diff before merging — these become the tracked medians
+            (the local pre-push hook checks against them; the PR perf gate,
+            `perf.yml`, reads only the tolerances).

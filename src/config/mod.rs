@@ -419,9 +419,48 @@ impl Ctx<'_> {
     }
 }
 
-/// The declaration of the setting called `name`.
+/// The declaration of the setting called `name`, the server's own or a
+/// compiled-in plugin's.
 pub fn spec(name: &str) -> Option<&'static Spec> {
-    SPECS.iter().find(|s| s.name == name)
+    all_specs().find(|s| s.name == name)
+}
+
+/// Every setting: the server's own, in registry order, then the ones the
+/// compiled-in plugins declare.
+pub fn all_specs() -> impl Iterator<Item = &'static Spec> {
+    SPECS.iter().chain(plugin_specs())
+}
+
+/// The settings the compiled-in plugins declare ([`ots_plugin_api::Plugin::settings`]),
+/// each in a section named after its plugin. A name the server already
+/// declares, or an earlier plugin did, is left out (the registry's tests
+/// keep the shipped plugins clear of both).
+pub fn plugin_specs() -> &'static [Spec] {
+    static PLUGIN_SPECS: OnceLock<Vec<Spec>> = OnceLock::new();
+    PLUGIN_SPECS.get_or_init(|| {
+        let mut out: Vec<Spec> = Vec::new();
+        for p in crate::plugins::registered_plugins() {
+            for s in p.settings() {
+                if SPECS.iter().chain(&out).any(|d| d.name == s.name) {
+                    continue;
+                }
+                out.push(plugin_spec(p.name(), s));
+            }
+        }
+        out
+    })
+}
+
+fn plugin_spec(plugin: &'static str, s: &ots_plugin_api::PluginSetting) -> Spec {
+    use ots_plugin_api::SettingKind;
+    let kind = match s.kind {
+        SettingKind::Bool => Kind::Bool,
+        SettingKind::Text => Kind::Text,
+        SettingKind::Url => Kind::Url,
+        SettingKind::List => Kind::List,
+        SettingKind::Secret => Kind::Secret,
+    };
+    Spec::new(s.name, kind, plugin).doc(s.doc)
 }
 
 /// The configured value of `spec` as given, before validation (`None`:
@@ -539,7 +578,7 @@ impl Config {
             production,
         };
         let mut entries = BTreeMap::new();
-        for spec in SPECS {
+        for spec in all_specs() {
             match resolve(spec, &ctx) {
                 Ok((value, source)) => {
                     entries.insert(spec.name, Entry { value, source });
@@ -649,8 +688,7 @@ impl Config {
     /// ones.
     pub fn describe_with(&self, overlay: impl Fn(&Spec) -> Option<String>) -> Vec<Described> {
         let production = self.production();
-        SPECS
-            .iter()
+        all_specs()
             .map(|spec| {
                 let entry = match overlay(spec) {
                     Some(v) => Entry {
@@ -744,9 +782,10 @@ pub fn current() -> &'static Arc<Config> {
         .unwrap_or_else(|| LIVE.get_or_init(|| Arc::new(Config::live())))
 }
 
-/// The `OTS_*` names among `names` that no setting declares (a typo, or a
-/// name from another version), for a startup warning. A secret reference
-/// may point at any variable (`env:OTS_SOMETHING`), so these only warn.
+/// The `OTS_*` names among `names` that no setting declares, the plugins'
+/// included (a typo, or a name from another version), for a startup warning.
+/// A secret reference may point at any variable (`env:OTS_SOMETHING`), so
+/// these only warn.
 pub fn unknown_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = names
         .into_iter()
