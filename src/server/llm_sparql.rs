@@ -102,6 +102,24 @@ pub(crate) fn chat_model() -> String {
         .unwrap_or_else(default_model)
 }
 
+/// `reasoning_effort` sent with every completion (`OTS_LLM_REASONING_EFFORT`).
+///
+/// Reasoning models such as Qwen3.5 think before they answer, and through an
+/// OpenAI-compatible endpoint that thinking counts against `max_tokens`: with
+/// these budgets it can use all of them and leave the answer empty. `none`
+/// turns it off where the server reads the field (Ollama, vLLM, OpenAI). Unset
+/// sends nothing, as before.
+fn reasoning_effort() -> Option<String> {
+    crate::config::LLM_REASONING_EFFORT.get()
+}
+
+/// Add `reasoning_effort` to a completion payload when one is configured.
+fn with_reasoning_effort(payload: &mut Value, effort: Option<&str>) {
+    if let Some(effort) = effort {
+        payload["reasoning_effort"] = json!(effort);
+    }
+}
+
 /// Optional bearer token for the endpoint (`OTS_LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
 ///
@@ -147,7 +165,7 @@ pub(crate) async fn chat_completion(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
@@ -156,6 +174,7 @@ pub(crate) async fn chat_completion(
             {"role": "user", "content": user},
         ],
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -206,12 +225,13 @@ pub(crate) async fn chat_completion_messages(
     messages: Vec<Value>,
     max_tokens: u32,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
         "messages": messages,
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -378,13 +398,14 @@ async fn chat_completion_messages_stream(
     sink: &EventSink,
     gate: &mut DeltaGate,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
         "messages": messages,
         "stream": true,
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -1960,6 +1981,7 @@ async fn chat_completion_full(
         payload["tools"] = t.clone();
         payload["tool_choice"] = json!("auto");
     }
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!(
         "{}/v1/chat/completions",
         gateway_base().map_err(CompletionFailure::Fatal)?
@@ -5134,6 +5156,20 @@ fn strip_code_fence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_configured_reasoning_effort_is_sent() {
+        let mut payload = serde_json::json!({"model": "m"});
+        super::with_reasoning_effort(&mut payload, Some("none"));
+        assert_eq!(payload["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn no_reasoning_effort_is_sent_when_unset() {
+        let mut payload = serde_json::json!({"model": "m"});
+        super::with_reasoning_effort(&mut payload, None);
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
     use super::{
         all_retrievals_empty, caps_for_window, contains_ask_fence, context_from_models_payload,
         context_from_ollama_show, extract_plan, extract_tool_calls, graph_vocab_summary,
