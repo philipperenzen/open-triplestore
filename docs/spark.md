@@ -59,6 +59,32 @@ A JSON spec with a `type` of `bar`, `line` or `pie`, an optional `title` / `xLab
 ```
 ````
 
+To chart the rows of a query Spark ran this turn, the spec says `"source": "query"` with the `x` (label) and `y` (number) columns instead of inline `data`; the platform reads the values from the rows, so a transcription slip cannot change a number. Categories are sorted by value; a time axis (ISO dates, or years in a column named like *year* / *date*) keeps chronological order, and a row whose value cell is empty is left out rather than drawn as 0.
+
+### `view` — the visual a query result fits
+
+`{"source": "query", "as": "auto"}` shows the rows of a query Spark ran this turn in whichever visual their shape supports. With `auto` (the default) the platform picks:
+
+| Rows | Visual |
+| --- | --- |
+| SHACL validation results (a report queried as triples, or a SELECT with focus-node and severity/message columns) | **SHACL summary** — conforms or not, counts per severity, the paths / shapes / focus nodes with the most results, and the worst few messages |
+| `CONSTRUCT` / `DESCRIBE` triples | **node-link graph** on the shared cytoscape canvas (capped at 150 nodes); click a node to inspect it |
+| A WGS84 WKT column, or a lat/lon column pair | **map** on the shared MapLibre viewer; rows in a projected CRS are counted as not shown, never reprojected |
+| A date column and a number | **timeline** (line chart, chronological; a small categorical column splits it into series) |
+| A label column and a number | **bar chart** of the top 15 by value, with "showing N of M rows" when cut |
+| One row with a number in it | **figures** — one tile per returned cell |
+| Anything else | **table** |
+
+`"as"` picks a visual explicitly (`bar`, `line`, `map`, `graph`, `shacl`, `stat` or `table`); when the rows cannot support it, the table is shown with a note saying so — the widget never draws something the query did not return. `"query": N` binds to the Nth query of the turn (1-based, counting failed rounds too) instead of the last one that returned rows; optional `"title"`, `"x"` and `"y"` name the chart title and columns. The block carries no data of its own, so with no query rows this turn it renders as a broken-block card.
+
+````markdown
+```view
+{"source": "query", "as": "auto", "title": "Bridges per year"}
+```
+````
+
+The same tabs appear wherever a result is shown in the chat: on the rows under **Ran a query** in the retrieval trail, on the result of a ` ```sparql ` card's **Run** (a `CONSTRUCT`/`DESCRIBE` result opens on its graph), and on CSV results of an ` ```api ` card. Those start on the table; the tabs offer only the visuals the rows support. An ` ```api ` call that returns a validation report (`GET /api/datasets/{id}/validation/latest`, …) gets the SHACL summary above its JSON.
+
 ### `map` — WKT feature map (with optional 3D models)
 
 A JSON `features` array rendered as an interactive map. Each feature carries a `wkt` geometry — WGS84, longitude before latitude — plus an optional `label` and `iri` linking the marker back to the resource. An optional `models` array places real 3D geometry on the basemap: each entry anchors a model file (glTF, STL, IFC, CityJSON) at a WKT `POINT`, rendered with the same georeferenced 3D engine as the dataset explorer.

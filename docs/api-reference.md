@@ -167,6 +167,23 @@ and the level the router enforces cannot drift apart.
 
 Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.
 
+## Spark chat answers — `/api/llm/chat` and `/api/llm/chat/stream`
+
+The `answer` of a chat turn is markdown with fenced widget blocks
+(` ```sparql `, ` ```api `, ` ```chart `, ` ```map `, ` ```view `, ` ```card `,
+` ```csv `, ` ```file `, ` ```model3d `, ` ```ask `; see [Spark](/docs/spark)).
+A client that renders answers itself needs one more field for the row-bound
+widgets: `queries`, the turn's retrieval trail, one entry per round in order —
+`{sparql, ok, error?, columns?, rows?, truncated}` (rows are capped at 50; a
+`CONSTRUCT`/`DESCRIBE` round comes back as `subject`/`predicate`/`object`
+columns). A ` ```chart ` or ` ```map ` with `"source": "query"` reads the last
+round that returned rows; a ` ```view ` reads that round too, or round `N`
+(1-based, failed rounds included) when it says `"query": N`. When an answer
+opens a ` ```chart `, ` ```map `, ` ```view `, ` ```card `, ` ```csv `,
+` ```model3d ` or ` ```file ` block and no query succeeded that turn, the
+server appends a note that the values were not retrieved from the knowledge
+graph.
+
 ## The dataset of a `/sparql` query
 
 A query's RDF dataset is the one SPARQL 1.1 defines, confined to the graphs the

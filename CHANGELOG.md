@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Spark draws query results in the visual their rows fit.** A new ` ```view `
+  widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
+  chart (label + number), a chronological timeline (date + number), a map on
+  the MapLibre viewer (WGS84 WKT or lat/lon), a node-link graph on the cytoscape
+  canvas (`CONSTRUCT`/`DESCRIBE` triples), a SHACL summary (validation results)
+  or figure tiles (one aggregate row), and falls back to the table when the rows
+  support none of them or not the one asked for. The same tabs appear on the
+  retrieval trail, on Run results of query cards and on CSV API results; an API
+  call returning a validation report gets the SHACL summary above its JSON.
+  Everything is built from the returned cells only. Row-bound ` ```chart `
+  blocks now keep a time axis chronological and skip empty values instead of
+  drawing them as 0.
 - **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
   schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
   (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
@@ -67,6 +79,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The reasoner sidecar builds from a Windows checkout.** `.gitattributes`
+  now pins `sidecars/reasoner/mvnw` and its `maven-wrapper.properties` to LF,
+  so `docker build -f sidecars/reasoner/Dockerfile .` no longer fails with
+  `./mvnw: not found` when Git checked the wrapper out with CRLF.
+- **A reasoning request keeps its expensive-operations slot until its work
+  ends.** A client that disconnected during a synchronous reasoning call
+  (`/api/reasoning/materialize`, `/api/reasoning/check`) freed the slot at
+  once, while the blocking work and its sidecar call kept running, so the
+  server could run more reasoning at once than `expensive_semaphore` allows.
+  The slot is now held by the blocking task itself.
 - **Konclude backend: no more wrong answers on the W3C OWL 2 DL test cases.**
   Konclude v0.7.0-1138 called inconsistent premises consistent (asymmetric,
   irreflexive and disjoint properties against asserted edges, and DL98 cases
