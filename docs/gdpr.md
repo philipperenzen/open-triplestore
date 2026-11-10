@@ -44,6 +44,11 @@ graphs); account/identity data lives in a local metadata database.
   (`GET /api/admin/llm/requests?user_id=…`), the feedback inbox
   (`GET /api/admin/feedback`) names each report's reporter, and a user reads
   their own saved chat conversations in the app.
+- **Change log** (when switched on, [PRIVACY.md](../PRIVACY.md) §4.9): each
+  row names the account that made the write as
+  `{OTS_BASE_URL}/users/{user ID}`, so an admin can pick a user's writes, with
+  their time, graph and quads, out of `GET /api/admin/changes`. There is no
+  per-user filter; the feed is paged by sequence number.
 
 ### Art. 16 — Right to rectification
 
@@ -68,6 +73,23 @@ graphs); account/identity data lives in a local metadata database.
   question preview) and usage events with the account; the append-only audit
   log keeps its entries by design. Plan for erasure in **backups** too
   (re-export or age them out per your retention policy).
+- **The change log** (when switched on, [PRIVACY.md](../PRIVACY.md) §4.9) is
+  not erased by any of the above. A SPARQL `DELETE`, a graph delete or a
+  dataset delete records the quads it removed as the row's payload, and those
+  stay readable by admins (`GET /api/admin/changes`) and, while the dataset
+  exists, by its readers (`GET /api/datasets/{id}/changes/{seq}`) until
+  retention removes the row. **A user purge does not touch the log
+  either**: the rows keep the account's IRI (with the user ID the audit log
+  also keeps) and the quads of its writes, and an admin or self-service
+  purge's own deletion of the user's profile graph is recorded with the
+  removed profile values. Rows go
+  after `OTS_CHANGE_RETENTION_DAYS` (default 90 days), and only when a sweep
+  runs (once every 1,000 rows recorded) and no live bookmark or delta-version
+  pin holds them. There is no targeted erasure from the log: the levers are a
+  shorter retention, keeping capture off where nothing reads the log, or,
+  with the server stopped, deleting `<data dir>/changes/` (which unpublished
+  delta versions need). A restored backup brings its log back, and a
+  replication follower holds the rows it already applied.
 
 ### Art. 18 — Right to restriction of processing
 
@@ -110,12 +132,19 @@ graphs); account/identity data lives in a local metadata database.
   unnecessarily sent to a third-party LLM (see [PRIVACY.md](../PRIVACY.md) §5).
   Set `OTS_LLM_LOG_PREVIEW_ENABLED=false` if you do not need the first 200
   characters of each AI question in the LLM request log
-  ([PRIVACY.md](../PRIVACY.md) §4.7).
+  ([PRIVACY.md](../PRIVACY.md) §4.7). Leave the change log off
+  (`OTS_CHANGE_CAPTURE_ENABLED`, off by default) unless something reads it,
+  such as replication, delta versions or run-on-write pipelines: while it is
+  on it keeps a copy of every write, deleted data and the writer's account
+  included ([PRIVACY.md](../PRIVACY.md) §4.9).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
   RDF data, accounts, audit logs (which include IP/user-agent), the private
   usage-tracking events, the LLM request log (user ID, IP address and question
   preview; `OTS_LLM_LOG_RETENTION_DAYS`, default 90 days), saved chat
-  conversations, feedback reports, and backups.
+  conversations, feedback reports, the change log when switched on (the
+  writer's account IRI and the added and removed quads;
+  `OTS_CHANGE_RETENTION_DAYS`, default 90 days, longer while a bookmark or
+  delta-version pin holds the rows), and backups.
 - **Special-category data (Art. 9).** If you load special-category data, ensure
   an Art. 9 condition applies and apply heightened safeguards.
 
@@ -143,7 +172,11 @@ operating them correctly is the operator's responsibility** (see
   user; cross-user aggregates are restricted to `super_admin`; nothing leaves the
   instance. Workload telemetry (`GET /api/admin/telemetry`) is memory-only and
   holds no personal data; the LLM request log is admin-only
-  ([PRIVACY.md](../PRIVACY.md) §2, §4.7).
+  ([PRIVACY.md](../PRIVACY.md) §2, §4.7). The change log as a whole is
+  admin-only, but a dataset's change feed (`GET /api/datasets/{id}/changes`)
+  shows anyone who may read the dataset, anonymous callers included for a
+  public one, each row's time and writer's account IRI for the graphs they may
+  read, and each change's quads on request ([PRIVACY.md](../PRIVACY.md) §4.9).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
@@ -196,8 +229,8 @@ an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the ass
       reverse proxy; review bind addresses and CORS.
 - [ ] Configure **roles, ACLs, and dataset visibility**; apply least privilege.
 - [ ] Define **retention periods** (RDF data, accounts, audit logs, usage events,
-      the LLM request log, chat conversations, feedback reports, backups) and
-      enforce them.
+      the LLM request log, chat conversations, feedback reports, the change
+      log, backups) and enforce them.
 - [ ] Establish a **data-subject-request** procedure mapped to the features in §2.
 - [ ] Establish an **incident-response & breach-notification** process; enable
       audit log review and alerting.

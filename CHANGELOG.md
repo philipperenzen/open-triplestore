@@ -77,6 +77,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and stale code anchors and versions. The web UI's `frontend/package.json`
   now carries the release version, and `release_prepare.py` keeps it, and the
   Windows guide's sample response, in step.
+- **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
+  names it under access (each row's account IRI), erasure (deleted quads and
+  a purged user's rows stay until retention, and a purge's own profile-graph
+  delete is recorded), data minimisation (leave capture off unless something
+  reads the log), storage limitation, security (the dataset change feed shows
+  the writer's account IRI to the dataset's readers) and the retention
+  checklist.
 
 ### Security
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
@@ -101,6 +108,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rows left behind by earlier purges stay until retention removes the log
   rows; usage events of deleted users can be removed with
   `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+- **The privacy-notice template documents the change log.** The new
+  `PRIVACY.md` §4.9 covers `changes.db`, which the template still left out.
+  While change capture is on (off by default; always on for a replication
+  leader or cluster member), every write keeps its time, graph and added and
+  removed quads, deleted ones included, and, for writes through SPARQL Update,
+  the Graph Store protocol, RDF Patch, a version restore or a repair, the
+  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). User profile
+  changes are recorded the same way. The section names the readers: admins
+  and replication followers see every row; anyone who may read a dataset,
+  anonymous callers included, sees the account IRI and the quads of the
+  dataset's graphs they may read. It also explains retention
+  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept once every 1,000 recorded rows,
+  keeping every row a live cursor or delta-version pin still needs), says that
+  switching capture off keeps an earlier log, and says that backups carry it.
+  **A user purge does not erase the change log**: the user's rows keep their
+  account IRI and quads until retention, and the purge's deletion of the
+  profile graph is itself recorded with the removed profile values. Operators
+  who published a notice from the earlier template should update theirs.
 
 ## [0.8.1] — 2026-10-22
 
