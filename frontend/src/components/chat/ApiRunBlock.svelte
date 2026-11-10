@@ -16,6 +16,10 @@
   import RunCard, { copyWithReset } from './RunCard.svelte';
   import SparqlResultView from './SparqlResultView.svelte';
   import CsvPreview from './CsvPreview.svelte';
+  import ResultVisual from './ResultVisual.svelte';
+  import ChatShaclReport from './ChatShaclReport.svelte';
+  import { unwrapValidationRun } from '../../lib/validationReport';
+  import { shaclFromReport } from '../../lib/chatViz';
   import { Globe, Play, Loader2, Copy, Check, Download, ExternalLink, ChevronDown, ChevronRight } from 'lucide-svelte';
 
   export let method = 'GET';
@@ -59,7 +63,7 @@
       try { return { kind: 'sparql', result: normalizeSparqlResult(JSON.parse(text)) }; }
       catch { return { kind: 'text', text }; }
     }
-    if (c.includes('json')) return { kind: 'json', text: prettyJson(text) };
+    if (c.includes('json')) return { kind: 'json', text: prettyJson(text), shacl: validationFindings(text) };
     if (c.includes('csv')) { const tab = parseCsv(text); return { kind: 'csv', ...tab }; }
     if (c.includes('tab-separated')) {
       const lines = text.replace(/\r\n?/g, '\n').split('\n').filter((l) => l.trim());
@@ -75,6 +79,16 @@
     }
     if (c.includes('xml')) return { kind: 'xml', text: prettyXml(text) };
     return { kind: 'text', text };
+  }
+
+  /** A validate / validation-run response carries a SHACL report: summarise it
+   *  above the raw JSON instead of leaving the user to read the envelope. */
+  function validationFindings(text) {
+    try {
+      return shaclFromReport(unwrapValidationRun(JSON.parse(text)).report);
+    } catch {
+      return null;
+    }
   }
 
   /** The effective URL (path + current parameter values) for display/copy. */
@@ -186,8 +200,13 @@
       {#if outcome.kind === 'sparql'}
         <SparqlResultView result={outcome.result} />
       {:else if outcome.kind === 'csv'}
-        <CsvPreview columns={outcome.columns} rows={outcome.rows} raw={raw} filename={svc?.slug || 'result'} framed={false} />
+        <ResultVisual table={{ columns: outcome.columns, rows: outcome.rows }} preferred="table">
+          <svelte:fragment slot="table">
+            <CsvPreview columns={outcome.columns} rows={outcome.rows} raw={raw} filename={svc?.slug || 'result'} framed={false} />
+          </svelte:fragment>
+        </ResultVisual>
       {:else if outcome.kind === 'json'}
+        {#if outcome.shacl}<ChatShaclReport findings={outcome.shacl} />{/if}
         <!-- The resultHighlight.js highlighters HTML-escape every source character
              and only add <span class="tok-*"> wrappers, so {@html} is safe here. -->
         <!-- eslint-disable-next-line svelte/no-at-html-tags -->

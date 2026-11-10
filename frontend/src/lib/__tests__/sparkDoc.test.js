@@ -33,7 +33,7 @@ describe('docs/spark.md', () => {
   });
 
   it('shows every widget-block fence literally (nested-fence examples survive)', () => {
-    for (const tag of ['```sparql', '```api', '```chart', '```map', '```card', '```csv']) {
+    for (const tag of ['```sparql', '```api', '```chart', '```map', '```view', '```card', '```csv']) {
       expect(html).toContain(tag);
     }
   });
