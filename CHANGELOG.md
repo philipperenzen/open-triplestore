@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Spark draws query results in the visual their rows fit.** A new ` ```view `
+  widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
+  chart (label + number), a chronological timeline (date + number), a map on
+  the MapLibre viewer (WGS84 WKT or lat/lon), a node-link graph on the cytoscape
+  canvas (`CONSTRUCT`/`DESCRIBE` triples), a SHACL summary (validation results)
+  or figure tiles (one aggregate row), and falls back to the table when the rows
+  support none of them or not the one asked for. The same tabs appear on the
+  retrieval trail, on Run results of query cards and on CSV API results; an API
+  call returning a validation report gets the SHACL summary above its JSON.
+  Everything is built from the returned cells only. Row-bound ` ```chart `
+  blocks now keep a time axis chronological and skip empty values instead of
+  drawing them as 0.
 - **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
   schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
   (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
@@ -76,6 +88,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   crosses; such a restore now takes tier 2. The defaults already avoided it
   (`OTS_APPLY_DELTA_TX_MAX_QUADS` is below the cap); a raised tier-1 limit no
   longer can.
+- **The reasoner sidecar builds from a Windows checkout.** `.gitattributes`
+  now pins `sidecars/reasoner/mvnw` and its `maven-wrapper.properties` to LF,
+  so `docker build -f sidecars/reasoner/Dockerfile .` no longer fails with
+  `./mvnw: not found` when Git checked the wrapper out with CRLF.
+- **A reasoning request keeps its expensive-operations slot until its work
+  ends.** A client that disconnected during a synchronous reasoning call
+  (`/api/reasoning/materialize`, `/api/reasoning/check`) freed the slot at
+  once, while the blocking work and its sidecar call kept running, so the
+  server could run more reasoning at once than `expensive_semaphore` allows.
+  The slot is now held by the blocking task itself.
 - **A demo content refresh no longer deletes files an operator added to the
   demo dataset.** When the recorded demo content version was behind, the
   refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
@@ -108,6 +130,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
+- **Dependency advisories published after 0.8.1, cleared.**
+  - `rusqlite` 0.40 → 0.41 and `r2d2_sqlite` 0.35 → 0.36 bring the bundled
+    SQLite from 3.53.2 to 3.54.1. Before 3.54.0, opening a database together
+    with a crafted `-wal` file of a different page size could return
+    uninitialised page-cache memory (RUSTSEC-2026-0459). The `writeback` tool
+    moves with them.
+  - `calamine` 0.37 → 0.38: a crafted file could panic or exhaust memory in
+    the OLE2 parser (RUSTSEC-2026-0436). Uploads reached it. Spreadsheet asset
+    metadata extraction opens every non-CSV spreadsheet with calamine's XLSX
+    reader, and that reader first probes the file with the OLE2 parser for an
+    encrypted package. So a user who could upload an asset could send a small
+    `.xlsx` that was really an OLE2 file and crash the server or drive it out
+    of memory.
+  - `zstd` 0.13.4, `zstd-safe` 7.4.0 and `zstd-sys` 2.1.2, under the text
+    index (RUSTSEC-2026-0391, -0398, -0403, -0410). Lockfile only.
+  - The AWS SDK crates and `openidconnect` 4.1 move to the patched
+    `crypto-bigint` 0.7 (RUSTSEC-2026-0387) and drop the unmaintained
+    `pin-utils` (RUSTSEC-2026-0441).
+  - RUSTSEC-2026-0387 is ignored in `deny.toml` for the two crates that still
+    use `crypto-bigint` 0.5 on their latest release. One is `jsonwebtoken`,
+    which signs the built-in OIDC provider's ES256 tokens; the other is `age`.
+    The comment there gives the exposure and the way out.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
