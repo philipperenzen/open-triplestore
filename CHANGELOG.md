@@ -79,6 +79,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows guide's sample response, in step.
 
 ### Security
+- **Dependency advisories of November 2026.** tantivy 0.26 → 0.27 (the
+  full-text and vocabulary search indexes) moves the zstd chain to `zstd`
+  0.14.3, `zstd-safe` 8.2.0 and `zstd-sys` 2.1.2, which clears
+  RUSTSEC-2026-0391, -0398, -0403 and -0410. tantivy 0.27 keeps the on-disk
+  index format (index format 7, sstable 3), so existing indexes open as they
+  are. `crypto-bigint` 0.5 (RUSTSEC-2026-0387, timing variability) stays
+  until `elliptic-curve` and `aws-sigv4` move to 0.7; no server path uses a
+  secret key on those curves, and `deny.toml` records why.
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.

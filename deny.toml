@@ -21,6 +21,15 @@ ignore = [
     # only at build time, by the i18n-embed proc-macros that `age` (backup encryption) uses
     # to parse its own i18n.toml; nothing at run time links it and no vulnerability is reported.
     "RUSTSEC-2026-0374",  # basic-toml — unmaintained (build-time, via age's i18n-embed-fl)
+    # crypto-bigint 0.5.5: timing variability in operations meant to be constant-time.
+    # Fixed only in 0.7.6, and every crate here still on 0.5 has no 0.7 release yet:
+    # elliptic-curve 0.13 (p256/p384) and aws-sigv4. A timing leak matters where a SECRET
+    # key is used, and no server path does that on these curves: aws-sigv4 reaches it only
+    # for SigV4a (S3 multi-region access points; the store signs with HMAC SigV4),
+    # jsonwebtoken/openidconnect use p384 to VERIFY ID tokens with public keys (the server
+    # signs its own tokens with HMAC), and age uses p256 only for P-256 recipients (backups
+    # use an X25519 identity). Revisit when elliptic-curve 0.14 / aws-sigv4 move to 0.7.
+    "RUSTSEC-2026-0387",  # crypto-bigint — timing variability (via elliptic-curve 0.13, aws-sigv4)
     # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
     # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults) — bumping
     # our own direct `quick-xml` dep would leave Oxigraph's copy in the tree, so the
