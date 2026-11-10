@@ -47,6 +47,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the start like any other setting; before, the dashboard reported the gateway
   as unavailable.
 
+### Changed
+- **Change capture costs concurrent bulk writers almost nothing now.** With
+  `OTS_CHANGE_CAPTURE_ENABLED=on`, four writers loading 500-quad batches ran
+  at 0.44 of their capture-off throughput, because the change log's sequence
+  section ran their SST ingestions one at a time. Bulk loads, which only add
+  quads, now share the section; every other write still holds it alone, so
+  `seq` order is still commit order. The same mixed phase runs at 0.99
+  (`docs/performance.md`, "Delta-versions fixes, measured").
+- **A checkpoint version is copied in linear time.** Each 50 000-quad batch of
+  a version copy made the count index recount the growing snapshot graph, with
+  capture on or off: a 0.9M-quad checkpoint cut took 43 s and a 9M one 48
+  minutes. The batch is now counted as it goes in: 16 s at 0.9M, and delta
+  builds 45 s → 17 s.
+- **A bulk import into a new graph no longer probes every quad** with capture
+  on: ×1.13 → ×1.04 for 1M quads. A graph that already holds quads is still
+  probed.
+
 ### Deprecated
 
 ### Fixed
@@ -95,6 +112,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
+- **Dependency advisories published after 0.8.1, cleared.**
+  - `rusqlite` 0.40 → 0.41 and `r2d2_sqlite` 0.35 → 0.36 bring the bundled
+    SQLite from 3.53.2 to 3.54.1. Before 3.54.0, opening a database together
+    with a crafted `-wal` file of a different page size could return
+    uninitialised page-cache memory (RUSTSEC-2026-0459). The `writeback` tool
+    moves with them.
+  - `calamine` 0.37 → 0.38: a crafted file could panic or exhaust memory in
+    the OLE2 parser (RUSTSEC-2026-0436). Uploads reached it. Spreadsheet asset
+    metadata extraction opens every non-CSV spreadsheet with calamine's XLSX
+    reader, and that reader first probes the file with the OLE2 parser for an
+    encrypted package. So a user who could upload an asset could send a small
+    `.xlsx` that was really an OLE2 file and crash the server or drive it out
+    of memory.
+  - `zstd` 0.13.4, `zstd-safe` 7.4.0 and `zstd-sys` 2.1.2, under the text
+    index (RUSTSEC-2026-0391, -0398, -0403, -0410). Lockfile only.
+  - The AWS SDK crates and `openidconnect` 4.1 move to the patched
+    `crypto-bigint` 0.7 (RUSTSEC-2026-0387) and drop the unmaintained
+    `pin-utils` (RUSTSEC-2026-0441).
+  - RUSTSEC-2026-0387 is ignored in `deny.toml` for the two crates that still
+    use `crypto-bigint` 0.5 on their latest release. One is `jsonwebtoken`,
+    which signs the built-in OIDC provider's ES256 tokens; the other is `age`.
+    The comment there gives the exposure and the way out.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
