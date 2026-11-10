@@ -1477,6 +1477,9 @@ impl AuthDb {
             "ALTER TABLE assets ADD COLUMN updated_at TEXT",
             // File-manager folders: a normalized relative path ('' = root).
             "ALTER TABLE assets ADD COLUMN folder TEXT NOT NULL DEFAULT ''",
+            // The seeder that created the row (NULL: an upload or import), so a
+            // demo reseed removes only what it made.
+            "ALTER TABLE assets ADD COLUMN seeded_by TEXT",
             // Dataset DCAT/ADMS/VoID metadata
             "ALTER TABLE datasets ADD COLUMN license TEXT",
             "ALTER TABLE datasets ADD COLUMN themes TEXT",
@@ -3077,12 +3080,25 @@ impl AuthDb {
     }
 
     pub fn delete_user(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
         // assets.uploaded_by has no CASCADE — clear it before deleting the user
         // to avoid a FK constraint violation. Asset metadata is lost; S3 objects
         // become orphaned (acceptable for a permanent purge operation).
-        conn.execute("DELETE FROM assets WHERE uploaded_by = ?1", params![id])?;
-        conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM assets WHERE uploaded_by = ?1", params![id])?;
+        // The LLM request log (IP address, question preview) and the usage
+        // events carry the user id without a foreign key, so nothing cascades
+        // to them: erase them with the account. The audit log stays.
+        tx.execute(
+            "DELETE FROM llm_request_log WHERE user_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM dataset_usage_events WHERE user_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -5010,9 +5026,7 @@ impl AuthDb {
 
     /// The graphs some dataset holds as private
     /// ([`Self::set_dataset_graph_private`]).
-    pub fn list_private_dataset_graph_iris(
-        &self,
-    ) -> anyhow::Result<std::collections::HashSet<String>> {
+    pub fn list_private_dataset_graph_iris(&self) -> anyhow::Result<HashSet<String>> {
         let conn = self.pool.get()?;
         let mut stmt =
             conn.prepare("SELECT DISTINCT graph_iri FROM dataset_graphs WHERE private != 0")?;
@@ -5660,6 +5674,31 @@ impl AuthDb {
         let conn = self.pool.get()?;
         conn.execute("DELETE FROM assets WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Record that `seeder` created asset `id`.
+    pub fn mark_asset_seeded(&self, id: &str, seeder: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE assets SET seeded_by = ?1 WHERE id = ?2",
+            params![seeder, id],
+        )?;
+        Ok(())
+    }
+
+    /// The ids of the assets in `dataset_id` that `seeder` created.
+    pub fn seeded_asset_ids(
+        &self,
+        dataset_id: &str,
+        seeder: &str,
+    ) -> anyhow::Result<HashSet<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM assets WHERE dataset_id = ?1 AND seeded_by = ?2")?;
+        let ids = stmt
+            .query_map(params![dataset_id, seeder], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
     }
 
     // ─── Access Control Helpers ───────────────────────────────────────────────
@@ -7064,6 +7103,52 @@ fn saml_config_json(p: &OauthProviderCreate) -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A purge erases the user's LLM request-log rows (IP address, question
+    /// preview) and usage events, which have no foreign key to cascade from;
+    /// other users' rows stay.
+    #[test]
+    fn a_purge_erases_the_users_llm_log_and_usage_events() {
+        use crate::server::llm_guard::{record, LlmLogEntry};
+        let db = AuthDb::in_memory().unwrap();
+        for (id, name) in [("u1", "alice"), ("u2", "bob")] {
+            db.create_user(
+                id,
+                name,
+                &format!("{name}@example.com"),
+                "hash",
+                SystemRole::User,
+            )
+            .unwrap();
+            let mut entry = LlmLogEntry::new("chat");
+            entry.user_id = Some(id.to_string());
+            entry.ip = Some("192.0.2.7".to_string());
+            entry.question_preview = Some(format!("a question from {name}"));
+            record(&db.pool(), entry);
+            db.record_dataset_usage("ds1", Some(id), "view").unwrap();
+        }
+        let rows = |table: &str, user: &str| -> i64 {
+            db.pool()
+                .get()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?1"),
+                    params![user],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(rows("llm_request_log", "u1"), 1);
+        assert_eq!(rows("dataset_usage_events", "u1"), 1);
+
+        db.delete_user("u1").unwrap();
+
+        assert_eq!(rows("llm_request_log", "u1"), 0);
+        assert_eq!(rows("dataset_usage_events", "u1"), 0);
+        assert_eq!(rows("llm_request_log", "u2"), 1);
+        assert_eq!(rows("dataset_usage_events", "u2"), 1);
+        assert!(db.get_user_by_id("u1").unwrap().is_none());
+    }
 
     /// The last-used stamp is written at most once a minute per token: a
     /// client that authenticates twice a second — a replication follower —

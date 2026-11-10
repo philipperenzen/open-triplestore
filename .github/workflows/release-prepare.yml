@@ -4,10 +4,12 @@
 #    bump level `patch`, `minor` or `major` and the branch to release from:
 #    `develop` for a normal release, or a `release/X.Y` maintenance branch for a
 #    patch on an older line. It runs .github/scripts/release_prepare.py, which
-#    writes the next version into Cargo.toml, Cargo.lock, README.md and
-#    CHANGELOG.md, commits that on `chore/release-X.Y.Z` and opens a PR into the
-#    chosen branch. Before merging, edit the section in that PR if you want an
-#    intro paragraph or to trim entries.
+#    writes the next version into Cargo.toml, Cargo.lock, README.md,
+#    frontend/package.json, frontend/package-lock.json and CHANGELOG.md (and,
+#    on a minor or major release, SECURITY.md and SUPPORT.md), commits that on
+#    `chore/release-X.Y.Z` and opens a PR into the chosen branch. Before
+#    merging, edit the section in that PR if you want an intro paragraph or to
+#    trim entries.
 # 2. promote — when that PR is merged into `develop`, opens the `develop → main`
 #    release PR. Merging it lets auto-tag.yml tag and publish the release. A
 #    `release/X.Y` PR needs no promote step: auto-tag.yml tags it on merge.

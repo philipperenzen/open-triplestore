@@ -39,8 +39,11 @@ graphs); account/identity data lives in a local metadata database.
 - **Whole graphs/datasets:** export a named graph or a dataset via the Graph
   Store and dataset/DCAT endpoints.
 - **Account data:** an operator/admin can retrieve a user's profile and an export
-  of audit entries relating to them (§2 of [PRIVACY.md](../PRIVACY.md) lists the
-  stored fields).
+  of audit entries relating to them (§4 of [PRIVACY.md](../PRIVACY.md) lists the
+  stored fields). The LLM request log can be filtered per user
+  (`GET /api/admin/llm/requests?user_id=…`), the feedback inbox
+  (`GET /api/admin/feedback`) names each report's reporter, and a user reads
+  their own saved chat conversations in the app.
 
 ### Art. 16 — Right to rectification
 
@@ -59,7 +62,11 @@ graphs); account/identity data lives in a local metadata database.
 - **User accounts:** an admin can **deactivate** an account and **revoke its
   tokens**, then **permanently purge** a deactivated user
   (`admin_delete_user` → `purge`); a user can **self-deactivate** their own
-  account (`DELETE /api/auth/account`). Plan for erasure in **backups** too
+  account (`DELETE /api/auth/account`) or, with their password, purge it
+  (`POST /api/auth/account/purge`). A purge deletes the user's saved chat
+  conversations, feedback reports, LLM request-log rows (user ID, IP address,
+  question preview) and usage events with the account; the append-only audit
+  log keeps its entries by design. Plan for erasure in **backups** too
   (re-export or age them out per your retention policy).
 
 ### Art. 18 — Right to restriction of processing
@@ -101,9 +108,14 @@ graphs); account/identity data lives in a local metadata database.
   you do not need; pseudonymise where possible; restrict optional profile fields;
   scope `OTS_LLM_GATEWAY_URL` usage (prefer a local model) so personal data is not
   unnecessarily sent to a third-party LLM (see [PRIVACY.md](../PRIVACY.md) §5).
+  Set `OTS_LLM_LOG_PREVIEW_ENABLED=false` if you do not need the first 200
+  characters of each AI question in the LLM request log
+  ([PRIVACY.md](../PRIVACY.md) §4.7).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
   RDF data, accounts, audit logs (which include IP/user-agent), the private
-  usage-tracking events, and backups.
+  usage-tracking events, the LLM request log (user ID, IP address and question
+  preview; `OTS_LLM_LOG_RETENTION_DAYS`, default 90 days), saved chat
+  conversations, feedback reports, and backups.
 - **Special-category data (Art. 9).** If you load special-category data, ensure
   an Art. 9 condition applies and apply heightened safeguards.
 
@@ -129,7 +141,9 @@ operating them correctly is the operator's responsibility** (see
   append-only), capturing actor, timestamp, IP, user agent, and outcome.
 - **Privacy-respecting usage tracking:** per-user data is visible only to that
   user; cross-user aggregates are restricted to `super_admin`; nothing leaves the
-  instance.
+  instance. Workload telemetry (`GET /api/admin/telemetry`) is memory-only and
+  holds no personal data; the LLM request log is admin-only
+  ([PRIVACY.md](../PRIVACY.md) §2, §4.7).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
@@ -182,7 +196,8 @@ an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the ass
       reverse proxy; review bind addresses and CORS.
 - [ ] Configure **roles, ACLs, and dataset visibility**; apply least privilege.
 - [ ] Define **retention periods** (RDF data, accounts, audit logs, usage events,
-      backups) and enforce them.
+      the LLM request log, chat conversations, feedback reports, backups) and
+      enforce them.
 - [ ] Establish a **data-subject-request** procedure mapped to the features in §2.
 - [ ] Establish an **incident-response & breach-notification** process; enable
       audit log review and alerting.

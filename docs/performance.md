@@ -2535,18 +2535,49 @@ HTTP `COUNT(*)` now beat Fuseki (see the comparison section).
 
 ### 5. Parallel SHACL evaluation — ✅ implemented
 
-`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
-parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
+`shacl::engine::validate` evaluates shapes, and each shape's focus nodes, in
+parallel via `rayon::par_iter()`. There is no per-worker query cache: one
+`DataView` per run ([`src/shacl/view.rs`](../src/shacl/view.rs)) is shared by
+every worker and reads from a single source (the accelerator's in-memory copy,
+else one RocksDB snapshot, else the live in-memory store). Value nodes are
+resolved natively from the quad index, so core constraints run no SPARQL per
+focus node (`sh:sparql` constraints and SPARQL targets query the same source).
+What a run does cache:
 
-### 5. Parallel SHACL evaluation — ✅ implemented
+- **Transitive path closures**: the `p+` reach sets the run computes, in a
+  `ClosureMemo` shared by all workers (PR #467; see optimisation 6).
+- **Class sets**: target instance sets and subclass closures, computed per run
+  before the parallel fan-out, plus a per-run adjacency for the shape
+  predicates when a run off the snapshot or live store is large enough to pay
+  for it.
 
-`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
-parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
-SHACL throughput climbs from 85 K to 286 K nodes/s as the dataset grows (the
-fixed shapes-loading cost amortizes across cores). Remaining headroom is in the
-fixed ~1 ms shapes-loading floor, not the per-node evaluation.
+Since PR #532 the class sets, the run index, the closure memo and the
+results all count against one memory budget per run,
+`OTS_SHACL_RUN_MEMORY_BYTES` ([`src/shacl/budget.rs`](../src/shacl/budget.rs)).
+- **`sh:pattern` regexes**: compiled once per thread
+  ([`src/shacl/constraints.rs`](../src/shacl/constraints.rs)).
+- **Constraint-component declarations**: those of the last shapes graph loaded,
+  per thread, keyed by shapes graph, store instance and write generation
+  ([`src/shacl/engine.rs`](../src/shacl/engine.rs)).
 
-### 6. Property path memoisation
+The per-thread property-path cache that predates this engine
+(`src/store/path_cache.rs`) was removed with the rebuild (PR #347).
+
+### 6. Property path memoisation — partly implemented (SHACL, per run)
+
+**Done (SHACL, per run, PR #467).** A SHACL run memoises the `p+` reach set of each
+transitive path it walks, per (path, graph selection, start node), in the
+run's shared `ClosureMemo`. A closure that reaches a node whose own closure is
+already known adds that set instead of walking it again; `*` adds the start
+node. The memo is bounded: 100 000 terms per set, 64 distinct paths, and the
+run's memory budget, `OTS_SHACL_RUN_MEMORY_BYTES`, which it shares with the
+run index and the results (PR #532; before that it had 2 M terms of its own).
+Past those bounds closures are still computed but not kept. The memo is
+dropped when the run ends, so it needs no write invalidation.
+
+**Still open.** Nothing is kept across SHACL runs, and SPARQL property paths in
+queries are not memoised; the per-query or per-session cache below is not
+built.
 
 **Impact:** 2–5× improvement for repeated transitive path evaluations over
 the same graph.
