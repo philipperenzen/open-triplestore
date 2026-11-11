@@ -49,6 +49,15 @@ graphs); account/identity data lives in a local metadata database.
   `{OTS_BASE_URL}/users/{user ID}`, so an admin can pick a user's writes, with
   their time, graph and quads, out of `GET /api/admin/changes`. There is no
   per-user filter; the feed is paged by sequence number.
+- **Commit trail and statement provenance** ([PRIVACY.md](../PRIVACY.md)
+  §4.10): every commit names the account that made the write as
+  `prov:wasAssociatedWith <{OTS_BASE_URL}/users/{user ID}>`, so an admin lists
+  a user's writes, with their time, graphs, counts and message, with a
+  `/sparql` query that names the commit graph (`FROM NAMED
+  <urn:system:commit-log>`) and filters on that IRI. A dataset recording
+  `full` statement provenance names the account on each statement change in
+  `urn:ots:statement-provenance:{id}`, which anyone who may read the dataset
+  can query the same way.
 
 ### Art. 16 — Right to rectification
 
@@ -90,6 +99,23 @@ graphs); account/identity data lives in a local metadata database.
   with the server stopped, deleting `<data dir>/changes/` (which unpublished
   delta versions need). A restored backup brings its log back, and a
   replication follower holds the rows it already applied.
+- **The commit trail and statement provenance** ([PRIVACY.md](../PRIVACY.md)
+  §4.10) are not erased by any of the above either, and have no retention. A
+  SPARQL `DELETE`, a graph delete or a dataset delete leaves a commit with its
+  graphs, counts, message and the account that made it, and a dataset
+  recording statement provenance keeps a copy of every statement a write
+  removed, as a triple term, with the change's time and account under
+  `full`. **A user purge touches neither**: the account's commits keep its
+  IRI for good, and the provenance graphs keep its IRI and the statements it
+  changed. The levers: an administrator can remove one account's attribution
+  from the commit graph with a SPARQL `DELETE` that names the graph and
+  deletes the triples naming the account's IRI (the commits stay,
+  unattributed), or empty the graph with `DROP GRAPH <urn:system:commit-log>`.
+  There is no targeted erasure from a statement-provenance graph, for
+  administrators either: it goes only with its dataset (or with `CLEAR ALL` /
+  `DROP ALL`), so keep statement provenance off datasets whose statements you
+  may have to erase, and `full` off those whose writers you may have to
+  forget. Both come back with a restored backup.
 
 ### Art. 18 — Right to restriction of processing
 
@@ -136,7 +162,13 @@ graphs); account/identity data lives in a local metadata database.
   (`OTS_CHANGE_CAPTURE_ENABLED`, off by default) unless something reads it,
   such as replication, delta versions or run-on-write pipelines: while it is
   on it keeps a copy of every write, deleted data and the writer's account
-  included ([PRIVACY.md](../PRIVACY.md) §4.9).
+  included ([PRIVACY.md](../PRIVACY.md) §4.9). Leave statement provenance off
+  (the default) on datasets that do not need a per-statement history:
+  `minimal` keeps a copy of every statement changed, removed ones included,
+  and `full` adds the account and time of each change, in a graph every
+  reader of the dataset can query; neither is ever pruned. A commit message
+  is stored as typed, so ask users to keep personal data out of them
+  ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
   RDF data, accounts, audit logs (which include IP/user-agent), the private
   usage-tracking events, the LLM request log (user ID, IP address and question
@@ -144,7 +176,10 @@ graphs); account/identity data lives in a local metadata database.
   conversations, feedback reports, the change log when switched on (the
   writer's account IRI and the added and removed quads;
   `OTS_CHANGE_RETENTION_DAYS`, default 90 days, longer while a bookmark or
-  delta-version pin holds the rows), and backups.
+  delta-version pin holds the rows), the commit trail and statement
+  provenance (the writer's account IRI on every commit and, under `full`, on
+  every statement change; nothing prunes them, [PRIVACY.md](../PRIVACY.md)
+  §4.10), and backups.
 - **Special-category data (Art. 9).** If you load special-category data, ensure
   an Art. 9 condition applies and apply heightened safeguards.
 
@@ -177,6 +212,12 @@ operating them correctly is the operator's responsibility** (see
   shows anyone who may read the dataset, anonymous callers included for a
   public one, each row's time and writer's account IRI for the graphs they may
   read, and each change's quads on request ([PRIVACY.md](../PRIVACY.md) §4.9).
+  A dataset's commit history (`GET /api/datasets/{id}/commits`) likewise
+  shows anyone who may read the dataset each writer's account IRI, username
+  and display name for the graphs they may read, and a model's or shape
+  graph's history its readers; a statement-provenance graph shows the
+  dataset's readers, under `full`, the account behind every statement change.
+  The whole commit graph is admin-only ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
@@ -230,7 +271,8 @@ an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the ass
 - [ ] Configure **roles, ACLs, and dataset visibility**; apply least privilege.
 - [ ] Define **retention periods** (RDF data, accounts, audit logs, usage events,
       the LLM request log, chat conversations, feedback reports, the change
-      log, backups) and enforce them.
+      log, the commit trail and statement provenance, backups) and enforce
+      them.
 - [ ] Establish a **data-subject-request** procedure mapped to the features in §2.
 - [ ] Establish an **incident-response & breach-notification** process; enable
       audit log review and alerting.

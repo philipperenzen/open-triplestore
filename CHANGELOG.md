@@ -126,6 +126,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account IRI and quads until retention, and the purge's deletion of the
   profile graph is itself recorded with the removed profile values. Operators
   who published a notice from the earlier template should update theirs.
+- **The privacy-notice template documents the commit trail and statement
+  provenance.** The new `PRIVACY.md` §4.10 covers the commit graph
+  `urn:system:commit-log`, which the template left out: SPARQL Update, Graph
+  Store, RDF Patch, import, version, editor, datasource, repair and restore
+  writes each leave a commit with the time, kind, graphs, counts and message
+  of the write and, for a signed-in caller, the account IRI
+  (`{OTS_BASE_URL}/users/{user ID}`); it cannot be switched off. It also
+  covers a dataset's opt-in statement-provenance graph
+  (`urn:ots:statement-provenance:{id}`), which keeps a copy of every changed
+  statement, removed ones included, and under `full` the account and time of
+  each change. The section names the readers (an administrator reads the
+  whole commit graph by naming it; anyone who may read a dataset, model or
+  shape graph reads its history with each writer's account IRI, username and
+  display name; a dataset's readers read its statement-provenance graph),
+  states that **neither has any retention and a user purge touches neither**
+  (an administrator can empty the commit graph or strip one account's
+  attribution from it; a statement-provenance graph goes only with its
+  dataset), and that backups carry both. `docs/gdpr.md` covers them under
+  access, erasure, data minimisation, storage limitation, security and the
+  retention checklist. Operators who published a notice from the earlier
+  template should update theirs.
 
 ## [0.8.1] — 2026-10-22
 

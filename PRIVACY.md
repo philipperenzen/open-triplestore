@@ -41,10 +41,11 @@ administrators only) keeps exact query counters and fixed-size in-memory samples
 of query latencies, SHACL validation timings and write spacing. It holds no
 query text, user identifiers or IP addresses, is never written to disk, and is
 lost on restart. The **usage tracking** of §4.5 and the **LLM request log** of
-§4.7 are stored in your own metadata database, and the **change log** of §4.9,
-when it is switched on, in a SQLite file beside the RDF store. None of it is
-ever transmitted off your instance by the software, except the change log to
-the replication followers you set up (§4.9).
+§4.7 are stored in your own metadata database, the **change log** of §4.9,
+when it is switched on, in a SQLite file beside the RDF store, and the
+**commit trail** of §4.10 in the RDF store itself. None of it is ever
+transmitted off your instance by the software, except the change log to the
+replication followers you set up (§4.9).
 
 All network calls the software can make are **either local to your own
 infrastructure or directed at endpoints that you explicitly configure**. They
@@ -257,6 +258,96 @@ returns one change's quads, removed ones included, as an RDF Patch.
 - The log stays on your instance and on the replication followers you set
   up; nothing in it is sent anywhere else.
 
+### 4.10 Commit trail and statement provenance
+
+A write through any of these leaves a **commit** in the RDF store itself, in
+the named graph `urn:system:commit-log` (`src/commit_log.rs`): SPARQL Update,
+the Graph Store protocol, RDF Patch, bulk imports and containers, LDES syncs,
+dataset version operations, model, vocabulary and shape-graph editor saves,
+datasource runs, applied repairs and backup restores. It cannot be switched
+off. A commit holds no copy of the data. It records:
+
+- the time, the kind of write, the graphs it touched and the number of quads
+  added and removed (and, while the change log of §4.9 is on, the sequence
+  numbers of its rows there);
+- **the account that made the write** (`prov:wasAssociatedWith
+  <{OTS_BASE_URL}/users/{user ID}>`) for a signed-in caller. An anonymous
+  write and a write the server makes on its own, such as a backup restore,
+  carry none;
+- **a message**: the text a user typed when saving a model, vocabulary or
+  shape graph, the `X-Commit-Message` header of a SPARQL Update, or a fixed
+  description otherwise (`Graph Store PUT <graph>`, `Imported 2 file(s) into
+  1 graph(s)`). A message is stored as typed;
+- for an editor save, the model or shape graph, version, branch and revision
+  it belongs to and the editor's metadata (JSON).
+
+A dataset can, in addition, record **statement provenance**. A dataset writer
+switches it on with `PUT /api/datasets/{id}/settings` (`"provenance":
+"minimal"` or `"full"`; off by default; it works only while the change log of
+§4.9 is on and in a build with the `rdf-12` feature, which the published image
+has). From then on a background consumer annotates every change to the
+dataset's statements, in RDF 1.2, in the dataset's graph
+`urn:ots:statement-provenance:{id}` (`src/statement_provenance.rs`):
+
+- **a copy of each changed statement** as a triple term (`rdf:reifies
+  <<( s p o )>>`), **removed statements included**, with its graph, and for
+  each change the operation (`add` or `remove`), the change-log sequence
+  number and the commit;
+- with `"full"`, **the account that made the change** (the same
+  `prov:wasAssociatedWith` IRI, for a write through SPARQL Update, the Graph
+  Store protocol, RDF Patch, a version restore or an applied repair) and
+  **its time** (`prov:atTime`).
+
+A statement with a blank node is skipped (unless the dataset imports with
+Skolem IRIs); each skip is recorded as a gap, without the statement.
+
+**Who reads them.** The commit graph belongs to no dataset, so a `/sparql`
+query that does not name it never sees it, and the Graph Store protocol
+refuses it to everyone but administrators. An **administrator** reads it whole
+by naming it (`FROM NAMED <urn:system:commit-log>`, or
+`GET /store?graph=urn:system:commit-log`), and so can list every write an
+account ever made. **Anyone who may read a dataset** (anonymous callers too,
+for a public dataset) lists the commits of the graphs they may read
+(`GET /api/datasets/{id}/commits`: time, kind, message, counts, graphs and
+**the writer's account IRI, with the username and display name** while the
+account exists) and gets the dataset's trail as PROV-O
+(`GET /api/datasets/{id}/provenance`, with each commit's account IRI). Anyone
+who may see a model or vocabulary reads its history the same way
+(`GET /api/models/{id}/commits`); a signed-in user who may see a shape graph,
+its (`GET /api/shacl/shape-graphs/{id}/commits`). The web UI shows these
+histories. The DCAT catalogue names only each dataset's latest commit, without
+its account. **The statement-provenance graph is one of the dataset's
+graphs**: everyone who may read the dataset reads it, over `/sparql`
+(`GRAPH <urn:ots:statement-provenance:{id}>`), the Graph Store protocol and
+the browser (`graph=`). It is left out of versions, LDES feeds, reasoning,
+validation and the default browse view.
+
+- **Retention: none.** Nothing in the software removes a commit or an
+  annotation; there is no retention setting and no sweep. Setting
+  `"provenance": "off"` stops new annotations but keeps the graph. A dataset
+  delete removes the dataset's statement-provenance graph but **not its
+  commits**, which keep their graph names, messages and account IRIs. An
+  administrator can empty the commit graph (`DROP GRAPH
+  <urn:system:commit-log>` over SPARQL Update, or a Graph Store `DELETE` of
+  it; the drop is recorded as the first commit of the emptied trail), or
+  remove one account's attribution from it with a SPARQL `DELETE` that names
+  the graph and deletes the triples naming the account's IRI (the commits
+  stay, unattributed). No request may write or clear a statement-provenance
+  graph, administrators included: it goes with its dataset, or with
+  `CLEAR ALL` / `DROP ALL`.
+- **Backups:** both are RDF in the store, so every backup's dump holds them
+  and a restore brings them back (§4.6). A restored store's trail is the
+  backup's, plus a commit recording the restore.
+- **Purging a user account touches neither.** The account's commits keep its
+  IRI, messages and graph names for good, and a statement-provenance graph
+  keeps its IRI, the times and the statements the account added or removed.
+  The instance can no longer turn that IRI into a username (the `/commits`
+  endpoints then show the IRI alone), but the user ID in it is the one the
+  audit log (§4.4) keeps with the username. The purge itself leaves no
+  commit; it deletes the profile graph directly.
+- Both stay on your instance and the replication followers or cluster
+  members you set up; nothing in them is sent anywhere else.
+
 ## 5. External network calls and how to disable each
 
 By design, every outbound call is **off by default or points only at endpoints
@@ -344,7 +435,8 @@ above are essential; document any others your customised deployment introduces.
   conversations, feedback reports, the change log if switched on (incl. the
   account IRI and the added and removed quads; `OTS_CHANGE_RETENTION_DAYS`,
   default 90 days, longer while a bookmark or delta-version pin holds the
-  rows), backups]_
+  rows), the commit trail and, per dataset, statement provenance (incl. the
+  account IRI; nothing prunes them, see §4.10), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_
