@@ -84,6 +84,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A draft copies the graphs of its source version only.**
+  `POST /api/models/:id/versions/:ver/draft` and a new branch took every graph
+  whose IRI starts with the source version's as the source's own, so a version
+  whose name only starts the same came along: with versions `9.1` and `9.10`, a
+  draft `9.2` of `9.1` also held 9.10's triples, in a second graph named
+  `…/version/9.20`, and an existing version `9.20` had its graph cleared and
+  filled with them. A version's graphs are now its base graph and the
+  sub-graphs under it (`…/version/9.1/…`).
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
