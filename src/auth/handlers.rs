@@ -4659,10 +4659,25 @@ pub async fn patch_dataset_graph_role(
     // A request carrying `private` is a privacy toggle and leaves the role
     // untouched; otherwise it is a role update (where a null role clears it).
     if let Some(private) = req.private {
+        // The private statement-provenance graph holds the annotations of the
+        // dataset's private graphs, which are those graphs' statements: it
+        // is private for as long as it exists.
+        if !private
+            && req.graph_iri == crate::provenance::private_statement_provenance_graph(&dataset_id)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Graph <{}> holds the statement provenance of the dataset's private graphs \
+                     and stays private.",
+                    req.graph_iri
+                ),
+            ));
+        }
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        // A validation report on the graph goes with it.
         if private {
+            // A validation report on the graph goes with it.
             crate::server::routes::report_graphs_follow_private_graph(&state, &req.graph_iri)
                 .map_err(|e| {
                     (
@@ -4673,6 +4688,30 @@ pub async fn patch_dataset_graph_role(
                         ),
                     )
                 })?;
+            // So does its statement provenance: an annotation is the
+            // statement. Before the response, so a caller told the graph is
+            // private finds nothing of it left where the dataset's readers
+            // read; the change-log consumer repeats the move on its next
+            // tick should this one fail.
+            let st = state.clone();
+            let (ds, graph) = (dataset_id.clone(), req.graph_iri.clone());
+            let followed = match tokio::task::spawn_blocking(move || {
+                crate::statement_provenance::follow_private_graph(&st, &ds, &graph)
+            })
+            .await
+            {
+                Ok(moved) => moved,
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            };
+            if let Err(e) = followed {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "The graph is private now, but its statement provenance could not all \
+                         follow: {e}"
+                    ),
+                ));
+            }
         }
     } else {
         let graph_role = parse_graph_role(req.graph_role.as_deref())?;

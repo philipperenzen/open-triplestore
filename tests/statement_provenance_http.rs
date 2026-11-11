@@ -858,45 +858,150 @@ const HIDDEN: &str = "urn:sp:hidden";
 const HIDDEN_VALUE: &str = "kept-from-readers";
 const OPEN_VALUE: &str = "open-to-readers";
 const ROUTES: [&str; 3] = ["/sparql", "/store", "the change feed"];
+const OTS_GRAPH: &str = "https://opentriplestore.org/ns#graph";
 
-/// What `token` reads of the dataset's annotations: over `POST /sparql` and
-/// `GET /store?graph=` on its provenance graph `pg`, and over the dataset's
-/// change feed (the patches of the rows the consumer's own writes to the
-/// provenance graphs left in the change log). For each of the three, whether
-/// the answer carries the public graph's statement and whether it carries
-/// anything of the private graph (its statement as a triple term, or its IRI
-/// as `ots:graph`).
-async fn provenance_read(
+/// The callers of a dataset: its admin, a signed-in user with a Viewer grant
+/// and one with an Editor grant.
+struct Readers {
+    admin: String,
+    viewer: String,
+    writer: String,
+}
+
+impl Readers {
+    fn each(&self) -> [(&'static str, Option<&str>); 4] {
+        [
+            ("anonymous", None),
+            ("viewer", Some(self.viewer.as_str())),
+            ("writer", Some(self.writer.as_str())),
+            ("admin", Some(self.admin.as_str())),
+        ]
+    }
+}
+
+/// A public dataset that records `full` provenance, holding `G` and `HIDDEN`
+/// (not private yet), with a viewer and a writer besides the admin. The
+/// consumer's cursor is at the head.
+async fn two_graph_dataset() -> (AppState, Router, String, Readers) {
+    use open_triplestore::auth::models::ResourceRole;
+    // Every caller over every route, more than once: more requests than the
+    // per-IP limiter allows one test.
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
+    let (state, admin) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let id = dataset(&state, &app, &admin).await;
+    let (st, v) = json_req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(&admin),
+        json!({ "graph_iri": HIDDEN }),
+    )
+    .await;
+    assert!(st.is_success(), "{v}");
+    for (user, role) in [
+        ("vera", ResourceRole::Viewer),
+        ("wes", ResourceRole::Editor),
+    ] {
+        state
+            .auth_db
+            .create_user(user, user, &format!("{user}@t.com"), "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .set_resource_grant("dataset", &id, "user", user, role, "adm")
+            .unwrap();
+    }
+    state.auth_db.invalidate_accessible_graphs_cache();
+    let (st, v) = json_req(
+        &app,
+        Method::PUT,
+        &format!("/api/datasets/{id}/settings"),
+        Some(&admin),
+        json!({ "provenance": "full" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    open_triplestore::statement_provenance::tick(&state);
+    let readers = Readers {
+        admin,
+        viewer: mint_token("vera", "vera", "user"),
+        writer: mint_token("wes", "wes", "user"),
+    };
+    (state, app, id, readers)
+}
+
+/// `PATCH /api/datasets/{id}/graphs`: the privacy toggle.
+async fn set_private(
     app: &Router,
-    token: Option<&str>,
+    token: &str,
     id: &str,
-    pg: &str,
-) -> [(bool, bool); 3] {
-    let query = format!(
-        "SELECT ?g ?statement ?op WHERE {{ GRAPH <{pg}> {{
+    graph: &str,
+    private: bool,
+) -> (StatusCode, Value) {
+    json_req(
+        app,
+        Method::PATCH,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(token),
+        json!({ "graph_iri": graph, "private": private }),
+    )
+    .await
+}
+
+/// One statement `<urn:sp:s> <urn:sp:note> "value"` into `graph`.
+async fn note(app: &Router, token: &str, graph: &str, value: &str) {
+    let (st, txt) = req(
+        app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(graph)),
+        Some(token),
+        Some("text/turtle"),
+        &format!("<urn:sp:s> <urn:sp:note> \"{value}\" ."),
+    )
+    .await;
+    assert!(st.is_success(), "{graph}: {txt}");
+}
+
+/// What `token` is served of the dataset's annotations, as three texts: over
+/// `POST /sparql` (every annotation in any graph the caller may read), over
+/// `GET /store?graph=` on its two statement-provenance graphs, and over its
+/// change feed (the patches of the rows the consumer's own writes to those
+/// graphs left in the change log).
+async fn provenance_texts(app: &Router, token: Option<&str>, id: &str) -> [String; 3] {
+    let query = "SELECT ?pg ?g ?statement ?op WHERE { GRAPH ?pg {
            ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?statement ;
               <https://opentriplestore.org/ns#graph> ?g ;
               <https://opentriplestore.org/ns#change> ?e .
-           ?e <https://opentriplestore.org/ns#op> ?op }} }}"
-    );
-    let (_, sparql) = req(
+           ?e <https://opentriplestore.org/ns#op> ?op } }";
+    let (st, sparql) = req(
         app,
         Method::POST,
         "/sparql",
         token,
         Some("application/sparql-query"),
-        &query,
+        query,
     )
     .await;
-    let (_, store) = req(
-        app,
-        Method::GET,
-        &format!("/store?graph={}&format=nquads", url_encode(pg)),
-        token,
-        None,
-        "",
-    )
-    .await;
+    assert_eq!(st, StatusCode::OK, "{sparql}");
+    let mut store = String::new();
+    for pg in [
+        format!("urn:ots:statement-provenance:{id}"),
+        format!("urn:ots:statement-provenance:{id}:private"),
+    ] {
+        let (st, body) = req(
+            app,
+            Method::GET,
+            &format!("/store?graph={}&format=nquads", url_encode(&pg)),
+            token,
+            None,
+            "",
+        )
+        .await;
+        if st == StatusCode::OK {
+            store.push_str(&body);
+        }
+    }
     let (st, feed) = json_req(
         app,
         Method::GET,
@@ -924,123 +1029,421 @@ async fn provenance_read(
             patches.push_str(&patch);
         }
     }
-    [sparql, store, patches].map(|body| {
-        (
-            body.contains(OPEN_VALUE),
-            body.contains(HIDDEN_VALUE) || body.contains(HIDDEN),
-        )
-    })
+    [sparql, store, patches]
+}
+
+/// The rule, for every caller over every route: what the annotations say of
+/// the private graph `HIDDEN` (its statement as a triple term, its IRI as
+/// `ots:graph`) is served to the dataset's writers and to nobody else; what
+/// they say of the public graph is served to every reader, except over the
+/// change feed, whose statement-provenance rows are the writers'.
+async fn assert_private_annotations_are_the_writers(app: &Router, id: &str, readers: &Readers) {
+    for (who, token) in readers.each() {
+        let writes = matches!(who, "writer" | "admin");
+        let texts = provenance_texts(app, token, id).await;
+        for (route, text) in ROUTES.iter().zip(texts) {
+            assert_eq!(
+                text.contains(HIDDEN_VALUE) || text.contains(HIDDEN),
+                writes,
+                "{who} over {route}: the private graph's annotations\n{text}"
+            );
+            assert_eq!(
+                text.contains(OPEN_VALUE),
+                writes || *route != "the change feed",
+                "{who} over {route}: the public graph's annotations\n{text}"
+            );
+        }
+    }
+}
+
+/// Whether statement-provenance graph `pg` says anything about `graph`.
+fn annotates(state: &AppState, pg: &str, graph: &str) -> bool {
+    ask(
+        state,
+        &format!("ASK {{ GRAPH <{pg}> {{ ?r <{OTS_GRAPH}> <{graph}> }} }}"),
+    )
 }
 
 /// A private graph is read by its dataset's writers and graph-ACL readers
 /// only; the annotations of its statements are that graph's statements again
 /// (`rdf:reifies <<( s p o )>>`, `ots:graph`), so they are read by the same
-/// callers and no others, on a public dataset too.
+/// callers and no others, on a public dataset too: they go to the dataset's
+/// private statement-provenance graph.
 #[tokio::test]
 async fn a_private_graphs_annotations_are_read_only_by_who_may_read_the_graph() {
-    use open_triplestore::auth::models::ResourceRole;
-    let (state, admin) = admin_state_with_store(recording());
-    let app = test_app(state.clone());
-    let id = dataset(&state, &app, &admin).await;
-    let graphs = format!("/api/datasets/{id}/graphs");
-    let (st, v) = json_req(
+    let (state, app, id, readers) = two_graph_dataset().await;
+    let (st, v) = set_private(&app, &readers.admin, &id, HIDDEN, true).await;
+    assert!(st.is_success(), "{v}");
+    note(&app, &readers.admin, G, OPEN_VALUE).await;
+    note(&app, &readers.admin, HIDDEN, HIDDEN_VALUE).await;
+    assert!(open_triplestore::statement_provenance::tick(&state) > 0);
+
+    assert_private_annotations_are_the_writers(&app, &id, &readers).await;
+
+    let pg = format!("urn:ots:statement-provenance:{id}");
+    let private_pg = format!("{pg}:private");
+    assert!(annotates(&state, &pg, G) && !annotates(&state, &pg, HIDDEN));
+    assert!(annotates(&state, &private_pg, HIDDEN) && !annotates(&state, &private_pg, G));
+    // Registered as the public one is, and private.
+    let entry = state
+        .auth_db
+        .list_dataset_graph_entries(&id)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.graph_iri == private_pg)
+        .expect("the private statement-provenance graph is registered");
+    assert!(entry.private);
+    assert_eq!(
+        entry.graph_role,
+        Some(open_triplestore::auth::models::GraphKind::Provenance)
+    );
+    let (_, settings) = json_req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{id}/settings"),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(settings["provenance_graph"], pg.as_str());
+    assert_eq!(settings["provenance_private_graph"], private_pg.as_str());
+
+    // The feed lists a statement-provenance row to a writer only, and serves
+    // its patch to a writer only.
+    let feed_of = |token: Option<String>| {
+        let app = app.clone();
+        let uri = format!("/api/datasets/{id}/changes");
+        async move {
+            let (_, feed) = json_req(&app, Method::GET, &uri, token.as_deref(), Value::Null).await;
+            feed["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r["graph_iri"]
+                        .as_str()
+                        .is_some_and(|g| g.starts_with("urn:ots:statement-provenance:"))
+                })
+                .map(|r| r["seq"].as_i64().unwrap())
+                .collect::<Vec<i64>>()
+        }
+    };
+    let rows = feed_of(Some(readers.writer.clone())).await;
+    assert_eq!(rows.len(), 2, "one row per provenance graph");
+    assert!(feed_of(Some(readers.viewer.clone())).await.is_empty());
+    assert!(feed_of(None).await.is_empty());
+    for seq in rows {
+        for (who, token) in readers.each() {
+            let (st, _) = req(
+                &app,
+                Method::GET,
+                &format!("/api/datasets/{id}/changes/{seq}"),
+                token,
+                None,
+                "",
+            )
+            .await;
+            assert_eq!(
+                st == StatusCode::OK,
+                matches!(who, "writer" | "admin"),
+                "{who}, change {seq}: {st}"
+            );
+        }
+    }
+}
+
+/// A graph made private after it was annotated takes its annotations along,
+/// in the request that makes it private: reifiers, their change events and
+/// gap nodes. Made public again, it is annotated publicly from then on, and
+/// what was annotated while it was private stays private.
+#[tokio::test]
+async fn a_graph_made_private_takes_its_annotations_along() {
+    let (state, app, id, readers) = two_graph_dataset().await;
+    let tick = || open_triplestore::statement_provenance::tick(&state);
+    let pg = format!("urn:ots:statement-provenance:{id}");
+    let private_pg = format!("{pg}:private");
+    note(&app, &readers.admin, G, OPEN_VALUE).await;
+    note(&app, &readers.admin, HIDDEN, HIDDEN_VALUE).await;
+    // A statement with a blank node is not annotated: a gap node records it.
+    let (st, txt) = req(
         &app,
         Method::POST,
-        &graphs,
-        Some(&admin),
-        json!({ "graph_iri": HIDDEN }),
+        &format!("/store?graph={}", url_encode(HIDDEN)),
+        Some(&readers.admin),
+        Some("text/turtle"),
+        "[] <urn:sp:note> \"anonymous\" .",
     )
     .await;
-    assert!(st.is_success(), "{v}");
-    let (st, v) = json_req(
-        &app,
-        Method::PATCH,
-        &graphs,
-        Some(&admin),
-        json!({ "graph_iri": HIDDEN, "private": true }),
-    )
-    .await;
-    assert!(st.is_success(), "{v}");
-    for (user, role) in [
-        ("vera", ResourceRole::Viewer),
-        ("wes", ResourceRole::Editor),
-    ] {
-        state
-            .auth_db
-            .create_user(user, user, &format!("{user}@t.com"), "h", SystemRole::User)
-            .unwrap();
-        state
-            .auth_db
-            .set_resource_grant("dataset", &id, "user", user, role, "adm")
-            .unwrap();
-    }
-    state.auth_db.invalidate_accessible_graphs_cache();
-    let viewer = mint_token("vera", "vera", "user");
-    let writer = mint_token("wes", "wes", "user");
+    assert!(st.is_success(), "{txt}");
+    assert!(tick() > 0);
+    // Public so far: every reader has the graph and its annotations.
+    let [sparql, _, _] = provenance_texts(&app, None, &id).await;
+    assert!(sparql.contains(HIDDEN_VALUE), "{sparql}");
+    let gap = |graph: &str| {
+        ask(
+            &state,
+            &format!(
+                "ASK {{ GRAPH <{graph}> {{ ?gap a <https://opentriplestore.org/ns#ProvenanceGap> ; <{OTS_GRAPH}> <{HIDDEN}> }} }}"
+            ),
+        )
+    };
+    assert!(gap(&pg) && !gap(&private_pg));
+    let before = count(&state, &pg);
 
+    let (st, v) = set_private(&app, &readers.admin, &id, HIDDEN, true).await;
+    assert!(st.is_success(), "{v}");
+    // No tick in between: the request moved them.
+    assert!(!annotates(&state, &pg, HIDDEN) && annotates(&state, &private_pg, HIDDEN));
+    assert!(!gap(&pg) && gap(&private_pg));
+    assert_eq!(
+        count(&state, &pg) + count(&state, &private_pg),
+        before,
+        "moved, none lost and none copied"
+    );
+    // The events went with their reifiers.
+    assert!(ask(
+        &state,
+        &format!(
+            "ASK {{ GRAPH <{private_pg}> {{ ?r <{OTS_GRAPH}> <{HIDDEN}> ; <https://opentriplestore.org/ns#change> ?e . ?e <https://opentriplestore.org/ns#op> \"add\" ; <http://www.w3.org/ns/prov#atTime> ?t }} }}"
+        )
+    ));
+    assert!(!ask(
+        &state,
+        &format!(
+            "ASK {{ GRAPH <{pg}> {{ ?e <https://opentriplestore.org/ns#op> ?op . FILTER NOT EXISTS {{ ?r <https://opentriplestore.org/ns#change> ?e }} }} }}"
+        )
+    ));
+    // The change log still holds the rows that wrote them publicly, and the
+    // move's own row: none of it is served to a reader.
+    assert_private_annotations_are_the_writers(&app, &id, &readers).await;
+
+    // While private: a removal is annotated privately.
+    state
+        .store
+        .update(&format!(
+            "DELETE DATA {{ GRAPH <{HIDDEN}> {{ <urn:sp:s> <urn:sp:note> \"{HIDDEN_VALUE}\" }} }}"
+        ))
+        .unwrap();
+    assert!(tick() > 0);
+    assert!(!annotates(&state, &pg, HIDDEN));
+    assert_private_annotations_are_the_writers(&app, &id, &readers).await;
+
+    // Public again: annotated publicly from here on; the private period,
+    // with the statement removed in it, stays with the writers.
+    let (st, v) = set_private(&app, &readers.admin, &id, HIDDEN, false).await;
+    assert!(st.is_success(), "{v}");
+    note(&app, &readers.admin, HIDDEN, "open-again").await;
+    assert!(tick() > 0);
+    for (who, token) in readers.each() {
+        let writes = matches!(who, "writer" | "admin");
+        let [sparql, store, patches] = provenance_texts(&app, token, &id).await;
+        assert!(sparql.contains("open-again"), "{who}: {sparql}");
+        assert!(store.contains("open-again"), "{who}: {store}");
+        for (route, text) in ROUTES.iter().zip([sparql, store, patches]) {
+            assert_eq!(
+                text.contains(HIDDEN_VALUE),
+                writes,
+                "{who} over {route}: the private period\n{text}"
+            );
+        }
+    }
+}
+
+/// The flag is not only set through the privacy toggle (a report graph
+/// follows the graph it reports on, a pipeline flags its target): whatever
+/// set it, the consumer's next tick moves the annotations, also for a
+/// dataset that has stopped recording provenance since.
+#[tokio::test]
+async fn a_flag_set_outside_the_toggle_is_followed_on_the_next_tick() {
+    let (state, app, id, readers) = two_graph_dataset().await;
+    let tick = || open_triplestore::statement_provenance::tick(&state);
+    let pg = format!("urn:ots:statement-provenance:{id}");
+    note(&app, &readers.admin, G, OPEN_VALUE).await;
+    note(&app, &readers.admin, HIDDEN, HIDDEN_VALUE).await;
+    assert!(tick() > 0);
     let (st, v) = json_req(
         &app,
         Method::PUT,
         &format!("/api/datasets/{id}/settings"),
-        Some(&admin),
-        json!({ "provenance": "full" }),
+        Some(&readers.admin),
+        json!({ "provenance": "off" }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let tick = || open_triplestore::statement_provenance::tick(&state);
-    tick();
-    for (graph, value) in [(G, OPEN_VALUE), (HIDDEN, HIDDEN_VALUE)] {
-        let (st, txt) = req(
-            &app,
-            Method::POST,
-            &format!("/store?graph={}", url_encode(graph)),
-            Some(&admin),
-            Some("text/turtle"),
-            &format!("<urn:sp:s> <urn:sp:note> \"{value}\" ."),
-        )
-        .await;
-        assert!(st.is_success(), "{graph}: {txt}");
-    }
-    assert!(tick() > 0);
+    state
+        .auth_db
+        .set_dataset_graph_private(&id, HIDDEN, true)
+        .unwrap();
+    assert!(annotates(&state, &pg, HIDDEN), "nothing has moved them yet");
+    // Nothing to annotate; the tick still moves what is there.
+    assert_eq!(tick(), 0);
+    assert!(!annotates(&state, &pg, HIDDEN));
+    assert_private_annotations_are_the_writers(&app, &id, &readers).await;
+}
 
+/// An install that annotated private graphs before datasets had a private
+/// statement-provenance graph holds their annotations where every reader of
+/// the dataset reads. The one-time pass moves them: for a graph that is
+/// private, and for a graph the dataset no longer holds (its flag can no
+/// longer be told), also where the dataset has since stopped recording
+/// provenance.
+#[tokio::test]
+async fn annotations_of_private_graphs_written_earlier_are_moved_once() {
+    use open_triplestore::statement_provenance::{
+        existing_annotations_split, split_existing_annotations, tick,
+    };
+    const GONE: &str = "urn:sp:gone";
+    const GONE_VALUE: &str = "of-a-detached-graph";
+    let (state, app, id, readers) = two_graph_dataset().await;
     let pg = format!("urn:ots:statement-provenance:{id}");
-    let callers = [
-        ("anonymous", None),
-        ("viewer", Some(viewer.as_str())),
-        ("writer", Some(writer.as_str())),
-        ("admin", Some(admin.as_str())),
-    ];
-    let mut seen = Vec::new();
-    for (who, token) in callers {
-        let read = provenance_read(&app, token, &id, &pg).await;
-        for (route, (public, private)) in ROUTES.iter().zip(read) {
-            eprintln!("{who} over {route}: public={public} private={private}");
-        }
-        seen.push((who, read));
-    }
-    // Reproduction only: what flagging the provenance graph private by hand
-    // (a writer may, today) does to the same reads.
+    let private_pg = format!("{pg}:private");
     let (st, v) = json_req(
         &app,
-        Method::PATCH,
-        &graphs,
-        Some(&admin),
-        json!({ "graph_iri": pg, "private": true }),
+        Method::POST,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(&readers.admin),
+        json!({ "graph_iri": GONE }),
     )
     .await;
     assert!(st.is_success(), "{v}");
-    for (who, token) in callers {
-        let read = provenance_read(&app, token, &id, &pg).await;
-        for (route, (public, private)) in ROUTES.iter().zip(read) {
-            eprintln!("flagged private, {who} over {route}: public={public} private={private}");
+    note(&app, &readers.admin, G, OPEN_VALUE).await;
+    note(&app, &readers.admin, HIDDEN, HIDDEN_VALUE).await;
+    note(&app, &readers.admin, GONE, GONE_VALUE).await;
+    assert!(tick(&state) > 0);
+    // The earlier layout: everything in the one graph, then the flag and the
+    // detach as the identity database records them, and provenance off.
+    state
+        .auth_db
+        .set_dataset_graph_private(&id, HIDDEN, true)
+        .unwrap();
+    state.auth_db.remove_dataset_graph(&id, GONE).unwrap();
+    let (st, v) = json_req(
+        &app,
+        Method::PUT,
+        &format!("/api/datasets/{id}/settings"),
+        Some(&readers.admin),
+        json!({ "provenance": "off" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(annotates(&state, &pg, HIDDEN) && annotates(&state, &pg, GONE));
+    let [sparql, _, _] = provenance_texts(&app, None, &id).await;
+    assert!(
+        sparql.contains(HIDDEN_VALUE),
+        "what the pass is for: {sparql}"
+    );
+
+    assert!(!existing_annotations_split(&state.auth_db));
+    assert!(split_existing_annotations(&state).unwrap() > 0);
+    assert!(existing_annotations_split(&state.auth_db));
+    assert!(annotates(&state, &pg, G));
+    for graph in [HIDDEN, GONE] {
+        assert!(!annotates(&state, &pg, graph), "{graph}");
+        assert!(annotates(&state, &private_pg, graph), "{graph}");
+    }
+    assert_private_annotations_are_the_writers(&app, &id, &readers).await;
+    for (who, token) in readers.each() {
+        let writes = matches!(who, "writer" | "admin");
+        for (route, text) in ROUTES.iter().zip(provenance_texts(&app, token, &id).await) {
+            assert_eq!(
+                text.contains(GONE_VALUE),
+                writes,
+                "{who} over {route}: the detached graph's annotations\n{text}"
+            );
         }
     }
-    for (who, read) in seen {
-        let reads_private = matches!(who, "writer" | "admin");
-        for (route, (_, private)) in ROUTES.iter().zip(read) {
+    assert_eq!(
+        split_existing_annotations(&state).unwrap(),
+        0,
+        "nothing left to move"
+    );
+}
+
+/// The private statement-provenance graph stays private and system-managed:
+/// its flag cannot be cleared, no request writes it, and detaching it drops
+/// the stored graph with the registration (a graph no dataset holds is read
+/// by everyone). The consumer registers it again, private, when it next
+/// needs it.
+#[tokio::test]
+async fn the_private_provenance_graph_stays_private() {
+    let (state, app, id, readers) = two_graph_dataset().await;
+    let tick = || open_triplestore::statement_provenance::tick(&state);
+    let private_pg = format!("urn:ots:statement-provenance:{id}:private");
+    let (st, v) = set_private(&app, &readers.admin, &id, HIDDEN, true).await;
+    assert!(st.is_success(), "{v}");
+    note(&app, &readers.admin, HIDDEN, HIDDEN_VALUE).await;
+    assert!(tick() > 0);
+    let is_private = || {
+        state
+            .auth_db
+            .list_dataset_graph_entries(&id)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.graph_iri == private_pg)
+            .map(|e| e.private)
+    };
+    assert_eq!(is_private(), Some(true));
+
+    for token in [&readers.writer, &readers.admin] {
+        let (st, _) = set_private(&app, token, &id, &private_pg, false).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, txt) = req(
+            &app,
+            Method::POST,
+            &format!("/store?graph={}", url_encode(&private_pg)),
+            Some(token),
+            Some("text/turtle"),
+            "<urn:sp:x> <urn:sp:p> 1 .",
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{txt}");
+    }
+    assert_eq!(is_private(), Some(true));
+    // A flag cleared behind the API is set again before the next write.
+    state
+        .auth_db
+        .set_dataset_graph_private(&id, &private_pg, false)
+        .unwrap();
+    note(&app, &readers.admin, HIDDEN, "second").await;
+    assert!(tick() > 0);
+    assert_eq!(is_private(), Some(true));
+
+    let (st, v) = json_req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(&readers.writer),
+        json!({ "graph_iri": private_pg }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(is_private(), None);
+    assert_eq!(
+        count(&state, &private_pg),
+        0,
+        "the stored graph went with it"
+    );
+    note(&app, &readers.admin, HIDDEN, "third").await;
+    assert!(tick() > 0);
+    assert_eq!(is_private(), Some(true));
+    assert!(annotates(&state, &private_pg, HIDDEN));
+    assert_private_annotations_are_the_writers_of_hidden(&app, &id, &readers).await;
+}
+
+/// As [`assert_private_annotations_are_the_writers`], for a dataset whose
+/// public graph holds nothing: only the private graph's side of the rule.
+async fn assert_private_annotations_are_the_writers_of_hidden(
+    app: &Router,
+    id: &str,
+    readers: &Readers,
+) {
+    for (who, token) in readers.each() {
+        let writes = matches!(who, "writer" | "admin");
+        for (route, text) in ROUTES.iter().zip(provenance_texts(app, token, id).await) {
             assert_eq!(
-                private, reads_private,
-                "{who} over {route}: the private graph's annotations"
+                text.contains(HIDDEN_VALUE) || text.contains(HIDDEN),
+                writes,
+                "{who} over {route}: the private graph's annotations\n{text}"
             );
         }
     }

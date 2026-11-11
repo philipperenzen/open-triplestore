@@ -41,14 +41,27 @@ pub fn owner_iri(base_url: &str, ds: &Dataset) -> String {
 }
 
 /// The graph a dataset's statement-level provenance goes to, when it opts in
-/// (delta note §6.3): one per dataset, registered with the Provenance role.
+/// (delta note §6.3), registered with the Provenance role. It holds the
+/// annotations of the graphs every reader of the dataset may read; a private
+/// graph's go to [`private_statement_provenance_graph`].
 pub fn statement_provenance_graph(dataset_id: &str) -> String {
     format!("urn:ots:statement-provenance:{dataset_id}")
 }
 
-/// Whether `graph` is `dataset_id`'s statement-provenance graph.
+/// The graph the statement-level provenance of a dataset's private graphs
+/// goes to: registered private, so it is read by whoever reads the dataset's
+/// private graphs (its writers) and by nobody else. An annotation is the
+/// statement itself, so it may not be read more widely than the statement.
+/// A dataset id is a slug without `:`, so the name is no other dataset's
+/// graph.
+pub fn private_statement_provenance_graph(dataset_id: &str) -> String {
+    format!("urn:ots:statement-provenance:{dataset_id}:private")
+}
+
+/// Whether `graph` is one of `dataset_id`'s two statement-provenance graphs.
 pub fn is_statement_provenance_graph(dataset_id: &str, graph: &str) -> bool {
     graph == statement_provenance_graph(dataset_id)
+        || graph == private_statement_provenance_graph(dataset_id)
 }
 
 /// Whether `graph` is any dataset's statement-provenance graph: annotations
@@ -64,7 +77,8 @@ pub fn is_any_statement_provenance_graph(graph: &str) -> bool {
 /// annotations (`statement_provenance`) may write them, so every user-facing
 /// write path — SPARQL Update, the Graph Store, RDF Patch and patch logs,
 /// imports, validate-and-commit, restores, RML and LDES targets — refuses
-/// them, for admins too (#533). Reading them is unaffected.
+/// them, for admins too (#533). Reading them follows the graphs' own
+/// registration: the private one is private.
 pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
     if is_any_statement_provenance_graph(graph) {
         return Err(format!(

@@ -245,7 +245,7 @@ SELECT ?op ?commit ?actor ?time WHERE {
 A statement with a blank node is not annotated — a reifier hashed over a
 blank-node label is only stable inside one store — unless the dataset also
 imports with Skolem IRIs (below); every skip, and every change the log could
-not carry, is an `ots:ProvenanceGap` event. Annotations start from the moment
+not carry, is an `ots:ProvenanceGap` event naming its `ots:graph`. Annotations start from the moment
 the dataset opts in. They cost storage: about six quads per changed statement
 (`minimal`), eight (`full`). The graph holds annotations *about* the data, so
 it is no reasoning premise, never gated by SHACL, no LDES member, left out of
@@ -259,8 +259,63 @@ logs, imports, validate-and-commit, version restores, RML and LDES targets
 all refuse it with `403` — for the dataset's owners and for admins too — and
 no dataset can register it as one of its graphs. An admin's store-wide
 `DELETE`/`INSERT` through a variable graph passes over it; only `CLEAR ALL`
-or `DROP ALL`, which wipe the store, clear it with everything else. Reading
-it is unaffected. To stop it growing, set `"provenance": "off"`.
+or `DROP ALL`, which wipe the store, clear it with everything else. To stop
+it growing, set `"provenance": "off"`.
+
+**Who reads the annotations.** An annotation is the statement itself (the
+triple term, its graph, and under `full` who changed it and when), so it is
+read by whoever may read the statement, and nobody else. A dataset therefore
+has two statement-provenance graphs:
+
+| Graph | Holds the annotations of | Read by |
+|---|---|---|
+| `urn:ots:statement-provenance:<id>` | the dataset's graphs that are not private | every reader of the dataset |
+| `urn:ots:statement-provenance:<id>:private` | the graphs the dataset holds as private | the dataset's writers and admins, as a private graph is |
+
+`GET /api/datasets/:id/settings` names both (`provenance_graph`,
+`provenance_private_graph`). The second is registered private the first time
+it is needed, stays private (clearing its flag answers `403`), and is
+system-managed like the first. A writer asks for a statement's whole history
+over both, with `GRAPH ?pg { … }` in place of the one graph name. Someone who
+reads a private graph through a graph-ACL grant, without write access to the
+dataset, does not read its annotations unless granted the private provenance
+graph as well.
+
+- **Which graph an annotation goes to** is decided by the graph's flag when
+  the change is annotated, a few seconds after the write.
+- **A graph made private** takes its annotations along: the request that
+  makes it private (`PATCH /api/datasets/:id/graphs`) moves them to the
+  private provenance graph before it answers, and the server repeats the
+  check every few seconds, which also covers a graph it flags itself (a
+  validation report graph that follows the graph it reports on, a pipeline
+  target), a dataset that has turned provenance off since, and a server
+  with change capture off. Nothing is lost; the dataset's readers stop
+  seeing that graph's history.
+- **A graph made public again** is annotated in the public graph from then
+  on. What was annotated while it was private stays in the private graph: it
+  holds the statements removed in that time, which were never public.
+- **The change feed** lists and serves the rows of both provenance graphs to
+  callers who can write the dataset only
+  ([versioning](/docs/versioning#the-datasets-change-feed)): such a row is the
+  annotations as patch text, and it outlives their move.
+
+Two things the split does not reach. A version that was cut with the public
+provenance graph named in `graphs` keeps its own copy, read like that graph
+is now: delete the version, or mark the graph private, if it was cut while
+private graphs were annotated there (see the upgrade note below). And the
+annotations of a graph that was private for a while and is public again
+cannot be told apart from the rest once they sit in the public graph.
+
+> **Upgrading from 0.8.0 or 0.8.1.** Those releases wrote every graph's
+> annotations to the one graph `urn:ots:statement-provenance:<id>`, which
+> every reader of the dataset reads, anonymous callers on a public dataset
+> included. On its first start a newer server moves, once, the annotations of
+> every graph a dataset holds privately, and of every graph it no longer
+> holds (whose flag can no longer be told), to the private graph; the log
+> line `moved N statement-provenance quad(s) about private graphs` reports
+> it. The move cannot undo what was read before it. An install was exposed
+> when change capture was on, a dataset recorded provenance, that dataset
+> held a private graph, and the dataset had readers who are not writers.
 
 ### Skolem IRIs on import (opt-in)
 

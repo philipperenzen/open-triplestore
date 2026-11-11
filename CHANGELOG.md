@@ -155,6 +155,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows guide's sample response, in step.
 
 ### Security
+- **Statement provenance no longer shows a private graph's statements to the
+  dataset's readers.** A dataset that records statement provenance
+  (`provenance: minimal | full`) annotated every one of its graphs into the
+  one graph `urn:ots:statement-provenance:<id>`, which every reader of the
+  dataset reads. An annotation is the statement itself (`rdf:reifies
+  <<( s p o )>>`, its graph, and under `full` the actor and time), and a
+  removed statement stays as a `remove` event. So a viewer, or an anonymous
+  caller on a public dataset, could read the statements of a graph marked
+  private, over `/sparql`, over `GET /store?graph=`, and as RDF Patch text
+  over `GET /api/datasets/<id>/changes/<seq>`, because the consumer's own
+  writes are change-captured. Affected: 0.8.0 and 0.8.1, on an install with
+  change capture on, a dataset that records provenance and holds a private
+  graph, and readers of that dataset who are not its writers.
+  - The annotations of a graph the dataset holds privately now go to a second
+    graph, `urn:ots:statement-provenance:<id>:private`, registered private:
+    the dataset's writers and admins read it, nobody else. Its flag cannot be
+    cleared (`403`), and it is system-managed like the first.
+    `GET /api/datasets/<id>/settings` names it as `provenance_private_graph`.
+  - A graph made private takes its annotations along, in the
+    `PATCH /api/datasets/<id>/graphs` request and again every few seconds
+    (which covers a report graph that follows a private graph and a pipeline
+    target, with provenance or change capture turned off since). A graph made
+    public again is annotated publicly from then on; the private period stays
+    private.
+  - The change feed lists and serves the rows of a dataset's
+    statement-provenance graphs to callers who can write the dataset only.
+    A reader's feed no longer lists them.
+  - **On upgrade**, the first start moves, once, the annotations of every
+    private graph, and of every graph its dataset no longer holds, into the
+    private graph, also for datasets that have since turned provenance off.
+    Nothing is deleted. It logs `moved N statement-provenance quad(s) about
+    private graphs`. Two things it cannot reach: annotations made while a
+    graph was private, of a graph that is public again now; and a version cut
+    with the provenance graph named explicitly, which keeps its own copy
+    (delete that version or mark the provenance graph private). What was
+    read before the upgrade stays read.
+  - `ots:ProvenanceGap` nodes for skipped blank-node statements now carry
+    `ots:graph`, so they move with their graph. Those written earlier hold a
+    sequence number and a count only, and stay where they are.
+
+  See [Statement provenance](docs/datasets.md#statement-provenance-opt-in).
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
