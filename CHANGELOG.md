@@ -84,6 +84,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
+  admin-only hard delete removed the account row but left `urn:system:user:{id}`,
+  the FOAF/vCard profile graph holding the person's name and username and, for
+  a public profile, their email, phone, organisation, bio and website, in the
+  RDF store. It now deletes that graph before the row, as
+  `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
