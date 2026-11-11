@@ -2782,6 +2782,18 @@ pub async fn run(
             }
         });
     }
+    // The change log's retention, on a timer: a minute after the start and
+    // hourly from then on. The write path sweeps only every 1,000 recorded
+    // rows, counted from the start, so without this an instance that writes
+    // little keeps rows past `OTS_CHANGE_RETENTION_DAYS` and idle cursors
+    // past `OTS_CURSOR_TTL_DAYS`, and a log left behind with capture off is
+    // never swept at all. Every node runs it, a follower included (see
+    // `spawn_retention_sweep`), and it is a no-op where there is no log.
+    crate::store::changes::spawn_retention_sweep(
+        state.store.changes_shared(),
+        crate::store::changes::SWEEP_START_DELAY,
+        crate::store::changes::SWEEP_INTERVAL,
+    );
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.

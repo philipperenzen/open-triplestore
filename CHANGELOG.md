@@ -155,6 +155,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows guide's sample response, in step.
 
 ### Security
+- **Change-log retention runs on a timer.** `OTS_CHANGE_RETENTION_DAYS`
+  (default 90) and `OTS_CURSOR_TTL_DAYS` were enforced only by a sweep on the
+  write path, once every 1,000 recorded rows, counted in memory from each
+  start. An instance that wrote little kept its rows, each with the writer's
+  account IRI and the added and removed quads, past the window, and for as
+  long as it never reached that count between two starts. A log left behind
+  after capture was switched off was never swept at all. The server now
+  sweeps a minute after it starts and every hour from then on, on every node
+  and over every log there is: one that records, one kept from an earlier run
+  while capture is off, one a restore put in place. A row that nothing holds
+  is gone within an hour of leaving the window; rows at or above the lowest
+  live cursor or delta-version pin stay, as before. A sweep also goes through
+  the log 500 rows (or 16 MiB of payload) at a time and releases it in
+  between, so a write waits for one step, not for the sweep. No new setting.
+  The first sweep after the upgrade deletes whatever is already past the
+  window, so raise `OTS_CHANGE_RETENTION_DAYS` first if those rows are still
+  needed.
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.

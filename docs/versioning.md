@@ -501,19 +501,28 @@ less; the scan cost does not shrink.
 ### Retention, crashes, caps
 
 - **Retention.** Rows older than `OTS_CHANGE_RETENTION_DAYS` (default 90)
-  are swept, but never above the lowest live cursor or pin. A cursor that has
+  are swept, but never at or above the lowest live cursor or pin. The sweep
+  runs on a timer: a minute after the server starts and every hour from then
+  on, whether or not anything is written, so a row that nothing holds is gone
+  within an hour of leaving the window. It runs on every node, a replication
+  follower included, and over any log there is: one that records, one an
+  earlier run left behind while capture is off, one a restore put in place.
+  The write path sweeps too, once every 1,000 rows it records. A sweep goes
+  through the log a few hundred rows at a time and lets go of it in between,
+  so a write waits for one such step, not for the sweep. A cursor that has
   not been updated for `OTS_CURSOR_TTL_DAYS` (default 30) stops pinning
-  retention and is dropped: a consumer that went away must resynchronise,
-  not hold the log forever. A delta version pins its range for as long as it
-  lives (deleting or publishing it releases the pin). Rows of a version's own
-  snapshot graphs and of restore staging graphs, which no chain needs, go
-  after a day. The highest sequence number retention deleted is remembered,
-  so a chain that would need a row below it counts as broken — the next cut
-  is a checkpoint — rather than silently missing a change.
+  retention and is dropped at the next sweep: a consumer that went away must
+  resynchronise, not hold the log forever. A delta version pins its range for
+  as long as it lives (deleting or publishing it releases the pin). Rows of a
+  version's own snapshot graphs and of restore staging graphs, which no chain
+  needs, go after a day. The highest sequence number retention deleted is
+  remembered, so a chain that would need a row below it counts as broken —
+  the next cut is a checkpoint — rather than silently missing a change.
 - **Capture switched off and on again.** A log kept from an earlier run
   stays readable while capture is off (delta versions resolve through it),
   but records nothing; the next run that records starts a new epoch, so no
-  chain is ever extended across writes the log did not see.
+  chain is ever extended across writes the log did not see. Retention keeps
+  running over it: its rows leave as they age out, as above.
 - **Bounded whole-graph operations.** `CLEAR`, `DROP`, `CREATE` and `LOAD`
   of a named graph (and `MOVE`/`COPY`/`ADD`, which are made of them) are
   bounded to that graph and recorded like any other write; only `CLEAR`/`DROP
