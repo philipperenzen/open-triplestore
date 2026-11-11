@@ -55,7 +55,9 @@ type PendingRow = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>, String);
 pub enum Extent {
     /// The payload is the complete net delta.
     Full,
-    /// Counts are exact, the payload was over the cap and is not stored.
+    /// Counts are exact and no payload is stored: it was over the cap, or
+    /// the graph is one whose payload is withheld
+    /// ([`is_payload_withheld_graph`]).
     Counts,
     /// Nothing about the delta is known; a chain cannot cross this row.
     Unknown,
@@ -533,6 +535,20 @@ pub fn is_version_snapshot_graph(graph: &str) -> bool {
         .is_some_and(|(_, rest)| rest.starts_with("version/"))
 }
 
+/// A user's profile graph (`urn:system:user:{id}`): its rows never carry a
+/// payload, whatever their size. The graph holds personal data — a name, and
+/// the contact details of a public profile — and a payload would keep every
+/// value the profile ever had: the old ones after an edit, all of them after
+/// the purge that erases the account, for as long as the row lives, on every
+/// follower that tails the log and in every backup of it. The row keeps its
+/// exact counts ([`Extent::Counts`]), which is all a replication follower
+/// needs: it fetches the graph, and after a purge that fetch finds nothing.
+/// No chain covers such a graph unless an administrator registered one to a
+/// dataset, and then the next version is a checkpoint.
+pub fn is_payload_withheld_graph(graph: &str) -> bool {
+    graph.starts_with(crate::auth::user_graph::PROFILE_GRAPH_PREFIX)
+}
+
 /// Hours after which rows of [`is_ephemeral_graph`] graphs are dropped.
 const EPHEMERAL_HOURS: i64 = 24;
 
@@ -977,10 +993,21 @@ impl ChangeLog {
 
     /// What a row's finalisation writes, taken from its delta before the
     /// sequence section: the payload serialised, or none when it is over
-    /// the cap.
+    /// the cap or the graph's payload is withheld. Every row's payload comes
+    /// through here, so a withheld one reaches neither the log's file nor
+    /// its write-ahead log.
     fn row_values(&self, delta: GraphDelta) -> RowValues {
+        let changed = delta.added.len() + delta.removed.len();
+        // A write that changed nothing stays an empty full row: there is no
+        // value in it, and a follower has nothing to fetch.
+        let withheld = changed > 0
+            && delta
+                .graph
+                .as_deref()
+                .is_some_and(is_payload_withheld_graph);
         let (extent, added, removed) = match delta.extent {
-            Extent::Full if delta.added.len() + delta.removed.len() <= self.max_payload => (
+            Extent::Full if withheld => (Extent::Counts, None, None),
+            Extent::Full if changed <= self.max_payload => (
                 Extent::Full,
                 encode_quads(&delta.added),
                 encode_quads(&delta.removed),
@@ -3072,6 +3099,70 @@ mod tests {
         assert!(log.begin("update", Some(&data), &|_| None).is_some());
         leave_write();
         assert_eq!(log.status().pending, 1);
+    }
+
+    /// A quad with a literal, as a profile's name is.
+    fn named(value: &str, g: &str) -> Quad {
+        Quad::new(
+            NamedNode::new_unchecked("http://ex/users/ada"),
+            NamedNode::new_unchecked("http://xmlns.com/foaf/0.1/name"),
+            oxigraph::model::Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new_unchecked(g)),
+        )
+    }
+
+    #[test]
+    fn a_profile_graph_row_keeps_its_counts_and_never_its_values() {
+        let log = log();
+        let profile = "urn:system:user:u1";
+        // An edit (the new name in, the old one out), then the purge's delete.
+        write(
+            &log,
+            profile,
+            vec![named("Ada Example", profile)],
+            vec![named("Ada Before", profile)],
+        );
+        write(&log, profile, vec![], vec![named("Ada Example", profile)]);
+        // The same value written to any other graph is recorded as before.
+        write(
+            &log,
+            "http://g/a",
+            vec![named("Ada Example", "http://g/a")],
+            vec![],
+        );
+        // A write that changed nothing is an empty full row, as anywhere.
+        write(&log, profile, vec![], vec![]);
+
+        let rows = log.rows_after(0, 10);
+        assert_eq!(rows.len(), 4);
+        for r in &rows[..2] {
+            assert_eq!(r.extent, Extent::Counts, "seq {:?}", r.seq);
+            assert_eq!(r.state, State::Committed);
+            assert!(r.added.is_none() && r.removed.is_none());
+        }
+        assert_eq!((rows[0].added_n, rows[0].removed_n), (1, 1));
+        assert_eq!(rows[0].post_count, Some(10));
+        assert_eq!((rows[1].added_n, rows[1].removed_n), (0, 1));
+        assert_eq!(rows[1].post_count, Some(9));
+        assert_eq!(rows[2].extent, Extent::Full);
+        assert!(rows[2].added.as_deref().unwrap().contains("Ada Example"));
+        assert_eq!(rows[3].extent, Extent::Full);
+        assert_eq!(rows[3].added_n + rows[3].removed_n, 0);
+
+        // The prefix decides, not a look-alike.
+        assert!(is_payload_withheld_graph("urn:system:user:u1"));
+        assert!(!is_payload_withheld_graph("urn:system:users"));
+        assert!(!is_payload_withheld_graph("urn:system:commit-log"));
+        assert!(!is_payload_withheld_graph("http://g/urn:system:user:u1"));
+
+        // A chain over a profile graph does not replay; one over the other
+        // graph is untouched by the profile's rows.
+        let over_profile = log.chain(&[profile.to_string()], &log.epoch(), 0, 4);
+        assert!(!over_profile.intact);
+        assert!(
+            log.chain(&["http://g/a".to_string()], &log.epoch(), 0, 4)
+                .intact
+        );
     }
 
     /// A range of an epoch the log never held finds no rows; that is not an

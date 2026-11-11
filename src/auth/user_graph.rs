@@ -3,9 +3,14 @@ use crate::store::engine::TripleStore;
 use crate::store::escape_sparql_iri;
 use oxigraph::io::RdfFormat;
 
+/// What every user profile graph's IRI starts with. The change log keys on
+/// it: a row of such a graph never carries the profile's values
+/// (`crate::store::changes::is_payload_withheld_graph`).
+pub const PROFILE_GRAPH_PREFIX: &str = "urn:system:user:";
+
 /// Named graph IRI for a user's FOAF/VCARD profile.
 pub fn user_profile_graph_iri(user_id: &str) -> String {
-    format!("urn:system:user:{}", user_id)
+    format!("{PROFILE_GRAPH_PREFIX}{user_id}")
 }
 
 /// Write (or overwrite) the FOAF/VCARD profile named graph for a user.
