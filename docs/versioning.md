@@ -459,10 +459,60 @@ known) are listed for every dataset: they bound every chain.
 `…/changes/<seq>` is that change as an RDF Patch (`application/rdf-patch`),
 `…/inverse` the patch that undoes it; **410** when retention has removed the
 change, **409** when the row carries no quads (it was larger than a row
-holds, or the log could not bound it). A cursor (any signed-in reader) pins
-retention like an admin cursor; it belongs to whoever set it — someone else
-gets 403 — and an admin can delete it. Every route answers from an empty log
-while capture is off.
+holds, or the log could not bound it). A cursor pins retention like an admin
+cursor; it belongs to whoever set it — someone else gets 403 — and an admin
+can delete it. Every route answers from an empty log while capture is off.
+
+#### Who sees what of the history
+
+A dataset's history holds two things its current data does not: who made each
+change, and quads its graphs no longer hold. Two settings decide how far down
+the dataset's roles each goes. Both take `writers` (accounts that may write
+the dataset, administrators included), `signed-in` (any account that may read
+it) or `readers` (everyone who may read it — anonymous callers on a public
+dataset too), and both default to `writers`:
+
+| Setting | Decides who gets | Below it |
+|---|---|---|
+| `OTS_ACTOR_VISIBILITY` | the author of a change: `actor_iri` on feed rows; `actor_iri`, `actor_username` and `actor_display_name` on `…/commits`; the agents of commits and versions in `…/provenance`; `created_by` on `…/versions`; `owner` on `…/branches`; `author` on `…/log` entries | the field is `null` or absent; times, messages, counts and commit IRIs stay |
+| `OTS_CHANGE_PATCH_ACCESS` | `…/changes/<seq>`, `…/changes/<seq>/inverse` and `PUT …/changes/cursors/<name>` | **401** without an account, **403** with one; the listing still says which graph changed at which sequence number, so a consumer can refetch the graph |
+
+Both are [runtime settings](administration.md#runtime-settings): an
+administrator changes them under **Admin → Workspace settings** without a
+restart. The account's role on the dataset decides, not the credential's
+scope: a read-only API token of an account that may write the dataset is in
+the `writers` audience, so a mirror can read authors and fetch patches with a
+credential that cannot write. Setting a cursor is a `PUT`, which needs a
+token with write scope, as every write does.
+
+Why `writers`: who edited what and when is personal data, and a patch holds
+deleted data on both sides — the quads a change removed, and the quads it
+added that a later change removed. A reader who may see the data as it is now
+has no claim on either. Why a cursor follows the patches: it keeps every row
+above it from being swept, for the whole store, so only a caller who may
+fetch the patches can hold one. A cursor set under a wider setting stays
+until it expires (`OTS_CURSOR_TTL_DAYS`); its owner can no longer refresh it
+and can still delete it, as can an administrator (`GET
+/api/admin/changes/stats` lists the cursors and their owners).
+
+What the settings do not cover, because a writer turns each on per dataset in
+order to publish history:
+
+- **Versions.** A version's data and the diff between two versions are served
+  to every reader of the graphs they cover, with what was later deleted,
+  until the version is deleted.
+- **The patch log.** `…/log/patch/<ref>` serves an entry's text, `D` lines
+  included, to every reader of the graphs it changes. No request removes an
+  entry.
+- **LDES.** Earlier versions of an entity stay members of the stream until
+  its retention policy drops them; a stream has none unless one is set.
+- **Statement provenance.** The statement-provenance graph holds every
+  removed statement as a triple term, and under the `full` profile the actor
+  of each change, readable over `/sparql` by every reader of the dataset.
+
+Neither setting erases anything: writers and administrators read the rows
+until retention sweeps them, and a patch a consumer fetched earlier is the
+consumer's.
 
 The commit trail points into the log: a commit whose write the log recorded
 carries `seq_from` / `seq_to` (its rows) and `net_added` / `net_removed`

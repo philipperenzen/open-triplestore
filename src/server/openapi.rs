@@ -1077,7 +1077,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/api/datasets/:dataset_id/provenance", vec![
         (M::Get, o("Datasets", "PROV-O provenance",
-            "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple.",
+            "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple. It covers the graphs the caller may read and the commits that touched them, and names the agent of a commit or a version only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset); the dataset's owner is always named.",
             vec![], vec![("200", "PROV-O (text/turtle)"), ("404", "Dataset not found or not visible")], false)),
     ]);
     // A container archive as the request body.
@@ -1550,7 +1550,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Versions",
                     "List versions",
-                    "Version snapshots of the dataset, newest first.",
+                    "Version snapshots of the dataset, newest first. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset); the same holds on `…/versions/{ver}`.",
                     vec![],
                     vec![("200", "Array of versions")],
                     false,
@@ -1709,7 +1709,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Removed"), ("404", "No such prefix"), ("401", "Authentication required"), ("403", "Write access required")], true)),
     ]);
     mount(paths, "/api/datasets/:dataset_id/log", vec![
-        (M::Get, o("Versions", "Dataset patch log", "The dataset's RDF Patch log (RDF Delta patch log, named by the dataset id): `{name, init, latest: {version, id}, entries: [{version, id, prev, kind, author, dataset_version, default_graph, graphs, created_at}]}`. `kind` is `patch` (appended here) or `version` (a version cut, the diff from the previous cut). An entry that changes a graph the caller may not read is listed as `{version, id, prev, kind, withheld: true}`. Page with `?after={version}&limit=`.",
+        (M::Get, o("Versions", "Dataset patch log", "The dataset's RDF Patch log (RDF Delta patch log, named by the dataset id): `{name, init, latest: {version, id}, entries: [{version, id, prev, kind, author, dataset_version, default_graph, graphs, created_at}]}`. `kind` is `patch` (appended here) or `version` (a version cut, the diff from the previous cut). An entry that changes a graph the caller may not read is listed as `{version, id, prev, kind, withheld: true}`. `author` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Page with `?after={version}&limit=`.",
             vec![], vec![("200", "The log"), ("404", "Dataset not found")], false)),
         (M::Post, o("Versions", "Append to the patch log", "Append an RDF Patch. It needs exactly one `H id` (an IRI the log does not hold) and at most one `H prev`, which must name the log's latest entry — none only when the log is empty; a mismatch is a 409 naming the latest entry, and nothing changes. The patch is then applied exactly as `POST …/patch` applies one (with `?graph=` for triples) and appended only when that succeeds. Writes made any other way are not journaled. Response: the apply result plus `{version, prev}`.",
             vec![], vec![("200", "Applied and appended"), ("400", "Invalid patch or headers"), ("401", "Authentication required"), ("403", "Write access required"), ("409", "H id taken, or H prev is not the latest entry"), ("422", "A SHACL write gate refused it")], true)),
@@ -1753,7 +1753,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "History",
                     "List branches",
-                    "Branches of the dataset's commit history.",
+                    "Branches of the dataset's commit history. A branch's `owner` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset).",
                     vec![],
                     vec![("200", "Array of branches")],
                     false,
@@ -1783,7 +1783,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "History",
                 "List commits",
-                "Commit history for the dataset (optionally per branch).",
+                "Commit history for the dataset (optionally per branch): the commits that touched a graph the caller may read, each listing only those graphs. `actor_iri`, `actor_username` and `actor_display_name` are present only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset).",
                 vec![
                     qp("branch", false, "Branch name"),
                     qp("limit", false, "Max commits"),
@@ -6484,7 +6484,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "The dataset's change feed",
-                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
+                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). A row's `actor_iri` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
                 vec![
                     qp("since", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
@@ -6503,15 +6503,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "One change as an RDF Patch",
-                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`.",
+                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`. A patch holds quads the graph may no longer hold, so it is served to OTS_CHANGE_PATCH_ACCESS's audience: `writers` by default (accounts that may write the dataset), `signed-in` (any account that may read it) or `readers` (anonymous readers of a public dataset too).",
                 vec![],
                 vec![
                     ("200", "The patch"),
+                    ("401", "Authentication required (unless OTS_CHANGE_PATCH_ACCESS is `readers`)"),
+                    ("403", "Not in OTS_CHANGE_PATCH_ACCESS's audience"),
                     ("404", "Not a change of this dataset, or not readable"),
                     ("409", "The row carries no quads (`extent` counts or unknown)"),
                     ("410", "Retention removed the change"),
                 ],
-                false,
+                true,
             ),
         )],
     );
@@ -6523,15 +6525,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "The patch that undoes one change",
-                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch.",
+                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch. Served to OTS_CHANGE_PATCH_ACCESS's audience, like the patch itself.",
                 vec![],
                 vec![
                     ("200", "The patch"),
+                    ("401", "Authentication required (unless OTS_CHANGE_PATCH_ACCESS is `readers`)"),
+                    ("403", "Not in OTS_CHANGE_PATCH_ACCESS's audience"),
                     ("404", "Not a change of this dataset, or not readable"),
                     ("409", "The row carries no quads"),
                     ("410", "Retention removed the change"),
                 ],
-                false,
+                true,
             ),
         )],
     );
@@ -6544,7 +6548,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 ob(
                     "Versions",
                     "Set a feed cursor",
-                    "Keep a reader's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it.",
+                    "Keep a consumer's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it. Because it holds rows back from the sweep, only an account OTS_CHANGE_PATCH_ACCESS serves patches to may set one (default `writers`: accounts that may write the dataset).",
                     vec![],
                     json_body(
                         ObjectBuilder::new()
@@ -6556,7 +6560,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         ("200", "The cursor"),
                         ("400", "Invalid name or seq beyond the log"),
                         ("401", "Authentication required"),
-                        ("403", "Someone else's cursor"),
+                        ("403", "Someone else's cursor, or not in OTS_CHANGE_PATCH_ACCESS's audience"),
                         ("409", "Change capture is off"),
                     ],
                     true,
@@ -6567,7 +6571,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Versions",
                     "Delete a feed cursor",
-                    "Drop a cursor; its owner or an admin.",
+                    "Drop a cursor; its owner or an admin, whatever OTS_CHANGE_PATCH_ACCESS says.",
                     vec![],
                     vec![
                         ("204", "Deleted"),

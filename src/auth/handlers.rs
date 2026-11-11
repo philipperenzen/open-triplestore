@@ -4451,7 +4451,8 @@ pub async fn list_dataset_graphs(
 }
 
 /// GET /api/datasets/:dataset_id/commits — provenance trail for writes touching
-/// any graph registered to this dataset. Readable by anyone with dataset access.
+/// any graph registered to this dataset. Readable by anyone with dataset access;
+/// the actor of a commit only by `OTS_ACTOR_VISIBILITY`'s audience.
 pub async fn list_dataset_commits(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
@@ -4479,9 +4480,23 @@ pub async fn list_dataset_commits(
     let graphs = db
         .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let scope = crate::commit_log::CommitScope::Graphs(graphs);
+    let scope = crate::commit_log::CommitScope::Graphs(graphs.clone());
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
-    crate::commit_log::resolve_actors(db.as_ref(), &mut commits);
+    // A commit can touch graphs the caller may not read besides the one that
+    // put it in this trail (one update over a public and a private graph, or
+    // over two datasets): those are not named.
+    for c in &mut commits {
+        c.affected_graphs.retain(|g| graphs.contains(g));
+    }
+    // Who made a commit is for `OTS_ACTOR_VISIBILITY`'s audience; below it the
+    // trail keeps its messages, times and counts and names nobody.
+    if crate::auth::policy::shows_actors(db.as_ref(), &dataset, user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        crate::commit_log::resolve_actors(db.as_ref(), &mut commits);
+    } else {
+        crate::commit_log::withhold_actors(&mut commits);
+    }
     Ok(Json(commits))
 }
 

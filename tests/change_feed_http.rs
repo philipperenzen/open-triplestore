@@ -170,6 +170,29 @@ async fn one_change_is_a_patch_and_so_is_its_inverse() {
             .and_then(|r| r.seq)
             .unwrap()
     };
+    // Out of the box a patch is its writers' (`OTS_CHANGE_PATCH_ACCESS`):
+    // an anonymous reader of the public dataset gets the listing, not the quads.
+    let (st, _, refused) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{id}/changes/{}", seq_of(G)),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "{refused}");
+    assert!(!refused.contains("<urn:cf:s>"), "{refused}");
+    // The rest of this test is about which rows a reader may have as a
+    // patch, so every reader is let in.
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/admin/settings/OTS_CHANGE_PATCH_ACCESS",
+        Some(&token),
+        json!({ "value": "readers" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
     let (st, _, patch) = req(
         &app,
         Method::GET,
@@ -259,6 +282,20 @@ async fn a_cursor_belongs_to_its_owner() {
         .unwrap();
     let mo = mint_token("mo", "mo", "user");
     let uri = format!("/api/datasets/{id}/changes/cursors/mirror");
+    // A cursor holds rows back from the sweep, so out of the box only an
+    // account that may write the dataset sets one (`OTS_CHANGE_PATCH_ACCESS`).
+    let (st, _, txt) = req(&app, Method::PUT, &uri, Some(&mo), json!({ "seq": 1 })).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{txt}");
+    // Ownership, below, is about readers who may hold one.
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/admin/settings/OTS_CHANGE_PATCH_ACCESS",
+        Some(&token),
+        json!({ "value": "signed-in" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
     let (st, c, txt) = req(&app, Method::PUT, &uri, Some(&mo), json!({ "seq": 1 })).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(c["owner"], "mo");

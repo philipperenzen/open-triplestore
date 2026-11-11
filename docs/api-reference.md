@@ -79,7 +79,7 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/patch` | **token** | Apply an RDF Patch (writers only); `PA` / `PD` change the dataset's prefix table. See [versioning.md](versioning.md#rdf-patch). |
 | `GET` | `/api/datasets/{dataset_id}/prefixes` | **none** | A public dataset's prefix table; a private one only to those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/prefixes` | **token** | Replace the prefix table (writers only); `PUT` / `DELETE …/prefixes/{label}` change one entry. |
-| `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld. |
+| `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld; an entry's `author` is `null` outside `OTS_ACTOR_VISIBILITY`'s audience. |
 | `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
@@ -123,9 +123,9 @@ Three facts worth knowing before an instance is exposed:
 | `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
 | `GET` | `/api/admin/changes/stats` | **admin** | Change-log size per dataset, pins, cursors, delta-version builds. |
 | `POST` | `/api/admin/versions/sweep` | **admin** | Purges versions of deleted datasets, unreferenced version graphs, stale pins, expired builds. |
-| `GET` | `/api/datasets/{id}/changes` | **none** | The dataset's change feed: rows of the graphs the caller may read, without quads. |
-| `GET` | `/api/datasets/{id}/changes/{seq}` | **none** | One change as an RDF Patch (`…/inverse` undoes it), if its graph is readable. |
-| `PUT` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | A reader's position in the feed; pins retention; its owner or an admin moves or drops it. |
+| `GET` | `/api/datasets/{id}/changes` | **none** | The dataset's change feed: rows of the graphs the caller may read, without quads. A row names its author (`actor_iri`) only to `OTS_ACTOR_VISIBILITY`'s audience. |
+| `GET` | `/api/datasets/{id}/changes/{seq}` | **token** | One change as an RDF Patch (`…/inverse` undoes it), if its graph is readable: for accounts that may write the dataset (`403` otherwise), unless `OTS_CHANGE_PATCH_ACCESS` is `signed-in` (any account that may read it) or `readers` (anonymous readers of a public dataset too). |
+| `PUT` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | A consumer's position in the feed; pins retention; its owner or an admin moves or drops it. Set by the accounts `OTS_CHANGE_PATCH_ACCESS` serves patches to (`403` otherwise). |
 | `DELETE` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | Drop a cursor (its owner or an admin). |
 | `GET` | `/api/datasets/{id}/settings` | **none** | The dataset's Skolem and statement-provenance opt-ins, to its readers. |
 | `PUT` | `/api/datasets/{id}/settings` | **token** | Change them; dataset writers only (`403` otherwise). |
@@ -358,14 +358,21 @@ A dataset's readers have their own view of the log:
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/datasets/<id>/changes?since=<seq>&limit=<n>&wait_ms=<ms>` | `{ "dataset_id", "enabled", "epoch", "rows", "next" }` — rows of the dataset's graphs the caller may read (plus store-scoped rows) above `since`, in commit order, without `added`/`removed` (`limit` 1–5000, default 500; `wait_ms` long-polls up to 30 000) |
-| `GET` | `/api/datasets/<id>/changes/<seq>` | the change as `application/rdf-patch` (`H id <urn:ots:change:<epoch>:<seq>>`, `H seq`, `H epoch`, `H dataset`, `H commit`); `404` when the change is not the dataset's or not readable, `410` when retention removed it, `409` (with `extent`, `added_n`, `removed_n`) when the row carries no quads |
-| `GET` | `/api/datasets/<id>/changes/<seq>/inverse` | the patch that undoes it (`H prev` names the forward patch) |
-| `PUT` | `/api/datasets/<id>/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor (`name`, `seq`, `owner`, `expires_at`); `403` for someone else's cursor, `400` for a bad name or `seq`, `409` while capture is off |
+| `GET` | `/api/datasets/<id>/changes?since=<seq>&limit=<n>&wait_ms=<ms>` | `{ "dataset_id", "enabled", "epoch", "rows", "next" }` — rows of the dataset's graphs the caller may read (plus store-scoped rows) above `since`, in commit order, without `added`/`removed` (`limit` 1–5000, default 500; `wait_ms` long-polls up to 30 000). `actor_iri` is `null` for a caller outside `OTS_ACTOR_VISIBILITY`'s audience |
+| `GET` | `/api/datasets/<id>/changes/<seq>` | the change as `application/rdf-patch` (`H id <urn:ots:change:<epoch>:<seq>>`, `H seq`, `H epoch`, `H dataset`, `H commit`); `401` / `403` for a caller outside `OTS_CHANGE_PATCH_ACCESS`'s audience, `404` when the change is not the dataset's or not readable, `410` when retention removed it, `409` (with `extent`, `added_n`, `removed_n`) when the row carries no quads |
+| `GET` | `/api/datasets/<id>/changes/<seq>/inverse` | the patch that undoes it (`H prev` names the forward patch); the same audience |
+| `PUT` | `/api/datasets/<id>/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor (`name`, `seq`, `owner`, `expires_at`); `403` for a caller outside `OTS_CHANGE_PATCH_ACCESS`'s audience and for someone else's cursor, `400` for a bad name or `seq`, `409` while capture is off |
 | `DELETE` | `/api/datasets/<id>/changes/cursors/<name>` | `204`; `403` unless the owner or an admin; `404` |
 
+Both settings default to `writers` — the accounts that may write the dataset;
+see [versioning.md](versioning.md#who-sees-what-of-the-history).
+
 A commit on `GET /api/datasets/<id>/commits` gains `seq_from`, `seq_to`,
-`net_added` and `net_removed` when the change log recorded its write.
+`net_added` and `net_removed` when the change log recorded its write. Its
+`actor_iri`, `actor_username` and `actor_display_name` are present only for
+`OTS_ACTOR_VISIBILITY`'s audience, as are `created_by` on `…/versions`,
+`owner` on `…/branches`, `author` on `…/log` entries and the agents in
+`…/provenance`.
 
 ## Dataset versions — checkpoints and deltas
 

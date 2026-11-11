@@ -352,6 +352,7 @@ the *Live settings* tab) or with `PUT /api/admin/settings/{name}`:
 | `OTS_EMBED_FRAME_ANCESTORS` | Who may frame the `/embed/*` pages |
 | `OTS_LLM_RATE_LIMIT_PER_MIN`, `OTS_LLM_RATE_LIMIT_ANON_PER_MIN`, `OTS_LLM_ANONYMOUS_ENABLED` | The AI request budgets |
 | `OTS_OIDC_PROVIDER_TOKEN_POLICY`, `OTS_OIDC_PROVIDER_WRITE_SCOPES`, `OTS_OIDC_IDP_TOKEN_POLICY`, `OTS_OIDC_IDP_WRITE_SCOPES` | What delegated OIDC tokens may do |
+| `OTS_ACTOR_VISIBILITY`, `OTS_CHANGE_PATCH_ACCESS` | Who sees the author of a dataset's changes, and who may fetch a change's quads from its feed |
 
 The environment variable stays the default: an override is stored (in the
 identity database's `app_settings` table, so followers see it too) only when an
@@ -479,6 +480,8 @@ as a reference shows the reference.
 | `OTS_STUDIO_INCREMENTAL_MAX` | `10000` | A write-triggered validation pipeline revalidates only the nodes a write touched, up to this many; above it, in full. |
 | `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |
 | `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
+| `OTS_ACTOR_VISIBILITY` | `writers` | Who sees the author of a dataset's changes — on its change feed, commit trail, PROV-O document, versions, branches and patch log: `writers` (accounts that may write the dataset, administrators included), `signed-in` (any account that may read it) or `readers` (everyone who may read it, anonymous callers on a public dataset included). Below the audience the author is left out; times, messages and counts stay. See [versioning.md](versioning.md#who-sees-what-of-the-history). |
+| `OTS_CHANGE_PATCH_ACCESS` | `writers` | Who may fetch one change of a dataset's feed as an RDF Patch (or its inverse) and hold a cursor on the feed; the same three values. A patch holds quads the graph may no longer hold, and a cursor holds rows back from the sweep. Below the audience both answer `401` / `403`; the listing of changes, without quads, stays every reader's. |
 | `OTS_REPLICATION_ROLE` | `none` | `leader` records every write in the change log and serves followers; `follower` keeps this store read-only and tails a leader. See [operations.md](operations.md#replication). |
 | `OTS_REPLICATION_MODE` | `warm` | A follower's temperature — how often it catches up: `cold` (hourly), `warm` (every minute; `medium` is accepted), `hot` (long-polls the leader: the request for rows is held up to 25 s and answered the moment a row lands). |
 | `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | *(unset)* | The leader's base URL and an admin API token minted there — the token raw or as a secret reference (`env:`/`file:`/`vault:`); under `OTS_ENV=production` a raw token is refused and the follower runs without one. A follower without a leader URL reports the omission in its status and applies nothing. |
