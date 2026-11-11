@@ -133,6 +133,8 @@ services:
       - OTS_LLM_SPARQL_MODEL=${OTS_LLM_SPARQL_MODEL:-}
       - OTS_LLM_SHACL_MODEL=${OTS_LLM_SHACL_MODEL:-}
       - OTS_LLM_CHAT_MODEL=${OTS_LLM_CHAT_MODEL:-}
+      # `none` turns a reasoning model's thinking off (e.g. qwen3.5); unset sends nothing.
+      - OTS_LLM_REASONING_EFFORT=${OTS_LLM_REASONING_EFFORT:-}
       # LLM guard, rate limits and request log; empty keeps each default
       # (see .env.example).
       - OTS_LLM_RATE_LIMIT_PER_MIN=${OTS_LLM_RATE_LIMIT_PER_MIN:-}

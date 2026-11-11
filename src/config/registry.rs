@@ -735,6 +735,8 @@ settings! {
         .doc("Model for the SHACL assistant (default `OTS_LLM_MODEL`).");
     LLM_CHAT_MODEL: Option<String> = Spec::new("OTS_LLM_CHAT_MODEL", Kind::Text, "llm")
         .doc("Model for the chat assistant (default `OTS_LLM_MODEL`).");
+    LLM_REASONING_EFFORT: Option<String> = Spec::new("OTS_LLM_REASONING_EFFORT", Kind::Enum(&["none", "low", "medium", "high"]), "llm")
+        .doc("`reasoning_effort` sent with every completion; `none` turns a reasoning model's thinking off. Unset: not sent.");
     LLM_API_KEY: Option<String> = Spec::new("OTS_LLM_API_KEY", Kind::Secret, "llm")
         .doc("Bearer token for the endpoint (a secret reference).");
     LLM_TIMEOUT: Duration = Spec::new("OTS_LLM_TIMEOUT_SECS", at_least(1), "llm")

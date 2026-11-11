@@ -26,6 +26,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Everything is built from the returned cells only. Row-bound ` ```chart `
   blocks now keep a time axis chronological and skip empty values instead of
   drawing them as 0.
+- **`OTS_LLM_REASONING_EFFORT`** (`none`, `low`, `medium`, `high`; unset by
+  default) is sent as `reasoning_effort` with every LLM completion. Reasoning
+  models such as Qwen3.5 think before they answer, and through an
+  OpenAI-compatible endpoint that thinking counts against the answer's token
+  budget: with Spark's budgets `qwen3.5:9b` returned empty answers. `none`
+  turns the thinking off where the server reads the field (Ollama, vLLM,
+  OpenAI). Unset sends nothing, so existing setups are unchanged.
 - **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
   schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
   (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
@@ -98,6 +105,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once, while the blocking work and its sidecar call kept running, so the
   server could run more reasoning at once than `expensive_semaphore` allows.
   The slot is now held by the blocking task itself.
+- **Konclude backend: no more wrong answers on the W3C OWL 2 DL test cases.**
+  Konclude v0.7.0-1138 called inconsistent premises consistent (asymmetric,
+  irreflexive and disjoint properties against asserted edges, and DL98 cases
+  where an inverse predecessor must merge back into an individual): the
+  bridge now runs it with its individuals backend cache and individual
+  saturation off, which finds those clashes. Where Konclude is wrong in any
+  configuration (disjoint data properties, keys, float facet ranges,
+  `rdf:XMLLiteral` values, nominals with inverses and counting, and the
+  complement of a number datatype, which it reads as holding no number), a
+  check answers `unknown` with the reason instead of a wrong `true`/`false`,
+  and a materialisation is marked incomplete. A check on which Konclude
+  crashes answers `unknown`. The W3C OWL 2 DL runner gains a Konclude mode
+  (`OTS_TEST_KONCLUDE_BIN`). See docs/owl2-dl.md.
 - **A demo content refresh no longer deletes files an operator added to the
   demo dataset.** When the recorded demo content version was behind, the
   refresh removed every asset of `viewer-3d-demo` (rows and stored objects)
