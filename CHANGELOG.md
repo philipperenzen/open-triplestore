@@ -26,6 +26,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Everything is built from the returned cells only. Row-bound ` ```chart `
   blocks now keep a time axis chronological and skip empty values instead of
   drawing them as 0.
+- **`OTS_LLM_REASONING_EFFORT`** (`none`, `low`, `medium`, `high`; unset by
+  default) is sent as `reasoning_effort` with every LLM completion. Reasoning
+  models such as Qwen3.5 think before they answer, and through an
+  OpenAI-compatible endpoint that thinking counts against the answer's token
+  budget: with Spark's budgets `qwen3.5:9b` returned empty answers. `none`
+  turns the thinking off where the server reads the field (Ollama, vLLM,
+  OpenAI). Unset sends nothing, so existing setups are unchanged.
 - **Scheduled LDES sync** (#530). A sync job runs on its own once it has a
   schedule: `auto` waits the stream's `ldes:pollingInterval` between runs
   (LDES 1.0 §3.1), `interval` a fixed number of seconds, and neither runs a
