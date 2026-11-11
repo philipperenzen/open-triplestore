@@ -65,8 +65,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops
   the start like any other setting; before, the dashboard reported the gateway
   as unavailable.
-
-### Changed
 - **Change capture costs concurrent bulk writers almost nothing now.** With
   `OTS_CHANGE_CAPTURE_ENABLED=on`, four writers loading 500-quad batches ran
   at 0.44 of their capture-off throughput, because the change log's sequence
@@ -86,6 +84,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A deep blank-node edit is published to LDES again.** With change capture
+  on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
+  below its entity was not published at all, since the walk up to its owner
+  stopped without one. Its graph is now republished whole, as for a write
+  over `OTS_LDES_BNODE_SUBJECTS_MAX`.
+- **A tier-1 restore no longer closes its own chains.** A version restore
+  whose inverse for one graph was over `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`
+  applied it in one transaction and recorded a `counts` row, which no chain
+  crosses; such a restore now takes tier 2. The defaults already avoided it
+  (`OTS_APPLY_DELTA_TX_MAX_QUADS` is below the cap); a raised tier-1 limit no
+  longer can.
 - **The reasoner sidecar builds from a Windows checkout.** `.gitattributes`
   now pins `sidecars/reasoner/mvnw` and its `maven-wrapper.properties` to LF,
   so `docker build -f sidecars/reasoner/Dockerfile .` no longer fails with

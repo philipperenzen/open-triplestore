@@ -546,6 +546,40 @@ async fn a_restore_applies_the_inverse_of_the_chain_in_one_transaction() {
     assert!(restore["seq_to"].is_i64(), "{restore}");
 }
 
+/// A tier-1 restore whose inverse is over the payload cap would write a
+/// `counts` row for the graph and close every chain through it; the plan
+/// sends it to tier 2 instead.
+#[tokio::test]
+async fn a_restore_whose_inverse_is_over_the_payload_cap_takes_tier_2() {
+    let store = TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, 2);
+    let (state, token) = admin_state_with_store(store);
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    // Two writes of two and one quads, each under the cap; their inverse
+    // (a back, c and d out) is three.
+    edit_after_v1(&state);
+    edit_after_v2(&state);
+    let (st, r, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/restore"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["tier"], 2, "{r}");
+    assert_eq!(live_subjects(&state), vec!["<urn:dv:a>", "<urn:dv:b>"]);
+    let rows = state.store.changes().rows_after(0, 1000);
+    assert!(
+        !rows.iter().any(|r| r.origin == "patch"),
+        "no tier-1 apply: {rows:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_restore_without_the_change_log_copies_the_version_back() {
     let store = TripleStore::in_memory()
