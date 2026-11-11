@@ -84,6 +84,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
 | `DELETE` | `/api/models/{id}/versions/{ver}` | **token** | Delete one version, its graphs and its registry record: admins, and publishers who may write the entry (`403` otherwise). `409` for a published version without `?force=true`, and while datasets depend on it whatever `force` says; see [models.md](models.md#deleting-a-version). |
+| `PATCH` | `/api/models/{id}/versions/{ver}/data` | **token** | Add and remove statements in a draft version, blank nodes included; whoever may write the entry (its owner, an admin of the owning organisation, an admin), `401` otherwise. See [Editing a model draft](#editing-a-model-draft). |
 | `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
@@ -166,6 +167,108 @@ and the level the router enforces cannot drift apart.
 - `/api/models/{id}/latest/data` — latest published model (content-negotiated RDF)
 
 Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.
+
+## Editing a model draft
+
+`PATCH /api/models/{id}/versions/{ver}/data` adds and removes statements in a
+version that is still a **draft**. It needs write access to the entry: its
+owner, an admin of the owning organisation, or an admin (`401` for anyone
+else). A version that is staged, published or deprecated answers `400`.
+
+```json
+{
+  "remove": [{ "s": "http://example.org/Book", "p": "http://www.w3.org/2000/01/rdf-schema#label",
+               "o": { "value": "Book", "lang": "en" } }],
+  "add":    [{ "s": "http://example.org/Book", "p": "http://www.w3.org/2000/01/rdf-schema#label",
+               "o": { "value": "Publication", "lang": "en" } }],
+  "message": "Rename Book"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `add`, `remove` | Statements `{ "s", "p", "o", "graph"? }`; either list may be left out. `s` and `p` are IRIs, bare or in `<…>`. `o` as a JSON string is an IRI or a blank node (`_:label`); as a JSON object `{ "value", "lang"?, "datatype"? }` it is a literal. |
+| `graph` | The graph the statements are in, for the request or per statement: the absolute IRI of one of the version's graphs, or the last part of a sub-graph's IRI. Without it, the version's base graph. A graph of another version is a `400`. |
+| `nodes`, `remove_nodes` | The draft's blank nodes the request refers to, and those to remove; see below. |
+| `message`, `metadata` | Recorded with the edit in the commit trail (`GET /api/models/{id}/commits`). |
+
+The answer is `{"current_revision": "…"}`, with the same value as `ETag`. Send
+the `ETag` of `GET …/data`, or of the previous edit's answer, as `If-Match`:
+when the draft has changed since, nothing is written and the answer is `409`
+with `{"error": "stale_revision", "current_revision": "…"}`.
+
+### Blank nodes in a draft
+
+A blank node label is local to the request. `_:x` in `add` is a new node (one
+node, wherever the request writes `_:x`), never a node the draft already has;
+a new RDF list or anonymous shape is added that way. To change or remove a
+blank node that is in the draft, declare it under `nodes`: each entry gives a
+node a label and says how to find it.
+
+```json
+{
+  "nodes": {
+    "binding": { "s": "http://example.org/BookShape", "p": "http://www.w3.org/ns/shacl#property",
+                 "where": [{ "p": "http://www.w3.org/ns/shacl#path", "o": "http://example.org/binding" }] },
+    "values":  { "s": "_:binding", "p": "http://www.w3.org/ns/shacl#in" }
+  },
+  "remove_nodes": ["values"],
+  "remove": [{ "s": "_:binding", "p": "http://www.w3.org/ns/shacl#minCount",
+               "o": { "value": "1", "datatype": "http://www.w3.org/2001/XMLSchema#integer" } }],
+  "add": [
+    { "s": "_:binding", "p": "http://www.w3.org/ns/shacl#minCount",
+      "o": { "value": "0", "datatype": "http://www.w3.org/2001/XMLSchema#integer" } },
+    { "s": "_:binding", "p": "http://www.w3.org/ns/shacl#in", "o": "_:c1" },
+    { "s": "_:c1", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "o": { "value": "hardcover" } },
+    { "s": "_:c1", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", "o": "_:c2" },
+    { "s": "_:c2", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "o": { "value": "e-book" } },
+    { "s": "_:c2", "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+      "o": "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil" }
+  ]
+}
+```
+
+This request finds the property shape `ex:BookShape sh:property [ sh:path
+ex:binding ; … ]` and the `sh:in` list on it, removes the list, changes the
+shape's `sh:minCount` and gives it a new list.
+
+An entry of `nodes` describes its node with:
+
+| Field | The node is … |
+|---|---|
+| `s`, `p` | the object of this statement. `s` is an IRI, or the `_:label` of another entry (in any order), which reaches a node several steps away from a named one. |
+| `where` | the subject of each of these statements `{ "p", "o" }`, `o` written as in `add`. |
+| `id` | the blank node with this identifier in the store: its label in `GET …/data` or in a SPARQL result, with or without `_:`. Used on its own. |
+| `graph` | in this graph; as for a statement. |
+
+`s` with `p`, `where`, or both must fit **exactly one** blank node of the
+graph. When none fits, the answer is `409` with `{"error":
+"blank_node_not_found", "node": "<label>"}`; when several do, `409` with
+`{"error": "blank_node_ambiguous", "node": "<label>", "matches": <n>}` — add a
+statement to `where` that only one of them has.
+
+- In `add` and `remove`, `_:label` of a declared label is that node. Any other
+  label in `add` is a new node. In `remove` every blank node must be declared;
+  one that is not is a `400`.
+- `remove_nodes` lists declared labels. For each it removes the statements
+  that point at the node, the node's own statements, and those of the blank
+  nodes below it: a whole property shape with its lists, a whole RDF list with
+  its cells. A blank node below it that another statement of the graph still
+  points at is kept, with what is below that one. Named nodes are not removed,
+  only the statements that link the removed nodes to them.
+- A request that declares nodes is applied whole or not at all, in one
+  transaction: node removals first, then `remove`, then `add`. A node that
+  cannot be found refuses the entire request. The commit trail records the
+  number of statements actually added and removed.
+- A blank node keeps its identifier for as long as it is stored, and a draft
+  or branch made from a version has the same identifiers as that version; an
+  edit only touches the statements in the draft's own graphs. Identifiers are
+  not part of the model: uploading a file again gives its anonymous nodes new
+  ones.
+
+Nothing about this changes what is stored or exported. Blank nodes stay blank
+nodes, and a request without `nodes` and `remove_nodes` is written as before:
+its removals and then its additions, one SPARQL update per graph.
 
 ## Spark chat answers — `/api/llm/chat` and `/api/llm/chat/stream`
 

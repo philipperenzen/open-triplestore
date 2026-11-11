@@ -45,6 +45,10 @@ The Schema.org entry keeps the version label `29.0` it first shipped with, becau
 6. **Deprecate** — Older published versions can be deprecated to signal that consumers should upgrade.
 7. **Delete** — Remove a version that should not exist, see below.
 
+## Editing a draft
+
+`PATCH /api/models/{id}/versions/{ver}/data` adds and removes statements in a draft without uploading the file again, with an `If-Match` revision check so two editors do not overwrite each other. It reaches blank nodes too: a request declares the anonymous property shape, restriction or RDF list it means (by the statement that points at it and the statements it has) and can then change its statements or remove it with everything below it. See [Editing a model draft](/docs/api-reference#editing-a-model-draft).
+
 ## Deleting a version
 
 `DELETE /api/models/{id}/versions/{ver}` removes one version: the named graphs that hold
