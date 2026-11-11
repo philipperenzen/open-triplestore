@@ -549,6 +549,37 @@ pub fn is_payload_withheld_graph(graph: &str) -> bool {
     graph.starts_with(crate::auth::user_graph::PROFILE_GRAPH_PREFIX)
 }
 
+/// A log up to this size is compacted once payloads were taken out of it
+/// ([`ChangeLog::withhold_recorded_payloads`]). Compacting rewrites the whole
+/// file, holds every write up while it runs, and needs up to twice the
+/// file's size in free space: seconds for a log of this size, minutes for
+/// one of gigabytes, which is not a wait to put in front of a start.
+pub const COMPACT_UP_TO_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What [`ChangeLog::withhold_recorded_payloads`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withheld {
+    /// Rows whose payload was taken out.
+    pub rows: usize,
+    pub compaction: Compaction,
+}
+
+/// Whether the log's file was written anew after payloads were taken out of
+/// its rows, which is what removes the last copy of them from the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Compaction {
+    /// No payload was taken out, now or by a call whose compaction failed.
+    NotNeeded,
+    Done,
+    /// The log is this many bytes, over [`COMPACT_UP_TO_BYTES`]: the rows
+    /// are clean, the file's unused space may still hold copies, and
+    /// `VACUUM` with the server stopped is what removes them.
+    TooLarge(u64),
+    /// SQLite refused (no space, a reader holding the file); the next call
+    /// tries again.
+    Failed(String),
+}
+
 /// Hours after which rows of [`is_ephemeral_graph`] graphs are dropped.
 const EPHEMERAL_HOURS: i64 = 24;
 
@@ -2044,6 +2075,155 @@ impl ChangeLog {
         disagree
     }
 
+    /// Remove the payloads the log holds for graphs whose payload is withheld
+    /// ([`is_payload_withheld_graph`]): the rows a version before the rule
+    /// recorded, and the ones the log of a restored backup brought back.
+    /// Each becomes a `counts` row, so a follower still behind it fetches
+    /// the graph instead of applying a delta that is no longer there.
+    ///
+    /// `keep` names the graphs to leave alone: a withheld graph an
+    /// administrator registered to a dataset, whose delta versions are
+    /// replayed from exactly these rows.
+    ///
+    /// Taking a value out of its row does not take it out of the file.
+    /// SQLite frees the space without clearing it, which `secure_delete`
+    /// mends for the row itself; but a page that was reorganised while the
+    /// row sat in it still holds an older copy of the row in its unused
+    /// space, and that only goes when the file is written anew. So the log
+    /// is compacted (`VACUUM`) afterwards when it is small enough to do
+    /// that at start ([`COMPACT_UP_TO_BYTES`]), and the write-ahead log,
+    /// which holds the replaced pages until then, is emptied. A compaction
+    /// that fails is tried again at the next call; a log over the size is
+    /// left to the operator, and the result says so.
+    pub fn withhold_recorded_payloads(&self, keep: &[String]) -> Result<Withheld, StoreError> {
+        self.withhold_recorded(keep, COMPACT_UP_TO_BYTES)
+    }
+
+    fn withhold_recorded(
+        &self,
+        keep: &[String],
+        compact_up_to: u64,
+    ) -> Result<Withheld, StoreError> {
+        let Some(conn) = self.lock() else {
+            return Ok(Withheld {
+                rows: 0,
+                compaction: Compaction::NotNeeded,
+            });
+        };
+        let prefix = crate::auth::user_graph::PROFILE_GRAPH_PREFIX;
+        // The IRIs that start with the prefix, as a range the graph index
+        // serves: up to the prefix with its last character raised by one.
+        let mut end = prefix.to_string();
+        if let Some(last) = end.pop() {
+            end.push(char::from_u32(last as u32 + 1).unwrap_or(char::MAX));
+        }
+        let rows: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT row, graph_iri FROM changes WHERE graph_iri >= ?1 AND graph_iri < ?2 \
+                     AND (length(added) > 0 OR length(removed) > 0)",
+                )
+                .map_err(sql_err)?;
+            let found = stmt
+                .query_map(params![prefix, end], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(sql_err)?;
+            found
+                .flatten()
+                .filter(|(_, g)| is_payload_withheld_graph(g) && !keep.contains(g))
+                .map(|(row, _)| row)
+                .collect()
+        };
+        let mut changed = 0;
+        if !rows.is_empty() {
+            let secure: i64 = conn
+                .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+                .map_err(sql_err)?;
+            conn.execute_batch("PRAGMA secure_delete = ON")
+                .map_err(sql_err)?;
+            let rewrite = || -> rusqlite::Result<usize> {
+                let tx = conn.unchecked_transaction()?;
+                let mut changed = 0;
+                for row in &rows {
+                    changed += tx.execute(
+                        "UPDATE changes SET added = NULL, removed = NULL, \
+                         extent = CASE extent WHEN 'full' THEN 'counts' ELSE extent END \
+                         WHERE row = ?1",
+                        params![row],
+                    )?;
+                }
+                // With the rows, so a stop before the compaction is seen.
+                tx.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('compact_pending', ?1)",
+                    params![now()],
+                )?;
+                tx.commit()?;
+                Ok(changed)
+            };
+            let rewritten = rewrite();
+            // The setting is the connection's: back to what the write path had.
+            let before = match secure {
+                0 => "OFF",
+                2 => "FAST",
+                _ => "ON",
+            };
+            let _ = conn.execute_batch(&format!("PRAGMA secure_delete = {before}"));
+            changed = rewritten.map_err(sql_err)?;
+        }
+        let pending: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key = 'compact_pending'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(sql_err)?
+            > 0;
+        if !pending {
+            return Ok(Withheld {
+                rows: changed,
+                compaction: Compaction::NotNeeded,
+            });
+        }
+        let pragma = |name: &str| -> u64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0)
+                .max(0) as u64
+        };
+        let bytes = pragma("page_count") * pragma("page_size");
+        let compaction = if bytes > compact_up_to {
+            Compaction::TooLarge(bytes)
+        } else {
+            match conn.execute_batch("VACUUM") {
+                Ok(()) => Compaction::Done,
+                Err(e) => Compaction::Failed(e.to_string()),
+            }
+        };
+        if !matches!(compaction, Compaction::Failed(_)) {
+            let _ = conn.execute("DELETE FROM meta WHERE key = 'compact_pending'", []);
+        }
+        // Until a checkpoint the file still holds its pages as they were. A
+        // reader that has the log open (a backup under way) can keep this
+        // one from finishing; the next checkpoint SQLite runs completes it.
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        Ok(Withheld {
+            rows: changed,
+            compaction,
+        })
+    }
+
+    /// Give the row at `seq` a payload, as a version before
+    /// [`is_payload_withheld_graph`] recorded one for a profile graph.
+    #[cfg(test)]
+    pub(crate) fn plant_payload(&self, seq: i64, added: &[Quad], removed: &[Quad]) {
+        let conn = self.lock().expect("a log to write to");
+        conn.execute(
+            "UPDATE changes SET extent = 'full', added = ?2, removed = ?3 WHERE seq = ?1",
+            params![seq, encode_quads(added), encode_quads(removed)],
+        )
+        .expect("the row takes the payload");
+    }
+
     /// Mint a new epoch: the store was replaced wholesale (a quarantine and
     /// rebuild, the restore of a backup that holds no log), so no chain from
     /// before it may be extended across it. Nothing to do without a log.
@@ -3162,6 +3342,137 @@ mod tests {
         assert!(
             log.chain(&["http://g/a".to_string()], &log.epoch(), 0, 4)
                 .intact
+        );
+    }
+
+    /// The log's bytes on disk: the database file and its write-ahead log.
+    fn bytes_on_disk(dir: &Path) -> Vec<u8> {
+        let mut all = Vec::new();
+        for name in ["changes.db", "changes.db-wal"] {
+            if let Ok(bytes) = std::fs::read(dir.join("changes").join(name)) {
+                all.extend(bytes);
+            }
+        }
+        all
+    }
+
+    fn holds(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    /// A log written by a version that still recorded profile values (or
+    /// restored from a backup of one) has them taken out: from the rows, and
+    /// from the bytes of the file, where an overwrite alone would leave them.
+    #[test]
+    fn recorded_profile_payloads_leave_the_rows_and_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        let (purged, versioned, other) = (
+            "urn:system:user:purged",
+            "urn:system:user:versioned",
+            "http://g/a",
+        );
+        // Two rows of the purged profile (an edit, then the purge), one of a
+        // profile registered to a dataset, one of an ordinary graph.
+        for g in [purged, purged, versioned, other] {
+            write(&log, g, vec![q(1, Some(g))], vec![q(2, Some(g))]);
+        }
+        // As the earlier version left them: full rows holding the values.
+        // The long one does not fit a page, so it sits on overflow pages.
+        let long = format!("Grace Overflow {}", "x".repeat(20_000));
+        let old_rows = [
+            (1, purged, "Ada Example", "Ada Before"),
+            (2, purged, long.as_str(), "Ada Example"),
+            (3, versioned, "Vera Versioned", "Vera Before"),
+            (4, other, "Otto Ordinary", "Otto Before"),
+        ];
+        for (seq, g, added, removed) in old_rows {
+            log.plant_payload(seq, &[named(added, g)], &[named(removed, g)]);
+        }
+        let before = bytes_on_disk(dir.path());
+        for value in [
+            "Ada Example",
+            "Ada Before",
+            "Grace Overflow",
+            "Vera Versioned",
+        ] {
+            assert!(holds(&before, value), "{value} is on disk to begin with");
+        }
+
+        let did = log
+            .withhold_recorded_payloads(&[versioned.to_string()])
+            .unwrap();
+        assert_eq!(did.rows, 2, "the purged profile's two rows");
+        assert_eq!(did.compaction, Compaction::Done);
+
+        let rows = log.rows_after(0, 10);
+        assert_eq!(rows.len(), 4, "no row is deleted, no sequence moves");
+        for r in &rows[..2] {
+            assert_eq!(r.graph_iri.as_deref(), Some(purged));
+            assert_eq!(r.extent, Extent::Counts);
+            assert_eq!(r.state, State::Committed);
+            assert!(r.added.is_none() && r.removed.is_none());
+            assert_eq!((r.added_n, r.removed_n), (1, 1), "the counts stay");
+        }
+        // The profile a dataset versions, and every other graph, are as they were.
+        assert_eq!(rows[2].extent, Extent::Full);
+        assert!(rows[2].added.as_deref().unwrap().contains("Vera Versioned"));
+        assert_eq!(rows[3].extent, Extent::Full);
+        assert!(rows[3].added.as_deref().unwrap().contains("Otto Ordinary"));
+        assert!(
+            log.chain(&[versioned.to_string()], &log.epoch(), 0, 4)
+                .intact
+        );
+
+        let after = bytes_on_disk(dir.path());
+        for value in ["Ada Example", "Ada Before", "Grace Overflow"] {
+            assert!(!holds(&after, value), "{value} is still in the file");
+        }
+        for value in ["Vera Versioned", "Otto Ordinary"] {
+            assert!(holds(&after, value), "{value} was not to be touched");
+        }
+
+        // Without the keep list the last profile row goes too. A log over
+        // the size is not compacted, and says so; its rows are clean.
+        let did = log.withhold_recorded(&[], 0).unwrap();
+        assert_eq!(did.rows, 1);
+        assert!(matches!(did.compaction, Compaction::TooLarge(n) if n > 0));
+        assert!(log.rows_after(0, 10)[2].added.is_none());
+        assert!(holds(&bytes_on_disk(dir.path()), "Otto Ordinary"));
+
+        // Nothing left to do, now or after a reopen; and writes go on.
+        let nothing = Withheld {
+            rows: 0,
+            compaction: Compaction::NotNeeded,
+        };
+        assert_eq!(log.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        drop(log);
+        let reopened = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        assert_eq!(reopened.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        write(&reopened, other, vec![q(5, Some(other))], vec![]);
+        assert_eq!(reopened.last_seq(), 5);
+        assert_eq!(reopened.rows_after(0, 10).len(), 5);
+        // A compaction that did not finish is taken up by the next call.
+        reopened
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('compact_pending', 'then')",
+                [],
+            )
+            .unwrap();
+        let did = reopened.withhold_recorded_payloads(&[]).unwrap();
+        assert_eq!((did.rows, did.compaction), (0, Compaction::Done));
+        assert!(!holds(&bytes_on_disk(dir.path()), "Vera Versioned"));
+        assert_eq!(reopened.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        // A log that is off has nothing to rewrite.
+        assert_eq!(
+            ChangeLog::disabled()
+                .withhold_recorded_payloads(&[])
+                .unwrap(),
+            nothing
         );
     }
 

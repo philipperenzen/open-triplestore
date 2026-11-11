@@ -203,10 +203,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   statement. A follower fetches the graph for such a row, and after a purge
   that fetch comes back empty, so an edit or a purge reaches followers as
   before.
-  Rows recorded before the upgrade keep their statements until retention
-  removes them, and backups already taken keep what they copied.
-  Unchanged: a purge leaves `actor_iri` on the user's earlier rows, and a
-  profile graph's IRI contains the account id.
+  At its next start each node also takes out the statements that earlier
+  versions recorded for these graphs, and then compacts the log (`VACUUM`) so
+  that no copy stays in the unused space of the file. A log over 512 MiB is
+  not compacted at start: the server logs a warning, and `VACUUM` on
+  `changes.db` with the server stopped does it. The clean-up skips a profile
+  graph that an administrator registered to a dataset, because that
+  dataset's delta versions are replayed from those rows. Backups already
+  taken keep what they copied. Unchanged: a purge leaves `actor_iri` on the
+  user's earlier rows, and a profile graph's IRI contains the account id.
 - **Purging a user erases their LLM request-log rows and usage events.** Both
   tables carry the user ID without a foreign key, so an admin purge, a
   self-service purge (`POST /api/auth/account/purge`) and an admin delete left

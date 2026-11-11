@@ -427,6 +427,16 @@ How a primitive arrives at its row:
   graph to a dataset, its changes cannot be replayed, so the dataset's next
   version is a checkpoint.
 
+  At start the server takes out the statements an earlier version recorded
+  for these graphs, or that the log of a restored backup brought back. The
+  rows become `counts`, and a log of up to 512 MiB is then compacted
+  (`VACUUM`), because SQLite keeps copies of a rewritten row in the unused
+  space of its file until the file is written anew. A larger log is not
+  compacted at start, which would hold the start up for minutes: the server
+  logs a warning, and running `VACUUM` on `changes.db` with the server
+  stopped does it. A profile graph registered to a dataset keeps its rows as
+  they are, because that dataset's delta versions are replayed from them.
+
 ### Reading and bookmarking
 
 ```
