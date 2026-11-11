@@ -727,7 +727,8 @@ pub async fn restore_version(
 /// Tier 1 of a restore (delta note §3.6): when the version is anchored in
 /// the current epoch, every graph to restore has its content hash, the chain
 /// from the version to now is intact for those graphs and its inverse fits
-/// one transaction (`OTS_APPLY_DELTA_TX_MAX_QUADS`), that inverse —
+/// one transaction (`OTS_APPLY_DELTA_TX_MAX_QUADS`) and, per graph, one row's
+/// payload (`OTS_CHANGE_CAPTURE_MAX_PAYLOAD`), that inverse —
 /// `(to add, to remove)`. Applied in one transaction, it puts every graph
 /// back at once: strictly better than the per-graph `MOVE` of tier 2, which
 /// rebuilds each graph's count and leaves the version observable
@@ -761,6 +762,12 @@ fn plan_inverse(
     for g in graphs {
         if let Some(net) = fold.get(&Some(g.clone())) {
             let undo = net.clone().inverse();
+            // The restore's row for this graph must carry its payload: over
+            // the payload cap it would be `counts` and close every chain
+            // through it, so tier 2 restores the graph instead.
+            if undo.added.len() + undo.removed.len() > log.max_payload() {
+                return None;
+            }
             added.extend(undo.added);
             removed.extend(undo.removed);
         }

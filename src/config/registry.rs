@@ -590,7 +590,7 @@ settings! {
         .doc("A dataset's member log is pruned at most this often from the write path.");
     LDES_BNODE_DEPTH: usize = Spec::new("OTS_LDES_BNODE_DEPTH", at_least(0), "ldes")
         .default("8")
-        .doc("How far up a blank-node tree the owner of a changed blank node is looked for.");
+        .doc("How far up a blank-node tree the owner of a changed blank node is looked for; a change deeper than this republishes its graph whole.");
     LDES_BNODE_SUBJECTS_MAX: usize = Spec::new("OTS_LDES_BNODE_SUBJECTS_MAX", at_least(0), "ldes")
         .default("10000")
         .doc("Above this many changed blank-node subjects in one graph, the graph is republished whole.");
