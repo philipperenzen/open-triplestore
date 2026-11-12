@@ -80,7 +80,8 @@ graphs); account/identity data lives in a local metadata database.
   not erased by any of the above. A SPARQL `DELETE`, a graph delete or a
   dataset delete records the quads it removed as the row's payload, and those
   stay readable by admins (`GET /api/admin/changes`) and, while the dataset
-  exists, by its readers (`GET /api/datasets/{id}/changes/{seq}`) until
+  exists, by its writers or the wider audience `OTS_CHANGE_PATCH_ACCESS`
+  names (`GET /api/datasets/{id}/changes/{seq}`) until
   retention removes the row. **A user purge does not touch the log
   either**: the rows keep the account's IRI (with the user ID the audit log
   also keeps) and the quads of its writes. An admin or self-service purge's
@@ -177,8 +178,10 @@ operating them correctly is the operator's responsibility** (see
   ([PRIVACY.md](../PRIVACY.md) §2, §4.7). The change log as a whole is
   admin-only, but a dataset's change feed (`GET /api/datasets/{id}/changes`)
   shows anyone who may read the dataset, anonymous callers included for a
-  public one, each row's time and writer's account IRI for the graphs they may
-  read, and each change's quads on request ([PRIVACY.md](../PRIVACY.md) §4.9).
+  public one, each row's time and counts for the graphs they may read. The
+  writer's account IRI and each change's quads go to the dataset's writers
+  unless an administrator widens `OTS_ACTOR_VISIBILITY` or
+  `OTS_CHANGE_PATCH_ACCESS` ([PRIVACY.md](../PRIVACY.md) §4.9).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
