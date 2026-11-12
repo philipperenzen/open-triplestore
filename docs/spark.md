@@ -59,6 +59,32 @@ A JSON spec with a `type` of `bar`, `line` or `pie`, an optional `title` / `xLab
 ```
 ````
 
+To chart the rows of a query Spark ran this turn, the spec says `"source": "query"` with the `x` (label) and `y` (number) columns instead of inline `data`; the platform reads the values from the rows, so a transcription slip cannot change a number. Categories are sorted by value; a time axis (ISO dates, or years in a column named like *year* / *date*) keeps chronological order, and a row whose value cell is empty is left out rather than drawn as 0.
+
+### `view` — the visual a query result fits
+
+`{"source": "query", "as": "auto"}` shows the rows of a query Spark ran this turn in whichever visual their shape supports. With `auto` (the default) the platform picks:
+
+| Rows | Visual |
+| --- | --- |
+| SHACL validation results (a report queried as triples, or a SELECT with focus-node and severity/message columns) | **SHACL summary** — conforms or not, counts per severity, the paths / shapes / focus nodes with the most results, and the worst few messages |
+| `CONSTRUCT` / `DESCRIBE` triples | **node-link graph** on the shared cytoscape canvas (capped at 150 nodes); click a node to inspect it |
+| A WGS84 WKT column, or a lat/lon column pair | **map** on the shared MapLibre viewer; rows in a projected CRS are counted as not shown, never reprojected |
+| A date column and a number | **timeline** (line chart, chronological; a small categorical column splits it into series) |
+| A label column and a number | **bar chart** of the top 15 by value, with "showing N of M rows" when cut |
+| One row with a number in it | **figures** — one tile per returned cell |
+| Anything else | **table** |
+
+`"as"` picks a visual explicitly (`bar`, `line`, `map`, `graph`, `shacl`, `stat` or `table`); when the rows cannot support it, the table is shown with a note saying so — the widget never draws something the query did not return. `"query": N` binds to the Nth query of the turn (1-based, counting failed rounds too) instead of the last one that returned rows; optional `"title"`, `"x"` and `"y"` name the chart title and columns. The block carries no data of its own, so with no query rows this turn it renders as a broken-block card.
+
+````markdown
+```view
+{"source": "query", "as": "auto", "title": "Bridges per year"}
+```
+````
+
+The same tabs appear wherever a result is shown in the chat: on the rows under **Ran a query** in the retrieval trail, on the result of a ` ```sparql ` card's **Run** (a `CONSTRUCT`/`DESCRIBE` result opens on its graph), and on CSV results of an ` ```api ` card. Those start on the table; the tabs offer only the visuals the rows support. An ` ```api ` call that returns a validation report (`GET /api/datasets/{id}/validation/latest`, …) gets the SHACL summary above its JSON.
+
 ### `map` — WKT feature map (with optional 3D models)
 
 A JSON `features` array rendered as an interactive map. Each feature carries a `wkt` geometry — WGS84, longitude before latitude — plus an optional `label` and `iri` linking the marker back to the resource. An optional `models` array places real 3D geometry on the basemap: each entry anchors a model file (glTF, STL, IFC, CityJSON) at a WKT `POINT`, rendered with the same georeferenced 3D engine as the dataset explorer.
@@ -171,6 +197,7 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | `OTS_LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Unset: the AI features are off — nothing is probed, and every AI request answers `503` naming this setting. |
 | `OTS_LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
 | `OTS_LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `OTS_LLM_MODEL`. |
+| `OTS_LLM_REASONING_EFFORT` | `none`, `low`, `medium` or `high`, sent as `reasoning_effort` with every completion. Reasoning models such as Qwen3.5 think before they answer, and through an OpenAI-compatible endpoint that thinking counts against the answer's token budget, so they can return an empty answer; `none` turns it off (Ollama, vLLM and OpenAI read the field). Unset: not sent. |
 | `OTS_LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
 | `OTS_LLM_TIMEOUT_SECS` | Per-completion budget in seconds (default `120`). Raise it when a large model is served from local hardware — past this the turn fails outright. |
 | `OTS_LLM_CONTEXT_TOKENS` | The serving model's context window, in tokens. When set, Spark budgets its prompt to fit (dropping the oldest conversation turns first, then the graph-vocabulary blocks) instead of letting the runtime truncate silently. **Set this whenever the endpoint is a local runtime** — Ollama, llama.cpp and vLLM cut an over-long prompt from the top, which deletes Spark's execution protocol and turns grounded answers into confident fabrication mid-conversation. Unset, Spark asks the gateway itself, best-effort: a vLLM-style `max_model_len` on `/v1/models`, or an Ollama Modelfile `num_ctx` via `/api/show`. An Ollama model *without* a Modelfile `num_ctx` yields no detection — its true serving context (`OLLAMA_CONTEXT_LENGTH`, default 4096) is invisible over the API, so Spark logs a warning instead of guessing; set this knob to mirror that value. Nothing detectable disables budgeting — fine for large-context hosted APIs. The effective window is reported by `GET /api/llm/health`, and a declared window of `32768`+ also widens the vocabulary sample (20 graphs × 16 classes + 32 predicates instead of 12 × 8 + 20). |
@@ -208,8 +235,13 @@ cheap tasks while chat gets a stronger one.
 Two guards make weaker models useful anyway: a reply that writes the query in a
 ```` ```sparql ```` fence instead of the `SPARQL:` directive is still executed
 (while nothing has been retrieved yet that turn), and a turn that asks for no
-query at all gets one explicit nudge to query before answering — the model may
-decline, and its original answer is kept when it does.
+query at all gets one explicit nudge to retrieve before answering, naming the
+tool that fits (full-text search for a name, vocabulary search for a class or
+property, a query for values) — the model may decline, and its original answer
+is kept when it does. A greeting, thanks or acknowledgement ("hi", "dank je
+wel", "ok") is answered as one: that turn offers no tools, gets no nudge, and
+the prompt tells the model not to query. Only messages made entirely of such
+words count, so "hi, which datasets are there?" is still a question.
 
 Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE), so progress (each query and its result) shows while the turn is still running; `POST /api/llm/chat` is the buffered fallback. Whether the answer text itself streams token by token depends on the protocol: on the directive protocol (`OTS_LLM_CHAT_TOOLS=off`, or a gateway that rejects native tools) the rounds after the first retrieval stream token by token; with native tools active every completion is a single request and the answer arrives when its round completes.
 

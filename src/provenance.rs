@@ -9,6 +9,12 @@
 //! specialisations — in Turtle, so a client can follow provenance with plain
 //! PROV vocabulary and no knowledge of this store's commit model.
 //!
+//! The document is the caller's view of the trail: only the graphs the caller
+//! may read and the commits that touched them (dataset access does not imply
+//! access to its private graphs), and the agents behind commits and versions
+//! only for `OTS_ACTOR_VISIBILITY`'s audience. The dataset's owner is always
+//! named: owning a dataset is not having edited it.
+//!
 //! Statement-level (RDF-star) qualification is deliberately absent: the trail
 //! records *which graphs* an activity touched, not which triples; per-triple
 //! attribution needs per-write change capture (the RDF Patch roadmap item).
@@ -41,14 +47,27 @@ pub fn owner_iri(base_url: &str, ds: &Dataset) -> String {
 }
 
 /// The graph a dataset's statement-level provenance goes to, when it opts in
-/// (delta note §6.3): one per dataset, registered with the Provenance role.
+/// (delta note §6.3), registered with the Provenance role. It holds the
+/// annotations of the graphs every reader of the dataset may read; a private
+/// graph's go to [`private_statement_provenance_graph`].
 pub fn statement_provenance_graph(dataset_id: &str) -> String {
     format!("urn:ots:statement-provenance:{dataset_id}")
 }
 
-/// Whether `graph` is `dataset_id`'s statement-provenance graph.
+/// The graph the statement-level provenance of a dataset's private graphs
+/// goes to: registered private, so it is read by whoever reads the dataset's
+/// private graphs (its writers) and by nobody else. An annotation is the
+/// statement itself, so it may not be read more widely than the statement.
+/// A dataset id is a slug without `:`, so the name is no other dataset's
+/// graph.
+pub fn private_statement_provenance_graph(dataset_id: &str) -> String {
+    format!("urn:ots:statement-provenance:{dataset_id}:private")
+}
+
+/// Whether `graph` is one of `dataset_id`'s two statement-provenance graphs.
 pub fn is_statement_provenance_graph(dataset_id: &str, graph: &str) -> bool {
     graph == statement_provenance_graph(dataset_id)
+        || graph == private_statement_provenance_graph(dataset_id)
 }
 
 /// Whether `graph` is any dataset's statement-provenance graph: annotations
@@ -64,7 +83,8 @@ pub fn is_any_statement_provenance_graph(graph: &str) -> bool {
 /// annotations (`statement_provenance`) may write them, so every user-facing
 /// write path — SPARQL Update, the Graph Store, RDF Patch and patch logs,
 /// imports, validate-and-commit, restores, RML and LDES targets — refuses
-/// them, for admins too (#533). Reading them is unaffected.
+/// them, for admins too (#533). Reading them follows the graphs' own
+/// registration: the private one is private.
 pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
     if is_any_statement_provenance_graph(graph) {
         return Err(format!(
@@ -76,17 +96,31 @@ pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The dataset's PROV-O trail as Turtle.
-pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
+/// The agent of a version as an IRI. A record's `created_by` is the account's
+/// IRI (`{base}/users/{id}`) wherever the server cuts a version, and is
+/// written as it is; a record that holds a bare account id gets that form.
+fn version_agent_iri(base: &str, created_by: &str) -> String {
+    if oxigraph::model::NamedNode::new(created_by).is_ok() {
+        created_by.to_string()
+    } else {
+        format!("{base}/users/{created_by}")
+    }
+}
+
+/// The dataset's PROV-O trail as Turtle, over `graphs` — the dataset's graphs
+/// the caller may read — with the agents of commits and versions when
+/// `actors` is set.
+pub fn dataset_provenance_turtle(
+    state: &AppState,
+    ds: &Dataset,
+    graphs: &[String],
+    actors: bool,
+) -> String {
     let base = state.base_url.trim_end_matches('/');
     let ds_iri = format!("{base}/dataset/{}", ds.id);
-    let graphs = state
-        .auth_db
-        .list_dataset_graphs(&ds.id)
-        .unwrap_or_default();
     let commits = list_commits(
         &state.store,
-        &CommitScope::Graphs(graphs.clone()),
+        &CommitScope::Graphs(graphs.to_vec()),
         &CommitQuery::default(),
     );
     let versions = crate::dataset_versions::registry::list_versions(&state.store, base, &ds.id);
@@ -122,7 +156,7 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
 
     // Each graph is an entity that specialises the dataset; its most recent
     // generating activity is the newest commit that touched it.
-    for g in &graphs {
+    for g in graphs {
         writeln!(out, "<{g}> a prov:Entity ;").unwrap();
         writeln!(out, "    prov:specializationOf <{ds_iri}> ;").unwrap();
         if let Some(c) = commits
@@ -153,10 +187,13 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
         if let Some(v) = &c.version {
             writeln!(out, "    ver:onVersion \"{}\" ;", esc(v)).unwrap();
         }
-        if let Some(a) = &c.actor_iri {
+        let actor = c.actor_iri.as_ref().filter(|_| actors);
+        if let Some(a) = actor {
             writeln!(out, "    prov:wasAssociatedWith <{a}> ;").unwrap();
         }
-        for g in &c.affected_graphs {
+        // A commit can touch graphs the caller may not read besides the one
+        // that put it in this trail: those are not named.
+        for g in c.affected_graphs.iter().filter(|g| graphs.contains(g)) {
             writeln!(out, "    prov:used <{g}> ;").unwrap();
             writeln!(out, "    prov:generated <{g}> ;").unwrap();
         }
@@ -172,7 +209,7 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
             c.created_at
         )
         .unwrap();
-        if let Some(a) = &c.actor_iri {
+        if let Some(a) = actor {
             writeln!(out, "<{a}> a prov:Agent .").unwrap();
         }
     }
@@ -195,8 +232,13 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
             )
             .unwrap();
         }
-        if let Some(by) = &v.created_by {
-            writeln!(out, "    prov:wasAttributedTo <{base}/users/{by}> ;").unwrap();
+        if let Some(by) = v.created_by.as_ref().filter(|_| actors) {
+            writeln!(
+                out,
+                "    prov:wasAttributedTo <{}> ;",
+                version_agent_iri(base, by)
+            )
+            .unwrap();
         }
         writeln!(
             out,
@@ -227,9 +269,45 @@ pub async fn get_dataset_provenance(
     if !visible {
         return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
     }
+    // The same graphs as `GET …/commits`: a private graph's commits (its IRI,
+    // messages, counts) are for callers who may write the dataset.
+    let graphs = state
+        .auth_db
+        .list_readable_dataset_graphs(uid, &ds)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let actors = crate::auth::policy::shows_actors(&state.auth_db, &ds, uid)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/turtle; charset=utf-8")],
-        dataset_provenance_turtle(&state, &ds),
+        dataset_provenance_turtle(&state, &ds, &graphs, actors),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_agent_iri;
+
+    const BASE: &str = "http://localhost:7878";
+
+    #[test]
+    fn a_version_agent_that_is_an_iri_is_written_as_it_is() {
+        for iri in [
+            "http://localhost:7878/users/u1",
+            "https://elsewhere.example/users/u1",
+            "urn:uuid:5a1c8d76-0000-4000-8000-000000000000",
+        ] {
+            assert_eq!(version_agent_iri(BASE, iri), iri);
+        }
+    }
+
+    #[test]
+    fn a_bare_account_id_becomes_the_account_iri() {
+        for id in ["u1", "5a1c8d76-0000-4000-8000-000000000000"] {
+            assert_eq!(
+                version_agent_iri(BASE, id),
+                format!("http://localhost:7878/users/{id}")
+            );
+        }
+    }
 }

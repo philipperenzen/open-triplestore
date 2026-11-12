@@ -292,7 +292,8 @@ impl Capture {
 }
 
 /// `OTS_LDES_BNODE_DEPTH` (default 8): how far up a blank-node tree the
-/// owner of a changed blank-node subject is looked for.
+/// owner of a changed blank-node subject is looked for; a change deeper
+/// than that republishes its graph whole.
 fn bnode_depth() -> usize {
     crate::config::LDES_BNODE_DEPTH.get()
 }
@@ -304,16 +305,29 @@ fn bnode_subjects_max() -> usize {
     crate::config::LDES_BNODE_SUBJECTS_MAX.get()
 }
 
+/// Where a changed blank node hangs from (see [`bnode_owner`]).
+#[derive(Debug, PartialEq, Eq)]
+enum BnodeOwner {
+    /// The IRI entity at the top of its tree.
+    Entity(String),
+    /// No IRI owns it: nothing to publish.
+    Orphan,
+    /// Still a blank node after `OTS_LDES_BNODE_DEPTH` steps (or a cycle):
+    /// the owner is unknown, so the graph is republished whole rather than
+    /// the change dropped.
+    TooDeep,
+}
+
 /// The IRI entity a blank node hangs from in `graph`: up the tree through
 /// the store as it is now, and through the quads the write removed (a link
-/// the write cut is still the owner it changed). `None` for an orphan.
+/// the write cut is still the owner it changed).
 fn bnode_owner(
     store: &TripleStore,
     graph: NamedNodeRef<'_>,
     bnode: &oxigraph::model::BlankNode,
     removed: &[Quad],
     depth: usize,
-) -> Option<String> {
+) -> BnodeOwner {
     let mut current = bnode.clone();
     for _ in 0..depth {
         let parent: Option<NamedOrBlankNode> = store
@@ -333,12 +347,15 @@ fn bnode_owner(
                     .find(|q| matches!(&q.object, Term::BlankNode(b) if *b == current))
                     .map(|q| q.subject.clone())
             });
-        match parent? {
-            NamedOrBlankNode::NamedNode(n) => return Some(n.as_str().to_string()),
-            NamedOrBlankNode::BlankNode(b) => current = b,
+        match parent {
+            None => return BnodeOwner::Orphan,
+            Some(NamedOrBlankNode::NamedNode(n)) => {
+                return BnodeOwner::Entity(n.as_str().to_string())
+            }
+            Some(NamedOrBlankNode::BlankNode(b)) => current = b,
         }
     }
-    None
+    BnodeOwner::TooDeep
 }
 
 /// Members from a write's rows: every IRI subject a row added or removed a
@@ -347,7 +364,8 @@ fn bnode_owner(
 /// it is left in the graph. A graph whose rows do not carry their quads (a
 /// change over the payload cap, or one the log could not bound) is
 /// republished whole, as is one with more blank-node subjects than
-/// `OTS_LDES_BNODE_SUBJECTS_MAX`.
+/// `OTS_LDES_BNODE_SUBJECTS_MAX` or one whose changed blank node is deeper
+/// than `OTS_LDES_BNODE_DEPTH` below any IRI (its owner is unknown).
 pub fn after_rows(
     state: &AppState,
     tracked: &[(String, String)],
@@ -396,8 +414,15 @@ pub fn after_rows(
                             republish = true;
                             break;
                         }
-                        if let Some(owner) = bnode_owner(&state.store, g, b, &removed, depth) {
-                            entities.insert(owner);
+                        match bnode_owner(&state.store, g, b, &removed, depth) {
+                            BnodeOwner::Entity(owner) => {
+                                entities.insert(owner);
+                            }
+                            BnodeOwner::Orphan => {}
+                            BnodeOwner::TooDeep => {
+                                republish = true;
+                                break;
+                            }
                         }
                     }
                 }

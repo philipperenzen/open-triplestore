@@ -2782,6 +2782,18 @@ pub async fn run(
             }
         });
     }
+    // The change log's retention, on a timer: a minute after the start and
+    // hourly from then on. The write path sweeps only every 1,000 recorded
+    // rows, counted from the start, so without this an instance that writes
+    // little keeps rows past `OTS_CHANGE_RETENTION_DAYS` and idle cursors
+    // past `OTS_CURSOR_TTL_DAYS`, and a log left behind with capture off is
+    // never swept at all. Every node runs it, a follower included (see
+    // `spawn_retention_sweep`), and it is a no-op where there is no log.
+    crate::store::changes::spawn_retention_sweep(
+        state.store.changes_shared(),
+        crate::store::changes::SWEEP_START_DELAY,
+        crate::store::changes::SWEEP_INTERVAL,
+    );
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.
@@ -2888,8 +2900,11 @@ pub async fn run(
             crate::ldes::schedule::TICK,
             Arc::new(chrono::Utc::now),
         );
-        // Change-log consumers, every few seconds (no-ops while change
-        // capture is off): write-triggered pipelines and statement provenance.
+        // Change-log consumers, every few seconds: write-triggered pipelines
+        // and statement provenance. While change capture is off they have
+        // nothing to consume; the statement-provenance tick still runs, for
+        // the part of it that does not read the log (a graph that has become
+        // private takes its annotations along).
         {
             let st = state.clone();
             tokio::spawn(async move {
@@ -2897,15 +2912,53 @@ pub async fn run(
                 every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     every.tick().await;
-                    if !st.store.changes().enabled() || st.store.replication().read_only() {
+                    if st.store.replication().read_only() {
                         continue;
                     }
                     let s = st.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        crate::shacl_studio::trigger::tick(&s.store, &s.auth_db, &s.base_url);
+                        if s.store.changes().enabled() {
+                            crate::shacl_studio::trigger::tick(&s.store, &s.auth_db, &s.base_url);
+                        }
                         crate::statement_provenance::tick(&s);
                     })
                     .await;
+                }
+            });
+        }
+        // Statement provenance written before a dataset had a private
+        // statement-provenance graph: what it says about private graphs moves
+        // there, once, on the node that writes (the marker on the identity
+        // database makes every later start skip it). Not tied to change
+        // capture: the annotations are there whether it is still on or not.
+        {
+            let st = state.clone();
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    every.tick().await;
+                    if crate::statement_provenance::existing_annotations_split(&st.auth_db) {
+                        break;
+                    }
+                    if st.store.replication().read_only() {
+                        continue;
+                    }
+                    let s = st.clone();
+                    let split = tokio::task::spawn_blocking(move || {
+                        crate::statement_provenance::split_existing_annotations(&s)
+                    })
+                    .await;
+                    match split {
+                        Ok(Ok(n)) if n > 0 => tracing::warn!(
+                            "moved {n} statement-provenance quad(s) about private graphs out of \
+                             the graphs every reader of their dataset reads"
+                        ),
+                        Ok(Err(e)) => tracing::warn!(
+                            "moving the statement provenance of private graphs failed, trying \
+                             again: {e}"
+                        ),
+                        _ => {}
+                    }
                 }
             });
         }

@@ -1722,7 +1722,7 @@ fi
         ex:A rdfs:subClassOf ex:B . ex:a a ex:A ; ex:r ex:b .
         ex:p a owl:DatatypeProperty .
         ex:B rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:p ;
-          owl:someValuesFrom [ a rdfs:Datatype ; owl:datatypeComplementOf xsd:integer ] ] ."#;
+          owl:someValuesFrom [ a rdfs:Datatype ; owl:datatypeComplementOf xsd:string ] ] ."#;
 
     /// KB, OK, IsKBSatisfiable = true, ReleaseKB.
     const CONSISTENT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -1764,7 +1764,7 @@ fi
         assert_eq!(consistency(DATA).result, Tri::True);
         // ¬rdfs:Literal is written as the empty range, so it is no reason.
         assert_eq!(
-            consistency(&COMPLEMENT.replace("xsd:integer ]", "rdfs:Literal ]")).result,
+            consistency(&COMPLEMENT.replace("xsd:string ]", "rdfs:Literal ]")).result,
             Tri::True
         );
 
@@ -1786,6 +1786,142 @@ fi
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
             "http://example.org/B"
         ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Inputs where Konclude v0.7.0 can miss a clash and no configuration
+    /// helps (see `dl_konclude_live_still_misses_these_clashes`), with a word
+    /// of the reason the bridge gives.
+    const ENGINE_GAPS: [(&str, &str); 5] = [
+        (
+            "ex:p a owl:DatatypeProperty ; owl:propertyDisjointWith ex:q . ex:q a owl:DatatypeProperty .",
+            "disjoint data properties",
+        ),
+        (
+            "ex:p a owl:DatatypeProperty . ex:A owl:hasKey ( ex:p ) .",
+            "owl:hasKey",
+        ),
+        (
+            "ex:A owl:equivalentClass [ a owl:Class ; owl:oneOf ( ex:i ) ] . \
+             ex:p a owl:ObjectProperty , owl:InverseFunctionalProperty .",
+            "owl:oneOf",
+        ),
+        (
+            "ex:p a owl:DatatypeProperty ; rdfs:range [ a rdfs:Datatype ; \
+             owl:onDatatype xsd:float ; owl:withRestrictions ( [ xsd:minExclusive \"0.0\"^^xsd:float ] ) ] .",
+            "xsd:float",
+        ),
+        (
+            "ex:p a owl:DatatypeProperty . ex:a ex:p \"<b/>\"^^rdf:XMLLiteral .",
+            "rdf:XMLLiteral",
+        ),
+    ];
+
+    /// A "consistent" from Konclude over one of [`ENGINE_GAPS`] may be a
+    /// missed clash, and an "inconsistent" over a complement of a number
+    /// datatype a clash that is not there: `unknown`, with the reason.
+    #[test]
+    fn dl_konclude_engine_gaps_are_not_trusted() {
+        let dir = tmp();
+        let store = TripleStore::in_memory().unwrap();
+        let check = |owllink: &str, ttl: &str| {
+            dl_backend::check(
+                &store,
+                &cfg(fake(&dir, owllink, SPARQL, 0)),
+                None,
+                Some(triples(&format!(
+                    "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+                     @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> . \
+                     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+                     @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+                     @prefix ex: <http://example.org/> . ex:a a ex:A . {ttl}"
+                ))),
+                &CheckTask::Consistency,
+                IdentityPolicy::Full,
+            )
+            .unwrap()
+            .0
+        };
+        let inconsistent = CONSISTENT.replace("result=\"true\"", "result=\"false\"");
+        for (ttl, why) in ENGINE_GAPS {
+            let o = check(CONSISTENT, ttl);
+            assert_eq!(o.result, Tri::Unknown, "{why}");
+            let detail = o.detail.unwrap_or_default();
+            assert!(
+                detail.contains(why) && detail.contains("\"yes\""),
+                "{detail}"
+            );
+            assert_eq!(check(&inconsistent, ttl).result, Tri::False, "{why}");
+        }
+        // A nominal without inverses, or counting alone, is no reason.
+        for ttl in [
+            "ex:A owl:equivalentClass [ a owl:Class ; owl:oneOf ( ex:i ) ] . \
+             ex:p a owl:ObjectProperty , owl:FunctionalProperty .",
+            "ex:p a owl:ObjectProperty , owl:InverseFunctionalProperty .",
+        ] {
+            assert_eq!(check(CONSISTENT, ttl).result, Tri::True, "{ttl}");
+        }
+        // ¬xsd:positiveInteger holds no number for Konclude: its clash is
+        // doubted as well.
+        let numeric = "ex:p a owl:DatatypeProperty ; rdfs:range [ a rdfs:Datatype ; \
+                       owl:datatypeComplementOf xsd:positiveInteger ] . ex:a ex:p -1 .";
+        let o = check(&inconsistent, numeric);
+        assert_eq!(o.result, Tri::Unknown);
+        let detail = o.detail.unwrap_or_default();
+        assert!(
+            detail.contains("number datatype") && detail.contains("\"no\""),
+            "{detail}"
+        );
+        assert_eq!(check(CONSISTENT, numeric).result, Tri::Unknown);
+        // A materialisation over it derives nothing.
+        let c = cfg(fake(&dir, OWLLINK, SPARQL, 0));
+        let store = store_with(&format!(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+             @prefix ex: <http://example.org/> . ex:A rdfs:subClassOf ex:B . ex:a a ex:A . {numeric}"
+        ));
+        let run = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full).unwrap();
+        assert!(!run.complete);
+        assert!(
+            run.warnings
+                .iter()
+                .any(|w| w.contains("nothing is derived")),
+            "{:?}",
+            run.warnings
+        );
+        assert!(!ask_in_tg(
+            &store,
+            "http://example.org/a",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://example.org/B"
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Konclude that dies on a signal gives no answer: a check is
+    /// `unknown`, not an error.
+    #[test]
+    fn dl_konclude_crash_is_unknown() {
+        let dir = tmp();
+        let bin = dir.join("Konclude");
+        std::fs::write(&bin, "#!/bin/sh\nkill -SEGV $$\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = TripleStore::in_memory().unwrap();
+        let (o, ..) = dl_backend::check(
+            &store,
+            &cfg(bin),
+            None,
+            Some(triples(DATA)),
+            &CheckTask::Consistency,
+            IdentityPolicy::Full,
+        )
+        .unwrap();
+        assert_eq!(o.result, Tri::Unknown);
+        assert!(
+            o.detail.unwrap_or_default().contains("crashed"),
+            "a crash says so"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2094,9 +2230,14 @@ fi
         ] {
             let o = check(&premise, CheckTask::Consistency);
             assert_eq!(o.result, Tri::Unknown, "{premise}");
-            // The withheld answer is Konclude's wrong "yes".
+            // The withheld answer is Konclude's wrong "yes", or a right "no"
+            // over a complement of a number datatype, which is not trusted
+            // either.
             let detail = o.detail.unwrap_or_default();
-            assert!(detail.contains("\"yes\" answer"), "{premise}: {detail}");
+            assert!(
+                detail.contains("\"yes\" answer") || detail.contains("number datatype"),
+                "{premise}: {detail}"
+            );
         }
         assert_eq!(
             check(
@@ -2120,13 +2261,16 @@ fi
             consistent(&format!("ex:a ex:p 1 . {}", all(&not(one)))),
             Tri::False
         );
+        // Right, but a complement of a number datatype: Konclude reads
+        // ¬xsd:integer as holding no number at all, so its clash is not
+        // trusted either.
         assert_eq!(
             consistent(&format!(
                 "ex:p rdfs:range xsd:integer . ex:a a [ a owl:Restriction ; owl:onProperty ex:p ;
                    owl:someValuesFrom {} ] .",
                 not("xsd:integer")
             )),
-            Tri::False
+            Tri::Unknown
         );
         // Right, but no longer trusted: the price of the fallback.
         assert_eq!(
@@ -2158,7 +2302,7 @@ fi
              @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
              @prefix ex: <http://example.org/> .
              ex:p a owl:DatatypeProperty . ex:A rdfs:subClassOf ex:B . {}",
-            some(&and("xsd:integer", &not("xsd:integer")))
+            some(&and("xsd:string", &not("xsd:string")))
         ));
         let run = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full).unwrap();
         assert!(!run.complete);
@@ -2176,6 +2320,221 @@ fi
             "http://example.org/B"
         ));
     }
+
+    /// Clashes Konclude v0.7.0 finds only with its individuals backend cache
+    /// and individual saturation off, the configuration the bridge passes
+    /// (`dl_konclude_live_still_misses_these_clashes` shows the defaults
+    /// missing them).
+    #[test]
+    fn dl_konclude_live_abox_clashes() {
+        let Some(c) = live() else { return };
+        let store = TripleStore::in_memory().unwrap();
+        let prefixes = "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+            @prefix ex: <http://example.org/> . \
+            ex:p a owl:ObjectProperty . ex:q a owl:ObjectProperty .";
+        let check = |premise: &str, task: CheckTask| {
+            dl_backend::check(
+                &store,
+                &c,
+                None,
+                Some(triples(&format!("{prefixes} {premise}"))),
+                &task,
+                IdentityPolicy::Full,
+            )
+            .unwrap()
+            .0
+            .result
+        };
+        for (premise, want) in [
+            (
+                "ex:p a owl:AsymmetricProperty . ex:a ex:p ex:b . ex:b ex:p ex:a .",
+                Tri::False,
+            ),
+            (
+                "ex:p a owl:AsymmetricProperty . ex:a ex:p ex:b . ex:b ex:p ex:c .",
+                Tri::True,
+            ),
+            (
+                "ex:p a owl:IrreflexiveProperty . ex:a ex:p ex:a .",
+                Tri::False,
+            ),
+            (
+                "ex:p a owl:IrreflexiveProperty . ex:a ex:p ex:b .",
+                Tri::True,
+            ),
+            (
+                "ex:p owl:propertyDisjointWith ex:q . ex:a ex:p ex:b ; ex:q ex:b .",
+                Tri::False,
+            ),
+            (
+                "ex:p owl:propertyDisjointWith ex:q . ex:a ex:p ex:b ; ex:q ex:c .",
+                Tri::True,
+            ),
+            (
+                "ex:a a [ a owl:Class ; owl:complementOf [ a owl:Restriction ; \
+                 owl:onProperty ex:p ; owl:hasSelf true ] ] . ex:a ex:p ex:a .",
+                Tri::False,
+            ),
+            // WebOnt-description-logic-008's shape: the inverse predecessor
+            // may have one p-successor, so it is ex:x, which cannot be ex:B.
+            (
+                "ex:A owl:disjointWith ex:B . ex:x a ex:A , [ a owl:Restriction ; \
+                 owl:onProperty [ owl:inverseOf ex:p ] ; owl:someValuesFrom [ a owl:Class ; \
+                 owl:intersectionOf ( [ a owl:Restriction ; owl:onProperty ex:p ; \
+                 owl:someValuesFrom ex:B ] [ a owl:Restriction ; owl:onProperty ex:p ; \
+                 owl:maxCardinality 1 ] ) ] ] .",
+                Tri::False,
+            ),
+        ] {
+            assert_eq!(check(premise, CheckTask::Consistency), want, "{premise}");
+        }
+        // The bridge's own negations add edges too: ¬p(b, a) is checked by
+        // asserting p(b, a).
+        let not_ba = || CheckTask::Entailment {
+            conclusion: triples(&format!(
+                "{prefixes} [ a owl:NegativePropertyAssertion ; owl:sourceIndividual ex:b ; \
+                 owl:assertionProperty ex:p ; owl:targetIndividual ex:a ] ."
+            )),
+        };
+        assert_eq!(
+            check("ex:p a owl:AsymmetricProperty . ex:a ex:p ex:b .", not_ba()),
+            Tri::True
+        );
+        assert_eq!(check("ex:a ex:p ex:b .", not_ba()), Tri::False);
+        // Entailed assertions are still materialised: the SPARQL runs keep
+        // Konclude's defaults.
+        let Some((store, r)) = live_run(&format!(
+            "{prefixes} ex:p rdfs:subPropertyOf ex:q . ex:q a owl:AsymmetricProperty . \
+             ex:a ex:p ex:b ."
+        )) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            "http://example.org/q",
+            "http://example.org/b"
+        ));
+        // With an irreflexive super-property Konclude's SPARQL interface
+        // crashes; the run says so and keeps what OWLlink reported.
+        let Some((_, r)) = live_run(&format!(
+            "{prefixes} ex:p rdfs:subPropertyOf ex:q . ex:q a owl:IrreflexiveProperty . \
+             ex:a ex:p ex:b ."
+        )) else {
+            return;
+        };
+        let run = r.unwrap();
+        assert!(!run.complete);
+        assert!(
+            run.warnings.iter().any(|w| w.contains("crashed")),
+            "{:?}",
+            run.warnings
+        );
+    }
+
+    /// Konclude's own verdict on `body` (functional syntax, `:` is
+    /// `http://example.org/`), with the bridge's configuration or without.
+    fn raw_consistent(c: &DlConfig, body: &str, bridge_config: bool) -> bool {
+        let dir = tmp();
+        let ofn = dir.join("raw.ofn");
+        std::fs::write(
+            &ofn,
+            format!(
+                "Prefix(:=<http://example.org/>) \
+                 Prefix(owl:=<http://www.w3.org/2002/07/owl#>) \
+                 Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>) \
+                 Ontology(<http://example.org/o> {body})"
+            ),
+        )
+        .unwrap();
+        let mut cmd = std::process::Command::new(&c.konclude_bin);
+        cmd.arg("consistency");
+        if bridge_config {
+            let config = dir.join("config.xml");
+            std::fs::write(
+                &config,
+                open_triplestore::reasoning::konclude_bridge::CONFIG,
+            )
+            .unwrap();
+            cmd.arg("-c").arg(&config);
+        }
+        let out = cmd.arg("-i").arg(&ofn).output().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(text.contains("consistent"), "{body}\n{text}");
+        text.contains("is consistent")
+    }
+
+    /// Konclude v0.7.0-1138's own wrong answers, without the bridge. When one
+    /// of these assertions fails, the Konclude in use got that case right:
+    /// the time to drop the matching workaround (the configuration, or a
+    /// reason in `konclude_bridge` for answering `unknown`).
+    #[test]
+    fn dl_konclude_live_still_misses_these_clashes() {
+        let Some(c) = live() else { return };
+        // Inconsistent; the default configuration says "consistent", the
+        // bridge's finds the clash.
+        for body in [
+            "Declaration(ObjectProperty(:p)) AsymmetricObjectProperty(:p) \
+             ObjectPropertyAssertion(:p :a :b) ObjectPropertyAssertion(:p :b :a)",
+            "Declaration(ObjectProperty(:p)) IrreflexiveObjectProperty(:p) \
+             ObjectPropertyAssertion(:p :a :a)",
+            "Declaration(ObjectProperty(:p)) Declaration(ObjectProperty(:q)) \
+             DisjointObjectProperties(:p :q) ObjectPropertyAssertion(:p :a :b) \
+             ObjectPropertyAssertion(:q :a :b)",
+            "Declaration(ObjectProperty(:r)) Declaration(Class(:A)) Declaration(Class(:B)) \
+             DisjointClasses(:A :B) ClassAssertion(ObjectIntersectionOf(:A \
+             ObjectSomeValuesFrom(ObjectInverseOf(:r) ObjectIntersectionOf(\
+             ObjectSomeValuesFrom(:r :B) ObjectMaxCardinality(1 :r)))) :x)",
+        ] {
+            assert!(raw_consistent(&c, body, false), "default now right: {body}");
+            assert!(!raw_consistent(&c, body, true), "bridge config: {body}");
+        }
+        // Inconsistent, and "consistent" either way: the bridge answers
+        // `unknown` where it would rest on these.
+        for body in [
+            "Declaration(DataProperty(:p)) Declaration(DataProperty(:q)) \
+             DisjointDataProperties(:p :q) DataPropertyAssertion(:p :a \"x\") \
+             DataPropertyAssertion(:q :a \"x\")",
+            "Declaration(DataProperty(:p)) HasKey(owl:Thing () (:p)) \
+             DataPropertyAssertion(:p :a \"x\") DataPropertyAssertion(:p :b \"x\") \
+             DifferentIndividuals(:a :b)",
+            "Declaration(DataProperty(:p)) ClassAssertion(DataSomeValuesFrom(:p \
+             DatatypeRestriction(xsd:float xsd:minExclusive \"0.0\"^^xsd:float \
+             xsd:maxExclusive \"1.401298464324817e-45\"^^xsd:float)) :a)",
+            ONE_EQUALS_TWO,
+        ] {
+            assert!(raw_consistent(&c, body, true), "now right: {body}");
+        }
+        // Consistent, and "inconsistent" either way: -1 is not a positive
+        // integer, but ¬xsd:positiveInteger holds no number for Konclude.
+        let body = "Declaration(DataProperty(:p)) \
+                    DataPropertyRange(:p DataComplementOf(xsd:positiveInteger)) \
+                    DataPropertyAssertion(:p :a \"-1\"^^xsd:integer)";
+        assert!(!raw_consistent(&c, body, true), "now right: {body}");
+    }
+
+    /// The W3C `one=two` case: `a` has three members and is in one-to-one
+    /// correspondence both with `2a` and with twice its size.
+    const ONE_EQUALS_TWO: &str = "\
+        FunctionalObjectProperty(:to_a) InverseFunctionalObjectProperty(:to_a) \
+        FunctionalObjectProperty(:to_bc) InverseFunctionalObjectProperty(:to_bc) \
+        FunctionalObjectProperty(:to_b) InverseFunctionalObjectProperty(:to_b) \
+        FunctionalObjectProperty(:to_c) InverseFunctionalObjectProperty(:to_c) \
+        SubClassOf(:two_a ObjectSomeValuesFrom(:to_bc :bc)) \
+        SubClassOf(:two_a ObjectSomeValuesFrom(:to_a :a)) \
+        SubClassOf(:a ObjectSomeValuesFrom(ObjectInverseOf(:to_a) :two_a)) \
+        SubClassOf(:bc ObjectSomeValuesFrom(ObjectInverseOf(:to_bc) :two_a)) \
+        DisjointClasses(:two_a :a) DisjointClasses(:two_a :bc) \
+        EquivalentClasses(:a ObjectOneOf(:i :j :k)) DifferentIndividuals(:i :j :k) \
+        SubClassOf(:a ObjectSomeValuesFrom(:to_b :b)) \
+        SubClassOf(:b ObjectSomeValuesFrom(ObjectInverseOf(:to_b) :a)) \
+        SubClassOf(:b ObjectSomeValuesFrom(:to_c :c)) \
+        SubClassOf(:c ObjectSomeValuesFrom(ObjectInverseOf(:to_c) :b)) \
+        DisjointClasses(:a :b) DisjointClasses(:a :c) DisjointClasses(:b :c) \
+        EquivalentClasses(:bc ObjectUnionOf(:b :c))";
 
     /// Konclude itself still misreads `∃p.(D ⊓ ¬D)`. When this fails, the
     /// Konclude in use reads it right and the fallback above can be narrowed.

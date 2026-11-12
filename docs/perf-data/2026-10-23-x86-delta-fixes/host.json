@@ -1,0 +1,13 @@
+{
+ "host_os": "Windows 11 Pro 10.0.26300",
+ "cpu": "AMD Ryzen 9 7900X3D 12-Core Processor",
+ "docker_desktop_engine": "28.5.1",
+ "container_limits": "docker run -m 8g --cpus 8 for every measurement; builds -m 16g --cpus 8, CARGO_BUILD_JOBS=8",
+ "container_os": "Debian GNU/Linux 12 (bookworm)",
+ "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+ "build": "cargo build --release --features full,test-utils (profile.release: lto = true; codegen-units of the open-triplestore package 7 instead of 1, to keep this build apart from other worktrees' in a shared target); Criterion: cargo bench --features full, same override",
+ "stores": "Docker named volume (ext4)",
+ "image": "ots-chef-lint:1.94 (the builder image)",
+ "commit_base": "e6f55c62 (develop)",
+ "notes": "The machine was shared with another session's work; every run took the machine lock, and no 9M-quad run was made. The 8-CPU limit makes the capture-off mixed phase slower than the 24-CPU figures of 2026-10-15 (5 200 against 8 550 quads/s): compare within this folder only."
+}
