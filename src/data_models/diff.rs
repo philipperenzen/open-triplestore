@@ -1,21 +1,25 @@
 //! data-model versions.
 
 use super::models::{ChangedTriple, DiffResult, DiffSummary, TripleView};
+use super::registry;
 use crate::store::{escape_sparql_iri, TripleStore};
 use oxigraph::sparql::QueryResults;
 
 /// Compute added, removed, and changed triples between two versions, given
 /// each one's base graph and the graphs holding its content.
 ///
-/// Graphs are compared by their place in their version (see [`graph_place`]):
-/// base graph with base graph, sub-graph `shapes` with sub-graph `shapes`. A
-/// graph only `to` has contributes additions, one only `from` has removals.
-/// Each triple is labelled with that place — `""` for the base graph, which
-/// is how the write endpoints name it too — so the label of a graph is the
-/// same on both sides, whatever the versions are called.
+/// Graphs are compared by their place in their version (see
+/// [`registry::version_graph_name`]): base graph with base graph, sub-graph
+/// `shapes` with sub-graph `shapes`. A graph only `to` has contributes
+/// additions, one only `from` has removals. Each triple is labelled with that
+/// place — `""` for the base graph, which is how the write endpoints name it
+/// too — so the label of a graph is the same on both sides, whatever the
+/// versions are called.
 ///
-/// `filter` narrows the comparison to the sub-graph of that name (a leading
-/// `/` is ignored; a nested sub-graph also answers to its trailing segments).
+/// `filter` narrows the comparison to the sub-graphs of that name, read as
+/// the download and write endpoints read one (see
+/// [`registry::sub_graph_answers_to`]: a leading `/` is ignored, and a nested
+/// sub-graph also answers to its trailing segments).
 pub fn compute_diff(
     store: &TripleStore,
     from_base: &str,
@@ -27,7 +31,7 @@ pub fn compute_diff(
     let place = |base: &str, graphs: &[String]| -> Vec<(String, String)> {
         graphs
             .iter()
-            .map(|g| (graph_place(base, g).to_string(), g.clone()))
+            .map(|g| (registry::version_graph_name(base, g).to_string(), g.clone()))
             .collect()
     };
     let from_placed = place(from_base, from_graphs);
@@ -49,14 +53,8 @@ pub fn compute_diff(
             to_compare.push((from_place.clone(), from_g.clone(), String::new()));
         }
     }
-    if let Some(wanted) = filter.map(|f| f.trim_start_matches('/')) {
-        if !wanted.is_empty() {
-            to_compare.retain(|(place, _, _)| {
-                place
-                    .strip_suffix(wanted)
-                    .is_some_and(|head| head.is_empty() || head.ends_with('/'))
-            });
-        }
+    if let Some(wanted) = filter.filter(|f| !f.trim_start_matches('/').is_empty()) {
+        to_compare.retain(|(place, _, _)| registry::sub_graph_answers_to(place, wanted));
     }
 
     let mut added: Vec<TripleView> = Vec::new();
@@ -162,18 +160,6 @@ pub fn compute_diff(
 
 fn to_suffix_label(iri: &str) -> String {
     iri.rsplit('/').next().unwrap_or(iri).to_string()
-}
-
-/// Where `graph` sits in the version whose base graph is `base`: `""` for the
-/// base graph, the path under it for a sub-graph (`shapes` for
-/// `{base}/shapes`). A version may also list a graph that is not under its
-/// base graph; such a graph goes by its last path segment.
-///
-/// The last segment of the IRI will not do for every graph: for a base graph
-/// it is the version's own name, which no graph of another version shares.
-fn graph_place<'a>(base: &str, graph: &'a str) -> &'a str {
-    super::registry::version_graph_suffix(base, graph)
-        .unwrap_or_else(|| graph.rsplit('/').next().unwrap_or(graph))
 }
 
 /// Flatten every triple across a set of graphs into a de-duplicated list,
