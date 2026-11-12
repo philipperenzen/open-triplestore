@@ -440,7 +440,7 @@ The Studio (under `/shacl` in the UI) generalises the per-dataset gate above int
 
 ### The validation layer (bindings)
 
-A *binding* links a target to a shape graph, stored as RDF in the system graph `urn:system:validation-layer` (`<target> ots:validatedBy <shape-graph graph>`, mirrored as `dct:conformsTo`). A target is a **dataset** (`{base}/datasets/{id}`), a **named graph** (its own IRI), or a **shape graph** (its `graph_iri`, for meta-validation). `kind` is one of `dataset` | `graph` | `shapegraph`.
+A *binding* links a target to a shape graph, stored as RDF in the system graph `urn:system:validation-layer` (`<target> ots:validatedBy <shape-graph graph>`, mirrored as `dct:conformsTo`). A target is a **dataset** (`{base}/dataset/{id}`), a **named graph** (its own IRI), or a **shape graph** (its `graph_iri`, for meta-validation). `kind` is one of `dataset` | `graph` | `shapegraph`.
 
 ```bash
 # List bindings for a target (or reverse — for a shape graph — with ?shape_graph_id=…)
@@ -459,6 +459,8 @@ curl -X DELETE http://localhost:7878/api/shacl/bindings \
 ```
 
 Writing a binding requires write access to the target (a graph binding uses the same ACL as a Graph Store write); the change is recorded in the shape graph's commit history.
+
+Bindings are keyed by IRI, and a dataset id is a slug of its name that is free again once the dataset is deleted. So deleting a dataset, or the organisation that owns it, removes the dataset's bindings and those of every graph the delete removes from the store: a dataset created later under the same name, or a graph written again under a removed graph's name, starts with none. A graph the delete keeps in the store keeps its bindings, which travel with it. Bindings left by a dataset deleted on release 0.8.1 or earlier still apply to the next dataset of that name; `POST /api/admin/versions/sweep` removes them (see [Versioning](/docs/versioning)).
 
 ### Shapes inherited from graphs
 

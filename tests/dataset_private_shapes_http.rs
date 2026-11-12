@@ -1369,3 +1369,230 @@ async fn a_pipeline_attaches_a_graph_on_record_as_private_as_private() {
         assert!(text.contains("SecretShape"), "{home}: {text}");
     }
 }
+
+// ─── Bindings a dataset delete leaves behind ─────────────────────────────────
+//
+// SHACL Studio bindings are triples keyed by IRI: a dataset's by
+// `{base}/dataset/{id}`, a graph's by the graph's own name. A dataset id is a
+// slug of its name, free again once the dataset is deleted, and its own
+// graphs live under `{base}/dataset/{id}/`. So the bindings a delete left
+// behind passed to the next dataset of that name: shapes its owner never
+// chose, that shape its runs and whose Turtle its form manifest serves to
+// its readers.
+
+/// alice's private Library entry, holding `PRIVATE_SHAPES`; returns
+/// `(id, graph_iri)`.
+async fn alice_private_entry(state: &AppState, alice: &str) -> (String, String) {
+    let (st, text) = send(
+        state,
+        Method::POST,
+        "/api/shacl/shape-graphs",
+        Some(alice),
+        json!({ "name": "alice rules", "visibility": "private", "turtle": PRIVATE_SHAPES }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{text}");
+    let entry: Value = serde_json::from_str(&text).unwrap();
+    (
+        entry["id"].as_str().unwrap().to_string(),
+        entry["graph_iri"].as_str().unwrap().to_string(),
+    )
+}
+
+/// `owner` creates a dataset named `name` through the route; returns its id.
+async fn create_dataset_named(
+    state: &AppState,
+    token: &str,
+    owner: &str,
+    name: &str,
+    visibility: &str,
+) -> String {
+    let (st, text) = send(
+        state,
+        Method::POST,
+        "/api/datasets",
+        Some(token),
+        json!({ "name": name, "owner_type": "user", "owner_id": owner,
+                "visibility": visibility }),
+    )
+    .await;
+    assert!(st.is_success(), "create {name}: {st}: {text}");
+    let ds: Value = serde_json::from_str(&text).unwrap();
+    ds["id"].as_str().unwrap().to_string()
+}
+
+/// `user` registers the empty graph `graph` to dataset `id` (so the dataset
+/// created it) and writes `ttl` into it through the Graph Store, which a
+/// non-admin writes by a graph-ACL grant.
+async fn write_own_graph(
+    state: &AppState,
+    (user, token): (&str, &str),
+    id: &str,
+    graph: &str,
+    ttl: &str,
+) {
+    state
+        .auth_db
+        .grant_graph_permission(&format!("w-{user}"), graph, "user", user, "write", "adm")
+        .unwrap();
+    let (st, text) = send(
+        state,
+        Method::POST,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(token),
+        json!({ "graph_iri": graph }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "register {graph}: {text}");
+    let (st, text) = put_data(state, token, graph, ttl).await;
+    assert!(st.is_success(), "write {graph}: {st}: {text}");
+    assert!(!leaks(&text), "{text}");
+}
+
+async fn bind(state: &AppState, token: &str, entry: &str, kind: &str, target: &str) {
+    let (st, text) = send(
+        state,
+        Method::POST,
+        "/api/shacl/bindings",
+        Some(token),
+        json!({ "shape_graph_id": entry, "target": { "kind": kind, "id": target } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "bind {kind} {target}: {text}");
+}
+
+/// alice binds her private entry to her private dataset and to a graph of
+/// its own, then deletes the dataset. bob gets a dataset of the same name,
+/// which gets the same id: a private one he creates himself, or a public one
+/// an administrator creates for him (creating a public dataset takes the
+/// publisher role). He writes a graph under the name alice's had. Neither
+/// binding comes with them: bob, and an anonymous caller on the public one,
+/// get nothing of alice's entry, and her shapes neither refuse his data nor
+/// report on it.
+#[tokio::test]
+async fn a_deleted_datasets_bindings_do_not_pass_to_the_next_dataset_of_its_name() {
+    for public in [false, true] {
+        let (state, admin, alice, bob) = fixture();
+        let (entry, entry_graph) = alice_private_entry(&state, &alice).await;
+        let id = create_dataset_named(&state, &alice, "alice", "Secret Rules", "private").await;
+        let own = format!(
+            "{}/dataset/{id}/records",
+            state.base_url.trim_end_matches('/')
+        );
+        write_own_graph(
+            &state,
+            ("alice", &alice),
+            &id,
+            &own,
+            "<http://ex.org/r1> <http://ex.org/p> \"r\" .",
+        )
+        .await;
+        bind(&state, &alice, &entry, "dataset", &id).await;
+        bind(&state, &alice, &entry, "graph", &own).await;
+
+        let uri = format!("/api/datasets/{id}");
+        let (st, text) = send(&state, Method::DELETE, &uri, Some(&alice), Value::Null).await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{text}");
+
+        let (creator, visibility) = if public {
+            (&admin, "public")
+        } else {
+            (&bob, "private")
+        };
+        let reused = create_dataset_named(&state, creator, "bob", "Secret Rules", visibility).await;
+        assert_eq!(reused, id, "the name's slug is free again");
+        let withheld = |when: &'static str| {
+            let (state, bob, id, entry_graph) =
+                (state.clone(), bob.clone(), id.clone(), entry_graph.clone());
+            async move {
+                let uri = format!("/api/datasets/{id}/effective-shapes");
+                let (st, text) = get(&state, &uri, &bob).await;
+                assert_eq!(st, StatusCode::OK, "{visibility}, {when}: {text}");
+                assert!(
+                    !text.contains(&entry_graph),
+                    "{visibility}, {when}, {uri}: {text}"
+                );
+                let manifest = format!("/api/datasets/{id}/form-manifest");
+                for token in [Some(bob.as_str()), None] {
+                    let (st, text) = send(&state, Method::GET, &manifest, token, Value::Null).await;
+                    assert!(
+                        !leaks(&text),
+                        "{visibility}, {when}, manifest ({token:?}): {text}"
+                    );
+                    assert!(
+                        !text.contains(&entry_graph),
+                        "{visibility}, {when}, manifest ({token:?}): {text}"
+                    );
+                    if token.is_some() || public {
+                        assert_eq!(st, StatusCode::OK, "{visibility}, {when}: {text}");
+                    }
+                }
+                let run = format!("/api/datasets/{id}/validate?test=true");
+                let (st, text) = send(&state, Method::POST, &run, Some(&bob), Value::Null).await;
+                assert!(
+                    !leaks(&text),
+                    "{visibility}, {when}, bob's test run: {st}: {text}"
+                );
+            }
+        };
+        withheld("the same id").await;
+
+        // A Thing breaks alice's shapes, so they would refuse or report it.
+        write_own_graph(
+            &state,
+            ("bob", &bob),
+            &id,
+            &own,
+            "<http://ex.org/b1> a <http://ex.org/Thing> .",
+        )
+        .await;
+        withheld("bob's graph under the old name").await;
+    }
+}
+
+/// Bindings left by a dataset deleted before deletes removed them go with
+/// the admin sweep (`POST /api/admin/versions/sweep`): the dataset's own, and
+/// those of graphs in its namespace that hold no data and no dataset holds.
+/// A graph in that namespace another dataset still holds keeps its
+/// bindings, and so does a dataset that exists.
+#[tokio::test]
+async fn the_admin_sweep_removes_bindings_a_deleted_dataset_left() {
+    use open_triplestore::shacl_studio::bindings;
+    let (state, admin, alice, bob) = fixture();
+    let (_, entry_graph) = alice_private_entry(&state, &alice).await;
+    let base = state.base_url.trim_end_matches('/').to_string();
+    let gone = format!("{base}/dataset/gone-ds");
+    let empty = format!("{base}/dataset/gone-ds/records");
+    let held = format!("{base}/dataset/gone-ds/shared");
+    let live = format!("{base}/dataset/pub-ds");
+    load(
+        &state.store,
+        &held,
+        "<http://ex.org/k> <http://ex.org/p> \"k\" .",
+    );
+    state.auth_db.add_dataset_graph("bob-ds", &held).unwrap();
+    for target in [&gone, &empty, &held, &live] {
+        bindings::add_binding(&state.store, target, &entry_graph).unwrap();
+    }
+
+    let sweep = "/api/admin/versions/sweep";
+    let (st, text) = send(&state, Method::POST, sweep, Some(&bob), Value::Null).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{text}");
+    let (st, text) = send(&state, Method::POST, sweep, Some(&admin), Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let report: Value = serde_json::from_str(&text).unwrap();
+    let mut removed: Vec<String> =
+        serde_json::from_value(report["bindings_removed"].clone()).unwrap_or_default();
+    removed.sort();
+    assert_eq!(removed, [gone.clone(), empty.clone()], "{text}");
+    for target in [&gone, &empty] {
+        assert!(bindings::bindings_for_target(&state.store, target).is_empty());
+    }
+    for target in [&held, &live] {
+        assert_eq!(
+            bindings::bindings_for_target(&state.store, target),
+            std::slice::from_ref(&entry_graph),
+            "{target}"
+        );
+    }
+}

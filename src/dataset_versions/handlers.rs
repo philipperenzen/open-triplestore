@@ -1573,7 +1573,8 @@ pub async fn gc_versions(
 /// operations left behind: every version of a dataset that no longer exists
 /// is purged (graphs, registry, pins); version graphs no registry record
 /// names are dropped; pins of versions the registry no longer holds are
-/// released; builds past their time-to-live are dropped. Admin only.
+/// released; builds past their time-to-live are dropped; the SHACL Studio
+/// bindings a deleted dataset left are removed. Admin only.
 pub async fn admin_sweep_orphans(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1586,6 +1587,40 @@ pub async fn admin_sweep_orphans(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
     Ok(Json(report))
+}
+
+/// Step 5 of [`sweep_orphans`]; returns the targets whose bindings it removed.
+fn sweep_orphan_bindings(state: &AppState) -> Result<Vec<String>, AppError> {
+    use crate::auth::dataset_graph;
+    use crate::shacl_studio::bindings;
+    let db_err = |e: anyhow::Error| AppError::Internal(e.to_string());
+    let dataset_root = format!("{}/dataset/", state.base_url.trim_end_matches('/'));
+    let mut removed = Vec::new();
+    for target in bindings::bound_targets(&state.store).map_err(AppError::from)? {
+        let own = target
+            .strip_prefix(&dataset_root)
+            .filter(|id| !id.is_empty() && !id.contains('/'));
+        let Some(id) =
+            own.or_else(|| dataset_graph::namespace_dataset_id(&state.base_url, &target))
+        else {
+            continue;
+        };
+        if state.auth_db.get_dataset(id).map_err(db_err)?.is_some() {
+            continue;
+        }
+        let graph_left_behind = own.is_some()
+            || (!dataset_graph::graph_holds_data(&state.store, &target)
+                && state
+                    .auth_db
+                    .datasets_with_graph(&target)
+                    .map_err(db_err)?
+                    .is_empty());
+        if graph_left_behind {
+            bindings::remove_target_bindings(&state.store, &target).map_err(AppError::from)?;
+            removed.push(target);
+        }
+    }
+    Ok(removed)
 }
 
 fn sweep_orphans(state: &AppState) -> Result<serde_json::Value, AppError> {
@@ -1659,10 +1694,18 @@ fn sweep_orphans(state: &AppState) -> Result<serde_json::Value, AppError> {
     // 3-4. Stale pins, expired builds.
     let pins_released = materialise::reconcile_pins(&state.store);
     let builds_dropped = materialise::sweep(&state.store);
+    // 5. SHACL Studio bindings of datasets that are gone, which a delete
+    //    before deletes removed them left behind: the dataset's own, and those
+    //    of graphs in its namespace that hold no data and no dataset holds. A
+    //    dataset that reuses the id, or a graph written again under such a
+    //    name, would inherit them. A graph another dataset still holds keeps
+    //    its bindings.
+    let bindings_removed = sweep_orphan_bindings(state)?;
     Ok(json!({
         "purged_datasets": purged_datasets,
         "orphan_graphs_dropped": orphans,
         "pins_released": pins_released,
         "builds_dropped": builds_dropped,
+        "bindings_removed": bindings_removed,
     }))
 }

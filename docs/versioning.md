@@ -97,7 +97,10 @@ Deleting a dataset deletes its versions too (they used to stay behind, and a
 new dataset reusing the id saw them). `POST /api/admin/versions/sweep`
 (admin) cleans up what a deletion before this left: versions of datasets that
 no longer exist, version graphs no record names, pins of versions that are
-gone, expired builds.
+gone, expired builds, and the SHACL Studio bindings of a dataset that no
+longer exists (`bindings_removed`): its own, and those of graphs in its
+namespace that hold no data and no dataset holds. A graph in that namespace
+that another dataset still holds keeps its bindings.
 
 In the web UI, the dataset page's version list has **Compare** and a **Diff** per
 version (from that version to the live graphs, or between two versions): the

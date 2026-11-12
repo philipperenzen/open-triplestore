@@ -346,6 +346,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that dataset's readers. The pipeline now only sets the flag, never clears
   it. Writing into a graph its owner names needs write access to that graph,
   so only administrators and graph-ACL writers could reach this.
+- **A deleted dataset's SHACL bindings no longer pass to the next dataset of
+  its name.** Bindings (`POST /api/shacl/bindings`) are triples keyed by IRI:
+  a dataset's by `{base}/dataset/{id}`, a graph's by its name. A dataset id is
+  a slug of the dataset's name and is free again after a delete, and deleting
+  a dataset or its organisation left its bindings in place. So anyone who
+  then created a dataset of the same name got the deleted dataset's bindings,
+  and with them shape graphs its owner never chose and may not read, even
+  private Library entries: listed in effective shapes, with their Turtle in
+  the form manifest (to anonymous callers too on a public dataset), shaping
+  validation runs and gating writes. The same held for a graph of the deleted
+  dataset written again under the same name. A dataset delete now removes the
+  dataset's bindings and those of every graph it removes from the store,
+  before the dataset itself goes; a graph it keeps keeps its bindings.
+  `POST /api/admin/versions/sweep` now also removes the bindings that earlier
+  deletes left (`bindings_removed` in its report): run it once after
+  upgrading.
 
 ## [0.8.1] — 2026-10-22
 

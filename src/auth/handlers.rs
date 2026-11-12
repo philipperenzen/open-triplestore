@@ -3363,16 +3363,18 @@ pub async fn delete_organisation(
         // directly) that no other dataset uses and that are neither system,
         // SHACL Studio nor model-registry graphs (see
         // `graphs_deletable_with_dataset`).
-        for iri in dataset_graph::graphs_deletable_with_dataset(
+        let removed_graphs = dataset_graph::graphs_deletable_with_dataset(
             &state.store,
             &state.auth_db,
             &state.base_url,
             dataset_id,
             &graph_iris,
             &current_user,
-        ) {
+        );
+        for iri in &removed_graphs {
             let _ = state.store.graph_store_delete(Some(iri.as_str()));
         }
+        remove_deleted_dataset_bindings(&state, dataset_id, &removed_graphs)?;
         // A private graph the loop above kept stays private by its name
         // (`AuthDb::delete_dataset`).
         state
@@ -4343,21 +4345,23 @@ pub async fn delete_dataset(
     let actor = current_user.clone();
     let meta_graph = dataset_graph::dataset_metadata_graph_iri(&dataset_id);
     let write_timeout = std::time::Duration::from_secs(state.write_timeout_secs);
-    tokio::time::timeout(
+    let removed_graphs = tokio::time::timeout(
         write_timeout,
         tokio::task::spawn_blocking(move || {
-            for iri in dataset_graph::graphs_deletable_with_dataset(
+            let removed = dataset_graph::graphs_deletable_with_dataset(
                 &store,
                 &auth_db,
                 &base_url,
                 &del_dataset_id,
                 &graph_iris,
                 &actor,
-            ) {
+            );
+            for iri in &removed {
                 let _ = store.graph_store_delete(Some(iri.as_str()));
             }
             // The DCAT metadata named graph for this dataset.
             let _ = store.graph_store_delete(Some(&meta_graph));
+            removed
         }),
     )
     .await
@@ -4374,6 +4378,7 @@ pub async fn delete_dataset(
         )
     })?;
 
+    remove_deleted_dataset_bindings(&state, &dataset_id, &removed_graphs)?;
     // The store deletes above kept some graphs. Each that the dataset held
     // as private stays private by its name, whatever else names it
     // (`AuthDb::delete_dataset`).
@@ -4386,6 +4391,40 @@ pub async fn delete_dataset(
     purge_dataset_versions(&state, &dataset_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deleted dataset's SHACL Studio bindings go with it: the dataset's own
+/// (`{base}/dataset/{id}`) and those of each graph the delete removed from
+/// the store. Bindings are keyed by IRI, and a dataset id is a slug of its
+/// name that is free again after the delete: left behind, they passed to the
+/// next dataset of that name, or to a graph written again under a removed
+/// graph's name, which then served the bound shapes (form manifest,
+/// effective shapes) to its readers and was gated by them. A graph the delete
+/// keeps keeps its bindings, which travel with it.
+///
+/// Runs before the dataset row goes, so a failure leaves the dataset, and its
+/// id, in place.
+fn remove_deleted_dataset_bindings(
+    state: &AppState,
+    dataset_id: &str,
+    removed_graphs: &[String],
+) -> Result<(), (StatusCode, String)> {
+    let dataset_iri =
+        crate::shacl_studio::bindings::dataset_target_iri(&state.base_url, dataset_id);
+    for target in std::iter::once(&dataset_iri).chain(removed_graphs) {
+        crate::shacl_studio::bindings::remove_target_bindings(&state.store, target).map_err(
+            |e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "The SHACL bindings of <{target}> could not be removed, so dataset \
+                         '{dataset_id}' was kept (its graphs may already be deleted): {e}"
+                    ),
+                )
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// A deleted dataset's versions go with it: snapshot and built graphs,
