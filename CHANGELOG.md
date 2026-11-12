@@ -172,8 +172,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and stale code anchors and versions. The web UI's `frontend/package.json`
   now carries the release version, and `release_prepare.py` keeps it, and the
   Windows guide's sample response, in step.
+- **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
+  names it under access (each row's account IRI), erasure (deleted quads and
+  a purged user's rows stay until retention, and a purge's own profile-graph
+  delete is recorded), data minimisation (leave capture off unless something
+  reads the log), storage limitation, security (the dataset change feed shows
+  the writer's account IRI to the dataset's readers) and the retention
+  checklist.
 
 ### Security
+- **Change-log retention runs on a timer.** `OTS_CHANGE_RETENTION_DAYS`
+  (default 90) and `OTS_CURSOR_TTL_DAYS` were enforced only by a sweep on the
+  write path, once every 1,000 recorded rows, counted in memory from each
+  start. An instance that wrote little kept its rows, each with the writer's
+  account IRI and the added and removed quads, past the window, and for as
+  long as it never reached that count between two starts. A log left behind
+  after capture was switched off was never swept at all. The server now
+  sweeps a minute after it starts and every hour from then on, on every node
+  and over every log there is: one that records, one kept from an earlier run
+  while capture is off, one a restore put in place. A row that nothing holds
+  is gone within an hour of leaving the window; rows at or above the lowest
+  live cursor or delta-version pin stay, as before. A sweep also goes through
+  the log 500 rows (or 16 MiB of payload) at a time and releases it in
+  between, so a write waits for one step, not for the sweep. No new setting.
+  The first sweep after the upgrade deletes whatever is already past the
+  window, so raise `OTS_CHANGE_RETENTION_DAYS` first if those rows are still
+  needed.
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
@@ -209,6 +233,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preview). The new §4.8 documents saved assistant conversations and feedback
   reports; the §7 retention list and `docs/gdpr.md` name all three. Operators
   who published a notice from the earlier template should update theirs.
+- **The change log no longer keeps the values of a user profile.** With
+  change capture on (`OTS_CHANGE_CAPTURE_ENABLED=on`, or on a replication
+  leader or cluster member), every write to a profile graph
+  (`urn:system:user:{id}`) was recorded with its statements. An edit left the
+  old name and contact details in `changes.db`, and a purge left the whole
+  profile there, in the row of its own delete. Admins could read those rows at
+  `GET /api/admin/changes`, followers received them and backups copied them,
+  for `OTS_CHANGE_RETENTION_DAYS` (90 by default) or for as long as a cursor
+  or pin held the row. Rows of a profile graph are now `counts` rows: they
+  give the time, the graph and the number of statements changed, and no
+  statement. A follower fetches the graph for such a row, and after a purge
+  that fetch comes back empty, so an edit or a purge reaches followers as
+  before.
+  At its next start each node also takes out the statements that earlier
+  versions recorded for these graphs, and then compacts the log (`VACUUM`) so
+  that no copy stays in the unused space of the file. A log over 512 MiB is
+  not compacted at start: the server logs a warning, and `VACUUM` on
+  `changes.db` with the server stopped does it. The clean-up skips a profile
+  graph that an administrator registered to a dataset, because that
+  dataset's delta versions are replayed from those rows. Backups already
+  taken keep what they copied. Unchanged: a purge leaves `actor_iri` on the
+  user's earlier rows, and a profile graph's IRI contains the account id.
 - **Purging a user erases their LLM request-log rows and usage events.** Both
   tables carry the user ID without a foreign key, so an admin purge, a
   self-service purge (`POST /api/auth/account/purge`) and an admin delete left
@@ -218,6 +264,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rows left behind by earlier purges stay until retention removes the log
   rows; usage events of deleted users can be removed with
   `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+- **The privacy-notice template documents the change log.** The new
+  `PRIVACY.md` §4.9 covers `changes.db`, which the template still left out.
+  While change capture is on (off by default; always on for a replication
+  leader or cluster member), every write keeps its time, graph and added and
+  removed quads, deleted ones included, and, for writes through SPARQL Update,
+  the Graph Store protocol, RDF Patch, a version restore or a repair, the
+  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). User profile
+  changes are recorded the same way. The section names the readers: admins
+  and replication followers see every row; anyone who may read a dataset,
+  anonymous callers included, sees the account IRI and the quads of the
+  dataset's graphs they may read. It also explains retention
+  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept once every 1,000 recorded rows,
+  keeping every row a live cursor or delta-version pin still needs), says that
+  switching capture off keeps an earlier log, and says that backups carry it.
+  **A user purge does not erase the change log**: the user's rows keep their
+  account IRI and quads until retention, and the purge's deletion of the
+  profile graph is itself recorded with the removed profile values. Operators
+  who published a notice from the earlier template should update theirs.
 
 ## [0.8.1] — 2026-10-22
 

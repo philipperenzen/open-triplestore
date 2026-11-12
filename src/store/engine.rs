@@ -1114,6 +1114,12 @@ impl TripleStore {
         &self.changes
     }
 
+    /// The change log as a handle a background task can keep (the retention
+    /// timer, [`crate::store::changes::spawn_retention_sweep`]).
+    pub fn changes_shared(&self) -> Arc<ChangeLog> {
+        self.changes.clone()
+    }
+
     /// This node's replication role and, on a follower, where it stands
     /// (see [`Replication`]).
     pub fn replication(&self) -> &Replication {
