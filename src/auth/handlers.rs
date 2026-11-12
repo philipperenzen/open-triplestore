@@ -5139,10 +5139,13 @@ pub async fn get_user(
 /// deleted unconditionally, which let an admin delete a super_admin (privilege-
 /// hierarchy bypass), delete themselves, or remove the last super_admin and leave
 /// the install unadministrable. It now enforces the same guards as the maintained
-/// purge path plus a last-super-admin lockout check.
+/// purge path plus a last-super-admin lockout check, and erases the same data:
+/// the account row (with its chat history, feedback, LLM request-log and usage
+/// rows) and the FOAF/vCard profile graph `urn:system:user:{id}`.
 pub async fn delete_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     authz::require_admin(&current_user)?;
@@ -5181,6 +5184,13 @@ pub async fn delete_user(
     // Revoke tokens before removing the row so no session outlives the account.
     let _ = db.revoke_all_user_refresh_tokens(&user_id);
     let _ = db.revoke_all_user_api_tokens(&user_id);
+
+    // Erase the profile graph before the row, as the purge routes do. It holds
+    // the person's name and username and, for a public profile, their email,
+    // phone, organisation, bio and website; without this it outlived the
+    // account in the RDF store.
+    let profile_graph = user_graph::user_profile_graph_iri(&user_id);
+    let _ = state.store.graph_store_delete(Some(&profile_graph));
 
     db.delete_user(&user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
