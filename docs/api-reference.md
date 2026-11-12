@@ -97,7 +97,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/shape-graphs` | **token** | SHACL studio: the caller's shape-graph library. |
 | `POST` | `/api/shacl/shape-graphs` | **token** | SHACL studio: create a shape graph. |
 | `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
-| `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
+| `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The shapes graphs of the datasets the caller may read; a private one only if they may read it. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
 | `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
 | `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |

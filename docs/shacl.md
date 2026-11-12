@@ -341,6 +341,30 @@ for all of this, whether it is still this dataset's shapes graph setting or
 linked from another dataset (see
 [Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
 
+The dataset record follows the same rule, for the IRI alone. `shapes_graph_iri`
+in `GET /api/datasets`, `GET /api/datasets/<id>` and the answer to
+`PUT /api/datasets/<id>` is `null` for a caller who may not read the graph it
+names: a viewer or an anonymous caller of a public dataset whose shapes graph
+is one of its private graphs, and a writer of a dataset that links another
+dataset's private graph they may not read. `shapes_graph_withheld` is `true`
+then, and `false` whenever the caller is given the IRI or there is none, so a
+client can tell a shapes graph it may not read from no shapes graph at all:
+the Validation page shows *Shapes you may not read* and offers no picker that
+would link another graph over it. The rest of the record is unchanged
+(`shacl_on_write` still says whether writes are validated). The same callers do not find the graph in
+`GET /api/shacl/dataset-shape-graphs`, in `GET /api/datasets/<id>/conformance`
+(which also leaves a dataset's own private graphs out of `graphs` and
+`reasoning_sources`), or as the dataset's `dct:conformsTo` in the DCAT
+catalogue. When the private flags cannot be read, nobody but an admin is shown
+to be a reader.
+
+A client that saves the on-write setting sends back the `shapes_graph_iri` it
+read. So that a writer who was served `null` does not unlink a graph they were
+never shown (and leave the gate on with nothing to check against),
+`PUT /api/datasets/<id>/shacl` from such a writer leaves the link as it is when
+the request names no graph. An empty string unlinks it; from a caller who
+reads the graph, `null` does too, as before.
+
 So a stored run also records the shapes graphs it used, and its full report
 is withheld from anyone but an admin who may not read one of them that some
 dataset holds as private when they ask, the dataset's writers included. An

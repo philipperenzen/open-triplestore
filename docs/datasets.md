@@ -384,6 +384,13 @@ with `"dataset": "bridges"`; `validation_shapes` is what validation applies
 be resolved is reported in `unresolved_model` rather than silently ignored. The
 layer is domain-neutral: a model is whatever the data-model registry holds.
 
+The layer is the caller's view. A graph some dataset holds as private is named
+only to who may read it by the rule `/sparql` applies (its dataset's writers,
+graph-ACL readers, admins); for anyone else who may read the dataset it is left
+out of `graphs`, `shape_graphs`, `reasoning_sources` and `validation_shapes`.
+That covers the dataset's own private graphs and another dataset's private
+graph bound here as shapes.
+
 
 ### Following a model update
 
