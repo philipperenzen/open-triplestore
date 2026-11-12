@@ -25,7 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
@@ -45,6 +45,20 @@ pub const DEFAULT_MAX_PAYLOAD: usize = 250_000;
 const GZIP_ABOVE: usize = 64 * 1024;
 /// Rows between retention sweeps on the write path.
 const SWEEP_EVERY_ROWS: u64 = 1_000;
+/// What one step of a sweep reads while it holds the log's connection: this
+/// many rows, or rows carrying this many bytes of payload, whichever comes
+/// first. A sweep is as many steps as the log is long, so how long a write
+/// can wait for the connection depends on these and not on the log's size.
+const SWEEP_STEP_ROWS: usize = 500;
+const SWEEP_STEP_BYTES: i64 = 16 * 1024 * 1024;
+/// How long the timed sweep leaves the connection to writers and readers
+/// between two steps.
+const SWEEP_PAUSE: std::time::Duration = std::time::Duration::from_millis(2);
+/// The timed sweep ([`spawn_retention_sweep`]): first this long after the
+/// start, then at this interval. Retention counts in days, so a row
+/// outlives its window by an hour at most.
+pub const SWEEP_START_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3_600);
 
 /// `(row, extent, added, removed, scope)` of a row left pending.
 type PendingRow = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>, String);
@@ -55,7 +69,9 @@ type PendingRow = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>, String);
 pub enum Extent {
     /// The payload is the complete net delta.
     Full,
-    /// Counts are exact, the payload was over the cap and is not stored.
+    /// Counts are exact and no payload is stored: it was over the cap, or
+    /// the graph is one whose payload is withheld
+    /// ([`is_payload_withheld_graph`]).
     Counts,
     /// Nothing about the delta is known; a chain cannot cross this row.
     Unknown,
@@ -429,6 +445,9 @@ pub struct ChangeLog {
     retention_days: u64,
     cursor_ttl_days: u64,
     rows_since_sweep: AtomicU64,
+    /// One sweep at a time. The write path's sweep steps aside for one that
+    /// is running; the timed one waits its turn.
+    sweeping: Mutex<()>,
     path: Option<std::path::PathBuf>,
     /// Woken after every finalised write: the long-poll on the change
     /// endpoint waits on it.
@@ -531,6 +550,51 @@ pub fn is_version_snapshot_graph(graph: &str) -> bool {
         .split_once("/dataset/")
         .and_then(|(_, rest)| rest.split_once('/'))
         .is_some_and(|(_, rest)| rest.starts_with("version/"))
+}
+
+/// A user's profile graph (`urn:system:user:{id}`): its rows never carry a
+/// payload, whatever their size. The graph holds personal data — a name, and
+/// the contact details of a public profile — and a payload would keep every
+/// value the profile ever had: the old ones after an edit, all of them after
+/// the purge that erases the account, for as long as the row lives, on every
+/// follower that tails the log and in every backup of it. The row keeps its
+/// exact counts ([`Extent::Counts`]), which is all a replication follower
+/// needs: it fetches the graph, and after a purge that fetch finds nothing.
+/// No chain covers such a graph unless an administrator registered one to a
+/// dataset, and then the next version is a checkpoint.
+pub fn is_payload_withheld_graph(graph: &str) -> bool {
+    graph.starts_with(crate::auth::user_graph::PROFILE_GRAPH_PREFIX)
+}
+
+/// A log up to this size is compacted once payloads were taken out of it
+/// ([`ChangeLog::withhold_recorded_payloads`]). Compacting rewrites the whole
+/// file, holds every write up while it runs, and needs up to twice the
+/// file's size in free space: seconds for a log of this size, minutes for
+/// one of gigabytes, which is not a wait to put in front of a start.
+pub const COMPACT_UP_TO_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What [`ChangeLog::withhold_recorded_payloads`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withheld {
+    /// Rows whose payload was taken out.
+    pub rows: usize,
+    pub compaction: Compaction,
+}
+
+/// Whether the log's file was written anew after payloads were taken out of
+/// its rows, which is what removes the last copy of them from the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Compaction {
+    /// No payload was taken out, now or by a call whose compaction failed.
+    NotNeeded,
+    Done,
+    /// The log is this many bytes, over [`COMPACT_UP_TO_BYTES`]: the rows
+    /// are clean, the file's unused space may still hold copies, and
+    /// `VACUUM` with the server stopped is what removes them.
+    TooLarge(u64),
+    /// SQLite refused (no space, a reader holding the file); the next call
+    /// tries again.
+    Failed(String),
 }
 
 /// Hours after which rows of [`is_ephemeral_graph`] graphs are dropped.
@@ -709,6 +773,7 @@ impl ChangeLog {
             retention_days: crate::config::CHANGE_RETENTION_DAYS.get(),
             cursor_ttl_days: crate::config::CURSOR_TTL_DAYS.get(),
             rows_since_sweep: AtomicU64::new(0),
+            sweeping: Mutex::new(()),
             path,
             rows_notify: tokio::sync::Notify::new(),
             cursor_moves: (Mutex::new(0), std::sync::Condvar::new()),
@@ -730,6 +795,7 @@ impl ChangeLog {
             retention_days: 0,
             cursor_ttl_days: 0,
             rows_since_sweep: AtomicU64::new(0),
+            sweeping: Mutex::new(()),
             path: None,
             rows_notify: tokio::sync::Notify::new(),
             cursor_moves: (Mutex::new(0), std::sync::Condvar::new()),
@@ -738,10 +804,14 @@ impl ChangeLog {
 
     /// The off switch beside a persistent store whose log was never
     /// written: it records nothing, but knows where the log would live, so a
-    /// restore can put a backup's log there ([`Self::restore_from`]).
+    /// restore can put a backup's log there ([`Self::restore_from`]). Such a
+    /// log is not opened before the next start, but its rows age meanwhile,
+    /// so the retention window is kept for the sweep
+    /// ([`Self::sweep_unopened`]).
     fn disabled_at(dir: Option<&Path>) -> Self {
         Self {
             path: dir.map(|d| d.join("changes").join("changes.db")),
+            retention_days: crate::config::CHANGE_RETENTION_DAYS.get(),
             ..Self::disabled()
         }
     }
@@ -977,10 +1047,21 @@ impl ChangeLog {
 
     /// What a row's finalisation writes, taken from its delta before the
     /// sequence section: the payload serialised, or none when it is over
-    /// the cap.
+    /// the cap or the graph's payload is withheld. Every row's payload comes
+    /// through here, so a withheld one reaches neither the log's file nor
+    /// its write-ahead log.
     fn row_values(&self, delta: GraphDelta) -> RowValues {
+        let changed = delta.added.len() + delta.removed.len();
+        // A write that changed nothing stays an empty full row: there is no
+        // value in it, and a follower has nothing to fetch.
+        let withheld = changed > 0
+            && delta
+                .graph
+                .as_deref()
+                .is_some_and(is_payload_withheld_graph);
         let (extent, added, removed) = match delta.extent {
-            Extent::Full if delta.added.len() + delta.removed.len() <= self.max_payload => (
+            Extent::Full if withheld => (Extent::Counts, None, None),
+            Extent::Full if changed <= self.max_payload => (
                 Extent::Full,
                 encode_quads(&delta.added),
                 encode_quads(&delta.removed),
@@ -1063,7 +1144,17 @@ impl ChangeLog {
         if self.rows_since_sweep.fetch_add(written, Ordering::Relaxed) + written >= SWEEP_EVERY_ROWS
         {
             self.rows_since_sweep.store(0, Ordering::Relaxed);
-            let _ = self.sweep();
+            // This write holds the finalisation turn, so it neither pauses
+            // between steps nor queues behind a sweep that is already
+            // running (the timed one): that sweep covers these rows too.
+            let free = match self.sweeping.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(_one) = free {
+                let _ = self.sweep_in_steps(std::time::Duration::ZERO, None);
+            }
         }
     }
 
@@ -1487,81 +1578,103 @@ impl ChangeLog {
     /// chain covers, go after a day regardless. The highest sequence number
     /// deleted from any other graph is remembered, so a range that reaches
     /// below it is known to have holes. Returns the number of rows deleted.
-    pub fn sweep(&self) -> Result<usize, StoreError> {
-        let Some(conn) = self.lock() else {
-            return Ok(0);
-        };
-        let now_s = now();
-        // The sequence must survive a sweep that empties the table.
-        let _ = conn.execute(
-            "UPDATE meta SET value = ?1 WHERE key = 'next_seq'",
-            params![self.next_seq.load(Ordering::Relaxed).to_string()],
-        );
-        conn.execute("DELETE FROM cursors WHERE expires_at < ?1", params![now_s])
-            .map_err(sql_err)?;
+    ///
+    /// Two things sweep. The write path, every [`SWEEP_EVERY_ROWS`] recorded
+    /// rows — a count kept in memory, so one that starts again at every
+    /// open, that an instance writing little reaches late or never, and that
+    /// a log which no longer records never reaches at all. And the server's
+    /// timer ([`spawn_retention_sweep`]), which calls this and is what makes
+    /// the retention window and the cursor time-to-live hold whatever the
+    /// traffic.
+    ///
+    /// A sweep reads the table once, in steps of [`SWEEP_STEP_ROWS`] rows or
+    /// [`SWEEP_STEP_BYTES`] of payload, and takes the connection for one
+    /// step at a time: a write waits for a step, not for the log. Called
+    /// from here it also leaves the connection alone for [`SWEEP_PAUSE`]
+    /// between two steps, which is when a waiting writer or reader gets it.
+    /// Blocking; on the server, call it from the blocking pool.
+    ///
+    /// Raising `stop` ends the sweep after the step it is in; what it did
+    /// not reach waits for the next one. The timer raises it when the
+    /// process goes down, so a long sweep does not hold up the exit.
+    pub fn sweep_until(&self, stop: &AtomicBool) -> Result<usize, StoreError> {
+        let _one = self.sweeping.lock().unwrap_or_else(|p| p.into_inner());
+        self.sweep_in_steps(SWEEP_PAUSE, Some(stop))
+    }
 
-        // Snapshot and staging graphs: a day, pins or not.
-        let day = (chrono::Utc::now() - chrono::Duration::hours(EPHEMERAL_HOURS)).to_rfc3339();
-        let ephemeral: Vec<i64> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT row, graph_iri FROM changes WHERE state != 'pending' AND created_at < ?1 \
-                     AND (graph_iri LIKE 'urn:ots:restore:%' OR graph_iri LIKE '%/version/%')",
-                )
-                .map_err(sql_err)?;
-            let rows = stmt
-                .query_map(params![day], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                })
-                .map_err(sql_err)?;
-            rows.flatten()
-                .filter(|(_, g)| is_ephemeral_graph(g))
-                .map(|(row, _)| row)
-                .collect()
-        };
-        let mut deleted = 0usize;
-        for row in &ephemeral {
-            deleted += conn
-                .execute("DELETE FROM changes WHERE row = ?1", params![row])
-                .map_err(sql_err)?;
+    /// The sweep itself; the caller holds `sweeping`.
+    fn sweep_in_steps(
+        &self,
+        pause: std::time::Duration,
+        stop: Option<&AtomicBool>,
+    ) -> Result<usize, StoreError> {
+        let stopped = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
+        let cuts = SweepCuts::at(chrono::Utc::now(), self.retention_days);
+        if self.conn.is_none() {
+            return self.sweep_unopened(&cuts, &stopped);
         }
-
-        let lowest: Option<i64> = conn
-            .query_row(
-                "SELECT MIN(seq) FROM (SELECT seq FROM cursors UNION ALL SELECT seq FROM pins)",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(sql_err)?;
-        let cutoff =
-            (chrono::Utc::now() - chrono::Duration::days(self.retention_days as i64)).to_rfc3339();
-        // Rows a cursor or pin still needs are never touched; below the
-        // lowest one, age decides.
-        let pin = lowest.unwrap_or(i64::MAX);
-        let highest: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(seq) FROM changes WHERE state != 'pending' AND created_at < ?1 \
-                 AND seq < ?2",
-                params![cutoff, pin],
-                |r| r.get(0),
-            )
-            .map_err(sql_err)?;
-        if let Some(h) = highest {
-            if h > meta_i64(&conn, "max_deleted_seq") {
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('max_deleted_seq', ?1)",
-                    params![h.to_string()],
-                )
-                .map_err(sql_err)?;
+        let caps = (SWEEP_STEP_ROWS, SWEEP_STEP_BYTES);
+        let mut deleted = 0usize;
+        let mut after = 0i64;
+        loop {
+            let step = {
+                let Some(mut conn) = self.lock() else { break };
+                // Read under the connection: a write stores it there.
+                let next_seq = self.next_seq.load(Ordering::Relaxed);
+                sweep_step(&mut conn, next_seq, after, &cuts, caps)?
+            };
+            deleted += step.deleted;
+            let Some(row) = step.resume else { break };
+            if stopped() {
+                break;
+            }
+            after = row;
+            if !pause.is_zero() {
+                std::thread::sleep(pause);
             }
         }
-        deleted += conn
-            .execute(
-                "DELETE FROM changes WHERE state != 'pending' AND created_at < ?1 \
-                 AND (seq IS NULL OR seq < ?2)",
-                params![cutoff, pin],
-            )
+        Ok(deleted)
+    }
+
+    /// Sweep a log file this run never opened: capture is off and the file
+    /// was not there at the start, so a restore put a backup's log in place
+    /// ([`Self::restore_from`]), to be read from the next start. Its rows
+    /// are as old as they were in the backup and age like any others; a
+    /// process that stays up must not keep them past the window. Nothing
+    /// else has the file open — `restore_from`, which replaces it, takes
+    /// `sweeping` first — and a log that was never written stays absent.
+    fn sweep_unopened(
+        &self,
+        cuts: &SweepCuts,
+        stopped: &dyn Fn() -> bool,
+    ) -> Result<usize, StoreError> {
+        let Some(path) = self.path.as_deref().filter(|p| p.is_file()) else {
+            return Ok(0);
+        };
+        let mut conn =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .map_err(sql_err)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(sql_err)?;
+        // The sequence as an open would compute it.
+        let max_seq: i64 = conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM changes", [], |r| {
+                r.get(0)
+            })
+            .map_err(sql_err)?;
+        let next_seq = meta_i64(&conn, "next_seq").max(max_seq + 1);
+        let caps = (SWEEP_STEP_ROWS, SWEEP_STEP_BYTES);
+        let mut deleted = 0usize;
+        let mut after = 0i64;
+        loop {
+            let step = sweep_step(&mut conn, next_seq, after, cuts, caps)?;
+            deleted += step.deleted;
+            let Some(row) = step.resume else { break };
+            if stopped() {
+                break;
+            }
+            after = row;
+        }
         Ok(deleted)
     }
 
@@ -2017,6 +2130,155 @@ impl ChangeLog {
         disagree
     }
 
+    /// Remove the payloads the log holds for graphs whose payload is withheld
+    /// ([`is_payload_withheld_graph`]): the rows a version before the rule
+    /// recorded, and the ones the log of a restored backup brought back.
+    /// Each becomes a `counts` row, so a follower still behind it fetches
+    /// the graph instead of applying a delta that is no longer there.
+    ///
+    /// `keep` names the graphs to leave alone: a withheld graph an
+    /// administrator registered to a dataset, whose delta versions are
+    /// replayed from exactly these rows.
+    ///
+    /// Taking a value out of its row does not take it out of the file.
+    /// SQLite frees the space without clearing it, which `secure_delete`
+    /// mends for the row itself; but a page that was reorganised while the
+    /// row sat in it still holds an older copy of the row in its unused
+    /// space, and that only goes when the file is written anew. So the log
+    /// is compacted (`VACUUM`) afterwards when it is small enough to do
+    /// that at start ([`COMPACT_UP_TO_BYTES`]), and the write-ahead log,
+    /// which holds the replaced pages until then, is emptied. A compaction
+    /// that fails is tried again at the next call; a log over the size is
+    /// left to the operator, and the result says so.
+    pub fn withhold_recorded_payloads(&self, keep: &[String]) -> Result<Withheld, StoreError> {
+        self.withhold_recorded(keep, COMPACT_UP_TO_BYTES)
+    }
+
+    fn withhold_recorded(
+        &self,
+        keep: &[String],
+        compact_up_to: u64,
+    ) -> Result<Withheld, StoreError> {
+        let Some(conn) = self.lock() else {
+            return Ok(Withheld {
+                rows: 0,
+                compaction: Compaction::NotNeeded,
+            });
+        };
+        let prefix = crate::auth::user_graph::PROFILE_GRAPH_PREFIX;
+        // The IRIs that start with the prefix, as a range the graph index
+        // serves: up to the prefix with its last character raised by one.
+        let mut end = prefix.to_string();
+        if let Some(last) = end.pop() {
+            end.push(char::from_u32(last as u32 + 1).unwrap_or(char::MAX));
+        }
+        let rows: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT row, graph_iri FROM changes WHERE graph_iri >= ?1 AND graph_iri < ?2 \
+                     AND (length(added) > 0 OR length(removed) > 0)",
+                )
+                .map_err(sql_err)?;
+            let found = stmt
+                .query_map(params![prefix, end], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(sql_err)?;
+            found
+                .flatten()
+                .filter(|(_, g)| is_payload_withheld_graph(g) && !keep.contains(g))
+                .map(|(row, _)| row)
+                .collect()
+        };
+        let mut changed = 0;
+        if !rows.is_empty() {
+            let secure: i64 = conn
+                .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+                .map_err(sql_err)?;
+            conn.execute_batch("PRAGMA secure_delete = ON")
+                .map_err(sql_err)?;
+            let rewrite = || -> rusqlite::Result<usize> {
+                let tx = conn.unchecked_transaction()?;
+                let mut changed = 0;
+                for row in &rows {
+                    changed += tx.execute(
+                        "UPDATE changes SET added = NULL, removed = NULL, \
+                         extent = CASE extent WHEN 'full' THEN 'counts' ELSE extent END \
+                         WHERE row = ?1",
+                        params![row],
+                    )?;
+                }
+                // With the rows, so a stop before the compaction is seen.
+                tx.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('compact_pending', ?1)",
+                    params![now()],
+                )?;
+                tx.commit()?;
+                Ok(changed)
+            };
+            let rewritten = rewrite();
+            // The setting is the connection's: back to what the write path had.
+            let before = match secure {
+                0 => "OFF",
+                2 => "FAST",
+                _ => "ON",
+            };
+            let _ = conn.execute_batch(&format!("PRAGMA secure_delete = {before}"));
+            changed = rewritten.map_err(sql_err)?;
+        }
+        let pending: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key = 'compact_pending'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(sql_err)?
+            > 0;
+        if !pending {
+            return Ok(Withheld {
+                rows: changed,
+                compaction: Compaction::NotNeeded,
+            });
+        }
+        let pragma = |name: &str| -> u64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0)
+                .max(0) as u64
+        };
+        let bytes = pragma("page_count") * pragma("page_size");
+        let compaction = if bytes > compact_up_to {
+            Compaction::TooLarge(bytes)
+        } else {
+            match conn.execute_batch("VACUUM") {
+                Ok(()) => Compaction::Done,
+                Err(e) => Compaction::Failed(e.to_string()),
+            }
+        };
+        if !matches!(compaction, Compaction::Failed(_)) {
+            let _ = conn.execute("DELETE FROM meta WHERE key = 'compact_pending'", []);
+        }
+        // Until a checkpoint the file still holds its pages as they were. A
+        // reader that has the log open (a backup under way) can keep this
+        // one from finishing; the next checkpoint SQLite runs completes it.
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        Ok(Withheld {
+            rows: changed,
+            compaction,
+        })
+    }
+
+    /// Give the row at `seq` a payload, as a version before
+    /// [`is_payload_withheld_graph`] recorded one for a profile graph.
+    #[cfg(test)]
+    pub(crate) fn plant_payload(&self, seq: i64, added: &[Quad], removed: &[Quad]) {
+        let conn = self.lock().expect("a log to write to");
+        conn.execute(
+            "UPDATE changes SET extent = 'full', added = ?2, removed = ?3 WHERE seq = ?1",
+            params![seq, encode_quads(added), encode_quads(removed)],
+        )
+        .expect("the row takes the payload");
+    }
+
     /// Mint a new epoch: the store was replaced wholesale (a quarantine and
     /// rebuild, the restore of a backup that holds no log), so no chain from
     /// before it may be extended across it. Nothing to do without a log.
@@ -2187,6 +2449,9 @@ impl ChangeLog {
         let Some(path) = &self.path else {
             return Ok(false);
         };
+        // Not while a sweep has the file being replaced open
+        // ([`Self::sweep_unopened`]).
+        let _one = self.sweeping.lock().unwrap_or_else(|p| p.into_inner());
         let io = |e: std::io::Error| StoreError::Other(format!("change log: {e}"));
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
@@ -2220,6 +2485,199 @@ pub struct PreparedRestore {
     pub dropped_rows: usize,
     /// The graphs of the builds the copy recorded, to drop from the store.
     pub built_graphs: Vec<String>,
+}
+
+/// The instants one sweep measures every row against, fixed when it starts so
+/// that all its steps decide alike.
+struct SweepCuts {
+    /// Cursors that expired before this stop pinning.
+    now: String,
+    /// Rows of snapshot and staging graphs older than this go.
+    ephemeral: String,
+    /// Every other row older than this goes, below the lowest cursor or pin.
+    /// Empty — older than nothing — for a window too long to subtract.
+    retention: String,
+}
+
+impl SweepCuts {
+    fn at(now: chrono::DateTime<chrono::Utc>, retention_days: u64) -> Self {
+        let retention = i64::try_from(retention_days)
+            .ok()
+            .and_then(chrono::Duration::try_days)
+            .and_then(|window| now.checked_sub_signed(window))
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        Self {
+            now: now.to_rfc3339(),
+            ephemeral: (now - chrono::Duration::hours(EPHEMERAL_HOURS)).to_rfc3339(),
+            retention,
+        }
+    }
+}
+
+/// What one step of a sweep did.
+struct SweepStep {
+    deleted: usize,
+    /// The row the next step goes on after; `None` once the table is through.
+    resume: Option<i64>,
+}
+
+/// One step of a sweep, in one transaction: the rows above `after` (0 for
+/// the first step, which is also the one that drops the expired cursors), in
+/// the order they were written, until `caps` — a number of rows, or of
+/// payload bytes those rows carry — is reached. A step that deletes rows
+/// persists `next_seq` with them: the sequence must survive a sweep that
+/// empties the table. A step that finds nothing to delete writes nothing.
+///
+/// Each row is judged on its own — nothing here assumes that a later row is
+/// a younger one, which a clock set back would break. Reading a row's age
+/// means reading past its payload, which is why the payload counts towards
+/// the cap whether or not the row goes.
+fn sweep_step(
+    conn: &mut Connection,
+    next_seq: i64,
+    after: i64,
+    cuts: &SweepCuts,
+    caps: (usize, i64),
+) -> Result<SweepStep, StoreError> {
+    let (max_rows, max_bytes) = caps;
+    let column = |e: rusqlite::types::FromSqlError| StoreError::Other(format!("change log: {e}"));
+    let tx = conn.transaction().map_err(sql_err)?;
+    if after == 0 {
+        tx.execute(
+            "DELETE FROM cursors WHERE expires_at < ?1",
+            params![cuts.now],
+        )
+        .map_err(sql_err)?;
+    }
+    // Rows a cursor or pin still needs are never touched; below the lowest
+    // one, age decides. Read in every step, so a cursor or pin set while the
+    // sweep runs holds from the next step on.
+    let floor: i64 = tx
+        .query_row(
+            "SELECT MIN(seq) FROM (SELECT seq FROM cursors UNION ALL SELECT seq FROM pins)",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .map_err(sql_err)?
+        .unwrap_or(i64::MAX);
+
+    let mut doomed: Vec<i64> = Vec::new();
+    let mut highest: Option<i64> = None;
+    let mut resume = None;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "SELECT row, seq, graph_iri, state, created_at, \
+                 COALESCE(length(added), 0) + COALESCE(length(removed), 0) \
+                 FROM changes WHERE row > ?1 ORDER BY row LIMIT ?2",
+            )
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query(params![after, max_rows as i64])
+            .map_err(sql_err)?;
+        let (mut read, mut bytes) = (0usize, 0i64);
+        while let Some(r) = rows.next().map_err(sql_err)? {
+            let row: i64 = r.get(0).map_err(sql_err)?;
+            let seq: Option<i64> = r.get(1).map_err(sql_err)?;
+            // Borrowed from the row: a sweep reads every row of the log.
+            let graph = r
+                .get_ref(2)
+                .map_err(sql_err)?
+                .as_str_or_null()
+                .map_err(column)?;
+            let state = r.get_ref(3).map_err(sql_err)?.as_str().map_err(column)?;
+            let created = r.get_ref(4).map_err(sql_err)?.as_str().map_err(column)?;
+            bytes += r.get::<_, i64>(5).map_err(sql_err)?;
+            read += 1;
+            if state != "pending" {
+                if graph.is_some_and(is_ephemeral_graph) && created < cuts.ephemeral.as_str() {
+                    // Snapshot and staging graphs: a day, pins or not, and
+                    // no chain covers them, so their going is not a gap.
+                    doomed.push(row);
+                } else if created < cuts.retention.as_str() && seq.is_none_or(|s| s < floor) {
+                    highest = highest.max(seq);
+                    doomed.push(row);
+                }
+            }
+            if read >= max_rows || bytes >= max_bytes {
+                resume = Some(row);
+                break;
+            }
+        }
+    }
+    if let Some(h) = highest {
+        if h > meta_i64(&tx, "max_deleted_seq") {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('max_deleted_seq', ?1)",
+                params![h.to_string()],
+            )
+            .map_err(sql_err)?;
+        }
+    }
+    let mut deleted = 0usize;
+    if !doomed.is_empty() {
+        let _ = tx.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'next_seq'",
+            params![next_seq.to_string()],
+        );
+        let mut delete = tx
+            .prepare_cached("DELETE FROM changes WHERE row = ?1")
+            .map_err(sql_err)?;
+        for row in &doomed {
+            deleted += delete.execute(params![row]).map_err(sql_err)?;
+        }
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(SweepStep { deleted, resume })
+}
+
+/// Run the retention sweep on a timer: `first` after the call, then every
+/// `every`, for as long as the process lives ([`SWEEP_START_DELAY`] and
+/// [`SWEEP_INTERVAL`] on the server). Each run goes to the blocking pool —
+/// it holds the log's connection lock a step at a time — and one that fails
+/// is logged and tried again at the next tick.
+///
+/// It runs on every node and for every log there is: a log that records, a
+/// log an earlier run left behind (capture off: readable, never written, so
+/// the write path's count never moves), a log a restore put in place. A
+/// replication follower is no exception. What it applies comes from the
+/// leader's log, and where it stands is kept beside the store and as a
+/// cursor on the leader, so nothing it still has to apply is in its own log;
+/// what its own log is read for — a change feed, a trigger, a delta version —
+/// holds a cursor or a pin there, which the sweep never goes below.
+pub fn spawn_retention_sweep(
+    log: std::sync::Arc<ChangeLog>,
+    first: std::time::Duration,
+    every: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    /// Raises the flag when the timer's task is dropped.
+    struct RaiseOnDrop(std::sync::Arc<AtomicBool>);
+    impl Drop for RaiseOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    tokio::spawn(async move {
+        // The task is dropped when the runtime shuts down, which then waits
+        // for the blocking pool: a sweep in flight stops after its step.
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let _raise = RaiseOnDrop(stop.clone());
+        tokio::time::sleep(first).await;
+        let mut ticks = tokio::time::interval(every);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // The first tick is immediate.
+            ticks.tick().await;
+            let (log, stop) = (log.clone(), stop.clone());
+            match tokio::task::spawn_blocking(move || log.sweep_until(&stop)).await {
+                Ok(Ok(0)) => {}
+                Ok(Ok(n)) => tracing::info!("change log: retention swept {n} row(s)"),
+                Ok(Err(e)) => tracing::warn!("change log: the retention sweep failed: {e}"),
+                Err(e) => tracing::warn!("change log: the retention sweep did not finish: {e}"),
+            }
+        }
+    })
 }
 
 /// Copy the whole of `src` into `dst`, in one step of SQLite's online backup
@@ -2501,6 +2959,13 @@ mod tests {
 
     fn log() -> ChangeLog {
         ChangeLog::in_memory().unwrap()
+    }
+
+    impl ChangeLog {
+        /// A whole sweep, as the timer runs one.
+        fn sweep(&self) -> Result<usize, StoreError> {
+            self.sweep_until(&AtomicBool::new(false))
+        }
     }
 
     #[test]
@@ -2977,6 +3442,213 @@ mod tests {
         assert!(!is_version_snapshot_graph("http://x/data/version/1"));
     }
 
+    /// Make the rows with these sequence numbers `days` old.
+    fn age(log: &ChangeLog, seqs: std::ops::RangeInclusive<i64>, days: i64) {
+        let then = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let conn = log.lock().unwrap();
+        conn.execute(
+            "UPDATE changes SET created_at = ?1 WHERE seq BETWEEN ?2 AND ?3",
+            params![then, seqs.start(), seqs.end()],
+        )
+        .unwrap();
+    }
+
+    fn seqs(log: &ChangeLog) -> Vec<i64> {
+        log.rows_after(0, 10_000)
+            .iter()
+            .filter_map(|r| r.seq)
+            .collect()
+    }
+
+    /// The write path sweeps every `SWEEP_EVERY_ROWS` recorded rows, counted
+    /// from the open; the timer waits for no write at all.
+    #[tokio::test]
+    async fn the_timer_sweeps_old_rows_without_a_thousand_writes() {
+        let mut log = log();
+        log.retention_days = 90;
+        for i in 0..4 {
+            write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
+        }
+        age(&log, 1..=2, 91);
+        assert!(log.rows_since_sweep.load(Ordering::Relaxed) < SWEEP_EVERY_ROWS);
+        assert_eq!(seqs(&log), [1, 2, 3, 4], "the write path has not swept");
+
+        let log = std::sync::Arc::new(log);
+        let timer = spawn_retention_sweep(
+            log.clone(),
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(20),
+        );
+        let until = |left: Vec<i64>| {
+            let log = log.clone();
+            async move {
+                for _ in 0..3_000 {
+                    if seqs(&log) == left {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("the timer left {:?}, not {left:?}", seqs(&log));
+            }
+        };
+        until(vec![3, 4]).await;
+        // And at a later tick, what has aged out since.
+        age(&log, 3..=3, 91);
+        until(vec![4]).await;
+        timer.abort();
+        assert_eq!(log.max_deleted_seq(), 3);
+        assert_eq!(log.status().next_seq, 5);
+    }
+
+    #[test]
+    fn a_log_left_behind_with_capture_off_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let log = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+            for i in 0..3 {
+                write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
+            }
+            age(&log, 1..=2, 91);
+            // A reader that went away longer ago than a cursor lives.
+            log.set_cursor("gone", 1, None).unwrap();
+            let yesterday = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+            let conn = log.lock().unwrap();
+            conn.execute("UPDATE cursors SET expires_at = ?1", params![yesterday])
+                .unwrap();
+        }
+        // Capture is off from here on: nothing is recorded, so the write
+        // path's count never moves and only the timer's sweep comes by.
+        let mut off = ChangeLog::open_at(Some(dir.path()), false).unwrap();
+        off.retention_days = 90;
+        assert!(!off.enabled() && off.readable());
+        assert_eq!(off.sweep().unwrap(), 2);
+        assert_eq!(seqs(&off), [3], "the row inside the window stays");
+        assert!(
+            off.cursors().is_empty(),
+            "an expired cursor is dropped and stops pinning"
+        );
+        drop(off);
+        // The sequence goes on from where it was, not from what is left.
+        let on = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        assert_eq!(on.status().next_seq, 4);
+    }
+
+    #[test]
+    fn the_sweep_keeps_every_row_at_or_above_the_lowest_cursor_or_pin() {
+        let mut log = log();
+        log.retention_days = 90;
+        for i in 0..6 {
+            write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
+        }
+        // Every row is far outside the window; only the floor keeps any.
+        age(&log, 1..=6, 200);
+        log.set_cursor("replica", 4, Some("adm")).unwrap();
+        log.set_pin("version:http://x/v1", 5, Some("ds1")).unwrap();
+        assert_eq!(log.sweep().unwrap(), 3, "seq 1-3 are below the cursor");
+        assert_eq!(seqs(&log), [4, 5, 6]);
+        assert_eq!(log.max_deleted_seq(), 3);
+        // The cursor moves on; the pin is now the lowest.
+        log.set_cursor("replica", 6, Some("adm")).unwrap();
+        assert_eq!(log.sweep().unwrap(), 1);
+        assert_eq!(seqs(&log), [5, 6]);
+        // A pin holds its range however old, with no cursor beside it.
+        assert!(log.delete_cursor("replica"));
+        assert_eq!(log.sweep().unwrap(), 0);
+        assert_eq!(seqs(&log), [5, 6]);
+        assert!(log.delete_pin("version:http://x/v1"));
+        assert_eq!(log.sweep().unwrap(), 2);
+        assert_eq!(log.max_deleted_seq(), 6);
+    }
+
+    /// `n` committed rows written straight into the table, `payload` bytes
+    /// each; every third one is inside the retention window, the others are
+    /// a hundred days old.
+    fn fill(log: &ChangeLog, n: i64, payload: i64) {
+        let old = (chrono::Utc::now() - chrono::Duration::days(100)).to_rfc3339();
+        let young = now();
+        let epoch = log.epoch();
+        let conn = log.lock().unwrap();
+        for seq in 1..=n {
+            conn.execute(
+                "INSERT INTO changes (seq, epoch, txn, scope, graph_iri, origin, extent, added, state, created_at) \
+                 VALUES (?1, ?2, 't', 'graph', 'http://g/a', 'test', 'full', zeroblob(?3), 'committed', ?4)",
+                params![seq, epoch, payload, if seq % 3 == 0 { &young } else { &old }],
+            )
+            .unwrap();
+        }
+        log.next_seq.store(n + 1, Ordering::Relaxed);
+    }
+
+    /// A sweep is many short holds of the connection, not one long one: a
+    /// step stops at its cap and says where the next goes on, and the steps
+    /// together delete what a single pass would — also where rows to keep
+    /// and rows to delete alternate.
+    #[test]
+    fn a_sweep_goes_through_the_log_a_step_at_a_time() {
+        let mut log = log();
+        log.retention_days = 90;
+        fill(&log, 1_200, 0);
+        // Told to stop, a sweep ends after the step it is in.
+        let one_step = log.sweep_until(&AtomicBool::new(true)).unwrap();
+        assert_eq!(one_step, 334, "of rows 1-500, the 334 old ones");
+        assert_eq!(log.status().rows, 1_200 - 334);
+        // The rest, in as many steps as it takes.
+        assert_eq!(log.sweep().unwrap(), 800 - 334);
+        assert_eq!(log.status().rows, 400);
+        assert_eq!(log.max_deleted_seq(), 1_199);
+        assert_eq!(log.sweep().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_step_stops_at_its_payload_cap() {
+        let log = log();
+        fill(&log, 9, 1_000);
+        let cuts = SweepCuts::at(chrono::Utc::now(), 90);
+        let mut conn = log.lock().unwrap();
+        // Three rows carry 3,000 bytes: the first count at or over the cap.
+        let step = sweep_step(&mut conn, 10, 0, &cuts, (SWEEP_STEP_ROWS, 2_500)).unwrap();
+        assert_eq!(step.resume, Some(3));
+        assert_eq!(step.deleted, 2, "rows 1 and 2; row 3 is young");
+        let step = sweep_step(&mut conn, 10, 3, &cuts, (SWEEP_STEP_ROWS, i64::MAX)).unwrap();
+        assert_eq!(step.resume, None, "the table is through");
+        assert_eq!(step.deleted, 4);
+    }
+
+    /// Capture off and no log at the start: a restore puts a backup's log
+    /// where the next start reads it. This run never opens it, and still
+    /// must not keep its rows past the window.
+    #[test]
+    fn a_log_a_restore_put_in_place_is_swept_before_it_is_opened() {
+        let src = tempfile::tempdir().unwrap();
+        {
+            let log = ChangeLog::open_at(Some(src.path()), true).unwrap();
+            for i in 0..3 {
+                write(&log, "http://g/a", vec![q(i, Some("http://g/a"))], vec![]);
+            }
+            age(&log, 1..=2, 91);
+        }
+        let copy = src.path().join("changes").join("changes.db");
+        ChangeLog::prepare_restore(&copy, None).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let file = dst.path().join("changes").join("changes.db");
+        let mut log = ChangeLog::disabled_at(Some(dst.path()));
+        log.retention_days = 90;
+        assert_eq!(log.sweep().unwrap(), 0);
+        assert!(!file.exists(), "a sweep does not create a log");
+        assert!(log.restore_from(&copy).unwrap());
+        assert!(
+            !log.readable(),
+            "the restored log is read from the next start"
+        );
+        assert_eq!(log.sweep().unwrap(), 2);
+        drop(log);
+
+        let opened = ChangeLog::open_at(Some(dst.path()), false).unwrap();
+        assert_eq!(seqs(&opened), [3]);
+        assert_eq!(opened.status().next_seq, 4);
+    }
+
     #[test]
     fn a_chain_is_intact_only_with_full_committed_rows_in_its_epoch() {
         let log = log();
@@ -3072,6 +3744,201 @@ mod tests {
         assert!(log.begin("update", Some(&data), &|_| None).is_some());
         leave_write();
         assert_eq!(log.status().pending, 1);
+    }
+
+    /// A quad with a literal, as a profile's name is.
+    fn named(value: &str, g: &str) -> Quad {
+        Quad::new(
+            NamedNode::new_unchecked("http://ex/users/ada"),
+            NamedNode::new_unchecked("http://xmlns.com/foaf/0.1/name"),
+            oxigraph::model::Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new_unchecked(g)),
+        )
+    }
+
+    #[test]
+    fn a_profile_graph_row_keeps_its_counts_and_never_its_values() {
+        let log = log();
+        let profile = "urn:system:user:u1";
+        // An edit (the new name in, the old one out), then the purge's delete.
+        write(
+            &log,
+            profile,
+            vec![named("Ada Example", profile)],
+            vec![named("Ada Before", profile)],
+        );
+        write(&log, profile, vec![], vec![named("Ada Example", profile)]);
+        // The same value written to any other graph is recorded as before.
+        write(
+            &log,
+            "http://g/a",
+            vec![named("Ada Example", "http://g/a")],
+            vec![],
+        );
+        // A write that changed nothing is an empty full row, as anywhere.
+        write(&log, profile, vec![], vec![]);
+
+        let rows = log.rows_after(0, 10);
+        assert_eq!(rows.len(), 4);
+        for r in &rows[..2] {
+            assert_eq!(r.extent, Extent::Counts, "seq {:?}", r.seq);
+            assert_eq!(r.state, State::Committed);
+            assert!(r.added.is_none() && r.removed.is_none());
+        }
+        assert_eq!((rows[0].added_n, rows[0].removed_n), (1, 1));
+        assert_eq!(rows[0].post_count, Some(10));
+        assert_eq!((rows[1].added_n, rows[1].removed_n), (0, 1));
+        assert_eq!(rows[1].post_count, Some(9));
+        assert_eq!(rows[2].extent, Extent::Full);
+        assert!(rows[2].added.as_deref().unwrap().contains("Ada Example"));
+        assert_eq!(rows[3].extent, Extent::Full);
+        assert_eq!(rows[3].added_n + rows[3].removed_n, 0);
+
+        // The prefix decides, not a look-alike.
+        assert!(is_payload_withheld_graph("urn:system:user:u1"));
+        assert!(!is_payload_withheld_graph("urn:system:users"));
+        assert!(!is_payload_withheld_graph("urn:system:commit-log"));
+        assert!(!is_payload_withheld_graph("http://g/urn:system:user:u1"));
+
+        // A chain over a profile graph does not replay; one over the other
+        // graph is untouched by the profile's rows.
+        let over_profile = log.chain(&[profile.to_string()], &log.epoch(), 0, 4);
+        assert!(!over_profile.intact);
+        assert!(
+            log.chain(&["http://g/a".to_string()], &log.epoch(), 0, 4)
+                .intact
+        );
+    }
+
+    /// The log's bytes on disk: the database file and its write-ahead log.
+    fn bytes_on_disk(dir: &Path) -> Vec<u8> {
+        let mut all = Vec::new();
+        for name in ["changes.db", "changes.db-wal"] {
+            if let Ok(bytes) = std::fs::read(dir.join("changes").join(name)) {
+                all.extend(bytes);
+            }
+        }
+        all
+    }
+
+    fn holds(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    /// A log written by a version that still recorded profile values (or
+    /// restored from a backup of one) has them taken out: from the rows, and
+    /// from the bytes of the file, where an overwrite alone would leave them.
+    #[test]
+    fn recorded_profile_payloads_leave_the_rows_and_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        let (purged, versioned, other) = (
+            "urn:system:user:purged",
+            "urn:system:user:versioned",
+            "http://g/a",
+        );
+        // Two rows of the purged profile (an edit, then the purge), one of a
+        // profile registered to a dataset, one of an ordinary graph.
+        for g in [purged, purged, versioned, other] {
+            write(&log, g, vec![q(1, Some(g))], vec![q(2, Some(g))]);
+        }
+        // As the earlier version left them: full rows holding the values.
+        // The long one does not fit a page, so it sits on overflow pages.
+        let long = format!("Grace Overflow {}", "x".repeat(20_000));
+        let old_rows = [
+            (1, purged, "Ada Example", "Ada Before"),
+            (2, purged, long.as_str(), "Ada Example"),
+            (3, versioned, "Vera Versioned", "Vera Before"),
+            (4, other, "Otto Ordinary", "Otto Before"),
+        ];
+        for (seq, g, added, removed) in old_rows {
+            log.plant_payload(seq, &[named(added, g)], &[named(removed, g)]);
+        }
+        let before = bytes_on_disk(dir.path());
+        for value in [
+            "Ada Example",
+            "Ada Before",
+            "Grace Overflow",
+            "Vera Versioned",
+        ] {
+            assert!(holds(&before, value), "{value} is on disk to begin with");
+        }
+
+        let did = log
+            .withhold_recorded_payloads(&[versioned.to_string()])
+            .unwrap();
+        assert_eq!(did.rows, 2, "the purged profile's two rows");
+        assert_eq!(did.compaction, Compaction::Done);
+
+        let rows = log.rows_after(0, 10);
+        assert_eq!(rows.len(), 4, "no row is deleted, no sequence moves");
+        for r in &rows[..2] {
+            assert_eq!(r.graph_iri.as_deref(), Some(purged));
+            assert_eq!(r.extent, Extent::Counts);
+            assert_eq!(r.state, State::Committed);
+            assert!(r.added.is_none() && r.removed.is_none());
+            assert_eq!((r.added_n, r.removed_n), (1, 1), "the counts stay");
+        }
+        // The profile a dataset versions, and every other graph, are as they were.
+        assert_eq!(rows[2].extent, Extent::Full);
+        assert!(rows[2].added.as_deref().unwrap().contains("Vera Versioned"));
+        assert_eq!(rows[3].extent, Extent::Full);
+        assert!(rows[3].added.as_deref().unwrap().contains("Otto Ordinary"));
+        assert!(
+            log.chain(&[versioned.to_string()], &log.epoch(), 0, 4)
+                .intact
+        );
+
+        let after = bytes_on_disk(dir.path());
+        for value in ["Ada Example", "Ada Before", "Grace Overflow"] {
+            assert!(!holds(&after, value), "{value} is still in the file");
+        }
+        for value in ["Vera Versioned", "Otto Ordinary"] {
+            assert!(holds(&after, value), "{value} was not to be touched");
+        }
+
+        // Without the keep list the last profile row goes too. A log over
+        // the size is not compacted, and says so; its rows are clean.
+        let did = log.withhold_recorded(&[], 0).unwrap();
+        assert_eq!(did.rows, 1);
+        assert!(matches!(did.compaction, Compaction::TooLarge(n) if n > 0));
+        assert!(log.rows_after(0, 10)[2].added.is_none());
+        assert!(holds(&bytes_on_disk(dir.path()), "Otto Ordinary"));
+
+        // Nothing left to do, now or after a reopen; and writes go on.
+        let nothing = Withheld {
+            rows: 0,
+            compaction: Compaction::NotNeeded,
+        };
+        assert_eq!(log.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        drop(log);
+        let reopened = ChangeLog::open_at(Some(dir.path()), true).unwrap();
+        assert_eq!(reopened.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        write(&reopened, other, vec![q(5, Some(other))], vec![]);
+        assert_eq!(reopened.last_seq(), 5);
+        assert_eq!(reopened.rows_after(0, 10).len(), 5);
+        // A compaction that did not finish is taken up by the next call.
+        reopened
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('compact_pending', 'then')",
+                [],
+            )
+            .unwrap();
+        let did = reopened.withhold_recorded_payloads(&[]).unwrap();
+        assert_eq!((did.rows, did.compaction), (0, Compaction::Done));
+        assert!(!holds(&bytes_on_disk(dir.path()), "Vera Versioned"));
+        assert_eq!(reopened.withhold_recorded_payloads(&[]).unwrap(), nothing);
+        // A log that is off has nothing to rewrite.
+        assert_eq!(
+            ChangeLog::disabled()
+                .withhold_recorded_payloads(&[])
+                .unwrap(),
+            nothing
+        );
     }
 
     /// A range of an epoch the log never held finds no rows; that is not an

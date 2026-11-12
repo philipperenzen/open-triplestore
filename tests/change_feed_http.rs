@@ -11,7 +11,7 @@ use axum::Router;
 use common::*;
 use open_triplestore::auth::models::SystemRole;
 use open_triplestore::server::AppState;
-use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
+use open_triplestore::store::changes::{Extent, DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use serde_json::{json, Value};
@@ -386,4 +386,209 @@ async fn a_commit_points_at_the_rows_its_write_made() {
     assert_eq!(c["seq_from"], c["seq_to"]);
     assert_eq!(c["net_added"], 1);
     assert_eq!(c["net_removed"], 0);
+}
+
+/// The whole of the log as a backup copies it: every row, every column.
+fn log_file(state: &AppState) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("changes.db");
+    assert!(state.store.changes().backup_to(&copy).unwrap());
+    std::fs::read(&copy).unwrap()
+}
+
+fn holds(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
+}
+
+/// A profile lives in `urn:system:user:{id}`. Editing it and purging the
+/// account are writes the log records, as rows that say how many statements
+/// changed and never which: neither the old values of an edit nor the ones a
+/// purge erases stay behind in the log, for an admin, a follower or a backup
+/// to read.
+#[tokio::test]
+async fn a_purge_leaves_no_profile_value_in_the_change_log() {
+    let (state, admin) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let password = "a long enough passphrase";
+    for (id, name, hash) in [
+        ("u-purge", "marit", "hash".to_string()),
+        (
+            "u-self",
+            "sietse",
+            open_triplestore::auth::password::hash_password(password).unwrap(),
+        ),
+    ] {
+        state
+            .auth_db
+            .create_user(
+                id,
+                name,
+                &format!("{name}@purge.test"),
+                &hash,
+                SystemRole::User,
+            )
+            .unwrap();
+    }
+    let marit = mint_token("u-purge", "marit", "user");
+    let sietse = mint_token("u-self", "sietse", "user");
+    // Every value either profile ever held.
+    let values = [
+        "marit",
+        "Bijenkorf",
+        "Zeldenrust",
+        "Appingedam",
+        "655500142",
+        "sietse",
+        "Hogeland",
+    ];
+
+    // A public profile, edited once: the first name is an old value by then.
+    for display_name in ["Marit Bijenkorf", "Marit Zeldenrust"] {
+        let (st, _, txt) = req(
+            &app,
+            Method::PUT,
+            "/api/auth/me",
+            Some(&marit),
+            json!({
+                "display_name": display_name,
+                "bio": "Keeps bees in Appingedam",
+                "website": "https://zeldenrust.example/",
+                "phone": "+31655500142",
+                "organization": "Imkerij Zeldenrust",
+                "is_public": true,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+    }
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/auth/me",
+        Some(&sietse),
+        json!({ "display_name": "Sietse Hogeland" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    // A write to any other graph, to tell a log that holds payloads from one
+    // that holds none.
+    state
+        .store
+        .load_str(
+            "<urn:cf:s> <urn:cf:p> \"payload-kept-elsewhere\" .",
+            RdfFormat::Turtle,
+            Some(OTHER),
+        )
+        .unwrap();
+
+    // The store holds the profile; an admin token reads the graph, which is
+    // how a follower gets it when a row carries no payload.
+    let graph_uri = |id: &str| {
+        format!(
+            "/store?graph={}",
+            url_encode(&format!("urn:system:user:{id}"))
+        )
+    };
+    let (st, _, profile) = req(
+        &app,
+        Method::GET,
+        &graph_uri("u-purge"),
+        Some(&admin),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{profile}");
+    for value in [
+        "Marit Zeldenrust",
+        "Appingedam",
+        "655500142",
+        "marit@purge.test",
+    ] {
+        assert!(profile.contains(value), "{value} missing from {profile}");
+    }
+    assert!(!profile.contains("Bijenkorf"), "the edit replaced the name");
+
+    // Both purge routes: an admin's, after deactivation, and the user's own.
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        "/api/admin/users/u-purge",
+        Some(&admin),
+        Value::Null,
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/admin/users/u-purge/purge",
+        Some(&admin),
+        Value::Null,
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/auth/account/purge",
+        Some(&sietse),
+        json!({ "password": password }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    // What a follower fetches now is empty, for either account.
+    for id in ["u-purge", "u-self"] {
+        let (st, _, txt) = req(&app, Method::GET, &graph_uri(id), Some(&admin), Value::Null).await;
+        assert_eq!(st, StatusCode::OK, "{id}: {txt}");
+        assert!(txt.trim().is_empty(), "{id}: {txt}");
+        assert!(state.auth_db.get_user_by_id(id).unwrap().is_none());
+    }
+
+    // The rows are there, with their counts: three profile writes and two
+    // deletes, each naming its graph, none carrying a statement.
+    let rows = state.store.changes().rows_after(0, 100);
+    let of_profiles: Vec<_> = rows
+        .iter()
+        .filter(|r| {
+            r.graph_iri
+                .as_deref()
+                .is_some_and(|g| g.starts_with("urn:system:user:"))
+        })
+        .collect();
+    assert_eq!(of_profiles.len(), 5, "{of_profiles:?}");
+    for r in &of_profiles {
+        assert!(r.added.is_none() && r.removed.is_none(), "{r:?}");
+        assert_eq!(r.extent, Extent::Counts, "{r:?}");
+        assert!(r.added_n + r.removed_n > 0, "{r:?}");
+    }
+    for id in ["u-purge", "u-self"] {
+        let g = format!("urn:system:user:{id}");
+        let last = of_profiles
+            .iter()
+            .rfind(|r| r.graph_iri.as_deref() == Some(g.as_str()))
+            .unwrap();
+        assert_eq!(last.added_n, 0, "{last:?}");
+        assert!(last.removed_n > 0, "the purge's delete: {last:?}");
+        assert_eq!(last.post_count, Some(0), "{last:?}");
+    }
+
+    // What an admin and a follower read, and what a backup copies.
+    let (st, _, served) = req(
+        &app,
+        Method::GET,
+        "/api/admin/changes?limit=5000",
+        Some(&admin),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{served}");
+    let file = log_file(&state);
+    assert!(served.contains("payload-kept-elsewhere"), "{served}");
+    assert!(holds(&file, "payload-kept-elsewhere"));
+    for value in values {
+        assert!(!served.contains(value), "{value} is served: {served}");
+        assert!(!holds(&file, value), "{value} is in the log's file");
+    }
 }
