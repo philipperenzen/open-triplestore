@@ -335,7 +335,35 @@ serve such a graph only to who may read it (`GET …/shapes` answers 404 when
 that leaves none). Linking one as a dataset's shapes graph
 (`PUT /api/datasets/<id>/shacl`) needs that right too. Its readers may link
 it into another dataset all the same: that dataset's runs then use it, and its
-own writers need not be allowed to read it.
+own writers need not be allowed to read it. A graph that was private when it
+was detached from its dataset counts as one some dataset holds as private
+for all of this, whether it is still this dataset's shapes graph setting or
+linked from another dataset (see
+[Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
+
+The dataset record follows the same rule, for the IRI alone. `shapes_graph_iri`
+in `GET /api/datasets`, `GET /api/datasets/<id>` and the answer to
+`PUT /api/datasets/<id>` is `null` for a caller who may not read the graph it
+names: a viewer or an anonymous caller of a public dataset whose shapes graph
+is one of its private graphs, and a writer of a dataset that links another
+dataset's private graph they may not read. `shapes_graph_withheld` is `true`
+then, and `false` whenever the caller is given the IRI or there is none, so a
+client can tell a shapes graph it may not read from no shapes graph at all:
+the Validation page shows *Shapes you may not read* and offers no picker that
+would link another graph over it. The rest of the record is unchanged
+(`shacl_on_write` still says whether writes are validated). The same callers do not find the graph in
+`GET /api/shacl/dataset-shape-graphs`, in `GET /api/datasets/<id>/conformance`
+(which also leaves a dataset's own private graphs out of `graphs` and
+`reasoning_sources`), or as the dataset's `dct:conformsTo` in the DCAT
+catalogue. When the private flags cannot be read, nobody but an admin is shown
+to be a reader.
+
+A client that saves the on-write setting sends back the `shapes_graph_iri` it
+read. So that a writer who was served `null` does not unlink a graph they were
+never shown (and leave the gate on with nothing to check against),
+`PUT /api/datasets/<id>/shacl` from such a writer leaves the link as it is when
+the request names no graph. An empty string unlinks it; from a caller who
+reads the graph, `null` does too, as before.
 
 So a stored run also records the shapes graphs it used, and its full report
 is withheld from anyone but an admin who may not read one of them that some
@@ -403,6 +431,19 @@ Three things can gate a write to a graph: SHACL Studio pipelines with `gate_writ
 The write lands only when every gate passes. When several would refuse it, the 422 carries the report of the first in this order, so fixing that one may reveal the next. Each gate is evaluated once per write; a shapes graph named by more than one gate is still checked by each, at that gate's own threshold. Every run of the dataset gate, passing or not, is kept in the dataset's report history as an `on-write` report.
 
 A datasource run into a dataset, and the promotion of a kept candidate after review, meet the same gates in the same order, over the candidate graph before it joins the dataset ([sources](sources.md)). There every gate is evaluated rather than only up to the first refusal: the results of each gate that refuses go into the run's report and open review items, so one refusal shows them all. The run keeps its own record of the outcome, not an `on-write` report.
+
+### The report history
+
+`GET /api/datasets/<id>/validation-reports` lists the dataset's report history, newest first: one record per run of the dataset gate (`"source": "on-write"`, with the graph written as `data_ref` and the gate's shapes graph as `shapes_ref`) and one per validate-and-commit (`"source": "platform"`, `"data_ref": "inline"`, with the `version` the commit cut). `GET …/validation-reports/<report_id>` returns one record with its body, `report_ttl`: for the gate its verdict and number of results (the results themselves go to the writer, in the 422), for a commit the validator's report.
+
+A record names the graphs it is about, and a commit's report is about the data committed. So who gets a record follows the rule for a stored run's report ([above](#what-a-run-reads-and-who-sees-its-report)), asked when the record is read:
+
+- an admin gets every record;
+- nobody else gets a record whose shapes graph some dataset holds as private and they may not read, the dataset's writers included (a shapes graph linked from another dataset need not be theirs to read);
+- the dataset's writers get every other record;
+- anyone else gets a record only when they may read every graph it validated, by the rule `/sparql` applies. For a gate's record that is the graph written; for a commit's, every graph its version was cut from. A commit's record whose version is gone goes to writers only.
+
+A record the caller does not get is left out of the listing and answers 404 by id, as one that does not exist: it is not served with the two names blanked, because what would be left (that a write to some graph was checked, when, and with what outcome) is about that graph too. So a caller who cannot write the dataset, an anonymous caller of a public dataset included, sees no record about one of its private graphs, and making a graph private takes the records about it out of what they are listed.
 
 ### What a gate validates
 
@@ -500,7 +541,7 @@ curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
 
 Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
 
-A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back.
+A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back. A graph that was private when it was detached from its dataset stays one: its entry is still shown only to those who may read the graph, which no longer includes the dataset's writers, until the graph is attached again (see [Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
 
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 

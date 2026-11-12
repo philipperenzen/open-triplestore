@@ -181,6 +181,8 @@ pub async fn get_settings(
         "skolem": s.skolem,
         "provenance": s.provenance,
         "provenance_graph": crate::provenance::statement_provenance_graph(&dataset_id),
+        "provenance_private_graph":
+            crate::provenance::private_statement_provenance_graph(&dataset_id),
         "change_capture": state.store.changes().enabled(),
     })))
 }
