@@ -12606,7 +12606,9 @@ pub async fn detect_shapes(
 /// the configured `shapes_graph_iri`, SHACL Studio bindings, and shapes-role
 /// dataset graphs (one entry per dataset × graph, deduped). This powers the
 /// shape-graph selector in the Validation page so users only see shapes for
-/// data they can access.
+/// data they can access. A graph some dataset holds as private is listed
+/// only to who may read it, by the rule a `/sparql` query is scoped to
+/// (admins read every graph), whichever dataset links or binds it.
 pub async fn list_accessible_shape_graphs(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -12614,6 +12616,8 @@ pub async fn list_accessible_shape_graphs(
     let datasets = state
         .auth_db
         .list_accessible_datasets(Some(&current_user.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut shape_graphs: Vec<serde_json::Value> = Vec::new();
@@ -12629,6 +12633,9 @@ pub async fn list_accessible_shape_graphs(
             }
         }
         for iri in iris {
+            if withheld.contains(&iri) {
+                continue;
+            }
             let source = if sources.configured.as_deref() == Some(iri.as_str()) {
                 "configured"
             } else if sources.bound.contains(&iri) {

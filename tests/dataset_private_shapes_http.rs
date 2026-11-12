@@ -18,7 +18,12 @@
 //!   pipeline run over a dataset the graph is bound to;
 //! * the model profile, which profiles every shapes graph bound to a model;
 //! * inference, which writes what a shapes graph's rules derive into the
-//!   dataset it runs over.
+//!   dataset it runs over;
+//! * the dataset record (`GET /api/datasets`, `GET /api/datasets/{id}`, the
+//!   answer to `PUT /api/datasets/{id}`), which carries the shapes graph the
+//!   dataset is configured with, and what else names that graph to a reader
+//!   of the dataset: the DCAT catalogue, the Validation page's shape-graph
+//!   selector and the conformance layer.
 
 mod common;
 
@@ -854,4 +859,384 @@ async fn a_private_shapes_graph_linked_by_a_writer_infers_only_for_its_readers()
     let j: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(j["partial"], json!(false), "{text}");
     assert!(derived(&state, secret), "alice's run applies it");
+}
+
+// ─── The dataset record ──────────────────────────────────────────────────────
+
+/// `shapes_graph_iri` of dataset `id` as `token` (`None`: an anonymous
+/// caller) reads it in `GET /api/datasets/{id}` and in the `GET /api/datasets`
+/// listing. The two agree, the field is there either way, and a caller who
+/// is not given the IRI in it is given it nowhere in either answer.
+async fn record_shapes(state: &AppState, id: &str, token: Option<&str>) -> Value {
+    let uri = format!("/api/datasets/{id}");
+    let (st, one) = send(state, Method::GET, &uri, token, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{uri}: {one}");
+    let (st, all) = send(state, Method::GET, "/api/datasets", token, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "/api/datasets: {all}");
+    let record: Value = serde_json::from_str(&one).unwrap();
+    let listing: Value = serde_json::from_str(&all).unwrap();
+    let listed = listing
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == json!(id))
+        .unwrap_or_else(|| panic!("{id} is listed: {all}"));
+    for (what, r) in [("the record", &record), ("the listing", listed)] {
+        assert!(
+            r.as_object().unwrap().contains_key("shapes_graph_iri"),
+            "{what} keeps the field: {r}"
+        );
+        // The rest of the record is the caller's as before.
+        assert_eq!(r["name"], json!(id), "{what}: {r}");
+        assert!(r["shacl_on_write"].is_boolean(), "{what}: {r}");
+        assert!(r["can_write"].is_boolean(), "{what}: {r}");
+    }
+    assert_eq!(
+        record["shapes_graph_iri"], listed["shapes_graph_iri"],
+        "the record and the listing differ: {one} / {listed}"
+    );
+    if record["shapes_graph_iri"].is_null() {
+        assert!(!one.contains(SHAPES), "{uri}: {one}");
+        assert!(!all.contains(SHAPES), "/api/datasets: {all}");
+    }
+    record["shapes_graph_iri"].clone()
+}
+
+/// The dataset record carries the dataset's configured shapes graph. When
+/// that is a private graph of the dataset, the record names it to who may
+/// read it (the dataset's writers, admins, graph-ACL readers) and carries
+/// `null` for anyone else who may read the dataset, anonymous callers of a
+/// public dataset included.
+#[tokio::test]
+async fn a_dataset_record_names_its_private_shapes_graph_only_to_who_may_read_it() {
+    let (state, admin, alice, bob) = fixture();
+    let carol = make_user(&state, "carol");
+    make_writer(&state, "pub-ds", "carol");
+    state
+        .auth_db
+        .update_dataset_shacl("pub-ds", true, Some(SHAPES))
+        .unwrap();
+
+    for (who, token) in [("an anonymous caller", None), ("a viewer", Some(&bob))] {
+        let shapes = record_shapes(&state, "pub-ds", token.map(String::as_str)).await;
+        assert_eq!(shapes, Value::Null, "named to {who}");
+    }
+    for (who, token) in [
+        ("its owner", &alice),
+        ("a writer", &carol),
+        ("an admin", &admin),
+    ] {
+        let shapes = record_shapes(&state, "pub-ds", Some(token)).await;
+        assert_eq!(shapes, json!(SHAPES), "withheld from {who}");
+    }
+
+    // A graph-ACL read grant reads the graph over /sparql, so is told of it.
+    state
+        .auth_db
+        .grant_graph_permission("rule-1", SHAPES, "user", "bob", "read", "adm")
+        .unwrap();
+    let shapes = record_shapes(&state, "pub-ds", Some(&bob)).await;
+    assert_eq!(shapes, json!(SHAPES), "withheld from a graph-ACL reader");
+}
+
+/// Another dataset's private graph linked as `alice-pub`'s shapes graph is
+/// named in `alice-pub`'s record to who may read that graph. A writer of
+/// `alice-pub` need not be one: carol is withheld it like a viewer, in the
+/// record she reads and in the one her own update is answered with.
+#[tokio::test]
+async fn another_datasets_private_graph_linked_as_shapes_is_named_only_to_its_readers() {
+    let (state, admin, alice, bob) = fixture();
+    let carol = make_user(&state, "carol");
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+
+    for (who, token) in [
+        ("an anonymous caller", None),
+        ("a viewer", Some(&bob)),
+        ("a writer of alice-pub", Some(&carol)),
+    ] {
+        let shapes = record_shapes(&state, "alice-pub", token.map(String::as_str)).await;
+        assert_eq!(shapes, Value::Null, "named to {who}");
+    }
+    for (who, token) in [("a writer of both", &alice), ("an admin", &admin)] {
+        let shapes = record_shapes(&state, "alice-pub", Some(token)).await;
+        assert_eq!(shapes, json!(SHAPES), "withheld from {who}");
+    }
+
+    let update = json!({ "name": "alice-pub", "visibility": "public" });
+    let (st, text) = send(
+        &state,
+        Method::PUT,
+        "/api/datasets/alice-pub",
+        Some(&carol),
+        update.clone(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(!text.contains(SHAPES), "carol's update is answered: {text}");
+    let record: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(record["shapes_graph_iri"], Value::Null, "{text}");
+    assert_eq!(record["name"], json!("alice-pub"), "{text}");
+    let (st, text) = send(
+        &state,
+        Method::PUT,
+        "/api/datasets/alice-pub",
+        Some(&alice),
+        update,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let record: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(record["shapes_graph_iri"], json!(SHAPES), "{text}");
+}
+
+/// What `alice-pub` is configured with, as stored.
+fn stored_shacl(state: &AppState) -> (bool, Option<String>) {
+    let ds = state.auth_db.get_dataset("alice-pub").unwrap().unwrap();
+    (
+        ds.shacl_on_write,
+        ds.shapes_graph_iri.filter(|s| !s.is_empty()),
+    )
+}
+
+/// A client saves the on-write setting with the shapes graph its record
+/// carried. A writer whose record carried none, because the graph is
+/// withheld from them, does not unlink it that way (the gate would be on
+/// with nothing to validate against): from them a request naming no graph
+/// leaves the link as it is. An empty IRI is still the unlink, and from
+/// someone who reads the graph so is `null`.
+#[tokio::test]
+async fn a_writer_withheld_the_shapes_graph_does_not_unlink_it_by_sending_back_their_record() {
+    let (state, _admin, alice, _bob) = fixture();
+    let carol = make_user(&state, "carol");
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let put = |token: &str, body: Value| {
+        let (state, token) = (&state, token.to_string());
+        async move {
+            let uri = "/api/datasets/alice-pub/shacl";
+            let (st, text) = send(state, Method::PUT, uri, Some(&token), body).await;
+            assert!(st.is_success(), "{st}: {text}");
+            assert!(!text.contains(SHAPES), "{text}");
+        }
+    };
+
+    put(
+        &carol,
+        json!({ "shacl_on_write": true, "shapes_graph_iri": null }),
+    )
+    .await;
+    assert_eq!(stored_shacl(&state), (true, Some(SHAPES.to_string())));
+    put(&carol, json!({ "shacl_on_write": false })).await;
+    assert_eq!(stored_shacl(&state), (false, Some(SHAPES.to_string())));
+
+    // Unlinking is a write of her dataset: hers to make, said outright.
+    put(
+        &carol,
+        json!({ "shacl_on_write": false, "shapes_graph_iri": "" }),
+    )
+    .await;
+    assert_eq!(stored_shacl(&state), (false, None));
+
+    // Alice reads the graph, so her record names it and her `null` means none.
+    link_shapes_into_alice_pub(&state, &alice).await;
+    assert_eq!(stored_shacl(&state), (false, Some(SHAPES.to_string())));
+    put(
+        &alice,
+        json!({ "shacl_on_write": false, "shapes_graph_iri": null }),
+    )
+    .await;
+    assert_eq!(stored_shacl(&state), (false, None));
+}
+
+/// The DCAT catalogue as N-Triples.
+async fn catalogue(state: &AppState, token: Option<&str>) -> String {
+    let uri = "/.well-known/void?format=ntriples";
+    let (st, text) = send(state, Method::GET, uri, token, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    text
+}
+
+/// The catalogue's statement that a dataset conforms to the shapes graph.
+fn conforms_to_shapes(dataset: &str) -> String {
+    format!("/dataset/{dataset}> <http://purl.org/dc/terms/conformsTo> <{SHAPES}>")
+}
+
+/// The configured shapes graph is named in three more places a reader of the
+/// dataset is served: the DCAT catalogue (`dct:conformsTo`, for a dataset
+/// validated on write), the shape-graph selector of the Validation page, and
+/// the dataset's conformance layer, which lists the dataset's graphs and the
+/// shape graphs bound to it. Each names a private one to who may read it
+/// only.
+#[tokio::test]
+async fn a_private_shapes_graph_is_named_nowhere_else_to_who_may_not_read_it() {
+    let (state, admin, alice, bob) = fixture();
+    let carol = make_user(&state, "carol");
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+    for id in ["pub-ds", "alice-pub"] {
+        state
+            .auth_db
+            .update_dataset_shacl(id, true, Some(SHAPES))
+            .unwrap();
+    }
+    let selector = "/api/shacl/dataset-shape-graphs";
+    // `pub-ds` holds the graph, `alice-pub` has it bound as shapes.
+    let conformance = [
+        "/api/datasets/pub-ds/conformance",
+        "/api/datasets/alice-pub/conformance",
+    ];
+
+    for (who, token) in [
+        ("an anonymous caller", None),
+        ("a viewer", Some(&bob)),
+        ("a writer of alice-pub", Some(&carol)),
+    ] {
+        let token = token.map(String::as_str);
+        let text = catalogue(&state, token).await;
+        assert!(!text.contains(SHAPES), "the catalogue, to {who}: {text}");
+        for uri in conformance {
+            let (st, text) = send(&state, Method::GET, uri, token, Value::Null).await;
+            assert_eq!(st, StatusCode::OK, "{text}");
+            assert!(!text.contains(SHAPES), "{uri}, to {who}: {text}");
+            // The graphs they may read stay in the layer.
+            let data = if uri.contains("pub-ds") {
+                DATA
+            } else {
+                ALICE_DATA
+            };
+            assert!(text.contains(data), "{uri}, to {who}: {text}");
+        }
+        if let Some(token) = token {
+            let (st, text) = get(&state, selector, token).await;
+            assert_eq!(st, StatusCode::OK, "{text}");
+            assert!(!text.contains(SHAPES), "the selector, to {who}: {text}");
+            // The dataset's other shapes stay listed.
+            assert!(text.contains("shape_graphs"), "{text}");
+        }
+    }
+    for (who, token) in [("a writer of both", &alice), ("an admin", &admin)] {
+        let text = catalogue(&state, Some(token)).await;
+        for id in ["pub-ds", "alice-pub"] {
+            assert!(
+                text.contains(&conforms_to_shapes(id)),
+                "the catalogue's {id}, to {who}: {text}"
+            );
+        }
+        for uri in conformance {
+            let (st, text) = get(&state, uri, token).await;
+            assert_eq!(st, StatusCode::OK, "{text}");
+            assert!(text.contains(SHAPES), "{uri}, to {who}: {text}");
+        }
+        let (st, text) = get(&state, selector, token).await;
+        assert_eq!(st, StatusCode::OK, "{text}");
+        let listed: Value = serde_json::from_str(&text).unwrap();
+        for id in ["pub-ds", "alice-pub"] {
+            assert!(
+                listed["shape_graphs"].as_array().unwrap().iter().any(|g| {
+                    g["dataset_id"] == json!(id) && g["shapes_graph_iri"] == json!(SHAPES)
+                }),
+                "the selector's {id}, to {who}: {text}"
+            );
+        }
+    }
+}
+
+/// The control: a shapes graph no dataset holds as private is named to every
+/// reader of the dataset, in its record, the catalogue, the selector and the
+/// conformance layer, whichever dataset links it.
+#[tokio::test]
+async fn a_public_shapes_graph_is_named_to_every_reader_of_the_dataset() {
+    let (state, admin, alice, bob) = fixture();
+    set_private(&state, false);
+    let carol = make_user(&state, "carol");
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+    for id in ["pub-ds", "alice-pub"] {
+        state
+            .auth_db
+            .update_dataset_shacl(id, true, Some(SHAPES))
+            .unwrap();
+    }
+
+    for (who, token) in [
+        ("an anonymous caller", None),
+        ("a viewer", Some(&bob)),
+        ("a writer of alice-pub", Some(&carol)),
+        ("a writer of both", Some(&alice)),
+        ("an admin", Some(&admin)),
+    ] {
+        let token = token.map(String::as_str);
+        for id in ["pub-ds", "alice-pub"] {
+            let shapes = record_shapes(&state, id, token).await;
+            assert_eq!(shapes, json!(SHAPES), "{id}'s record, to {who}");
+        }
+        let text = catalogue(&state, token).await;
+        for id in ["pub-ds", "alice-pub"] {
+            assert!(
+                text.contains(&conforms_to_shapes(id)),
+                "the catalogue's {id}, to {who}: {text}"
+            );
+        }
+        for id in ["pub-ds", "alice-pub"] {
+            let uri = format!("/api/datasets/{id}/conformance");
+            let (st, text) = send(&state, Method::GET, &uri, token, Value::Null).await;
+            assert_eq!(st, StatusCode::OK, "{text}");
+            assert!(text.contains(SHAPES), "{uri}, to {who}: {text}");
+        }
+        if let Some(token) = token {
+            let (st, text) = get(&state, "/api/shacl/dataset-shape-graphs", token).await;
+            assert_eq!(st, StatusCode::OK, "{text}");
+            assert!(text.contains(SHAPES), "the selector, to {who}: {text}");
+        }
+    }
+}
+
+/// When the private flags cannot be read, nobody is shown to be a reader of
+/// the shapes graph: the record carries none, the catalogue and the selector
+/// do not name it. An admin reads every graph and needs no lookup.
+#[tokio::test]
+async fn the_shapes_graph_is_withheld_when_the_private_flags_cannot_be_read() {
+    let (state, admin, alice, bob) = fixture();
+    // Public, so that only the failed lookup stands between bob and the IRI.
+    set_private(&state, false);
+    state
+        .auth_db
+        .update_dataset_shacl("pub-ds", true, Some(SHAPES))
+        .unwrap();
+    let shapes = record_shapes(&state, "pub-ds", Some(&bob)).await;
+    assert_eq!(shapes, json!(SHAPES), "public and readable so far");
+
+    // Every query on the dataset-graph table now fails, as a database error
+    // would: the in-memory pool holds one connection.
+    state
+        .auth_db
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE dataset_graphs")
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    for (who, token) in [
+        ("an anonymous caller", None),
+        ("a viewer", Some(&bob)),
+        ("its owner", Some(&alice)),
+    ] {
+        let token = token.map(String::as_str);
+        let shapes = record_shapes(&state, "pub-ds", token).await;
+        assert_eq!(shapes, Value::Null, "named to {who}");
+        let text = catalogue(&state, token).await;
+        assert!(!text.contains(SHAPES), "the catalogue, to {who}: {text}");
+        if let Some(token) = token {
+            let (_, text) = get(&state, "/api/shacl/dataset-shape-graphs", token).await;
+            assert!(!text.contains(SHAPES), "the selector, to {who}: {text}");
+        }
+    }
+    let shapes = record_shapes(&state, "pub-ds", Some(&admin)).await;
+    assert_eq!(shapes, json!(SHAPES), "withheld from an admin");
 }

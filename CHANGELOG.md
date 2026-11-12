@@ -236,6 +236,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dataset's delta versions are replayed from those rows. Backups already
   taken keep what they copied. Unchanged: a purge leaves `actor_iri` on the
   user's earlier rows, and a profile graph's IRI contains the account id.
+- **The dataset record names a private shapes graph only to who may read
+  it.** `GET /api/datasets` and `GET /api/datasets/{id}` served the dataset
+  record whole, its configured shapes graph (`shapes_graph_iri`) included, to
+  anyone who may read the dataset. When that graph is one some dataset holds
+  as private, callers who may not read it learned its IRI: viewers and
+  anonymous callers of a public dataset whose shapes graph is one of its
+  private graphs, and the writers of a dataset that links another dataset's
+  private graph. The record now carries `"shapes_graph_iri": null` for a
+  caller who may not read the graph by the rule `/sparql` applies (its
+  dataset's writers, graph-ACL readers and admins read it), and so does the
+  answer to `PUT /api/datasets/{id}`. The same rule now holds in the other
+  places that named the graph to those callers:
+  `GET /api/datasets/{id}/conformance`, which also listed a dataset's own
+  private graphs under `graphs` and `reasoning_sources`;
+  `GET /api/shacl/dataset-shape-graphs`; and `dct:conformsTo` in the DCAT
+  catalogue (`/.well-known/void`). When the private flags cannot be read, the
+  graph is withheld from everyone but an admin. A client that saves the
+  on-write setting sends back the shapes graph it read, so from a writer the
+  graph is withheld from, `PUT /api/datasets/{id}/shacl` without
+  `shapes_graph_iri` now leaves the link as it is; an empty string unlinks it.
 - **Purging a user erases their LLM request-log rows and usage events.** Both
   tables carry the user ID without a foreign key, so an admin purge, a
   self-service purge (`POST /api/auth/account/purge`) and an admin delete left

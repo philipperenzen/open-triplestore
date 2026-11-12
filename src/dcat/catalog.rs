@@ -1431,9 +1431,18 @@ fn dataset_entry(
     g.int(s.clone(), &p(VOID, "triples"), total);
     void_description(g, opts, store, &s, &entries, total);
 
-    // Conformance.
+    // Conformance. The shapes graph is named to who may read it: a graph
+    // some dataset holds as private is its readers' only, whichever dataset
+    // links it (`crate::auth::acl::private_graph_withheld`, over the readable
+    // set this catalogue is built with; `None` is an administrator). Private
+    // flags that cannot be read show no one to be a reader.
     if ds.shacl_on_write {
-        if let Some(shapes) = &ds.shapes_graph_iri {
+        let withheld = |shapes: &str| {
+            readable.is_some_and(|r| {
+                !r.contains(shapes) && auth_db.is_private_dataset_graph(shapes).unwrap_or(true)
+            })
+        };
+        if let Some(shapes) = ds.shapes_graph_iri.as_deref().filter(|iri| !withheld(iri)) {
             g.ranged(
                 s.clone(),
                 &p(DCT, "conformsTo"),
