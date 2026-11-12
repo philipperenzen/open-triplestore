@@ -1,4 +1,5 @@
-//! Naming a sub-graph of a model version, through the real router:
+//! Naming a sub-graph of a model version, and the diff of versions that hold
+//! several values for one subject and predicate, through the real router:
 //!
 //! * a sub-graph goes by its place in its version — `shapes` for
 //!   `{version graph}/shapes`, with or without a leading `/` — or by its full
@@ -8,7 +9,10 @@
 //!   `core-shapes` instead;
 //! * a nested sub-graph `ontology/core` also answers to `core`, as it does in
 //!   the diff's `graph=`; an edit or a lifecycle change takes the sub-graph
-//!   named exactly so first, and refuses a name several nested ones share.
+//!   named exactly so first, and refuses a name several nested ones share;
+//! * the diff names every triple that differs once: a removed value pairs
+//!   with one added value of its subject and predicate as a change, and the
+//!   values left over are plain removals and additions.
 
 mod common;
 
@@ -514,4 +518,256 @@ async fn a_nested_sub_graph_answers_to_its_trailing_segments() {
         ["Shape=shapes", "Tunnel=new"]
     );
     assert!(sub_graph_statuses(&app, &token).await.is_empty());
+}
+
+// ─── GET /api/models/:id/diff ────────────────────────────────────────────────
+
+/// `(class, label)` pairs in order — with repeats, when a list names one twice.
+type Labels = Vec<(String, String)>;
+
+/// The pairs of `these` that `those` does not hold.
+fn only_in(these: &[(&str, &str)], those: &[(&str, &str)]) -> Labels {
+    let mut out: Labels = these
+        .iter()
+        .filter(|pair| !those.contains(pair))
+        .map(|(class, text)| (class.to_string(), text.to_string()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The versions `1.0` and `1.1` of `m1`, one graph each, holding the labels
+/// `from` and `to`, and their diff from `1.0` to `1.1`.
+async fn diff_of(from: &[(&str, &str)], to: &[(&str, &str)]) -> Value {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    model(&state);
+    for (ver, content) in [("1.0", from), ("1.1", to)] {
+        version(&state, ver, VersionStatus::Published, &[]);
+        for (class, text) in content {
+            label(&state, &version_graph(&state, ver), class, text);
+        }
+    }
+    diff(&app, &token, "from=1.0&to=1.1").await
+}
+
+async fn diff(app: &Router, token: &str, query: &str) -> Value {
+    let (status, body) = req(
+        app,
+        Method::GET,
+        &format!("/api/models/m1/diff?{query}"),
+        token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{query}: {body}");
+    body
+}
+
+/// The class and label a diff names: the subject of `item` and its `value`
+/// (`o`, `before` or `after`).
+fn class_and_label(item: &Value, value: &str) -> (String, String) {
+    assert_eq!(item["p"], json!(format!("<{RDFS_LABEL}>")), "{item}");
+    let class = item["s"]
+        .as_str()
+        .and_then(|s| s.strip_prefix(&format!("<{EX}")))
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("the subject of {item}"));
+    let text = item[value]
+        .as_str()
+        .and_then(|o| o.strip_prefix('"'))
+        .and_then(|o| o.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("the {value} of {item}"));
+    (class.to_string(), text.to_string())
+}
+
+/// Every label `list` (`added` or `removed`) holds, with the `side` (`after`
+/// or `before`) of every changed value: what the diff says one version has
+/// and the other does not.
+fn named(diff: &Value, list: &str, side: &str) -> Labels {
+    let items = |key: &str| diff[key].as_array().expect("a diff list").clone();
+    let mut out: Labels = items(list)
+        .iter()
+        .map(|item| class_and_label(item, "o"))
+        .chain(
+            items("changed")
+                .iter()
+                .map(|item| class_and_label(item, side)),
+        )
+        .collect();
+    out.sort();
+    out
+}
+
+/// The changed values of `diff`, as sorted `(class, before, after)`.
+fn changes(diff: &Value) -> Vec<(String, String, String)> {
+    let mut out: Vec<_> = diff["changed"]
+        .as_array()
+        .expect("changed")
+        .iter()
+        .map(|item| {
+            let (class, before) = class_and_label(item, "before");
+            (class, before, class_and_label(item, "after").1)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn change(class: &str, before: &str, after: &str) -> (String, String, String) {
+    (class.to_string(), before.to_string(), after.to_string())
+}
+
+/// `diff` names every label only `from` has once, as removed or as the old
+/// side of a change, and every label only `to` has once, as added or as the
+/// new side of a change; nothing else; and its summary counts its lists.
+fn assert_every_difference_once(diff: &Value, from: &[(&str, &str)], to: &[(&str, &str)]) {
+    assert_eq!(
+        named(diff, "removed", "before"),
+        only_in(from, to),
+        "what only the older version has: {diff}"
+    );
+    assert_eq!(
+        named(diff, "added", "after"),
+        only_in(to, from),
+        "what only the newer version has: {diff}"
+    );
+    let count = |key: &str| diff[key].as_array().expect("a diff list").len();
+    assert_eq!(
+        diff["summary"],
+        json!({
+            "added": count("added"),
+            "removed": count("removed"),
+            "changed": count("changed"),
+        }),
+        "{diff}"
+    );
+}
+
+/// One value replaced by two: one change, and the other new value is added.
+#[tokio::test]
+async fn one_value_replaced_by_two_is_a_change_and_an_addition() {
+    let from = [("Bridge", "a"), ("Tunnel", "same")];
+    let to = [("Bridge", "b"), ("Bridge", "c"), ("Tunnel", "same")];
+    let diff = diff_of(&from, &to).await;
+
+    assert_every_difference_once(&diff, &from, &to);
+    assert_eq!(changes(&diff), [change("Bridge", "a", "b")], "{diff}");
+    assert_eq!(
+        diff["summary"],
+        json!({ "added": 1, "removed": 0, "changed": 1 }),
+        "{diff}"
+    );
+}
+
+/// Two values replaced by one: one change, and the other old value is
+/// removed — not two changes to the same new value.
+#[tokio::test]
+async fn two_values_replaced_by_one_is_a_change_and_a_removal() {
+    let from = [("Bridge", "a"), ("Bridge", "b"), ("Tunnel", "same")];
+    let to = [("Bridge", "c"), ("Tunnel", "same")];
+    let diff = diff_of(&from, &to).await;
+
+    assert_every_difference_once(&diff, &from, &to);
+    assert_eq!(changes(&diff), [change("Bridge", "a", "c")], "{diff}");
+    assert_eq!(
+        diff["summary"],
+        json!({ "added": 0, "removed": 1, "changed": 1 }),
+        "{diff}"
+    );
+}
+
+/// Two values replaced by two: two changes, each old value with a new value
+/// of its own, paired in the order of the values.
+#[tokio::test]
+async fn two_values_replaced_by_two_are_two_changes() {
+    let from = [("Bridge", "a"), ("Bridge", "b"), ("Tunnel", "same")];
+    let to = [("Bridge", "c"), ("Bridge", "d"), ("Tunnel", "same")];
+    let diff = diff_of(&from, &to).await;
+
+    assert_every_difference_once(&diff, &from, &to);
+    assert_eq!(
+        changes(&diff),
+        [change("Bridge", "a", "c"), change("Bridge", "b", "d")],
+        "{diff}"
+    );
+    assert_eq!(
+        diff["summary"],
+        json!({ "added": 0, "removed": 0, "changed": 2 }),
+        "{diff}"
+    );
+}
+
+/// Several subjects at once, each with its own mix of kept, replaced, added
+/// and dropped values: the pairing of one subject's values takes none of
+/// another's.
+#[tokio::test]
+async fn each_subject_pairs_its_own_values() {
+    let from = [
+        ("Bridge", "a"),
+        ("Lock", "k1"),
+        ("Lock", "k2"),
+        ("Tunnel", "kept"),
+        ("Tunnel", "t1"),
+        ("Tunnel", "t2"),
+        ("Weir", "dropped"),
+    ];
+    let to = [
+        ("Bridge", "b"),
+        ("Bridge", "c"),
+        ("Culvert", "new"),
+        ("Lock", "k3"),
+        ("Tunnel", "kept"),
+        ("Tunnel", "t3"),
+        ("Tunnel", "t4"),
+    ];
+    let diff = diff_of(&from, &to).await;
+
+    assert_every_difference_once(&diff, &from, &to);
+    assert_eq!(
+        changes(&diff),
+        [
+            change("Bridge", "a", "b"),
+            change("Lock", "k1", "k3"),
+            change("Tunnel", "t1", "t3"),
+            change("Tunnel", "t2", "t4"),
+        ],
+        "{diff}"
+    );
+    assert_eq!(
+        diff["summary"],
+        json!({ "added": 2, "removed": 2, "changed": 4 }),
+        "{diff}"
+    );
+}
+
+/// A value dropped from one sub-graph and another added to a different one
+/// are a removal and an addition, each in its own graph: values pair within
+/// a graph only.
+#[tokio::test]
+async fn values_pair_within_their_own_graph() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    model(&state);
+    for (ver, sub, text) in [("1.0", "ontology", "a"), ("1.1", "shapes", "b")] {
+        version(
+            &state,
+            ver,
+            VersionStatus::Published,
+            &["ontology", "shapes"],
+        );
+        let graph = format!("{}/{sub}", version_graph(&state, ver));
+        label(&state, &graph, "Bridge", text);
+    }
+
+    let diff = diff(&app, &token, "from=1.0&to=1.1").await;
+    assert_eq!(
+        diff["summary"],
+        json!({ "added": 1, "removed": 1, "changed": 0 }),
+        "{diff}"
+    );
+    assert_eq!(diff["removed"][0]["graph"], "ontology", "{diff}");
+    assert_eq!(diff["removed"][0]["o"], "\"a\"", "{diff}");
+    assert_eq!(diff["added"][0]["graph"], "shapes", "{diff}");
+    assert_eq!(diff["added"][0]["o"], "\"b\"", "{diff}");
 }
