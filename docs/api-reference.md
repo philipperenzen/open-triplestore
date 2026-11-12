@@ -341,13 +341,20 @@ retention and the caps.
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/admin/changes?after=<seq>&limit=<n>&graph=<iri>` | `{ "epoch", "rows", "next_after" }` — rows above `after` in commit order (`limit` 1–5000, default 500); `graph` narrows to one graph plus the store-scoped rows |
+| `GET` | `/api/admin/changes?after=<seq>&limit=<n>&graph=<iri>` | `{ "epoch", "rows", "next_after", "max_deleted_seq", "max_deleted_ephemeral_seq" }` — rows above `after` in commit order (`limit` 1–5000, default 500); `graph` narrows to one graph plus the store-scoped rows |
 | `GET` | `/api/admin/changes/status` | capture on/off, `epoch`, `next_seq`, row counts by state, `oldest_seq` / `newest_seq`, live `cursors`, the caps and retention |
 | `PUT` | `/api/admin/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor; `400` for a bad name (1–64 of `[A-Za-z0-9._-]`) or a `seq` beyond the log |
 | `DELETE` | `/api/admin/changes/cursors/<name>` | `204`, or `404` |
 
 A cursor is a consumer's bookmark: retention never deletes rows above the
 lowest live one, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30) is dropped.
+Every page of rows says how far retention has deleted, for the whole log
+whatever `graph` is: `max_deleted_seq` is the highest sequence number it
+deleted (`0`: none), and `max_deleted_ephemeral_seq` the highest one among
+the rows of version snapshot graphs and restore staging graphs, which go
+after a day whatever cursors exist and are not counted in the first. A
+reader whose `after` is below either number was not given every write and
+has to read the graphs again; a replication follower does.
 `GET /api/admin/changes/stats` returns `{ "enabled", "readable", "epoch",
 "size_bytes", "rows", "max_deleted_seq", "first_seq_commit", "datasets":
 { <id>: { "rows", "payload_bytes", "materialised_quads", "materialisations",
