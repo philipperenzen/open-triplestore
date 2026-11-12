@@ -40,9 +40,11 @@
 
   function onBranchChange() { loadCommits(); }
 
+  // Empty when the commit names nobody: a system write, or a reader the
+  // server does not show authors to (OTS_ACTOR_VISIBILITY).
   function authorName(c) {
     return c.actor_display_name || c.actor_username
-      || (c.actor_iri ? c.actor_iri.split('/').pop() : 'unknown');
+      || (c.actor_iri ? c.actor_iri.split('/').pop() : '');
   }
   function authorId(c) {
     return c.actor_iri ? c.actor_iri.split('/').pop() : '';
@@ -98,8 +100,10 @@
           <div class="commit-main">
             <div class="commit-msg">{c.message}</div>
             <div class="commit-meta">
-              <span class="commit-author">{authorName(c)}</span>
-              <span class="commit-dot">·</span>
+              {#if authorName(c)}
+                <span class="commit-author">{authorName(c)}</span>
+                <span class="commit-dot">·</span>
+              {/if}
               <span title={c.created_at}>{relTime(c.created_at)}</span>
               {#if c.branch}
                 <span class="commit-badge commit-branch">{c.branch}</span>
