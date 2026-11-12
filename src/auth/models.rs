@@ -710,6 +710,9 @@ pub struct Dataset {
     pub owner_id: String,
     pub visibility: Visibility,
     pub shacl_on_write: bool,
+    /// The shapes graph the dataset is configured with. Served as `null` to a
+    /// caller who may not read it: a graph some dataset holds as private is
+    /// named only to who may read it by the `/sparql` rule.
     pub shapes_graph_iri: Option<String>,
     /// Model registry ID this dataset's instance data conforms to.
     pub conforms_to_model: Option<String>,
