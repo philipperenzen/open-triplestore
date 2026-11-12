@@ -1260,6 +1260,8 @@
       "running": "Running…",
       "issueCount": "{count} issue(s)",
       "noShapes": "No shapes",
+      "shapesWithheld": "Shapes you may not read",
+      "shapesWithheldDesc": "This dataset's shapes graph is one you may not read, so you cannot validate against it. Writes are still checked against it when validation on write is on.",
       "linkShapesPlaceholder": "+ Link shapes…",
       "notRunPill": "Not run",
       "configureShapesFirst": "Configure SHACL shapes first",

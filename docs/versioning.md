@@ -13,6 +13,28 @@ Datasets can be snapshotted into immutable versions, organised on branches, and 
 
 Each version records who created it, an optional note, and its source-graph mapping. Download any version's data (content-negotiated, defaulting to TriG) at `/api/datasets/{id}/versions/{version}/data`.
 
+### What a reader gets of a version record
+
+Reading a dataset does not include its private graphs, and that covers their
+names. `GET /api/datasets/{id}/versions` and `…/versions/{version}` return the
+whole record only to a caller who may write the dataset (its writers and
+administrators). Any other caller — a viewer, a signed-in account or an
+anonymous caller on a public dataset — gets the record of the graphs they may
+read:
+
+| Field | For a caller who may not write the dataset |
+|---|---|
+| `source_map`, `snapshot_graphs` | Without the graphs whose source graph is withheld (flagged private now, or detached from the dataset while private; see [Private graphs in versions](#private-graphs-in-versions)), and without a snapshot the map does not tie to a source graph. |
+| `quad_count`, `content_hash` | The totals of the graphs that remain: what `…/versions/{version}/data` returns to that caller. Left out when one of those graphs has no figure of its own. |
+| `change_count` | Left out. It counts a delta's changes across all its graphs. |
+
+Nothing else changes, and a version that covers no private graph is returned
+as it is. Private is the graph's flag now, not when the version was cut:
+flagging a graph private hides it in every version that already holds it, and
+a graph detached while private stays hidden. The version's data, its diffs and
+the [patch log](#patch-logs) follow the same rule, and a branch's `ahead` /
+`behind` count only the graphs the caller may read.
+
 ## Delta versions
 
 Without the change log every version is a full physical copy of the graphs
@@ -105,6 +127,39 @@ per-graph counts, the changes row by row from the RDF Patch, and the patch to
 download. **Clean up** asks how many unpublished versions to keep, shows which
 versions would go, and deletes them after the app's confirmation dialog.
 
+## Private graphs in versions
+
+A version copies every graph it covers, private ones included. A caller who
+may read the dataset but not write it — a viewer, or anyone at all on a public
+dataset — is served a version without those copies: in the version's data, in
+its diffs, on a `?version=` read of the dataset's SPARQL service, in browse,
+in an API-service run and in the [patch log](#patch-logs). The version record
+leaves those graphs' names out too
+([What a reader gets of a version record](#what-a-reader-gets-of-a-version-record)).
+Writers and administrators are served all of it.
+
+Whether a copy is withheld follows the graph it was cut from:
+
+| The source graph | Its copies in the dataset's versions |
+|---|---|
+| is flagged private | Withheld. The flag counts as it is now, not as it was at the cut: flagging a graph private hides it in every version that already holds it, and making it public shows it there again. |
+| was detached from the dataset while private | Still withheld. The dataset keeps on record that the graph was private when it left — by `DELETE /api/datasets/{id}/graphs` or any other way a graph leaves a dataset, and whether or not its stored data was deleted with it. |
+| was detached while public | Served, as before the detach. The version's stored validation report is not: it goes to a reader only while they may read every graph it validated, and a graph no dataset holds is not one `/sparql` serves them ([the report history](/docs/shacl#the-report-history)). |
+| is attached to the dataset again after it left private | Private again, as a live graph and in the versions. That holds for the registration route, for a [restore](#restore), and for a graph created later under the same name. Only a writer's `PATCH /api/datasets/{id}/graphs` with `"private": false` makes it public. |
+
+The record is the dataset's own: another dataset that holds the same graph is
+not affected. It ends when the graph is attached to the dataset again (its
+registration carries the flag from then on) or when the dataset is deleted.
+
+The same record keeps the graph's live data private when the detach leaves it
+in the store: see
+[Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store).
+
+A graph that was detached while private on release 0.8.1 or earlier left no
+record, and its copies in the versions cut before the detach are served to
+readers. To hide them, attach the graph to the dataset again, flag it
+private and detach it; or delete those versions.
+
 ## Restore
 
 `POST /api/datasets/:id/versions/:ver/restore` puts the dataset's live graphs
@@ -126,6 +181,10 @@ Either way the restore is one commit in the dataset's history, captured by
 its LDES stream, entailment and full-text index. Snapshot, branch and
 restore stream their copies in batches rather than holding every quad in
 memory.
+
+A restore registers the graphs it writes to the dataset again. One that left
+the dataset while private comes back private
+(see [Private graphs in versions](#private-graphs-in-versions)).
 
 ## Branches
 
@@ -356,9 +415,10 @@ is a diff from the empty graph for those graphs: it adds what the version
 holds but cannot delete what replay may still carry.
 
 Reading the log needs read access to the dataset. An entry that changes a
-graph the caller may not read (a private graph, for a caller who cannot
-write the dataset) is listed as `withheld` and refused with `403`, and
-version 0 leaves those graphs out.
+graph the caller may not read (a private graph, or one that was private when
+it was detached from the dataset, for a caller who cannot write the dataset)
+is listed as `withheld` and refused with `403`, and version 0 leaves those
+graphs out.
 
 ## Change log
 
@@ -446,9 +506,12 @@ PUT    /api/admin/changes/cursors/<name>      {"seq": <n>}
 DELETE /api/admin/changes/cursors/<name>
 ```
 
-`GET /api/admin/changes` returns `{ "epoch", "rows", "next_after" }`; pass
-`next_after` back as `after` to continue. `graph=` narrows to one graph's
-rows *plus* the store-scoped rows, which a reader of any graph must see.
+`GET /api/admin/changes` returns `{ "epoch", "rows", "next_after",
+"max_deleted_seq", "max_deleted_ephemeral_seq" }`; pass `next_after` back as
+`after` to continue. `graph=` narrows to one graph's rows *plus* the
+store-scoped rows, which a reader of any graph must see. The last two say
+how far retention has deleted rows (see [Retention](#retention-crashes-caps)):
+a reader whose `after` is below either was not given every write.
 `PUT …/cursors/<name>` bookmarks a consumer at the last `seq` it applied
 (`0` … the newest `seq`; names are 1–64 characters of `[A-Za-z0-9._-]`),
 `DELETE` drops it (`204`, or `404`). All four are admin-only: rows carry
@@ -473,16 +536,74 @@ The feed lists the rows of the dataset's graphs above `since`, without their
 quads, plus `next` to resume from; `wait_ms` long-polls (up to 30 s) when
 nothing is new. Only rows of graphs the caller may read are listed — dataset
 access does not imply access to its private graphs, and an unreadable row is
-omitted, never counted. Store-scoped rows (writes whose graphs were not
-known) are listed for every dataset: they bound every chain.
+omitted, never counted. The rows of the dataset's
+[statement-provenance](datasets.md#statement-provenance-opt-in) graphs are
+listed, and served as patches, to callers who can write the dataset only: a
+row holds annotations as patch text, also after the annotations themselves
+moved to the private provenance graph with a graph that was made private.
+Store-scoped rows (writes whose graphs were not known) are listed for every
+dataset: they bound every chain.
 
 `…/changes/<seq>` is that change as an RDF Patch (`application/rdf-patch`),
 `…/inverse` the patch that undoes it; **410** when retention has removed the
 change, **409** when the row carries no quads (it was larger than a row
-holds, or the log could not bound it). A cursor (any signed-in reader) pins
-retention like an admin cursor; it belongs to whoever set it — someone else
-gets 403 — and an admin can delete it. Every route answers from an empty log
-while capture is off.
+holds, or the log could not bound it). A cursor pins retention like an admin
+cursor; it belongs to whoever set it — someone else gets 403 — and an admin
+can delete it. Every route answers from an empty log while capture is off.
+
+#### Who sees what of the history
+
+A dataset's history holds two things its current data does not: who made each
+change, and quads its graphs no longer hold. Two settings decide how far down
+the dataset's roles each goes. Both take `writers` (accounts that may write
+the dataset, administrators included), `signed-in` (any account that may read
+it) or `readers` (everyone who may read it — anonymous callers on a public
+dataset too), and both default to `writers`:
+
+| Setting | Decides who gets | Below it |
+|---|---|---|
+| `OTS_ACTOR_VISIBILITY` | the author of a change: `actor_iri` on feed rows; `actor_iri`, `actor_username` and `actor_display_name` on `…/commits`; the agents of commits and versions in `…/provenance`; `created_by` on `…/versions`; `owner` on `…/branches`; `author` on `…/log` entries | the field is `null` or absent; times, messages, counts and commit IRIs stay |
+| `OTS_CHANGE_PATCH_ACCESS` | `…/changes/<seq>`, `…/changes/<seq>/inverse` and `PUT …/changes/cursors/<name>` | **401** without an account, **403** with one; the listing still says which graph changed at which sequence number, so a consumer can refetch the graph |
+
+Both are [runtime settings](administration.md#runtime-settings): an
+administrator changes them under **Admin → Workspace settings** without a
+restart. The account's role on the dataset decides, not the credential's
+scope: a read-only API token of an account that may write the dataset is in
+the `writers` audience, so a mirror can read authors and fetch patches with a
+credential that cannot write. Setting a cursor is a `PUT`, which needs a
+token with write scope, as every write does.
+
+Why `writers`: who edited what and when is personal data, and a patch holds
+deleted data on both sides — the quads a change removed, and the quads it
+added that a later change removed. A reader who may see the data as it is now
+has no claim on either. Why a cursor follows the patches: it keeps every row
+above it from being swept, for the whole store, so only a caller who may
+fetch the patches can hold one. A cursor set under a wider setting stays
+until it expires (`OTS_CURSOR_TTL_DAYS`); its owner can no longer refresh it
+and can still delete it, as can an administrator (`GET
+/api/admin/changes/stats` lists the cursors and their owners).
+
+What the settings do not cover, because a writer turns each on per dataset in
+order to publish history:
+
+- **Versions.** A version's data and the diff between two versions are served
+  to every reader of the graphs they cover, with what was later deleted,
+  until the version is deleted.
+- **The patch log.** `…/log/patch/<ref>` serves an entry's text, `D` lines
+  included, to every reader of the graphs it changes. No request removes an
+  entry.
+- **LDES.** Earlier versions of an entity stay members of the stream until
+  its retention policy drops them; a stream has none unless one is set.
+- **Statement provenance.** The statement-provenance graph holds every
+  removed statement of the dataset's graphs that are not private as a triple
+  term, and under the `full` profile the actor of each change, readable over
+  `/sparql` by every reader of the dataset. A private graph's annotations are
+  in the private provenance graph, which the dataset's writers read
+  ([statement provenance](/docs/datasets#statement-provenance-opt-in)).
+
+Neither setting erases anything: writers and administrators read the rows
+until retention sweeps them, and a patch a consumer fetched earlier is the
+consumer's.
 
 The commit trail points into the log: a commit whose write the log recorded
 carries `seq_from` / `seq_to` (its rows) and `net_added` / `net_removed`
@@ -538,6 +659,11 @@ less; the scan cost does not shrink.
   needs, go after a day. The highest sequence number retention deleted is
   remembered, so a chain that would need a row below it counts as broken —
   the next cut is a checkpoint — rather than silently missing a change.
+  `GET /api/admin/changes` reports it with every page (`max_deleted_seq`),
+  and beside it the highest one deleted from snapshot and staging graphs
+  (`max_deleted_ephemeral_seq`), which no cursor holds back. A replication
+  follower whose position is below the first fetches every graph in scope
+  again; below the second only, the snapshot and staging graphs.
 - **Capture switched off and on again.** A log kept from an earlier run
   stays readable while capture is off (delta versions resolve through it),
   but records nothing; the next run that records starts a new epoch, so no
