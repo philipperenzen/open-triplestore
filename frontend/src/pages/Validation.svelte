@@ -221,6 +221,11 @@
   // "has shapes" is: legacy shapes_graph_iri OR membership in that response.
   $: shapeSourceDatasetIds = new Set((accessibleShapeGraphs || []).map(sg => String(sg.dataset_id)).filter(s => s && s !== 'undefined'));
   $: noShapesIds = new Set(datasets.filter(d => !d.shapes_graph_iri && !shapeSourceDatasetIds.has(String(d.id))).map(d => d.id));
+  // A shapes graph the caller may not read comes back as `shapes_graph_iri:
+  // null` with `shapes_graph_withheld: true`. Such a dataset has shapes, just
+  // none the caller can run, so it gets no "link shapes" picker: picking one
+  // would replace a link the caller cannot see.
+  $: withheldShapesIds = new Set(datasets.filter(d => d.shapes_graph_withheld && noShapesIds.has(d.id)).map(d => d.id));
 
   // What the inline "link shapes" picker offers. The Library comes first: those
   // are the shape graphs the Shapes view shows and the ones a user has just
@@ -261,7 +266,7 @@
   $: summary = (() => {
     const s = { conforms: 0, violations: 0, warnings: 0, infos: 0, validated: 0, total: datasets.length, noShapes: 0 };
     for (const d of datasets) {
-      if (noShapesIds.has(d.id)) s.noShapes += 1;
+      if (noShapesIds.has(d.id) && !withheldShapesIds.has(d.id)) s.noShapes += 1;
       const st = datasetStatus[d.id];
       const src = st?.summary;
       if (!src) continue;
@@ -374,6 +379,8 @@
                   {/if}
                 {:else if status.error}
                   <span class="pill pill-error"><AlertTriangle size={11} /> {$t('system.error')}</span>
+                {:else if withheldShapesIds.has(ds.id)}
+                  <span class="pill pill-muted" title={$t('pages.validation.shapesWithheldDesc')}><Lock size={11} /> {$t('pages.validation.shapesWithheld')}</span>
                 {:else if noShapesIds.has(ds.id)}
                   <span class="pill pill-muted">{$t('pages.validation.noShapes')}</span>
                   {#if shapeLinkOptions.length}
@@ -398,7 +405,7 @@
             <div class="row-actions">
               <button class="btn btn-sm btn-ghost" on:click|stopPropagation={() => runValidation(ds.id)}
                 disabled={status.loading || noShapesIds.has(ds.id)}
-                title={noShapesIds.has(ds.id) ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
+                title={withheldShapesIds.has(ds.id) ? $t('pages.validation.shapesWithheldDesc') : noShapesIds.has(ds.id) ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
                 {#if status.loading}<Loader2 size={12} class="spin" />{:else}<Play size={12} />{/if}
                 <span class="run-label">{$t('pages.validation.runValidation')}</span>
               </button>
@@ -466,6 +473,8 @@
               {#if !noShapesIds.has(selectedDs.id)}
                 <p>{$t('pages.validation.notValidatedDesc', { values: { name: selectedDs.name } })}</p>
                 <button class="btn" on:click={() => runValidation(selectedDataset)}><Play size={14} /> {$t('pages.validation.runValidation')}</button>
+              {:else if withheldShapesIds.has(selectedDs.id)}
+                <p>{$t('pages.validation.shapesWithheldDesc')}</p>
               {:else}
                 <p>{$t('pages.validation.noShapesConfiguredDesc', { values: { name: selectedDs.name } })}</p>
                 <button class="btn" on:click={() => setTab('shapes')}><FileCode size={14} /> {$t('pages.validation.editShapes')}</button>

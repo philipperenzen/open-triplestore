@@ -285,6 +285,17 @@ From then on each catch-up:
      graphs the leader no longer lists are dropped;
    - a row for a graph outside the scope is skipped; the cursor advances
      over it;
+
+   Each page also says how far the leader's retention has deleted rows. If
+   that is above the follower's position (`max_deleted_seq`), rows it never
+   applied are gone: it was away for longer than its cursor lived. It then
+   applies nothing of what is left, fetches every graph in scope again as it
+   does for a new epoch (at most once per catch-up), and tails from the
+   leader's position. Rows of a version's snapshot graphs and of restore
+   staging graphs leave the log after a day whatever cursors exist
+   (`max_deleted_ephemeral_seq`); a follower that was more than a day behind
+   fetches those graphs again, drops the ones the leader no longer has, and
+   applies the other rows as usual;
 3. bookmarks the last applied sequence number — locally
    (`<data-dir>/replication.json`, so a restart continues where it stopped)
    after every page and after every row that fetched a graph whole, so a
@@ -474,7 +485,11 @@ model. Three things to know:
 
 - **RDF data**, per graph, per the scope. Version-snapshot graphs
   (`…/version/…`) come across whole (the leader records them `unknown`
-  rather than copy them into its log).
+  rather than copy them into its log). So do user profile graphs
+  (`urn:system:user:{id}`): the leader records their writes
+  [without the statements](versioning.md#what-a-row-says), so that an erased
+  profile does not live on in a log, and the follower fetches the graph on
+  each profile change. After a purge that fetch comes back empty.
 - **The identity database** (`auth.db`: users, organisations, datasets,
   tokens, ACLs), shipped whole — see "Identity database" below.
 - **Not the object store.** Point both nodes at the same S3 bucket; with the
@@ -507,8 +522,14 @@ one request per follower. The change log itself costs the leader what
 per ground update, a scan of the target graph per `WHERE` update.
 Retention on the leader (`OTS_CHANGE_RETENTION_DAYS`, 90) never sweeps above
 the lowest live cursor, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30)
-expires — a follower away longer than that resynchronises whole when it
-comes back.
+expires. From then on the rows a follower has not applied leave the log as
+they age out of the window. A follower that comes back after one of them is
+gone resynchronises whole: the leader says with every page how far it
+deleted, and the follower fetches every graph in scope again when that is
+above its position. One that comes back sooner finds every row it needs,
+tails on and sets its cursor again. Rows of version snapshot graphs and
+restore staging graphs are kept for a day only, cursor or not, so a follower
+more than a day behind fetches those graphs again and nothing else.
 
 A follower is a client of the leader's [rate limiter](#rate-limiting) like
 any other at its address: the Graph Store reads a bootstrap makes are

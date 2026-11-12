@@ -102,6 +102,24 @@ pub(crate) fn chat_model() -> String {
         .unwrap_or_else(default_model)
 }
 
+/// `reasoning_effort` sent with every completion (`OTS_LLM_REASONING_EFFORT`).
+///
+/// Reasoning models such as Qwen3.5 think before they answer, and through an
+/// OpenAI-compatible endpoint that thinking counts against `max_tokens`: with
+/// these budgets it can use all of them and leave the answer empty. `none`
+/// turns it off where the server reads the field (Ollama, vLLM, OpenAI). Unset
+/// sends nothing, as before.
+fn reasoning_effort() -> Option<String> {
+    crate::config::LLM_REASONING_EFFORT.get()
+}
+
+/// Add `reasoning_effort` to a completion payload when one is configured.
+fn with_reasoning_effort(payload: &mut Value, effort: Option<&str>) {
+    if let Some(effort) = effort {
+        payload["reasoning_effort"] = json!(effort);
+    }
+}
+
 /// Optional bearer token for the endpoint (`OTS_LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
 ///
@@ -147,7 +165,7 @@ pub(crate) async fn chat_completion(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
@@ -156,6 +174,7 @@ pub(crate) async fn chat_completion(
             {"role": "user", "content": user},
         ],
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -206,12 +225,13 @@ pub(crate) async fn chat_completion_messages(
     messages: Vec<Value>,
     max_tokens: u32,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
         "messages": messages,
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -378,13 +398,14 @@ async fn chat_completion_messages_stream(
     sink: &EventSink,
     gate: &mut DeltaGate,
 ) -> Result<String, AppError> {
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
         "messages": messages,
         "stream": true,
     });
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
@@ -1537,6 +1558,11 @@ WKT must be WGS84 with longitude before latitude. Prefer points or centroids; sk
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
 real 3D geometry on the basemap.\n\
+- ```view — the platform draws a query result in the visual its rows fit: {\"source\":\"query\",\"as\":\"auto\"}. \
+auto picks from the row shape: counts per label → bar, dates with numbers → line, WKT → map, \
+CONSTRUCT/DESCRIBE triples → graph, SHACL results → shacl summary, one aggregate row → stat, else table. \
+Set \"as\" (bar|line|map|graph|shacl|stat|table) to choose; a choice the rows cannot support shows a table. \
+Add \"query\":N for the Nth query of this turn (default: the last with rows).\n\
 - ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}; \
 asset download paths carry no file extension, so give those an explicit format: \
 {\"models\":[{\"label\":\"…\",\"url\":\"/api/datasets/<id>/assets/<id>/download\",\"format\":\"ifc\"}]}. \
@@ -1560,8 +1586,8 @@ also render well.\n\
 - Entity links: link the key entities you name to their detail page as \
 `[label](/resource?iri=<percent-encoded IRI>)` — it opens the platform's resource inspector with the \
 full RDF, geometry and 3D view. Use these in prose and in table cells whenever a result row has an IRI.\n\n\
-Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
-locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
+Pick at most a couple of widgets per answer, chosen for the question: a query result to show → view, \
+trends or comparisons → chart, locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
 map with models when georeferenced, files → file, raw listings → markdown table or csv, \"how do I \
 get this myself\" → sparql or api block. Every fence must open on its own line, contain real content on the \
 following lines, and close with ``` on its own line — never write a one-line or empty fence. Widget \
@@ -1960,6 +1986,7 @@ async fn chat_completion_full(
         payload["tools"] = t.clone();
         payload["tool_choice"] = json!("auto");
     }
+    with_reasoning_effort(&mut payload, reasoning_effort().as_deref());
     let url = format!(
         "{}/v1/chat/completions",
         gateway_base().map_err(CompletionFailure::Fatal)?
@@ -2592,6 +2619,14 @@ async fn run_chat_turn(
         );
     }
 
+    // A greeting, thanks or acknowledgement asks for no data. Offering it the
+    // retrieval tools (and nudging it towards them below) made the model query
+    // something anyway and answer "hi" with a dataset summary and a SPARQL card.
+    let small_talk = is_small_talk(last_user_text(&req));
+    if small_talk {
+        system_content.push_str(SMALL_TALK_NOTE);
+    }
+
     let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
     msgs.push(json!({
         "role": "system",
@@ -2612,7 +2647,7 @@ async fn run_chat_turn(
     // read scope; its rows — or its error, so the model can self-repair — go
     // back into the conversation for the next round.
     let mut runs: Vec<ChatQueryRun> = Vec::new();
-    let tool_defs = chat_tools_enabled().then(chat_tool_definitions);
+    let tool_defs = (chat_tools_enabled() && !small_talk).then(chat_tool_definitions);
     sink.send(ChatStreamEvent::Status {
         round: 0,
         state: "thinking",
@@ -2631,7 +2666,9 @@ async fn run_chat_turn(
     // ask once, in a short and explicit message. The model may decline (a
     // conceptual question needs no data), and if it does we keep its original
     // answer, so the nudge can only add retrieval, never take an answer away.
-    let needs_nudge = extract_tool_calls(&assistant).is_empty() && {
+    // Small talk is never nudged: a 7B model reads "retrieve it now" as an
+    // order and queries whatever it can think of.
+    let needs_nudge = !small_talk && extract_tool_calls(&assistant).is_empty() && {
         let reply = assistant_text(&assistant);
         extract_query_request(&reply, true).is_none() && !contains_ask_fence(&reply)
     };
@@ -2640,10 +2677,12 @@ async fn run_chat_turn(
         msgs.push(json!({"role": "assistant", "content": assistant_text(&assistant)}));
         msgs.push(json!({"role": "user", "content":
             "You answered without querying the graphs. If answering my question needs data from \
-             them (any name, number, date, value or geometry), retrieve it now: call a tool, or \
-             reply with EXACTLY one line: `SPARQL:` followed by a single query and nothing else. \
-             If it genuinely needs no data from the graphs, repeat your previous answer \
-             unchanged."}));
+             them (any name, number, date, value or geometry), retrieve it now with the tool that \
+             fits: text_search to find something by name, vocab_term_search for a class or \
+             property, run_sparql for values and counts — or reply with EXACTLY one line: \
+             `SPARQL:` followed by a single query and nothing else. If the PLATFORM CONTEXT \
+             already answers it (which datasets, graphs, files or API services exist) or it \
+             needs no data at all, repeat your previous answer unchanged."}));
         sink.send(ChatStreamEvent::Status {
             round: 0,
             state: "thinking",
@@ -3212,7 +3251,16 @@ fn opens_data_widget_fence(line: &str) -> bool {
     }
     matches!(
         t[run..].trim().to_ascii_lowercase().as_str(),
-        "chart" | "map" | "geo" | "card" | "infocard" | "info-card" | "csv" | "model3d" | "file"
+        "chart"
+            | "map"
+            | "geo"
+            | "card"
+            | "infocard"
+            | "info-card"
+            | "csv"
+            | "model3d"
+            | "file"
+            | "view"
     )
 }
 
@@ -4966,6 +5014,108 @@ fn directive_pos(reply: &str) -> Option<usize> {
     None
 }
 
+/// Appended to the system prompt on a small-talk turn (see [`is_small_talk`]).
+const SMALL_TALK_NOTE: &str = "\n\n# THIS TURN\nThe user's latest message is a greeting, \
+thanks or acknowledgement, not a question about the data. Reply in one or two friendly sentences \
+in the user's language and offer what you can help with. Do not query, write no `SPARQL:` line \
+and use no widgets.";
+
+/// Words a greeting, thanks or acknowledgement is made of (English and Dutch).
+const SMALL_TALK_WORDS: &[&str] = &[
+    "hi",
+    "hello",
+    "hey",
+    "hiya",
+    "yo",
+    "hoi",
+    "hallo",
+    "hai",
+    "dag",
+    "goedemorgen",
+    "goedemiddag",
+    "goedenavond",
+    "morgen",
+    "good",
+    "morning",
+    "afternoon",
+    "evening",
+    "there",
+    "spark",
+    "thanks",
+    "thank",
+    "thx",
+    "ty",
+    "you",
+    "bedankt",
+    "dank",
+    "dankje",
+    "dankjewel",
+    "je",
+    "jij",
+    "u",
+    "wel",
+    "zeer",
+    "very",
+    "much",
+    "so",
+    "a",
+    "lot",
+    "ok",
+    "okay",
+    "oke",
+    "oké",
+    "k",
+    "great",
+    "nice",
+    "cool",
+    "top",
+    "prima",
+    "super",
+    "perfect",
+    "mooi",
+    "fijn",
+    "helder",
+    "duidelijk",
+    "clear",
+    "got",
+    "it",
+    "bye",
+    "goodbye",
+    "doei",
+    "tot",
+    "ziens",
+    "later",
+    "cheers",
+    "how",
+    "are",
+    "hoe",
+    "gaat",
+    "het",
+    "met",
+    "yes",
+    "no",
+    "ja",
+    "nee",
+    "sure",
+    "alright",
+    "welcome",
+    "all",
+    "right",
+];
+
+/// True when the message is only a greeting, thanks or acknowledgement — at
+/// most six words, every one of them from [`SMALL_TALK_WORDS`]. Deliberately
+/// narrow: one content word ("hi, which datasets…") makes it a real question,
+/// so a data question can never be mistaken for small talk.
+fn is_small_talk(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .collect();
+    !words.is_empty() && words.len() <= 6 && words.iter().all(|w| SMALL_TALK_WORDS.contains(w))
+}
+
 /// True when a reply opens an ```ask fence. Asking the user IS a complete,
 /// legitimate reply — it must not be nudged into querying, and it carries no
 /// data to caveat.
@@ -5134,6 +5284,20 @@ fn strip_code_fence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_configured_reasoning_effort_is_sent() {
+        let mut payload = serde_json::json!({"model": "m"});
+        super::with_reasoning_effort(&mut payload, Some("none"));
+        assert_eq!(payload["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn no_reasoning_effort_is_sent_when_unset() {
+        let mut payload = serde_json::json!({"model": "m"});
+        super::with_reasoning_effort(&mut payload, None);
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
     use super::{
         all_retrievals_empty, caps_for_window, contains_ask_fence, context_from_models_payload,
         context_from_ollama_show, extract_plan, extract_tool_calls, graph_vocab_summary,
@@ -5144,7 +5308,7 @@ mod tests {
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
         fallback_answer, find_ci, first_sparql_fence, history_within_budget,
-        hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
+        hoist_misplaced_modifiers, is_bare_sparql_directive, is_small_talk, looks_like_wkt,
         relevant_services_hint, render_rows_for_llm, repair_iri_case, repair_sparql, sse_data,
         stream_delta_text, strip_code_fence, trim_at_parse_error, truncate, unknown_vocab_iris,
         validate_sparql, widgets_without_retrieval, ChatMessage, ChatQueryResult, ChatQueryRun,
@@ -5338,6 +5502,33 @@ mod tests {
     }
 
     #[test]
+    fn small_talk_is_only_greetings_thanks_and_acknowledgements() {
+        for s in [
+            "hi",
+            "Hi!",
+            "hallo Spark",
+            "goedemorgen",
+            "thanks a lot!",
+            "Dank je wel 🙏",
+            "ok",
+            "how are you?",
+            "doei",
+        ] {
+            assert!(is_small_talk(s), "{s:?} is small talk");
+        }
+        for s in [
+            "",
+            "hi, which datasets are there?",
+            "hoi, hoeveel bruggen zijn er?",
+            "ok show me the bridges",
+            "thanks, now chart it per year",
+            "bridges",
+        ] {
+            assert!(!is_small_talk(s), "{s:?} is a question");
+        }
+    }
+
+    #[test]
     fn widget_fence_variants_the_frontend_renders_are_detected() {
         // The frontend (chatRich.js) also renders ~~~ fences, leading
         // whitespace, a space before the tag, and the geo/infocard aliases.
@@ -5366,8 +5557,15 @@ mod tests {
 ```",
             &[]
         ));
+        // A ```view only ever binds to this turn's query rows.
+        assert!(widgets_without_retrieval(
+            "```view\n{\"source\":\"query\"}
+```",
+            &[]
+        ));
         // A tag that merely starts with a widget name is not a widget fence.
         assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
+        assert!(!widgets_without_retrieval("```viewport\ncode\n```", &[]));
         // Two characters are not a fence.
         assert!(!widgets_without_retrieval("``map``", &[]));
     }

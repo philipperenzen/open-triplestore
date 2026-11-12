@@ -698,7 +698,9 @@ pub async fn describe_log(
     Query(q): Query<ListParams>,
 ) -> Result<Response, Refused> {
     let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
-    let (_, hidden) = readable(&state, &dataset_id, uid)?;
+    let (ds, hidden) = readable(&state, &dataset_id, uid)?;
+    // Who appended an entry is for `OTS_ACTOR_VISIBILITY`'s audience.
+    let actors = crate::auth::policy::shows_actors(&state.auth_db, &ds, uid).map_err(e500)?;
     let limit = q.limit.unwrap_or(1000).clamp(1, 10_000);
     let init = meta(&state.auth_db, &dataset_id)
         .map_err(e500)?
@@ -714,7 +716,11 @@ pub async fn describe_log(
                     "withheld": true,
                 })
             } else {
-                serde_json::to_value(e).unwrap_or_default()
+                let mut v = serde_json::to_value(e).unwrap_or_default();
+                if !actors {
+                    v["author"] = serde_json::Value::Null;
+                }
+                v
             }
         })
         .collect();

@@ -41,8 +41,10 @@ administrators only) keeps exact query counters and fixed-size in-memory samples
 of query latencies, SHACL validation timings and write spacing. It holds no
 query text, user identifiers or IP addresses, is never written to disk, and is
 lost on restart. The **usage tracking** of §4.5 and the **LLM request log** of
-§4.7 are stored in your own metadata database. None of it is ever transmitted
-off your instance by the software.
+§4.7 are stored in your own metadata database, and the **change log** of §4.9,
+when it is switched on, in a SQLite file beside the RDF store. None of it is
+ever transmitted off your instance by the software, except the change log to
+the replication followers you set up (§4.9).
 
 All network calls the software can make are **either local to your own
 infrastructure or directed at endpoints that you explicitly configure**. They
@@ -60,7 +62,8 @@ are enumerated in §5, together with instructions for disabling each one.
 ## 4. Categories of data the software stores
 
 Open Triplestore stores data **on the infrastructure where you run it** (a local
-SQLite metadata database, the RDF store, and — if configured — an S3-compatible
+SQLite metadata database, the RDF store and, when switched on, its change log
+(§4.9), and — if configured — an S3-compatible
 object store such as the Versity S3 Gateway the compose stack bundles, for uploaded assets). The categories below are what
 the software is *capable* of storing; what your specific instance actually holds
 depends on how you use it.
@@ -128,7 +131,7 @@ A local, privacy-respecting feature records lightweight per-user usage events
 
 Application logs, optional backups, and (if configured) outbound operational
 alerts (§5) may incidentally contain identifiers. Treat backups as containing
-every category above.
+every category in this section, the change log of §4.9 included.
 
 Workload telemetry (§2) is kept in memory only and holds no personal data. Each
 stored SHACL validation run (the last 50 per dataset) also records how long it
@@ -183,6 +186,90 @@ can read the same counts and the top 10 users.
   read, answer and delete them.
 
 Both are deleted when the user account is purged.
+
+### 4.9 Change log
+
+The change log is **off by default**: `OTS_CHANGE_CAPTURE_ENABLED=on` switches
+it on, and a replication leader or cluster member (`OTS_REPLICATION_ROLE=leader`
+or `cluster`) keeps it on regardless, because its followers read it. While it
+is on, every write to the RDF store adds a row per graph to a SQLite database
+beside the store, `<data dir>/changes/changes.db` (`src/store/changes.rs`; in
+memory for an in-memory store). Each row holds:
+
+- the time of the write, the graph, the kind of write and the commit it
+  belongs to;
+- **the quads the write added and removed**, unless the write was too large
+  to copy (`OTS_CHANGE_CAPTURE_MAX_PAYLOAD` and `OTS_CHANGE_CAPTURE_MAX_SCAN`,
+  250 000 quads each by default), when the row keeps only the counts or just
+  the fact that the graph changed. Any personal data in your RDF (§4.1) is copied
+  into the log this way, **including the quads a write deleted**. User profile
+  graphs (`urn:system:user:{id}`) are the exception: a row of one keeps the
+  time, the graph and the number of statements changed, and never the
+  statements, so neither the values an edit replaced nor the values of a
+  purged profile are in the log;
+- **the account that made the write** (`actor_iri`, of the form
+  `{OTS_BASE_URL}/users/{user ID}`) when the write came through SPARQL Update,
+  the Graph Store protocol, RDF Patch, a version restore or an applied repair.
+  Other writes, such as file imports and the server's own writes, leave it
+  empty.
+
+A consumer's bookmark (cursor) in the log records the user ID of the account
+that set it.
+
+**Administrators** read every row, quads and account included
+(`GET /api/admin/changes`). `GET /api/admin/changes/status` and
+`GET /api/admin/changes/stats` add counts and the bookmarks and pins with the
+user or dataset that owns them. A replication follower reads the same feed
+with an administrator's credentials and so receives every row.
+
+**Anyone who may read a dataset** (anonymous callers too, for a public
+dataset) lists the rows of the dataset's graphs they may read
+(`GET /api/datasets/{id}/changes`): time, graph, kind and counts, without
+the quads. Two settings, both `writers` by default, decide who gets more:
+
+- **the account IRI** on those rows goes to the audience of
+  `OTS_ACTOR_VISIBILITY`;
+- `GET /api/datasets/{id}/changes/{seq}`, which returns one change's quads,
+  removed ones included, as an RDF Patch, answers the audience of
+  `OTS_CHANGE_PATCH_ACCESS`, and only that audience can set a bookmark on
+  the dataset's feed.
+
+`writers` is the accounts that may write the dataset, administrators
+included. An administrator can widen either setting to `signed-in` (any
+account that may read the dataset) or `readers` (everyone who may read it,
+anonymous callers on a public dataset included); a notice for an instance
+that does so should name the wider audience here.
+
+- **Retention:** rows older than `OTS_CHANGE_RETENTION_DAYS` (default **90**
+  days) are deleted by a sweep that runs a minute after the server starts and
+  every hour from then on, so a row that nothing holds is gone within an hour
+  of leaving the window. The sweep never deletes a row at or above the lowest live bookmark or pin, of
+  any graph: a bookmark holds rows until it goes unused for
+  `OTS_CURSOR_TTL_DAYS` (default 30 days), and a delta version's pin holds
+  them until the version is deleted or published. Rows of version-snapshot
+  and restore-staging graphs go after a day.
+- **Off switch:** leave `OTS_CHANGE_CAPTURE_ENABLED` unset (or `off`) on a node
+  that is not a replication leader or cluster member. Switching it off stops
+  recording but **does not delete a log an earlier run wrote**: that file
+  stays readable through the routes above and goes into backups, and the
+  hourly sweep keeps applying retention to it. To remove it, stop the server and delete `<data dir>/changes/`; an unpublished delta
+  version, which is a checkpoint plus a range of the log, can then no longer
+  be built.
+- **Backups:** a backup copies the change log whenever the store keeps one
+  (encrypted like the rest of the backup when backup encryption is on), and
+  restoring the backup puts its log back.
+- **Purging a user account does not touch the change log.** Its rows keep the
+  account's IRI and the quads of its writes until retention removes them. The
+  instance can no longer turn that IRI into a username, but the user ID in it
+  is the one the audit log (§4.4) keeps with the username. An admin purge
+  and a self-service purge also delete the user's profile graph. The log
+  records that delete without the removed values: the row keeps the time, the
+  graph IRI (which contains the user ID) and the number of statements
+  removed. A log written by an earlier version is cleaned of profile values
+  at the first start after the upgrade; backups taken before then still hold
+  the earlier rows.
+- The log stays on your instance and on the replication followers you set
+  up; nothing in it is sent anywhere else.
 
 ## 5. External network calls and how to disable each
 
@@ -268,7 +355,10 @@ above are essential; document any others your customised deployment introduces.
 - **Retention periods:** _[per category — RDF data, accounts, audit logs (incl.
   IP/user-agent), usage events, the LLM request log (incl. IP address and
   question preview; `OTS_LLM_LOG_RETENTION_DAYS`, default 90 days), saved chat
-  conversations, feedback reports, backups]_
+  conversations, feedback reports, the change log if switched on (incl. the
+  account IRI and the added and removed quads; `OTS_CHANGE_RETENTION_DAYS`,
+  default 90 days, longer while a bookmark or delta-version pin holds the
+  rows), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_

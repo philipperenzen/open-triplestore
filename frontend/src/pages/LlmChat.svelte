@@ -15,7 +15,7 @@
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import { prettySparql } from '../lib/resultHighlight.js';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
-  import CsvPreview from '../components/chat/CsvPreview.svelte';
+  import ResultVisual from '../components/chat/ResultVisual.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
@@ -761,7 +761,9 @@
                       <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
                     </button>
                     {#if q.columns && q.rows && q.rows.length}
-                      <CsvPreview columns={q.columns} rows={q.rows} framed={false} downloadable={false} />
+                      <!-- The rows as a table, with a tab for each visual their shape
+                           supports (chart / map / graph / SHACL summary). -->
+                      <ResultVisual table={{ columns: q.columns, rows: q.rows }} preferred="table" truncated={q.truncated} />
                       {#if q.truncated}<p class="truncated-note">{$t('pages.llmChat.showingFirstRows', { values: { count: q.rows.length } })}</p>{/if}
                     {/if}
                   </div>

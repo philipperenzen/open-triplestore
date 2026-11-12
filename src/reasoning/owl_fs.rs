@@ -14,7 +14,17 @@ const EMPTY_DATA_RANGE: &str = "DataIntersectionOf(<http://www.w3.org/2001/XMLSc
 #[derive(Default)]
 pub struct FsWriter {
     labels: HashMap<String, String>,
-    data_complement: bool,
+    complements: Complements,
+}
+
+/// The `DataComplementOf`s left in the text.
+#[derive(Default)]
+struct Complements {
+    any: bool,
+    /// One over a number datatype (`owl:real`, `xsd:decimal` and the types
+    /// derived from it): Konclude v0.7.0 reads `¬xsd:positiveInteger` as
+    /// holding no number at all.
+    numeric: bool,
 }
 
 impl FsWriter {
@@ -25,7 +35,13 @@ impl FsWriter {
     /// Whether anything written so far kept a `DataComplementOf` (the ones
     /// [`dr`] rewrites away do not count).
     pub fn wrote_data_complement(&self) -> bool {
-        self.data_complement
+        self.complements.any
+    }
+
+    /// Whether one of those complements is over a number datatype, or a
+    /// restriction of one.
+    pub fn wrote_numeric_complement(&self) -> bool {
+        self.complements.numeric
     }
 
     /// The ontology document, with `extra` axioms appended (entailment and
@@ -253,7 +269,7 @@ impl FsWriter {
     }
 
     fn dr(&mut self, r: &DataRange) -> String {
-        write_dr(r, &mut self.data_complement)
+        write_dr(r, &mut self.complements)
     }
 }
 
@@ -278,7 +294,7 @@ fn opes(v: &[ObjectProp]) -> String {
 
 #[cfg(test)]
 fn dr(r: &DataRange) -> String {
-    write_dr(r, &mut false)
+    write_dr(r, &mut Complements::default())
 }
 
 /// `true` for a data range with no values at all.
@@ -299,9 +315,44 @@ fn is_top_range(r: &DataRange) -> bool {
     }
 }
 
-/// Writes `r`; sets `complement` when a `DataComplementOf` stays in the text.
-fn write_dr(r: &DataRange, complement: &mut bool) -> String {
-    let list = |v: &[DataRange], complement: &mut bool| {
+/// `true` for `owl:real`, `owl:rational`, `xsd:decimal` and the integer
+/// types derived from it.
+fn is_numeric(datatype: &str) -> bool {
+    match datatype.strip_prefix(XSD) {
+        Some(local) => matches!(
+            local,
+            "decimal"
+                | "integer"
+                | "nonNegativeInteger"
+                | "positiveInteger"
+                | "nonPositiveInteger"
+                | "negativeInteger"
+                | "long"
+                | "int"
+                | "short"
+                | "byte"
+                | "unsignedLong"
+                | "unsignedInt"
+                | "unsignedShort"
+                | "unsignedByte"
+        ),
+        None => matches!(datatype.strip_prefix(OWL), Some("real" | "rational")),
+    }
+}
+
+/// Whether `r` names a number datatype, directly or as a restriction's base.
+fn mentions_numeric(r: &DataRange) -> bool {
+    match r {
+        DataRange::Datatype(d) | DataRange::Restriction(d, _) => is_numeric(d),
+        DataRange::IntersectionOf(v) | DataRange::UnionOf(v) => v.iter().any(mentions_numeric),
+        DataRange::ComplementOf(x) => mentions_numeric(x),
+        DataRange::OneOf(_) => false,
+    }
+}
+
+/// Writes `r`; records each `DataComplementOf` that stays in the text.
+fn write_dr(r: &DataRange, complement: &mut Complements) -> String {
+    let list = |v: &[DataRange], complement: &mut Complements| {
         v.iter()
             .map(|x| write_dr(x, complement))
             .collect::<Vec<_>>()
@@ -336,7 +387,8 @@ fn write_dr(r: &DataRange, complement: &mut bool) -> String {
                 _ if is_empty_range(x) => iri_ref(RDFS_LITERAL),
                 DataRange::ComplementOf(y) => write_dr(y, complement),
                 _ => {
-                    *complement = true;
+                    complement.any = true;
+                    complement.numeric |= mentions_numeric(x);
                     format!("DataComplementOf({})", write_dr(x, complement))
                 }
             }
@@ -502,6 +554,41 @@ mod tests {
             not(int()),
         )));
         assert!(w.wrote_data_complement());
+    }
+
+    #[test]
+    fn complements_of_number_datatypes_are_flagged() {
+        let not = |r: DataRange| DataRange::ComplementOf(Box::new(r));
+        let dt = |d: &str| DataRange::Datatype(format!("{XSD}{d}"));
+        let flagged = |r: &DataRange| {
+            let mut w = FsWriter::new();
+            w.dr(r);
+            w.wrote_numeric_complement()
+        };
+        for r in [
+            not(dt("positiveInteger")),
+            not(DataRange::Datatype(
+                "http://www.w3.org/2002/07/owl#real".into(),
+            )),
+            not(DataRange::Restriction(format!("{XSD}integer"), vec![])),
+            DataRange::IntersectionOf(vec![dt("short"), not(dt("unsignedByte"))]),
+        ] {
+            assert!(flagged(&r), "{r:?}");
+        }
+        for r in [
+            dt("integer"),
+            not(dt("string")),
+            not(dt("double")),
+            not(DataRange::OneOf(vec![Literal {
+                lexical: "1".into(),
+                datatype: format!("{XSD}integer"),
+                lang: None,
+            }])),
+            // ¬¬xsd:integer is written as xsd:integer.
+            not(not(dt("integer"))),
+        ] {
+            assert!(!flagged(&r), "{r:?}");
+        }
     }
 
     #[test]

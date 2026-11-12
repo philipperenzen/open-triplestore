@@ -705,6 +705,18 @@ impl StorageBulkLoader<'_> {
         any(target_family = "wasm", not(feature = "rocksdb")),
         expect(clippy::unnecessary_wraps)
     )]
+    pub fn prepare(&mut self) -> Result<(), StorageError> {
+        match &mut self.kind {
+            #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]
+            StorageBulkLoaderKind::RocksDb(loader) => loader.prepare(),
+            StorageBulkLoaderKind::Memory(_) => Ok(()),
+        }
+    }
+
+    #[cfg_attr(
+        any(target_family = "wasm", not(feature = "rocksdb")),
+        expect(clippy::unnecessary_wraps)
+    )]
     pub fn commit(self) -> Result<(), StorageError> {
         match self.kind {
             #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]

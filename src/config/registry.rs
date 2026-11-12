@@ -423,6 +423,14 @@ settings! {
     REMOTE_AUTH: String = Spec::new("OTS_REMOTE_AUTH", Kind::Enum(&["none", "assert"]), "auth")
         .default("none")
         .doc("`assert`: send an identity assertion with SERVICE and LDES requests to peers.");
+    ACTOR_VISIBILITY: String = Spec::new("OTS_ACTOR_VISIBILITY", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
+        .default("writers")
+        .doc("Who sees the author of a dataset's changes (feed, commits, provenance, versions, patch log): writers, signed-in or readers.")
+        .runtime();
+    CHANGE_PATCH_ACCESS: String = Spec::new("OTS_CHANGE_PATCH_ACCESS", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
+        .default("writers")
+        .doc("Who may fetch a change's quads from a dataset's change feed and hold a cursor on it: writers, signed-in or readers.")
+        .runtime();
 
     // ── storage ──
     S3_ENDPOINT: Option<String> = Spec::new("OTS_S3_ENDPOINT", Kind::Url, "storage")
@@ -590,7 +598,7 @@ settings! {
         .doc("A dataset's member log is pruned at most this often from the write path.");
     LDES_BNODE_DEPTH: usize = Spec::new("OTS_LDES_BNODE_DEPTH", at_least(0), "ldes")
         .default("8")
-        .doc("How far up a blank-node tree the owner of a changed blank node is looked for.");
+        .doc("How far up a blank-node tree the owner of a changed blank node is looked for; a change deeper than this republishes its graph whole.");
     LDES_BNODE_SUBJECTS_MAX: usize = Spec::new("OTS_LDES_BNODE_SUBJECTS_MAX", at_least(0), "ldes")
         .default("10000")
         .doc("Above this many changed blank-node subjects in one graph, the graph is republished whole.");
@@ -735,6 +743,8 @@ settings! {
         .doc("Model for the SHACL assistant (default `OTS_LLM_MODEL`).");
     LLM_CHAT_MODEL: Option<String> = Spec::new("OTS_LLM_CHAT_MODEL", Kind::Text, "llm")
         .doc("Model for the chat assistant (default `OTS_LLM_MODEL`).");
+    LLM_REASONING_EFFORT: Option<String> = Spec::new("OTS_LLM_REASONING_EFFORT", Kind::Enum(&["none", "low", "medium", "high"]), "llm")
+        .doc("`reasoning_effort` sent with every completion; `none` turns a reasoning model's thinking off. Unset: not sent.");
     LLM_API_KEY: Option<String> = Spec::new("OTS_LLM_API_KEY", Kind::Secret, "llm")
         .doc("Bearer token for the endpoint (a secret reference).");
     LLM_TIMEOUT: Duration = Spec::new("OTS_LLM_TIMEOUT_SECS", at_least(1), "llm")

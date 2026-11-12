@@ -347,6 +347,11 @@ async fn main() -> anyhow::Result<()> {
     let store = store::recovery::open_store_with_recovery(&data_dir, &backup_dir)?;
     info!("Store opened at {:?}", data_dir);
 
+    // The change log records user profile graphs without their values. What
+    // an earlier version recorded, or a restored backup's log brought back,
+    // goes now, before anything reads the log.
+    auth::user_graph::withhold_recorded_profile_payloads(&store, &auth_db);
+
     // Load initial data if specified
     if let Some(ref load_path) = cli.load {
         info!("Loading data from {:?}", load_path);
