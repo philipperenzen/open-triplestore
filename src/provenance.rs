@@ -9,6 +9,12 @@
 //! specialisations — in Turtle, so a client can follow provenance with plain
 //! PROV vocabulary and no knowledge of this store's commit model.
 //!
+//! The document is the caller's view of the trail: only the graphs the caller
+//! may read and the commits that touched them (dataset access does not imply
+//! access to its private graphs), and the agents behind commits and versions
+//! only for `OTS_ACTOR_VISIBILITY`'s audience. The dataset's owner is always
+//! named: owning a dataset is not having edited it.
+//!
 //! Statement-level (RDF-star) qualification is deliberately absent: the trail
 //! records *which graphs* an activity touched, not which triples; per-triple
 //! attribution needs per-write change capture (the RDF Patch roadmap item).
@@ -76,17 +82,20 @@ pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The dataset's PROV-O trail as Turtle.
-pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
+/// The dataset's PROV-O trail as Turtle, over `graphs` — the dataset's graphs
+/// the caller may read — with the agents of commits and versions when
+/// `actors` is set.
+pub fn dataset_provenance_turtle(
+    state: &AppState,
+    ds: &Dataset,
+    graphs: &[String],
+    actors: bool,
+) -> String {
     let base = state.base_url.trim_end_matches('/');
     let ds_iri = format!("{base}/dataset/{}", ds.id);
-    let graphs = state
-        .auth_db
-        .list_dataset_graphs(&ds.id)
-        .unwrap_or_default();
     let commits = list_commits(
         &state.store,
-        &CommitScope::Graphs(graphs.clone()),
+        &CommitScope::Graphs(graphs.to_vec()),
         &CommitQuery::default(),
     );
     let versions = crate::dataset_versions::registry::list_versions(&state.store, base, &ds.id);
@@ -122,7 +131,7 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
 
     // Each graph is an entity that specialises the dataset; its most recent
     // generating activity is the newest commit that touched it.
-    for g in &graphs {
+    for g in graphs {
         writeln!(out, "<{g}> a prov:Entity ;").unwrap();
         writeln!(out, "    prov:specializationOf <{ds_iri}> ;").unwrap();
         if let Some(c) = commits
@@ -153,10 +162,13 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
         if let Some(v) = &c.version {
             writeln!(out, "    ver:onVersion \"{}\" ;", esc(v)).unwrap();
         }
-        if let Some(a) = &c.actor_iri {
+        let actor = c.actor_iri.as_ref().filter(|_| actors);
+        if let Some(a) = actor {
             writeln!(out, "    prov:wasAssociatedWith <{a}> ;").unwrap();
         }
-        for g in &c.affected_graphs {
+        // A commit can touch graphs the caller may not read besides the one
+        // that put it in this trail: those are not named.
+        for g in c.affected_graphs.iter().filter(|g| graphs.contains(g)) {
             writeln!(out, "    prov:used <{g}> ;").unwrap();
             writeln!(out, "    prov:generated <{g}> ;").unwrap();
         }
@@ -172,7 +184,7 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
             c.created_at
         )
         .unwrap();
-        if let Some(a) = &c.actor_iri {
+        if let Some(a) = actor {
             writeln!(out, "<{a}> a prov:Agent .").unwrap();
         }
     }
@@ -195,7 +207,7 @@ pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
             )
             .unwrap();
         }
-        if let Some(by) = &v.created_by {
+        if let Some(by) = v.created_by.as_ref().filter(|_| actors) {
             writeln!(out, "    prov:wasAttributedTo <{base}/users/{by}> ;").unwrap();
         }
         writeln!(
@@ -227,9 +239,17 @@ pub async fn get_dataset_provenance(
     if !visible {
         return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
     }
+    // The same graphs as `GET …/commits`: a private graph's commits (its IRI,
+    // messages, counts) are for callers who may write the dataset.
+    let graphs = state
+        .auth_db
+        .list_readable_dataset_graphs(uid, &ds)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let actors = crate::auth::policy::shows_actors(&state.auth_db, &ds, uid)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/turtle; charset=utf-8")],
-        dataset_provenance_turtle(&state, &ds),
+        dataset_provenance_turtle(&state, &ds, &graphs, actors),
     ))
 }

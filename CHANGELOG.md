@@ -164,10 +164,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a purged user's rows stay until retention, and a purge's own profile-graph
   delete is recorded as counts only), data minimisation (leave capture off unless something
   reads the log), storage limitation, security (the dataset change feed shows
-  the writer's account IRI to the dataset's readers) and the retention
-  checklist.
+  the writer's account IRI to the audience of `OTS_ACTOR_VISIBILITY`) and the
+  retention checklist.
 
 ### Security
+- **A dataset's history no longer shows every reader who changed it, or the
+  quads it no longer holds (breaking for unprivileged feed consumers).** Two
+  runtime settings, both `writers` by default, with `signed-in` and `readers`
+  as the wider values (**Admin → Workspace settings**, or the environment):
+  - `OTS_ACTOR_VISIBILITY` decides who sees the author of a change. Outside
+    its audience `actor_iri` is `null` on `GET /api/datasets/{id}/changes`
+    rows; `actor_iri`, `actor_username` and `actor_display_name` are left off
+    `…/commits`; `…/provenance` names no agent for a commit or a version;
+    `created_by` on `…/versions`, `owner` on `…/branches` and `author` on
+    `…/log` entries are `null`. Before, all of these went to anyone who could
+    read the dataset: for a public dataset, an anonymous caller got the
+    account IRI of every editor and, from `…/commits`, their username and
+    display name.
+  - `OTS_CHANGE_PATCH_ACCESS` decides who may fetch `…/changes/{seq}` and
+    `…/changes/{seq}/inverse`, and who may set a cursor on the feed. A patch
+    holds deleted data on both sides (what the change removed, and what it
+    added that a later change removed), so data taken out of a public dataset
+    stayed readable by anyone for as long as the row was kept; and any
+    signed-in reader could keep every dataset's rows from being swept with a
+    cursor. Outside the audience the three routes answer `401` or `403`. The
+    listing of changes, without quads, is unchanged.
+
+  `writers` means the accounts that may write the dataset, administrators
+  included; a read-only API token of such an account counts (it reads authors
+  and patches; a cursor needs write scope, as before). **Upgrading:** a
+  consumer that mirrors a dataset from its change feed without write access
+  now gets `403` on patches and on `PUT …/changes/cursors/{name}`. Give it a
+  token of an account that may write the dataset, have it refetch a graph
+  when the listing shows a change, publish an LDES stream for it, or set
+  `OTS_CHANGE_PATCH_ACCESS` to `signed-in` or `readers`. Cursors readers set
+  before the upgrade expire after `OTS_CURSOR_TTL_DAYS`; their owners and
+  administrators can delete them sooner. Neither setting erases anything, and
+  neither covers what a writer publishes on purpose: version data and diffs,
+  patch-log entries, LDES members and the statement-provenance graph. See
+  `docs/versioning.md`, "Who sees what of the history".
+- **`GET /api/datasets/{id}/provenance` and `…/commits` no longer name a
+  graph the caller may not read.** The PROV-O document listed every graph of
+  the dataset and every commit on them, so a reader of a public dataset got
+  its private graphs' IRIs, commit messages and counts. It now covers the
+  graphs the caller may read, as `…/commits` does. On both routes a commit
+  that changed a readable and an unreadable graph in one write lists only the
+  readable one.
 - **Change-log retention runs on a timer.** `OTS_CHANGE_RETENTION_DAYS`
   (default 90) and `OTS_CURSOR_TTL_DAYS` were enforced only by a sweep on the
   write path, once every 1,000 recorded rows, counted in memory from each
@@ -259,11 +301,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Graph Store protocol, RDF Patch, a version restore or a repair, the
   writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). Rows of user
   profile graphs carry counts only. The section names the readers: admins
-  and replication followers see every row; anyone who may read a dataset,
-  anonymous callers included, sees the account IRI and the quads of the
-  dataset's graphs they may read. It also explains retention
-  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly, keeping every row a
-  live cursor or delta-version pin still needs), says that
+  and replication followers see every row; a dataset's writers, or the wider
+  audiences `OTS_ACTOR_VISIBILITY` and `OTS_CHANGE_PATCH_ACCESS` name, see the
+  account IRI and the quads of the dataset's graphs they may read. It also
+  explains retention (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly,
+  keeping every row a live cursor or delta-version pin still needs), says that
   switching capture off keeps an earlier log, and says that backups carry it.
   **A user purge does not erase the change log**: the user's rows keep their
   account IRI and quads until retention; the purge's deletion of the profile

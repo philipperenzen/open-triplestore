@@ -6,7 +6,9 @@
 //!   from. Only rows of graphs the caller may read are listed (dataset access
 //!   does not imply access to its private graphs); an unreadable row is
 //!   omitted, never counted. Store-scoped rows — writes whose graphs were not
-//!   known — are listed for every dataset: they bound every chain.
+//!   known — are listed for every dataset: they bound every chain. A row
+//!   names who made the change (`actor_iri`) only for a caller in
+//!   `OTS_ACTOR_VISIBILITY`'s audience.
 //! * `GET /api/datasets/:id/changes/:seq` and `…/:seq/inverse` — one change
 //!   as an RDF Patch, or the patch that undoes it. 410 when retention has
 //!   removed it, 409 when the row carries no quads (a change over the payload
@@ -15,6 +17,13 @@
 //!   consumer position. It pins retention until it expires
 //!   (`OTS_CURSOR_TTL_DAYS`, refreshed by every PUT) or its owner or an admin
 //!   deletes it.
+//!
+//! A patch holds quads the graph may no longer hold — both sides of it: what
+//! a later change removed is still in the patch that added it — and a cursor
+//! keeps every row above it from being swept. Both are therefore for
+//! `OTS_CHANGE_PATCH_ACCESS`'s audience (default: accounts that may write the
+//! dataset); below it a patch and a cursor PUT answer 401 or 403, and the
+//! listing still says which graph changed at which sequence number.
 //! * `GET /api/admin/changes/stats` — size accounting: rows and payload bytes
 //!   per dataset, pins and cursors with their owners, live materialisations
 //!   and versions per kind.
@@ -94,7 +103,10 @@ pub async fn feed(
     Query(p): Query<FeedParams>,
 ) -> Result<impl IntoResponse, AppError> {
     let user = user.as_deref();
-    load_readable(&state, &dataset_id, user.map(|u| u.user_id.as_str()))?;
+    let uid = user.map(|u| u.user_id.as_str());
+    let ds = load_readable(&state, &dataset_id, uid)?;
+    let actors = crate::auth::policy::shows_actors(&state.auth_db, &ds, uid)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let graphs = readable_graphs(&state, &dataset_id, user)?;
     let since = p.since.unwrap_or(0).max(0);
     let limit = p.limit.unwrap_or(500).clamp(1, 5000);
@@ -108,6 +120,11 @@ pub async fn feed(
         rows = log.rows_after_in_graphs(since, limit, &graphs, false);
     }
     let next = rows.last().and_then(|r| r.seq).unwrap_or(since);
+    if !actors {
+        for r in &mut rows {
+            r.actor_iri = None;
+        }
+    }
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "enabled": log.enabled(),
@@ -117,14 +134,38 @@ pub async fn feed(
     })))
 }
 
-/// The row `seq` of `dataset_id`, if the caller may read it.
+/// Refuse a caller below `OTS_CHANGE_PATCH_ACCESS`'s audience: 401 without
+/// an account, 403 with one. Asked before anything about a row is looked up,
+/// so the answer does not depend on what the log holds.
+fn require_patch_access(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<(), AppError> {
+    let audience = crate::auth::policy::change_patch_audience(&state.auth_db);
+    if audience
+        .admits(&state.auth_db, ds, uid)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Ok(());
+    }
+    // An account is in every audience but `writers`.
+    Err(match uid {
+        None => AppError::Unauthorized(
+            "Authentication required: this dataset's changes are not served as patches to anonymous callers".into(),
+        ),
+        Some(_) => AppError::Forbidden(
+            "Write access to this dataset required to fetch its changes as patches or to hold a cursor on its feed".into(),
+        ),
+    })
+}
+
+/// The row `seq` of `dataset_id`, if the caller may read it as a patch.
 fn readable_row(
     state: &AppState,
     dataset_id: &str,
     seq: i64,
     user: Option<&AuthenticatedUser>,
 ) -> Result<ChangeRow, AppError> {
-    load_readable(state, dataset_id, user.map(|u| u.user_id.as_str()))?;
+    let uid = user.map(|u| u.user_id.as_str());
+    let ds = load_readable(state, dataset_id, uid)?;
+    require_patch_access(state, &ds, uid)?;
     let log = state.store.changes();
     let Some(row) = log.row(seq) else {
         if seq >= 1 && seq <= log.last_seq() {
@@ -218,7 +259,10 @@ pub async fn put_cursor(
     Path((dataset_id, name)): Path<(String, String)>,
     Json(body): Json<CursorBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    load_readable(&state, &dataset_id, Some(&user.user_id))?;
+    let ds = load_readable(&state, &dataset_id, Some(&user.user_id))?;
+    // A cursor holds rows back from the sweep for the whole store: only a
+    // caller who may fetch the patches it is for can set or refresh one.
+    require_patch_access(&state, &ds, Some(&user.user_id))?;
     if !valid_cursor_name(&name) {
         return Err(AppError::BadRequest(
             "cursor names are 1-64 characters of [A-Za-z0-9._-]".into(),
@@ -259,7 +303,8 @@ pub async fn put_cursor(
 }
 
 /// DELETE /api/datasets/:dataset_id/changes/cursors/:name — its owner or an
-/// admin.
+/// admin. Not behind `OTS_CHANGE_PATCH_ACCESS`: an owner who can no longer
+/// refresh a cursor can still take it away.
 pub async fn delete_cursor(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,

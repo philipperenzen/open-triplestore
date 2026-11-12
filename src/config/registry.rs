@@ -423,6 +423,14 @@ settings! {
     REMOTE_AUTH: String = Spec::new("OTS_REMOTE_AUTH", Kind::Enum(&["none", "assert"]), "auth")
         .default("none")
         .doc("`assert`: send an identity assertion with SERVICE and LDES requests to peers.");
+    ACTOR_VISIBILITY: String = Spec::new("OTS_ACTOR_VISIBILITY", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
+        .default("writers")
+        .doc("Who sees the author of a dataset's changes (feed, commits, provenance, versions, patch log): writers, signed-in or readers.")
+        .runtime();
+    CHANGE_PATCH_ACCESS: String = Spec::new("OTS_CHANGE_PATCH_ACCESS", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
+        .default("writers")
+        .doc("Who may fetch a change's quads from a dataset's change feed and hold a cursor on it: writers, signed-in or readers.")
+        .runtime();
 
     // ── storage ──
     S3_ENDPOINT: Option<String> = Spec::new("OTS_S3_ENDPOINT", Kind::Url, "storage")
