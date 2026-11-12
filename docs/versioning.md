@@ -446,9 +446,12 @@ PUT    /api/admin/changes/cursors/<name>      {"seq": <n>}
 DELETE /api/admin/changes/cursors/<name>
 ```
 
-`GET /api/admin/changes` returns `{ "epoch", "rows", "next_after" }`; pass
-`next_after` back as `after` to continue. `graph=` narrows to one graph's
-rows *plus* the store-scoped rows, which a reader of any graph must see.
+`GET /api/admin/changes` returns `{ "epoch", "rows", "next_after",
+"max_deleted_seq", "max_deleted_ephemeral_seq" }`; pass `next_after` back as
+`after` to continue. `graph=` narrows to one graph's rows *plus* the
+store-scoped rows, which a reader of any graph must see. The last two say
+how far retention has deleted rows (see [Retention](#retention-crashes-caps)):
+a reader whose `after` is below either was not given every write.
 `PUT …/cursors/<name>` bookmarks a consumer at the last `seq` it applied
 (`0` … the newest `seq`; names are 1–64 characters of `[A-Za-z0-9._-]`),
 `DELETE` drops it (`204`, or `404`). All four are admin-only: rows carry
@@ -538,6 +541,11 @@ less; the scan cost does not shrink.
   needs, go after a day. The highest sequence number retention deleted is
   remembered, so a chain that would need a row below it counts as broken —
   the next cut is a checkpoint — rather than silently missing a change.
+  `GET /api/admin/changes` reports it with every page (`max_deleted_seq`),
+  and beside it the highest one deleted from snapshot and staging graphs
+  (`max_deleted_ephemeral_seq`), which no cursor holds back. A replication
+  follower whose position is below the first fetches every graph in scope
+  again; below the second only, the snapshot and staging graphs.
 - **Capture switched off and on again.** A log kept from an earlier run
   stays readable while capture is off (delta versions resolve through it),
   but records nothing; the next run that records starts a new epoch, so no

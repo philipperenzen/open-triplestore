@@ -153,6 +153,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and stale code anchors and versions. The web UI's `frontend/package.json`
   now carries the release version, and `release_prepare.py` keeps it, and the
   Windows guide's sample response, in step.
+- **A replication follower that was away too long resynchronises, as
+  documented.** A follower away for longer than its cursor lived
+  (`OTS_CURSOR_TTL_DAYS`) came back to a log from which the leader's retention
+  had deleted rows it never applied, and tailed what was left: those writes
+  never reached it, and a graph healed only when a later row for it disagreed
+  on the count. `GET /api/admin/changes` now reports how far retention has
+  deleted (`max_deleted_seq`), and a follower whose position is below that
+  fetches every graph in scope again, at most once per catch-up, then tails
+  from the leader's position. The same held for a follower more than a day
+  behind with its cursor alive: rows of version snapshot graphs and restore
+  staging graphs leave the log after a day whatever cursors exist, so a
+  version cut while it was down never reached it. Those deletions are
+  reported apart (`max_deleted_ephemeral_seq`, recorded from this version
+  on), and the follower fetches the snapshot and staging graphs in scope
+  again. A follower of a leader on an earlier version behaves as before.
 - **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
   names it under access (each row's account IRI), erasure (deleted quads and
   a purged user's rows stay until retention, and a purge's own profile-graph

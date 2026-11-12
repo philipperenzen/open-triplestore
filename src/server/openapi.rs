@@ -6359,7 +6359,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Change log rows",
-                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`). Admins only. See docs/versioning.md.",
+                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`), and how far retention has deleted rows: `max_deleted_seq`, and `max_deleted_ephemeral_seq` for the rows of version snapshot and restore staging graphs, which go after a day whatever cursors exist. A reader whose `after` is below either was not given every write. Admins only. See docs/versioning.md.",
                 vec![
                     qp("after", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
