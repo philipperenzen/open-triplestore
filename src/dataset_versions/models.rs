@@ -7,7 +7,11 @@
 //! into version-scoped named graphs, plus a `source → snapshot` mapping used to
 //! restore a snapshot back onto the live graphs.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
+
+use crate::store::set_hash::SetHash;
 
 // Reuse the lifecycle enum from the data-model module so status semantics and
 // serialization match across the whole versioning surface.
@@ -187,6 +191,70 @@ impl DatasetVersion {
             .map(|m| m.source_graph.clone())
             .collect()
     }
+
+    /// The snapshot graphs left once the source graphs in `hidden` are taken
+    /// out. With nothing hidden, all of them — a record cut before
+    /// `source_map` existed included. Otherwise only the snapshots the map
+    /// ties to a source graph that is not hidden: one it does not map goes
+    /// too, since nothing says which graph it copies (fail-closed).
+    pub fn snapshots_outside(&self, hidden: &HashSet<String>) -> Vec<String> {
+        if hidden.is_empty() {
+            return self.snapshot_graphs.clone();
+        }
+        self.source_map
+            .iter()
+            .filter(|m| !hidden.contains(&m.source_graph))
+            .map(|m| m.snapshot_graph.clone())
+            .collect()
+    }
+
+    /// Reduce the record to the graphs [`Self::snapshots_outside`] leaves,
+    /// for a caller who may not read the source graphs in `hidden`: the two
+    /// graph lists name a graph (and, in a snapshot's IRI, its slug), and the
+    /// totals say how much it holds.
+    ///
+    /// When a graph is taken out, `quad_count` and `content_hash` become the
+    /// totals of the graphs that remain — `None` when one of those has no
+    /// figure of its own. The registry's totals would not do: the count less
+    /// the remaining graphs' is the hidden graphs' size, and the hash is
+    /// additive (`store::set_hash`), so the same subtraction gives a hash of
+    /// their content, to test a guess against. `change_count` is over all of a
+    /// delta's graphs and cannot be split from the record, so it goes.
+    ///
+    /// A record no hidden graph is part of is left exactly as it is. Only for
+    /// what is sent to that caller: never store the result, and never build
+    /// or restore a version from it.
+    pub fn hide_sources(&mut self, hidden: &HashSet<String>) {
+        if hidden.is_empty() {
+            return;
+        }
+        let kept = self.snapshots_outside(hidden);
+        let whole = self.snapshot_graphs.iter().all(|g| kept.contains(g))
+            && self
+                .source_map
+                .iter()
+                .all(|m| !hidden.contains(&m.source_graph));
+        if whole {
+            return;
+        }
+        self.source_map
+            .retain(|m| !hidden.contains(&m.source_graph));
+        self.snapshot_graphs = kept;
+        if self.quad_count.is_some() {
+            self.quad_count = self.source_map.iter().map(|m| m.quad_count).sum();
+        }
+        if self.content_hash.is_some() {
+            self.content_hash = self
+                .source_map
+                .iter()
+                .try_fold(SetHash::new(), |mut total, m| {
+                    total.merge(&m.content_hash.as_deref().and_then(SetHash::from_hex)?);
+                    Some(total)
+                })
+                .map(SetHash::to_hex);
+        }
+        self.change_count = None;
+    }
 }
 
 // ─── Request bodies ─────────────────────────────────────────────────────────
@@ -255,4 +323,123 @@ pub struct DatasetBranchInfo {
     pub created_at: String,
     pub ahead: usize,
     pub behind: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PUB: &str = "urn:t:public";
+    const PRIV: &str = "urn:t:private";
+
+    fn hash_of(element: &str) -> SetHash {
+        let mut h = SetHash::new();
+        h.add_element(element);
+        h
+    }
+
+    /// A version of two graphs, one quad in `PUB` and two in `PRIV`, with the
+    /// totals a cut records.
+    fn record() -> DatasetVersion {
+        let mut public = GraphMapping::new("urn:v:1/public".into(), PUB.into());
+        public.quad_count = Some(1);
+        public.content_hash = Some(hash_of("a").to_hex());
+        let mut private = GraphMapping::new("urn:v:1/private".into(), PRIV.into());
+        private.quad_count = Some(2);
+        let mut h = hash_of("b");
+        h.merge(&hash_of("c"));
+        private.content_hash = Some(h.to_hex());
+        let mut total = hash_of("a");
+        total.merge(&h);
+        let mut v = DatasetVersion::checkpoint(
+            "ds",
+            "1.0.0",
+            VersionStatus::Published,
+            "urn:v:1".into(),
+            vec![public, private],
+            None,
+            None,
+            None,
+        );
+        v.quad_count = Some(3);
+        v.content_hash = Some(total.to_hex());
+        v
+    }
+
+    fn hidden(graphs: &[&str]) -> HashSet<String> {
+        graphs.iter().map(|g| g.to_string()).collect()
+    }
+
+    #[test]
+    fn a_hidden_source_leaves_the_record_with_its_snapshot_and_totals() {
+        let mut v = record();
+        v.change_count = Some(7);
+        v.hide_sources(&hidden(&[PRIV]));
+        assert_eq!(v.snapshot_graphs, vec!["urn:v:1/public".to_string()]);
+        assert_eq!(v.covered_graphs(), vec![PUB.to_string()]);
+        assert_eq!(v.quad_count, Some(1));
+        assert_eq!(v.content_hash, Some(hash_of("a").to_hex()));
+        assert_eq!(v.change_count, None);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("private"), "{json}");
+    }
+
+    #[test]
+    fn a_record_without_a_hidden_source_is_left_as_it_is() {
+        for set in [hidden(&[]), hidden(&["urn:t:another"])] {
+            let mut v = record();
+            v.change_count = Some(7);
+            let before = serde_json::to_value(&v).unwrap();
+            v.hide_sources(&set);
+            assert_eq!(serde_json::to_value(&v).unwrap(), before);
+        }
+    }
+
+    /// A snapshot the map does not tie to a source graph: kept while nothing
+    /// is hidden (a record cut before the map existed), dropped once anything
+    /// is — it may be a copy of the hidden graph.
+    #[test]
+    fn an_unmapped_snapshot_goes_once_anything_is_hidden() {
+        let mut legacy = record();
+        legacy.snapshot_graphs.push("urn:v:1/unmapped".into());
+
+        let mut v = legacy.clone();
+        v.hide_sources(&hidden(&[]));
+        assert_eq!(v.snapshot_graphs.len(), 3);
+
+        // Hidden graphs the version does not cover still drop it.
+        let mut v = legacy.clone();
+        v.hide_sources(&hidden(&["urn:t:another"]));
+        assert_eq!(
+            v.snapshot_graphs,
+            vec!["urn:v:1/public".to_string(), "urn:v:1/private".to_string()]
+        );
+        assert_eq!(v.source_map.len(), 2);
+
+        // A record with no map at all lists nothing.
+        let mut v = legacy;
+        v.source_map.clear();
+        v.hide_sources(&hidden(&[PRIV]));
+        assert!(v.snapshot_graphs.is_empty());
+        assert_eq!(v.quad_count, Some(0));
+        assert_eq!(v.content_hash, Some(SetHash::new().to_hex()));
+    }
+
+    #[test]
+    fn totals_are_left_out_when_a_remaining_graph_has_none() {
+        let mut v = record();
+        v.source_map[0].quad_count = None;
+        v.source_map[0].content_hash = None;
+        v.hide_sources(&hidden(&[PRIV]));
+        assert_eq!(v.quad_count, None);
+        assert_eq!(v.content_hash, None);
+
+        // A record that never had totals does not gain them.
+        let mut v = record();
+        v.quad_count = None;
+        v.content_hash = None;
+        v.hide_sources(&hidden(&[PRIV]));
+        assert_eq!(v.quad_count, None);
+        assert_eq!(v.content_hash, None);
+    }
 }

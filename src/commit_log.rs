@@ -608,6 +608,16 @@ pub fn resolve_actors(auth_db: &crate::auth::db::AuthDb, commits: &mut [CommitRe
     }
 }
 
+/// Take the actor off `commits`, for a caller the actor is not shown to
+/// (`OTS_ACTOR_VISIBILITY`): the IRI and the names [`resolve_actors`] fills.
+pub fn withhold_actors(commits: &mut [CommitRecord]) {
+    for c in commits.iter_mut() {
+        c.actor_iri = None;
+        c.actor_username = None;
+        c.actor_display_name = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
