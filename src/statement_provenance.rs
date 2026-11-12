@@ -23,23 +23,48 @@
 //! skip is recorded as an `ots:ProvenanceGap` event, as is a change the
 //! change log could not carry.
 //!
+//! An annotation is the statement itself, so it is read by whoever reads the
+//! statement and nobody else: the annotations of a graph the dataset holds
+//! privately go to a second graph, `urn:ots:statement-provenance:{id}:private`,
+//! registered private (its readers are the dataset's writers). The flag that
+//! counts is the graph's when the change is annotated. A graph made private
+//! later takes its annotations along ([`follow_private_graph`]): in the
+//! request that makes it private, and again on every tick
+//! ([`follow_private_graphs`]), which covers the paths that flag a graph
+//! without such a request (a report graph that follows the graph it reports
+//! on, a pipeline target) — also for a dataset that no longer records
+//! provenance, and while change capture is off. A graph made public
+//! again is annotated in the public graph from then on; what was annotated
+//! while it was private stays private, since it holds the statements removed
+//! in that time.
+//!
 //! Written by a change-log consumer ([`tick`]) behind the data commit, on its
 //! own cursor (`statement-provenance`): the annotations are a separate store
 //! write, ids are deterministic, so a replay after a crash rewrites the same
 //! quads. A dataset that opts in is annotated from the change log's head on,
 //! not retroactively. Nothing happens while change capture is off.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use oxigraph::model::{GraphName, Literal, NamedNode, NamedOrBlankNode, Quad, Term};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedOrBlankNode, NamedOrBlankNodeRef, Quad, Term,
+    TermRef,
+};
 use sha2::{Digest, Sha256};
 
 use crate::dataset_settings::{self, ProvenanceProfile};
+use crate::provenance::{private_statement_provenance_graph, statement_provenance_graph};
 use crate::server::AppState;
 use crate::store::changes::{decode_text, ChangeRow, Extent, State};
+use crate::store::QuadOp;
 
 pub const CURSOR: &str = "statement-provenance";
 const BATCH: usize = 2_000;
+/// Reifiers and gap nodes [`follow_private_graph`] moves per transaction.
+const MOVE_BATCH: usize = 500;
+/// The `app_settings` key [`split_existing_annotations`] sets once it has
+/// gone through every dataset.
+const SPLIT_MARKER: &str = "cleanup.statement_provenance_private.v1";
 const OTS: &str = "https://opentriplestore.org/ns#";
 const PROV: &str = "http://www.w3.org/ns/prov#";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
@@ -50,7 +75,7 @@ const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 /// Register the dataset's statement-provenance graph (Provenance role) if it
 /// is not yet.
 pub fn ensure_graph(state: &AppState, dataset_id: &str) -> anyhow::Result<String> {
-    let g = crate::provenance::statement_provenance_graph(dataset_id);
+    let g = statement_provenance_graph(dataset_id);
     let known = state
         .auth_db
         .list_dataset_graphs(dataset_id)?
@@ -65,6 +90,177 @@ pub fn ensure_graph(state: &AppState, dataset_id: &str) -> anyhow::Result<String
         )?;
     }
     Ok(g)
+}
+
+/// Register the dataset's private statement-provenance graph (Provenance
+/// role, private) if it is not yet, and make it private again should the
+/// flag have been cleared. Call it before the graph's first quad is written:
+/// a graph no dataset holds is read by everyone.
+pub fn ensure_private_graph(state: &AppState, dataset_id: &str) -> anyhow::Result<String> {
+    let g = private_statement_provenance_graph(dataset_id);
+    let private = state
+        .auth_db
+        .list_dataset_graph_entries(dataset_id)?
+        .iter()
+        .any(|e| e.graph_iri == g && e.private);
+    if !private {
+        state.auth_db.add_private_dataset_graph(
+            dataset_id,
+            &g,
+            Some(crate::auth::models::GraphKind::Provenance),
+        )?;
+    }
+    Ok(g)
+}
+
+/// `graph_iri` is a graph `dataset_id` holds privately: move what the
+/// dataset's statement-provenance graph says about it — its statements'
+/// reifiers with their change events, and its gap nodes — to the private
+/// statement-provenance graph. Returns the quads moved; nothing is written
+/// when there is nothing to move. Each batch is one transaction, so a reifier
+/// is in one graph or the other, and a call that fails part-way is completed
+/// by the next one.
+pub fn follow_private_graph(
+    state: &AppState,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> anyhow::Result<usize> {
+    if crate::provenance::is_any_statement_provenance_graph(graph_iri) {
+        return Ok(0);
+    }
+    let from = nn(&statement_provenance_graph(dataset_id));
+    let to = nn(&private_statement_provenance_graph(dataset_id));
+    let about = nn(graph_iri);
+    let ots_graph = nn(&format!("{OTS}graph"));
+    let ots_change = nn(&format!("{OTS}change"));
+    let from_ref = GraphNameRef::NamedNode(from.as_ref());
+    let store = state.store.store();
+    let mut registered = false;
+    let mut moved = 0usize;
+    loop {
+        let subjects = store
+            .quads_for_pattern(
+                None,
+                Some(ots_graph.as_ref()),
+                Some(TermRef::NamedNode(about.as_ref())),
+                Some(from_ref),
+            )
+            .take(MOVE_BATCH)
+            .map(|q| q.map(|q| q.subject))
+            .collect::<Result<Vec<NamedOrBlankNode>, _>>()?;
+        if subjects.is_empty() {
+            return Ok(moved);
+        }
+        if !registered {
+            ensure_private_graph(state, dataset_id)?;
+            registered = true;
+        }
+        let mut quads: Vec<Quad> = Vec::new();
+        for s in &subjects {
+            for q in store.quads_for_pattern(Some(s.as_ref()), None, None, Some(from_ref)) {
+                let q = q?;
+                if q.predicate == ots_change {
+                    if let Term::NamedNode(event) = &q.object {
+                        for e in store.quads_for_pattern(
+                            Some(NamedOrBlankNodeRef::NamedNode(event.as_ref())),
+                            None,
+                            None,
+                            Some(from_ref),
+                        ) {
+                            quads.push(e?);
+                        }
+                    }
+                }
+                quads.push(q);
+            }
+        }
+        let ops: Vec<QuadOp> = quads
+            .into_iter()
+            .flat_map(|q| {
+                let there = Quad::new(
+                    q.subject.clone(),
+                    q.predicate.clone(),
+                    q.object.clone(),
+                    to.clone(),
+                );
+                [QuadOp::Add(there), QuadOp::Remove(q)]
+            })
+            .collect();
+        // Every subject of the batch loses its `ots:graph` quad here, so the
+        // next read starts behind it.
+        let (_, removed) = state.store.apply_quad_ops(&ops)?;
+        moved += removed.len();
+    }
+}
+
+/// [`follow_private_graph`] for every graph a dataset holds privately beside
+/// a statement-provenance graph: whatever flagged the graph, whether or not
+/// the dataset still records provenance. One identity-database query and an
+/// index probe per such graph when nothing is to move. Returns the quads
+/// moved.
+pub fn follow_private_graphs(state: &AppState) -> anyhow::Result<usize> {
+    let mut moved = 0usize;
+    for (dataset_id, graph) in state
+        .auth_db
+        .list_private_graphs_with_statement_provenance()?
+    {
+        moved += follow_private_graph(state, &dataset_id, &graph)?;
+    }
+    Ok(moved)
+}
+
+/// Whether [`split_existing_annotations`] has completed on this identity
+/// database (a lookup error counts as not yet).
+pub fn existing_annotations_split(db: &crate::auth::db::AuthDb) -> bool {
+    matches!(db.get_app_setting(SPLIT_MARKER), Ok(Some(_)))
+}
+
+/// One-time pass over annotations written before datasets had a private
+/// statement-provenance graph, when every graph's annotations went to the one
+/// graph all the dataset's readers read. For every dataset with a registered
+/// statement-provenance graph, whether it still records provenance or not,
+/// the annotations of each graph the dataset does not hold as a non-private
+/// graph move to the private graph ([`follow_private_graph`]): a graph it
+/// holds privately, and a graph it no longer holds, whose flag nobody can
+/// tell any more. Returns the quads moved, and sets the marker
+/// ([`existing_annotations_split`]) when every dataset went through.
+///
+/// What it cannot find: annotations made while a graph was private, of a
+/// graph that is public again by now. Nothing tells them from the rest.
+pub fn split_existing_annotations(state: &AppState) -> anyhow::Result<usize> {
+    let db = &state.auth_db;
+    let ots_graph = nn(&format!("{OTS}graph"));
+    let mut moved = 0usize;
+    for (dataset_id, graph, _) in db.list_all_dataset_graph_rows()? {
+        if graph != statement_provenance_graph(&dataset_id) {
+            continue;
+        }
+        let open: HashSet<String> = db
+            .list_dataset_graph_entries(&dataset_id)?
+            .into_iter()
+            .filter(|e| !e.private)
+            .map(|e| e.graph_iri)
+            .collect();
+        let from = nn(&graph);
+        let mut annotated: BTreeSet<String> = BTreeSet::new();
+        for q in state.store.store().quads_for_pattern(
+            None,
+            Some(ots_graph.as_ref()),
+            None,
+            Some(GraphNameRef::NamedNode(from.as_ref())),
+        ) {
+            if let Term::NamedNode(g) = q?.object {
+                if !open.contains(g.as_str()) {
+                    annotated.insert(g.into_string());
+                }
+            }
+        }
+        for g in annotated {
+            moved += follow_private_graph(state, &dataset_id, &g)?;
+        }
+    }
+    db.set_app_setting(SPLIT_MARKER, &chrono::Utc::now().to_rfc3339())?;
+    Ok(moved)
 }
 
 /// The reifier of statement `(g s p o)`: `{base}/statement/{h}`, `h` the
@@ -178,6 +374,11 @@ fn annotate(
         let gap = format!("{base}/statement/gap/{}/{seq}", row.epoch);
         push(&gap, RDF_TYPE, nn(&format!("{OTS}ProvenanceGap")).into());
         push(&gap, &format!("{OTS}seq"), int(seq));
+        // Its graph, as on every annotation: what goes with the graph when
+        // it is made private is found by it.
+        if let Some(g) = &row.graph_iri {
+            push(&gap, &format!("{OTS}graph"), nn(g).into());
+        }
         push(
             &gap,
             &format!("{OTS}skippedBlankNodeStatements"),
@@ -187,14 +388,53 @@ fn annotate(
     skipped
 }
 
-/// Annotate the changes since the consumer's cursor. Blocking. Returns the
-/// annotation quads written.
+/// The dataset a data graph is annotated for, and how it holds the graph.
+struct Owner {
+    dataset: String,
+    profile: ProvenanceProfile,
+    private: bool,
+}
+
+/// Move the annotations of graphs that are private by now, then annotate the
+/// changes since the consumer's cursor. Blocking. Returns the annotation
+/// quads written. The move does not depend on change capture: annotations
+/// written while it was on are there after it is turned off.
 pub fn tick(state: &AppState) -> usize {
+    // Before anything else is written: a tick that cannot move them
+    // annotates nothing, and tries again.
+    if let Err(e) = follow_private_graphs(state) {
+        tracing::warn!("statement provenance of private graphs not moved: {e}");
+        return 0;
+    }
     let log = state.store.changes();
     if !log.enabled() || !cfg!(feature = "rdf-12") {
         return 0;
     }
     let datasets = dataset_settings::with_provenance(&state.auth_db);
+    // Which dataset each data graph belongs to (never a provenance graph),
+    // and whether that dataset holds it privately. A dataset whose graphs
+    // cannot be listed is not annotated this tick: without the flags its
+    // annotations have no graph they may safely go to.
+    let mut owner: HashMap<String, Owner> = HashMap::new();
+    for (ds, profile) in &datasets {
+        match state.auth_db.list_dataset_graph_entries(ds) {
+            Ok(entries) => {
+                for e in entries {
+                    if !crate::provenance::is_any_statement_provenance_graph(&e.graph_iri) {
+                        owner.insert(
+                            e.graph_iri,
+                            Owner {
+                                dataset: ds.clone(),
+                                profile: *profile,
+                                private: e.private,
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("statement provenance: graphs of {ds} not listed: {e}"),
+        }
+    }
     let head = log.last_seq();
     let since = match log.cursor(CURSOR) {
         Some(c) if !datasets.is_empty() => c.seq,
@@ -209,39 +449,44 @@ pub fn tick(state: &AppState) -> usize {
         let _ = log.set_cursor(CURSOR, since, Some("system"));
         return 0;
     };
-    // Which dataset each data graph belongs to (never a provenance graph).
-    let mut owner: HashMap<String, (String, ProvenanceProfile)> = HashMap::new();
-    for (ds, profile) in &datasets {
-        if let Ok(graphs) = state.auth_db.list_dataset_graphs(ds) {
-            for g in graphs {
-                if !crate::provenance::is_any_statement_provenance_graph(&g) {
-                    owner.insert(g, (ds.clone(), *profile));
-                }
-            }
-        }
-    }
-    let mut by_dataset: HashMap<String, Vec<Quad>> = HashMap::new();
+    // Per dataset, the annotations for its readers and those for whoever
+    // reads its private graphs.
+    let mut by_target: HashMap<(String, bool), Vec<Quad>> = HashMap::new();
     for row in &rows {
-        let Some((ds, profile)) = row.graph_iri.as_deref().and_then(|g| owner.get(g)) else {
+        let Some(o) = row.graph_iri.as_deref().and_then(|g| owner.get(g)) else {
             continue;
         };
-        let target = GraphName::NamedNode(nn(&crate::provenance::statement_provenance_graph(ds)));
-        let out = by_dataset.entry(ds.clone()).or_default();
-        annotate(&state.base_url, row, &target, *profile, out);
+        let target = if o.private {
+            private_statement_provenance_graph(&o.dataset)
+        } else {
+            statement_provenance_graph(&o.dataset)
+        };
+        let out = by_target.entry((o.dataset.clone(), o.private)).or_default();
+        annotate(
+            &state.base_url,
+            row,
+            &GraphName::NamedNode(nn(&target)),
+            o.profile,
+            out,
+        );
     }
     let mut written = 0usize;
-    for (ds, quads) in by_dataset {
+    for ((ds, private), quads) in by_target {
         if quads.is_empty() {
             continue;
         }
-        if let Err(e) = ensure_graph(state, &ds) {
+        let registered = if private {
+            ensure_private_graph(state, &ds)
+        } else {
+            ensure_graph(state, &ds)
+        };
+        if let Err(e) = registered {
             tracing::warn!("statement provenance: graph of {ds} not registered: {e}");
             continue;
         }
         // Chunked: an annotation set can be large, and re-applying one is a
         // no-op (the reifiers are named), so a retry completes a part-write.
-        let ops: Vec<crate::store::QuadOp> =
-            quads.into_iter().map(crate::store::QuadOp::Add).collect();
+        let ops: Vec<QuadOp> = quads.into_iter().map(QuadOp::Add).collect();
         match state.store.apply_quad_ops_chunked(&ops) {
             Ok((inserted, _)) => written += inserted.len(),
             Err(e) => {

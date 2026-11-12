@@ -156,8 +156,10 @@ fn readable_live_graphs(
 /// graph the dataset held at capture time — private ones included — into
 /// version-scoped IRIs that never appear in `list_dataset_graph_entries`, so the
 /// live private filter is a no-op on them. This maps each snapshot back to its
-/// live source graph and drops the ones whose source is private, for a non-writer.
-/// Writers see all. A dataset with no private graph is returned unchanged, so the
+/// live source graph and drops the ones whose source is private — now, or when
+/// it was detached from the dataset — for a non-writer: the set every version
+/// read uses (`dataset_versions::handlers::withheld_sources`).
+/// Writers see all. A dataset with no such graph is returned unchanged, so the
 /// common case (and a legacy version with an empty `source_map`) is untouched.
 /// Fails closed: a lookup error propagates.
 fn readable_snapshot_graphs(
@@ -169,7 +171,7 @@ fn readable_snapshot_graphs(
     if can_write {
         return Ok(ver.snapshot_graphs.iter().cloned().collect());
     }
-    let private = private_live_graphs(state, dataset_id)?;
+    let private = crate::dataset_versions::handlers::withheld_sources(state, dataset_id)?;
     if private.is_empty() {
         return Ok(ver.snapshot_graphs.iter().cloned().collect());
     }
