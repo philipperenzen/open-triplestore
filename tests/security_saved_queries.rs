@@ -218,6 +218,63 @@ async fn private_snapshot_graph_hidden_from_anonymous_version_run() {
     );
 }
 
+/// A private graph that is detached from the dataset stays hidden in the
+/// versions that cover it. The flag used to go with the registration, so a
+/// run on a version — pinned, or the one a run without `version` resolves to —
+/// served the copy from then on.
+#[tokio::test]
+async fn detached_private_snapshot_stays_hidden_from_version_run() {
+    let (state, admin) = admin_state();
+    setup_service(&state);
+    snapshot_as_version(
+        &state.store,
+        state.base_url.as_str(),
+        "apids",
+        "1.0.0",
+        &[PUBLIC_GRAPH.to_string(), PRIVATE_GRAPH.to_string()],
+        VersionStatus::Published,
+        None,
+        None,
+    )
+    .unwrap();
+    // What every detach path ends in.
+    assert!(state
+        .auth_db
+        .remove_dataset_graph("apids", PRIVATE_GRAPH)
+        .unwrap());
+
+    for uri in [
+        "/api/datasets/apids/api-services/all-graphs/run?version=1.0.0",
+        "/api/datasets/apids/api-services/all-graphs/run",
+    ] {
+        let resp = test_app(state.clone())
+            .oneshot(run_request(uri, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let body = body_text(resp.into_body()).await;
+        assert!(
+            body.contains(PUBLIC_MARKER),
+            "{uri}: public snapshot missing: {body}"
+        );
+        assert!(
+            !body.contains(PRIVATE_MARKER),
+            "{uri}: the detached private graph's snapshot leaked: {body}"
+        );
+
+        let resp = test_app(state.clone())
+            .oneshot(run_request(uri, Some(&admin)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let body = body_text(resp.into_body()).await;
+        assert!(
+            body.contains(PUBLIC_MARKER) && body.contains(PRIVATE_MARKER),
+            "{uri}: a writer must still see the private snapshot: {body}"
+        );
+    }
+}
+
 // ─── V5: organisation-scoped union leak ──────────────────────────────────────
 
 /// An org `acme` with one public dataset that has a public and a private graph,

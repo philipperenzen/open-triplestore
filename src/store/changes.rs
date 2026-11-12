@@ -538,8 +538,11 @@ fn materialisation_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<Materiali
 
 /// Rows of these graphs are never part of a chain (a version's own snapshot
 /// graphs, a restore's staging graph): retention drops them after a day
-/// regardless of pins, and their deletion does not count as a gap.
-fn is_ephemeral_graph(graph: &str) -> bool {
+/// regardless of cursors and pins, and their deletion does not count as a
+/// gap in a chain. It is remembered apart
+/// ([`ChangeLog::max_deleted_ephemeral_seq`]) for a reader that mirrors such
+/// graphs — a replication follower — and was more than a day behind.
+pub fn is_ephemeral_graph(graph: &str) -> bool {
     graph.starts_with("urn:ots:restore:") || is_version_snapshot_graph(graph)
 }
 
@@ -1577,7 +1580,9 @@ impl ChangeLog {
     /// version's own snapshot graphs and of restore staging graphs, which no
     /// chain covers, go after a day regardless. The highest sequence number
     /// deleted from any other graph is remembered, so a range that reaches
-    /// below it is known to have holes. Returns the number of rows deleted.
+    /// below it is known to have holes; the highest one deleted from those
+    /// graphs is remembered apart ([`Self::max_deleted_ephemeral_seq`]).
+    /// Returns the number of rows deleted.
     ///
     /// Two things sweep. The write path, every [`SWEEP_EVERY_ROWS`] recorded
     /// rows — a count kept in memory, so one that starts again at every
@@ -1684,6 +1689,31 @@ impl ChangeLog {
         self.lock()
             .map(|c| meta_i64(&c, "max_deleted_seq"))
             .unwrap_or(0)
+    }
+
+    /// The highest sequence number retention deleted from a graph whose rows
+    /// go after a day ([`is_ephemeral_graph`]), which
+    /// [`Self::max_deleted_seq`] leaves out (0 when nothing was — or nothing
+    /// since this was first recorded: sweeps of an earlier version deleted
+    /// such rows without a trace). No cursor holds these rows, so a reader
+    /// can be below this number with its cursor alive.
+    pub fn max_deleted_ephemeral_seq(&self) -> i64 {
+        self.lock()
+            .map(|c| meta_i64(&c, "max_deleted_ephemeral_seq"))
+            .unwrap_or(0)
+    }
+
+    /// Make the rows with these sequence numbers `days` old, as if they had
+    /// been written then: a test cannot wait a retention window out.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn backdate(&self, seqs: std::ops::RangeInclusive<i64>, days: i64) {
+        let then = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        if let Some(conn) = self.lock() {
+            let _ = conn.execute(
+                "UPDATE changes SET created_at = ?1 WHERE seq BETWEEN ?2 AND ?3",
+                params![then, seqs.start(), seqs.end()],
+            );
+        }
     }
 
     // ── Pins ────────────────────────────────────────────────────────────────
@@ -2564,6 +2594,7 @@ fn sweep_step(
 
     let mut doomed: Vec<i64> = Vec::new();
     let mut highest: Option<i64> = None;
+    let mut highest_ephemeral: Option<i64> = None;
     let mut resume = None;
     {
         let mut stmt = tx
@@ -2592,8 +2623,11 @@ fn sweep_step(
             read += 1;
             if state != "pending" {
                 if graph.is_some_and(is_ephemeral_graph) && created < cuts.ephemeral.as_str() {
-                    // Snapshot and staging graphs: a day, pins or not, and
-                    // no chain covers them, so their going is not a gap.
+                    // Snapshot and staging graphs: a day, cursors and pins
+                    // or not. No chain covers them, so their going is not a
+                    // gap in one; it is one for a reader that mirrors these
+                    // graphs, and is remembered apart.
+                    highest_ephemeral = highest_ephemeral.max(seq);
                     doomed.push(row);
                 } else if created < cuts.retention.as_str() && seq.is_none_or(|s| s < floor) {
                     highest = highest.max(seq);
@@ -2606,11 +2640,16 @@ fn sweep_step(
             }
         }
     }
-    if let Some(h) = highest {
-        if h > meta_i64(&tx, "max_deleted_seq") {
+    // In the transaction that deletes the rows: a reader never finds rows
+    // gone that these numbers do not cover yet.
+    for (key, highest) in [
+        ("max_deleted_seq", highest),
+        ("max_deleted_ephemeral_seq", highest_ephemeral),
+    ] {
+        if let Some(h) = highest.filter(|h| *h > meta_i64(&tx, key)) {
             tx.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('max_deleted_seq', ?1)",
-                params![h.to_string()],
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, h.to_string()],
             )
             .map_err(sql_err)?;
         }
@@ -3435,6 +3474,11 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].graph_iri.as_deref(), Some("http://g/a"));
         assert_eq!(log.max_deleted_seq(), 0, "no chain-relevant row was cut");
+        assert_eq!(
+            log.max_deleted_ephemeral_seq(),
+            2,
+            "what a follower a day behind is told it missed"
+        );
         assert!(is_version_snapshot_graph(snap));
         assert!(!is_version_snapshot_graph(
             "http://x/dataset/ds1/graphs/version"
@@ -3444,13 +3488,7 @@ mod tests {
 
     /// Make the rows with these sequence numbers `days` old.
     fn age(log: &ChangeLog, seqs: std::ops::RangeInclusive<i64>, days: i64) {
-        let then = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
-        let conn = log.lock().unwrap();
-        conn.execute(
-            "UPDATE changes SET created_at = ?1 WHERE seq BETWEEN ?2 AND ?3",
-            params![then, seqs.start(), seqs.end()],
-        )
-        .unwrap();
+        log.backdate(seqs, days);
     }
 
     fn seqs(log: &ChangeLog) -> Vec<i64> {
