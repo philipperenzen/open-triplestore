@@ -655,6 +655,71 @@ mod auth {
         );
     }
 
+    /// The legacy hard delete must erase the user's profile graph
+    /// (`urn:system:user:{id}`) like the purge routes do; otherwise the
+    /// person's name, username and public contact details outlive the account.
+    #[tokio::test]
+    async fn legacy_delete_user_erases_profile_graph() {
+        use open_triplestore::auth::user_graph;
+        use oxigraph::sparql::QueryResults;
+
+        let (state, admin_token) = admin_state();
+        state
+            .auth_db
+            .create_user("u3", "lena", "lena@t.com", "h", SystemRole::User)
+            .unwrap();
+        // A public profile puts the email into the graph as well.
+        let mut user = state.auth_db.get_user_by_id("u3").unwrap().unwrap();
+        user.is_public = true;
+        user.display_name = Some("Lena Example".to_string());
+        user_graph::write_user_profile_graph(&state.store, &state.base_url, &user);
+
+        let graph = user_graph::user_profile_graph_iri("u3");
+        let ask = |q: &str| -> bool {
+            match state.store.query(q).unwrap() {
+                QueryResults::Boolean(b) => b,
+                _ => panic!("ASK must return a boolean"),
+            }
+        };
+        let in_graph = format!("ASK {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}");
+        let mailto = "ASK { GRAPH ?g { ?s ?p <mailto:lena@t.com> } }";
+        assert!(ask(&in_graph), "profile graph must exist before the delete");
+        assert!(
+            ask(mailto),
+            "a public profile must carry the email before the delete"
+        );
+
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/users/u3")
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "legacy delete must succeed"
+        );
+
+        assert!(
+            state.auth_db.get_user_by_id("u3").unwrap().is_none(),
+            "the account row must be gone"
+        );
+        assert!(
+            !ask(&in_graph),
+            "the profile graph must be erased with the account"
+        );
+        assert!(
+            !ask(mailto),
+            "the email must not survive anywhere in the store"
+        );
+    }
+
     #[tokio::test]
     async fn no_token_on_protected_endpoint() {
         let resp = test_app(test_state())
