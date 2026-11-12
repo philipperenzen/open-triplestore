@@ -956,7 +956,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Set graph role / privacy",
-                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library.",
+                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library. A graph made private takes the validation reports on it and its statement provenance along; the dataset's private statement-provenance graph cannot be made public (403).",
                     vec![],
                     ref_body(
                         "PatchDatasetGraphRoleRequest",
@@ -967,6 +967,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Graph updated"),
                         ("401", "Authentication required"),
+                        (
+                            "403",
+                            "Write access required, or the private statement-provenance graph cannot be made public",
+                        ),
                         ("404", "Graph not registered to this dataset"),
                     ],
                     true,
@@ -6484,7 +6488,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "The dataset's change feed",
-                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). A row's `actor_iri` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
+                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Rows of its statement-provenance graphs are listed and served to callers who can write the dataset only. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). A row's `actor_iri` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
                 vec![
                     qp("since", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
@@ -6593,7 +6597,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Versions",
                     "Dataset settings",
-                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, which needs change capture).",
+                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, and for the dataset's private graphs in the private graph `urn:ots:statement-provenance:{id}:private`; it needs change capture).",
                     vec![],
                     vec![("200", "The settings"), ("404", "Dataset not found")],
                     false,

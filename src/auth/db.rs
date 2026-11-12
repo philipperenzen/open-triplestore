@@ -4798,6 +4798,28 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Register `graph_iri` to `dataset_id` as a private graph with
+    /// `graph_role`, in one statement: at no moment is the graph registered
+    /// and readable by the dataset's readers. A registration that exists is
+    /// made private and keeps its role.
+    pub fn add_private_dataset_graph(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+        graph_role: Option<GraphKind>,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let role_str = graph_role.map(|r| r.as_str().to_string());
+        conn.execute(
+            "INSERT INTO dataset_graphs (dataset_id, graph_iri, graph_role, private) \
+             VALUES (?1,?2,?3,1) \
+             ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET private = 1",
+            params![dataset_id, graph_iri, role_str],
+        )?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
     /// Register `graph_iri` to `dataset_id` and record how the dataset came to
     /// hold it (`origin`: `'created'` or `'adopted'`, see the
     /// `dataset_graphs.origin` column). A registration that already records
@@ -5034,6 +5056,30 @@ impl AuthDb {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         Ok(iris)
+    }
+
+    /// Every `(dataset_id, graph_iri)` a dataset holds privately while it also
+    /// has its statement-provenance graph
+    /// (`urn:ots:statement-provenance:{id}`) registered: the graphs whose
+    /// annotations must not be in that graph. The provenance graphs
+    /// themselves are left out.
+    pub fn list_private_graphs_with_statement_provenance(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT g.dataset_id, g.graph_iri FROM dataset_graphs g
+             WHERE g.private != 0
+               AND g.graph_iri NOT LIKE 'urn:ots:statement-provenance:%'
+               AND EXISTS (SELECT 1 FROM dataset_graphs p
+                           WHERE p.dataset_id = g.dataset_id
+                             AND p.graph_iri = 'urn:ots:statement-provenance:' || g.dataset_id)
+             ORDER BY g.dataset_id, g.graph_iri",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// The datasets that have their validation report graph

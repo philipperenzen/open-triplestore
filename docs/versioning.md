@@ -473,8 +473,13 @@ The feed lists the rows of the dataset's graphs above `since`, without their
 quads, plus `next` to resume from; `wait_ms` long-polls (up to 30 s) when
 nothing is new. Only rows of graphs the caller may read are listed — dataset
 access does not imply access to its private graphs, and an unreadable row is
-omitted, never counted. Store-scoped rows (writes whose graphs were not
-known) are listed for every dataset: they bound every chain.
+omitted, never counted. The rows of the dataset's
+[statement-provenance](datasets.md#statement-provenance-opt-in) graphs are
+listed, and served as patches, to callers who can write the dataset only: a
+row holds annotations as patch text, also after the annotations themselves
+moved to the private provenance graph with a graph that was made private.
+Store-scoped rows (writes whose graphs were not known) are listed for every
+dataset: they bound every chain.
 
 `…/changes/<seq>` is that change as an RDF Patch (`application/rdf-patch`),
 `…/inverse` the patch that undoes it; **410** when retention has removed the

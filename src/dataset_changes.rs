@@ -66,7 +66,13 @@ fn load_readable(state: &AppState, id: &str, uid: Option<&str>) -> Result<Datase
     Ok(ds)
 }
 
-/// The dataset's graphs the caller may read.
+/// The dataset's graphs whose change rows the caller may read: the graphs
+/// they may read, less its statement-provenance graphs for a caller who
+/// cannot write the dataset. A row of such a graph is annotations as patch
+/// text, and the log keeps it after the annotations themselves have moved to
+/// the private statement-provenance graph with a graph that was made private
+/// (the move is one more such row). The annotations are derived from this
+/// feed, so a reader loses nothing the provenance graph does not give them.
 fn readable_graphs(
     state: &AppState,
     dataset_id: &str,
@@ -80,10 +86,33 @@ fn readable_graphs(
         return Ok(graphs);
     }
     let readable = crate::server::routes::accessible_read_graphs(state, user)?;
-    Ok(graphs
+    let graphs: Vec<String> = graphs
         .into_iter()
         .filter(|g| readable.contains(g))
-        .collect())
+        .collect();
+    let annotations = |g: &String| crate::provenance::is_any_statement_provenance_graph(g);
+    if !graphs.iter().any(annotations) {
+        return Ok(graphs);
+    }
+    let writer = match user {
+        Some(u) => match state
+            .auth_db
+            .get_dataset(dataset_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            Some(ds) => state
+                .auth_db
+                .can_write_dataset(&u.user_id, &ds)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+            None => false,
+        },
+        None => false,
+    };
+    Ok(if writer {
+        graphs
+    } else {
+        graphs.into_iter().filter(|g| !annotations(g)).collect()
+    })
 }
 
 #[derive(Debug, Deserialize)]
