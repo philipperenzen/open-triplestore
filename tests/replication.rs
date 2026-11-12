@@ -133,6 +133,58 @@ fn counts_and_unknown_rows_make_the_follower_fetch_the_graph() {
     assert_eq!(graph(&f, G1).len(), 6);
 }
 
+/// A user's profile graph is recorded without its statements (they are
+/// personal data, and a log would keep them past the account). A follower
+/// therefore fetches the graph on an edit and again on the purge, one graph
+/// each time and no resync; and a member that keeps a log of its own
+/// records no statement of it either.
+#[test]
+fn a_profile_graph_reaches_a_follower_and_neither_log_holds_its_values() {
+    const PROFILE: &str = "urn:system:user:u1";
+    let name = |n: &str| {
+        format!("<https://example.org/users/ada> <http://xmlns.com/foaf/0.1/name> \"{n}\" .")
+    };
+    let l = leader();
+    l.graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    l.graph_store_put(Some(PROFILE), &name("Ada Before"), RdfFormat::Turtle)
+        .unwrap();
+    let src = InProcessLeader::new(l.clone());
+    let f = follower(Scope::All).with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD);
+    f.replicate_once(&src).unwrap();
+    assert_eq!(graph(&f, PROFILE), graph(&l, PROFILE));
+
+    // An edit of the profile.
+    l.graph_store_put(Some(PROFILE), &name("Ada Example"), RdfFormat::Turtle)
+        .unwrap();
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        (p.refetched_graphs, p.applied_rows, p.resyncs),
+        (1, 0, 0),
+        "{p:?}"
+    );
+    assert_eq!(graph(&f, PROFILE), graph(&l, PROFILE));
+    assert!(graph(&f, PROFILE).iter().any(|t| t.contains("Ada Example")));
+
+    // The purge deletes the graph on the leader; the follower's copy goes.
+    l.graph_store_delete(Some(PROFILE)).unwrap();
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!((p.refetched_graphs, p.resyncs), (1, 0), "{p:?}");
+    assert!(graph(&f, PROFILE).is_empty(), "gone on the follower too");
+    assert_eq!(graph(&f, G1), graph(&l, G1), "the other graph is untouched");
+
+    for (node, store) in [("leader", &l), ("follower", &f)] {
+        let rows = store.changes().rows_after(0, 100);
+        let of_profile = rows
+            .iter()
+            .filter(|r| r.graph_iri.as_deref() == Some(PROFILE))
+            .count();
+        assert!(of_profile >= 2, "{node} records the profile's writes");
+        let text = serde_json::to_string(&rows).unwrap();
+        assert!(!text.contains("Ada "), "{node}: {text}");
+    }
+}
+
 #[test]
 fn a_store_scoped_row_resynchronises_every_graph_in_scope() {
     let l = leader();
