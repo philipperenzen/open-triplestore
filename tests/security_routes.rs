@@ -906,6 +906,313 @@ async fn reattached_graph_is_private_until_a_writer_makes_it_public() {
     assert_eq!(flag(), Some(false));
 }
 
+// ─── The stored graph after a detach ─────────────────────────────────────────
+//
+// A detach by a writer who may not delete the graph (the dataset did not create
+// it, and they hold no graph-ACL write grant on it) removes the registration
+// and leaves the graph in the store. A graph no dataset holds is not "unmanaged,
+// readable by everyone": `/sparql`, the Graph Store and the browser scope every
+// caller but an administrator to the graphs of the datasets they can access plus
+// their graph-ACL grants. The tests below pin that, caller by caller, for a
+// graph that was private when it left.
+
+const LIVE_MARKER: &str = "PRIVATE_TRIPLE_LIVE_ONLY_MARKER";
+
+/// [`detach_state`], plus one quad in the private graph that no version holds:
+/// a response carrying [`LIVE_MARKER`] was served the live graph.
+fn live_state() -> open_triplestore::server::AppState {
+    let (mut state, _record, _later) = detach_state();
+    // The matrix of reads below is longer than the SPARQL tier's burst, and
+    // this harness buckets every request under one key. Take the limiter out
+    // of this state's router rather than work around it with sleeps.
+    state.config = std::sync::Arc::new(open_triplestore::config::Config::live_from(|name| {
+        if name == "OTS_RATE_LIMIT_ENABLED" {
+            Some("false".to_string())
+        } else {
+            std::env::var(name).ok()
+        }
+    }));
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{PRIV_GRAPH}> {{ <http://example.org/s4> <http://example.org/p> \"{LIVE_MARKER}\" }} }}"
+        ))
+        .unwrap();
+    state
+}
+
+/// One read of the live store, and what in a response shows the caller was
+/// served [`PRIV_GRAPH`].
+struct LiveRead {
+    name: &'static str,
+    uri: String,
+    needle: &'static str,
+}
+
+/// The reads of a live graph: by name on `/sparql`, the Graph Store and the
+/// browser, each of them without naming a graph, and through the dataset.
+fn live_reads() -> Vec<LiveRead> {
+    let g = url_encode(PRIV_GRAPH);
+    let sparql = |name: &'static str, query: &str, rest: &str| LiveRead {
+        name,
+        uri: format!("/sparql?query={}{rest}", url_encode(query)),
+        needle: LIVE_MARKER,
+    };
+    vec![
+        sparql(
+            "sparql, GRAPH <g>",
+            &format!("SELECT ?o WHERE {{ GRAPH <{PRIV_GRAPH}> {{ ?s ?p ?o }} }}"),
+            "",
+        ),
+        sparql(
+            "sparql, FROM <g>",
+            &format!("SELECT ?o FROM <{PRIV_GRAPH}> WHERE {{ ?s ?p ?o }}"),
+            "",
+        ),
+        sparql(
+            "sparql, default-graph-uri",
+            "SELECT ?o WHERE { ?s ?p ?o }",
+            &format!("&default-graph-uri={g}"),
+        ),
+        sparql("sparql, no graph named", "SELECT ?o WHERE { ?s ?p ?o }", ""),
+        LiveRead {
+            name: "graph store",
+            uri: format!("/store?graph={g}"),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, graph=",
+            uri: format!("/api/browse/triples?graph={g}&limit=100"),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, no graph named",
+            uri: "/api/browse/triples?limit=100".to_string(),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, graph list",
+            uri: "/api/browse/graphs".to_string(),
+            needle: PRIV_GRAPH,
+        },
+        LiveRead {
+            name: "dataset service",
+            uri: format!(
+                "/api/datasets/ds1/services/default/sparql?query={}",
+                url_encode("SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }")
+            ),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "dataset graph list",
+            uri: "/api/datasets/ds1/graphs".to_string(),
+            needle: PRIV_GRAPH,
+        },
+    ]
+}
+
+/// Who is served the private graph: one line per read of [`live_reads`],
+/// naming the callers of [`audience`] whose response carries its needle.
+async fn who_reads(app: &Router) -> String {
+    let mut lines = Vec::new();
+    for read in live_reads() {
+        let mut served = Vec::new();
+        for (who, token, _writer) in audience() {
+            let (status, body) = get_auth(app, &read.uri, token.as_deref()).await;
+            // A throttled request carries no marker and would read as "not
+            // served".
+            assert_ne!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{}, {who}: {body}",
+                read.name
+            );
+            if body.contains(read.needle) {
+                served.push(who);
+            }
+        }
+        lines.push(format!("{}: {}", read.name, served.join(", ")));
+    }
+    lines.join("\n")
+}
+
+/// What [`who_reads`] returns when read `name` serves the graph to `to(name)`.
+fn served(to: impl Fn(&str) -> &'static [&'static str]) -> String {
+    live_reads()
+        .iter()
+        .map(|read| format!("{}: {}", read.name, to(read.name).join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The dataset's writers and administrators.
+const WRITERS: &[&str] = &["editor", "owner", "admin"];
+
+/// What an administrator alone is served of a graph no dataset holds: every
+/// read that names it as the query's dataset or as the graph to fetch, and
+/// the browser (an administrator browses the whole store). A query that
+/// names no dataset covers the registered graphs only, `GRAPH <g>` included,
+/// and the dataset no longer has the graph.
+fn admin_only(read: &str) -> &'static [&'static str] {
+    match read {
+        "sparql, GRAPH <g>"
+        | "sparql, no graph named"
+        | "dataset service"
+        | "dataset graph list" => &[],
+        _ => &["admin"],
+    }
+}
+
+/// A private graph the dataset did not create is detached by the dataset's
+/// owner: the stored graph stays, and from then on an administrator is the
+/// only caller who reads it. Not an anonymous caller, not a viewer, and no
+/// longer the dataset's writers either, who also cannot attach it again (it
+/// holds data they may not write directly). An administrator can: it comes
+/// back private, and the dataset's writers read it again.
+#[tokio::test]
+async fn detached_private_graph_is_not_served_as_an_unmanaged_graph() {
+    let state = live_state();
+    let app = test_app(state.clone());
+
+    assert_eq!(
+        who_reads(&app).await,
+        served(|_| WRITERS),
+        "attached and private (control)"
+    );
+
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(
+        stored(&state, PRIV_GRAPH),
+        "the dataset did not create the graph, so its owner's detach leaves it in the store"
+    );
+    assert_eq!(who_reads(&app).await, served(admin_only), "detached");
+
+    let attach = serde_json::json!({ "graph_iri": PRIV_GRAPH });
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/datasets/ds1/graphs",
+        "owner",
+        attach.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the owner attaches: {body}");
+    assert_eq!(who_reads(&app).await, served(admin_only), "still detached");
+
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/datasets/ds1/graphs",
+        "adm",
+        attach,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "an admin attaches: {body}");
+    assert_eq!(
+        who_reads(&app).await,
+        served(|_| WRITERS),
+        "attached again, private again"
+    );
+}
+
+/// A graph-ACL grant is on the graph, not on the registration, so it outlives
+/// the detach: a caller granted read keeps reading the stored graph where the
+/// grant counts (`/sparql`, the Graph Store), and nobody else starts to. A
+/// writer granted write may delete the graph directly, so their detach takes
+/// the stored graph with it and nothing is left to read.
+#[tokio::test]
+async fn detached_private_graph_keeps_its_graph_acl_readers() {
+    let granted = |read: &str| -> bool { read.starts_with("sparql, ") || read == "graph store" };
+
+    let state = live_state();
+    state
+        .auth_db
+        .grant_graph_permission("rule-read", PRIV_GRAPH, "user", "viewer", "read", "adm")
+        .unwrap();
+    let app = test_app(state.clone());
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if granted(read) {
+            &["viewer", "editor", "owner", "admin"]
+        } else {
+            WRITERS
+        }),
+        "attached, private, read granted to the viewer (control)"
+    );
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(stored(&state, PRIV_GRAPH));
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| match read {
+            // No dataset named: the caller's readable graphs, and for an
+            // administrator the registered ones.
+            "sparql, GRAPH <g>" | "sparql, no graph named" => &["viewer"],
+            read if granted(read) => &["viewer", "admin"],
+            read => admin_only(read),
+        }),
+        "detached, read granted to the viewer"
+    );
+
+    let state = live_state();
+    state
+        .auth_db
+        .grant_graph_permission("rule-write", PRIV_GRAPH, "user", "owner", "write", "adm")
+        .unwrap();
+    let app = test_app(state.clone());
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(
+        !stored(&state, PRIV_GRAPH),
+        "a writer who may delete the graph directly takes it with the detach"
+    );
+    assert_eq!(who_reads(&app).await, served(|_| &[]), "deleted");
+}
+
+/// A graph another dataset also holds stays in the store and follows that
+/// dataset: here the viewer's own private dataset `ds2`, which holds the graph
+/// without the flag. Its owner read the graph before the detach and reads it
+/// after; `ds1`'s writers no longer do; an anonymous caller never does.
+#[tokio::test]
+async fn detached_private_graph_follows_the_dataset_that_still_holds_it() {
+    let state = live_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ds2",
+            "DS2",
+            None,
+            OwnerType::User,
+            "viewer",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("ds2", PRIV_GRAPH).unwrap();
+    let app = test_app(state.clone());
+    // The dataset reads are `ds1`'s, where the viewer only views.
+    let of_ds1 = |read: &str| read.starts_with("dataset ");
+
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if of_ds1(read) {
+            WRITERS
+        } else {
+            &["viewer", "editor", "owner", "admin"]
+        }),
+        "attached to both (control)"
+    );
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(stored(&state, PRIV_GRAPH), "ds2 still uses the graph");
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if of_ds1(read) {
+            &[]
+        } else {
+            &["viewer", "admin"]
+        }),
+        "detached from ds1"
+    );
+}
+
 // ─── Padded version labels (CB5, part 3) ─────────────────────────────────────
 //
 // The dataset service trimmed `version` before resolving the snapshot graphs but

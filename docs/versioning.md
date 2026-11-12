@@ -151,6 +151,10 @@ The record is the dataset's own: another dataset that holds the same graph is
 not affected. It ends when the graph is attached to the dataset again (its
 registration carries the flag from then on) or when the dataset is deleted.
 
+The same record keeps the graph's live data private when the detach leaves it
+in the store: see
+[Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store).
+
 A graph that was detached while private on release 0.8.1 or earlier left no
 record, and its copies in the versions cut before the detach are served to
 readers. To hide them, attach the graph to the dataset again, flag it
