@@ -223,9 +223,21 @@ with an administrator's credentials and so receives every row.
 
 **Anyone who may read a dataset** (anonymous callers too, for a public
 dataset) lists the rows of the dataset's graphs they may read
-(`GET /api/datasets/{id}/changes`): time, graph, kind, counts and **the
-account IRI**, without the quads. `GET /api/datasets/{id}/changes/{seq}`
-returns one change's quads, removed ones included, as an RDF Patch.
+(`GET /api/datasets/{id}/changes`): time, graph, kind and counts, without
+the quads. Two settings, both `writers` by default, decide who gets more:
+
+- **the account IRI** on those rows goes to the audience of
+  `OTS_ACTOR_VISIBILITY`;
+- `GET /api/datasets/{id}/changes/{seq}`, which returns one change's quads,
+  removed ones included, as an RDF Patch, answers the audience of
+  `OTS_CHANGE_PATCH_ACCESS`, and only that audience can set a bookmark on
+  the dataset's feed.
+
+`writers` is the accounts that may write the dataset, administrators
+included. An administrator can widen either setting to `signed-in` (any
+account that may read the dataset) or `readers` (everyone who may read it,
+anonymous callers on a public dataset included); a notice for an instance
+that does so should name the wider audience here.
 
 - **Retention:** rows older than `OTS_CHANGE_RETENTION_DAYS` (default **90**
   days) are deleted by a sweep that runs once every 1,000 rows the log

@@ -158,8 +158,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a purged user's rows stay until retention, and a purge's own profile-graph
   delete is recorded), data minimisation (leave capture off unless something
   reads the log), storage limitation, security (the dataset change feed shows
-  the writer's account IRI to the dataset's readers) and the retention
-  checklist.
+  the writer's account IRI to the audience of `OTS_ACTOR_VISIBILITY`) and the
+  retention checklist.
 
 ### Security
 - **A dataset's history no longer shows every reader who changed it, or the
@@ -295,9 +295,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Graph Store protocol, RDF Patch, a version restore or a repair, the
   writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). User profile
   changes are recorded the same way. The section names the readers: admins
-  and replication followers see every row; anyone who may read a dataset,
-  anonymous callers included, sees the account IRI and the quads of the
-  dataset's graphs they may read. It also explains retention
+  and replication followers see every row; a dataset's writers, or the wider
+  audiences `OTS_ACTOR_VISIBILITY` and `OTS_CHANGE_PATCH_ACCESS` name, see the
+  account IRI and the quads of the dataset's graphs they may read. It also explains retention
   (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept once every 1,000 recorded rows,
   keeping every row a live cursor or delta-version pin still needs), says that
   switching capture off keeps an earlier log, and says that backups carry it.
