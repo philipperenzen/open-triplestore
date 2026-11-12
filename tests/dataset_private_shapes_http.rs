@@ -867,6 +867,8 @@ async fn a_private_shapes_graph_linked_by_a_writer_infers_only_for_its_readers()
 /// caller) reads it in `GET /api/datasets/{id}` and in the `GET /api/datasets`
 /// listing. The two agree, the field is there either way, and a caller who
 /// is not given the IRI in it is given it nowhere in either answer.
+/// `shapes_graph_withheld` says so exactly when the dataset has a shapes
+/// graph stored and the caller is served none.
 async fn record_shapes(state: &AppState, id: &str, token: Option<&str>) -> Value {
     let uri = format!("/api/datasets/{id}");
     let (st, one) = send(state, Method::GET, &uri, token, Value::Null).await;
@@ -895,6 +897,17 @@ async fn record_shapes(state: &AppState, id: &str, token: Option<&str>) -> Value
         record["shapes_graph_iri"], listed["shapes_graph_iri"],
         "the record and the listing differ: {one} / {listed}"
     );
+    let configured = state
+        .auth_db
+        .get_dataset(id)
+        .unwrap()
+        .unwrap()
+        .shapes_graph_iri
+        .is_some_and(|s| !s.is_empty());
+    let withheld = json!(configured && record["shapes_graph_iri"].is_null());
+    for (what, r) in [("the record", &record), ("the listing", listed)] {
+        assert_eq!(r["shapes_graph_withheld"], withheld, "{what}: {r}");
+    }
     if record["shapes_graph_iri"].is_null() {
         assert!(!one.contains(SHAPES), "{uri}: {one}");
         assert!(!all.contains(SHAPES), "/api/datasets: {all}");
@@ -929,6 +942,11 @@ async fn a_dataset_record_names_its_private_shapes_graph_only_to_who_may_read_it
         let shapes = record_shapes(&state, "pub-ds", Some(token)).await;
         assert_eq!(shapes, json!(SHAPES), "withheld from {who}");
     }
+
+    // A dataset with no shapes graph says it has none, not that one is
+    // withheld (`record_shapes` checks the flag against what is stored).
+    let shapes = record_shapes(&state, "bob-ds", Some(&bob)).await;
+    assert_eq!(shapes, Value::Null);
 
     // A graph-ACL read grant reads the graph over /sparql, so is told of it.
     state
@@ -977,6 +995,7 @@ async fn another_datasets_private_graph_linked_as_shapes_is_named_only_to_its_re
     assert!(!text.contains(SHAPES), "carol's update is answered: {text}");
     let record: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(record["shapes_graph_iri"], Value::Null, "{text}");
+    assert_eq!(record["shapes_graph_withheld"], json!(true), "{text}");
     assert_eq!(record["name"], json!("alice-pub"), "{text}");
     let (st, text) = send(
         &state,
@@ -989,6 +1008,7 @@ async fn another_datasets_private_graph_linked_as_shapes_is_named_only_to_its_re
     assert_eq!(st, StatusCode::OK, "{text}");
     let record: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(record["shapes_graph_iri"], json!(SHAPES), "{text}");
+    assert_eq!(record["shapes_graph_withheld"], json!(false), "{text}");
 }
 
 /// What `alice-pub` is configured with, as stored.
@@ -1039,6 +1059,10 @@ async fn a_writer_withheld_the_shapes_graph_does_not_unlink_it_by_sending_back_t
     )
     .await;
     assert_eq!(stored_shacl(&state), (false, None));
+    // Her record now says there is none (the empty IRI as stored), not that
+    // one is withheld.
+    let shapes = record_shapes(&state, "alice-pub", Some(&carol)).await;
+    assert!(shapes.as_str().is_none_or(str::is_empty), "{shapes}");
 
     // Alice reads the graph, so her record names it and her `null` means none.
     link_shapes_into_alice_pub(&state, &alice).await;

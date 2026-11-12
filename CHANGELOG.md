@@ -246,7 +246,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   private graph. The record now carries `"shapes_graph_iri": null` for a
   caller who may not read the graph by the rule `/sparql` applies (its
   dataset's writers, graph-ACL readers and admins read it), and so does the
-  answer to `PUT /api/datasets/{id}`. The same rule now holds in the other
+  answer to `PUT /api/datasets/{id}`. The new `shapes_graph_withheld` field
+  is `true` then, so a client can tell this from a dataset with no shapes
+  graph: the Validation page says *Shapes you may not read* and no longer
+  offers to link a graph over one the caller cannot see. The same rule now holds in the other
   places that named the graph to those callers:
   `GET /api/datasets/{id}/conformance`, which also listed a dataset's own
   private graphs under `graphs` and `reasoning_sources`;

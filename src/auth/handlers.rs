@@ -411,23 +411,47 @@ pub struct DatasetView {
     /// no graph has a role tag yet.
     #[serde(default)]
     pub roles: Vec<crate::auth::models::GraphKind>,
+    /// See [`DatasetRecord::shapes_graph_withheld`].
+    pub shapes_graph_withheld: bool,
+}
+
+/// A stored dataset as one of its readers is served it ([`record_for_reader`]).
+#[derive(Debug, serde::Serialize)]
+pub struct DatasetRecord {
+    #[serde(flatten)]
+    pub dataset: Dataset,
+    /// The dataset is configured with a shapes graph the caller may not read:
+    /// `shapes_graph_iri` is `null` all the same, and the graph still gates
+    /// writes when `shacl_on_write` is set. Lets a client tell "no shapes
+    /// graph" from "one you may not read" (which `GET …/shapes` already tells
+    /// by its 404 message) instead of offering to link one over it.
+    pub shapes_graph_withheld: bool,
 }
 
 /// A dataset record as one of its readers is served it: without the shapes
-/// graph it is configured with (`shapes_graph_iri`, served as `null`) when
-/// `withheld` says the reader may not be told of that graph. That is a graph
-/// some dataset holds as private that the reader may not read by the
-/// `/sparql` rule ([`crate::auth::acl::private_graph_withheld`]): the
-/// dataset's own private graph for its viewers and anonymous callers, and
-/// another dataset's private graph linked here for this dataset's writers
-/// too, who need not be readers of that one. Every handler that serves a
-/// stored [`Dataset`] goes through this (a dataset just created has no shapes
-/// graph yet); the record names no other graph.
-fn record_for_reader(mut dataset: Dataset, withheld: impl FnOnce(&str) -> bool) -> Dataset {
-    if dataset.shapes_graph_iri.as_deref().is_some_and(withheld) {
+/// graph it is configured with (`shapes_graph_iri` served as `null`, and
+/// `shapes_graph_withheld` set) when `withheld` says the reader may not be
+/// told of that graph. That is a graph some dataset holds as private that the
+/// reader may not read by the `/sparql` rule
+/// ([`crate::auth::acl::private_graph_withheld`]): the dataset's own private
+/// graph for its viewers and anonymous callers, and another dataset's private
+/// graph linked here for this dataset's writers too, who need not be readers
+/// of that one. Every handler that serves a stored [`Dataset`] goes through
+/// this (a dataset just created has no shapes graph yet); the record names no
+/// other graph.
+fn record_for_reader(mut dataset: Dataset, withheld: impl FnOnce(&str) -> bool) -> DatasetRecord {
+    let shapes_graph_withheld = dataset
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .is_some_and(withheld);
+    if shapes_graph_withheld {
         dataset.shapes_graph_iri = None;
     }
-    dataset
+    DatasetRecord {
+        dataset,
+        shapes_graph_withheld,
+    }
 }
 
 /// Whether `user` (`None`: an anonymous caller) is not to be told of
@@ -4030,7 +4054,10 @@ pub async fn list_datasets(
     let views: Vec<DatasetView> = datasets
         .into_iter()
         .map(|ds| {
-            let ds = record_for_reader(ds, |g| withheld.as_ref().map_or(true, |w| w.contains(g)));
+            let DatasetRecord {
+                dataset: ds,
+                shapes_graph_withheld,
+            } = record_for_reader(ds, |g| withheld.as_ref().map_or(true, |w| w.contains(g)));
             let effective_role = db.effective_dataset_role(user_id, &ds).ok().flatten();
             let can_write = effective_role.map(|r| r.can_write()).unwrap_or(false);
             let can_manage = effective_role.map(|r| r.can_manage()).unwrap_or(false);
@@ -4049,6 +4076,7 @@ pub async fn list_datasets(
                 can_manage,
                 effective_role,
                 roles,
+                shapes_graph_withheld,
             }
         })
         .collect();
@@ -4133,7 +4161,10 @@ pub async fn get_dataset(
         }
     }
     let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &dataset.id);
-    let dataset = record_for_reader(dataset, |g| shapes_link_withheld(&db, user.as_deref(), g));
+    let DatasetRecord {
+        dataset,
+        shapes_graph_withheld,
+    } = record_for_reader(dataset, |g| shapes_link_withheld(&db, user.as_deref(), g));
     Ok(Json(DatasetView {
         dataset,
         dataset_iri,
@@ -4141,6 +4172,7 @@ pub async fn get_dataset(
         can_manage,
         effective_role,
         roles,
+        shapes_graph_withheld,
     }))
 }
 

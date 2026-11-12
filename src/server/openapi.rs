@@ -824,7 +824,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "List datasets",
-                    "Datasets filtered by the caller's access. `shapes_graph_iri` is `null` in the record of a dataset whose shapes graph the caller may not read: a graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins).",
+                    "Datasets filtered by the caller's access. `shapes_graph_iri` is `null` in the record of a dataset whose shapes graph the caller may not read, with `shapes_graph_withheld: true`: a graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins).",
                     vec![
                         qp(
                             "owner_type",
@@ -871,7 +871,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "Get dataset",
-                    "Dataset details, including the caller's effective role and permissions. `shapes_graph_iri` is the shapes graph the dataset is configured with, or `null` when there is none or the caller may not read it: a graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins). So a public dataset's private shapes graph is not named to its viewers or to anonymous callers, and another dataset's private graph linked here is not named to this dataset's writers unless they may read it.",
+                    "Dataset details, including the caller's effective role and permissions. `shapes_graph_iri` is the shapes graph the dataset is configured with, or `null` when there is none or the caller may not read it; `shapes_graph_withheld` is `true` in the second case only. A graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins). So a public dataset's private shapes graph is not named to its viewers or to anonymous callers, and another dataset's private graph linked here is not named to this dataset's writers unless they may read it.",
                     vec![],
                     vec![("200", "Dataset (DatasetView)"), ("404", "Not found")],
                     false,
@@ -882,7 +882,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Update dataset",
-                    "Update dataset metadata (name, visibility, DCAT/VoID fields). The answer is the dataset record, with `shapes_graph_iri` `null` when the caller may not read the shapes graph (see `GET`).",
+                    "Update dataset metadata (name, visibility, DCAT/VoID fields). The answer is the dataset record, with `shapes_graph_iri` `null` and `shapes_graph_withheld: true` when the caller may not read the shapes graph (see `GET`).",
                     vec![],
                     ref_body(
                         "UpdateDatasetRequest",
@@ -1865,7 +1865,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Validation",
                 "Configure SHACL-on-write",
-                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. A caller who may not read the linked graph is served `shapes_graph_iri: null` in the dataset record; from such a caller a request without `shapes_graph_iri` (or with `null`) leaves the link as it is, so saving the on-write setting does not unlink a graph they were not shown, and an empty string clears it. From anyone else `null` clears it. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
+                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. A caller who may not read the linked graph is served `shapes_graph_iri: null` and `shapes_graph_withheld: true` in the dataset record; from such a caller a request without `shapes_graph_iri` (or with `null`) leaves the link as it is, so saving the on-write setting does not unlink a graph they were not shown, and an empty string clears it. From anyone else `null` clears it. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
                 vec![],
                 ref_body(
                     "DatasetShaclRequest",

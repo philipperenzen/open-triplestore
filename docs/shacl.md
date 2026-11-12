@@ -340,11 +340,14 @@ own writers need not be allowed to read it.
 The dataset record follows the same rule, for the IRI alone. `shapes_graph_iri`
 in `GET /api/datasets`, `GET /api/datasets/<id>` and the answer to
 `PUT /api/datasets/<id>` is `null` for a caller who may not read the graph it
-names, as if none were configured: a viewer or an anonymous caller of a public
-dataset whose shapes graph is one of its private graphs, and a writer of a
-dataset that links another dataset's private graph they may not read. The rest
-of the record is unchanged (`shacl_on_write` still says whether writes are
-validated). The same callers do not find the graph in
+names: a viewer or an anonymous caller of a public dataset whose shapes graph
+is one of its private graphs, and a writer of a dataset that links another
+dataset's private graph they may not read. `shapes_graph_withheld` is `true`
+then, and `false` whenever the caller is given the IRI or there is none, so a
+client can tell a shapes graph it may not read from no shapes graph at all:
+the Validation page shows *Shapes you may not read* and offers no picker that
+would link another graph over it. The rest of the record is unchanged
+(`shacl_on_write` still says whether writes are validated). The same callers do not find the graph in
 `GET /api/shacl/dataset-shape-graphs`, in `GET /api/datasets/<id>/conformance`
 (which also leaves a dataset's own private graphs out of `graphs` and
 `reasoning_sources`), or as the dataset's `dct:conformsTo` in the DCAT
