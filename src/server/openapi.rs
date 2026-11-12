@@ -2048,9 +2048,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "List validation reports",
-                "Stored SHACL validation reports for the dataset.",
+                "The dataset's report history, newest first, without the report bodies: one record per run of the dataset's `shacl_on_write` gate (`source` `on-write`; `data_ref` is the graph written, `shapes_ref` the gate's shapes graph) and one per validate-and-commit (`source` `platform`; `data_ref` is `inline`, `version` the version the commit cut). A record names the graphs it is about, so a caller is listed the records they may read, by the rule of a stored validation run, asked at every read. Administrators get every record. Nobody else gets a record whose shapes graph some dataset holds as private and they may not read. A caller without write access to the dataset also needs to be able to read every graph the record validated, by the rule `/sparql` applies (for a commit: every graph its version was cut from; a commit whose version is gone goes to writers only). The other records are left out: a caller who cannot write the dataset, an anonymous caller of a public dataset included, is listed no record about one of its private graphs.",
                 vec![],
-                vec![("200", "Array of report summaries")],
+                vec![
+                    ("200", "Array of the report records the caller may read"),
+                    ("404", "No such dataset, or one the caller may not read"),
+                ],
                 false,
             ),
         )],
@@ -2063,9 +2066,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation report",
-                "One stored validation report in full.",
+                "One record of the dataset's report history with its body (`report_ttl`, Turtle): the gate's verdict and number of results for an `on-write` record, the validator's report for a `platform` record. A record the caller may not read (the rule is the listing's: a record about a private graph for a caller who may not read that graph) answers 404, as one that does not exist.",
                 vec![],
-                vec![("200", "Validation report"), ("404", "Not found")],
+                vec![
+                    ("200", "The report record"),
+                    (
+                        "404",
+                        "No such dataset or report, or one the caller may not read",
+                    ),
+                ],
                 false,
             ),
         )],

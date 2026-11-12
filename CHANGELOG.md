@@ -179,6 +179,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The first sweep after the upgrade deletes whatever is already past the
   window, so raise `OTS_CHANGE_RETENTION_DAYS` first if those rows are still
   needed.
+- **A dataset's validation-report history no longer names its private graphs
+  to readers.** `GET /api/datasets/{id}/validation-reports` and
+  `…/validation-reports/{report_id}` returned every record to anyone who may
+  read the dataset. A record of the dataset's write gate names the graph
+  written (`data_ref`) and the gate's shapes graph (`shapes_ref`), so a caller
+  without write access, an anonymous caller of a public dataset included,
+  learned the IRIs of the dataset's private graphs, that they were written,
+  when, and whether the write conformed. A validate-and-commit record also
+  carries the validator's report on the committed data, whichever graph the
+  commit went into. A record is now served by the rule a stored validation
+  run's report already follows, asked at every read: admins get every record;
+  nobody else gets one whose shapes graph some dataset holds as private and
+  they may not read; a caller who cannot write the dataset gets a record only
+  when they may read every graph it validated (for a commit, the graphs its
+  version was cut from; a commit whose version is gone goes to writers only).
+  A record the caller does not get is left out of the listing and answers 404
+  by id. The dataset's writers keep every record about its own graphs. When
+  the private flags cannot be read the routes answer 500 rather than serve
+  the history unfiltered.
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.

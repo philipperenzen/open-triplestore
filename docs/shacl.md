@@ -404,6 +404,19 @@ The write lands only when every gate passes. When several would refuse it, the 4
 
 A datasource run into a dataset, and the promotion of a kept candidate after review, meet the same gates in the same order, over the candidate graph before it joins the dataset ([sources](sources.md)). There every gate is evaluated rather than only up to the first refusal: the results of each gate that refuses go into the run's report and open review items, so one refusal shows them all. The run keeps its own record of the outcome, not an `on-write` report.
 
+### The report history
+
+`GET /api/datasets/<id>/validation-reports` lists the dataset's report history, newest first: one record per run of the dataset gate (`"source": "on-write"`, with the graph written as `data_ref` and the gate's shapes graph as `shapes_ref`) and one per validate-and-commit (`"source": "platform"`, `"data_ref": "inline"`, with the `version` the commit cut). `GET …/validation-reports/<report_id>` returns one record with its body, `report_ttl`: for the gate its verdict and number of results (the results themselves go to the writer, in the 422), for a commit the validator's report.
+
+A record names the graphs it is about, and a commit's report is about the data committed. So who gets a record follows the rule for a stored run's report ([above](#what-a-run-reads-and-who-sees-its-report)), asked when the record is read:
+
+- an admin gets every record;
+- nobody else gets a record whose shapes graph some dataset holds as private and they may not read, the dataset's writers included (a shapes graph linked from another dataset need not be theirs to read);
+- the dataset's writers get every other record;
+- anyone else gets a record only when they may read every graph it validated, by the rule `/sparql` applies. For a gate's record that is the graph written; for a commit's, every graph its version was cut from. A commit's record whose version is gone goes to writers only.
+
+A record the caller does not get is left out of the listing and answers 404 by id, as one that does not exist: it is not served with the two names blanked, because what would be left (that a write to some graph was checked, when, and with what outcome) is about that graph too. So a caller who cannot write the dataset, an anonymous caller of a public dataset included, sees no record about one of its private graphs, and making a graph private takes the records about it out of what they are listed.
+
 ### What a gate validates
 
 A `PUT` and a validate-and-commit replace the graph, so the gates validate the payload, which is the graph's whole future; a bulk import's gates validate the imported quads. A `POST`, an RDF Patch and a repair apply change part of a graph. For these the gates do not copy the graph: they work out from the shapes which nodes the write can affect, and validate those nodes against the graph as it will be, staging only the write's triples and what those nodes read. A 1 000-quad `POST` into a large graph costs about what validating its own nodes costs, not a copy of the graph ([#534](https://github.com/philipperenzen/open-triplestore/issues/534); figures in [performance](performance.md)).
