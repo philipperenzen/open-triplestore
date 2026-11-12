@@ -824,7 +824,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "List datasets",
-                    "Datasets filtered by the caller's access.",
+                    "Datasets filtered by the caller's access. `shapes_graph_iri` is `null` in the record of a dataset whose shapes graph the caller may not read, with `shapes_graph_withheld: true`: a graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins).",
                     vec![
                         qp(
                             "owner_type",
@@ -871,7 +871,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "Get dataset",
-                    "Dataset details, including the caller's effective role and permissions.",
+                    "Dataset details, including the caller's effective role and permissions. `shapes_graph_iri` is the shapes graph the dataset is configured with, or `null` when there is none or the caller may not read it; `shapes_graph_withheld` is `true` in the second case only. A graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins). So a public dataset's private shapes graph is not named to its viewers or to anonymous callers, and another dataset's private graph linked here is not named to this dataset's writers unless they may read it.",
                     vec![],
                     vec![("200", "Dataset (DatasetView)"), ("404", "Not found")],
                     false,
@@ -882,7 +882,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Update dataset",
-                    "Update dataset metadata (name, visibility, DCAT/VoID fields).",
+                    "Update dataset metadata (name, visibility, DCAT/VoID fields). The answer is the dataset record, with `shapes_graph_iri` `null` and `shapes_graph_withheld: true` when the caller may not read the shapes graph (see `GET`).",
                     vec![],
                     ref_body(
                         "UpdateDatasetRequest",
@@ -956,7 +956,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Set graph role / privacy",
-                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library.",
+                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library. A graph made private takes the validation reports on it and its statement provenance along; the dataset's private statement-provenance graph cannot be made public (403).",
                     vec![],
                     ref_body(
                         "PatchDatasetGraphRoleRequest",
@@ -967,6 +967,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Graph updated"),
                         ("401", "Authentication required"),
+                        (
+                            "403",
+                            "Write access required, or the private statement-provenance graph cannot be made public",
+                        ),
                         ("404", "Graph not registered to this dataset"),
                     ],
                     true,
@@ -1072,12 +1076,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/api/datasets/:dataset_id/conformance", vec![
         (M::Get, o("Datasets", "Conformance layer",
-            "Which graphs of the dataset play which role, which model versions and shape graphs it declares conformance to (`dct:conformsTo`), and the graphs reasoning reads and the shapes validation applies as a result.",
+            "Which graphs of the dataset play which role, which model versions and shape graphs it declares conformance to (`dct:conformsTo`), and the graphs reasoning reads and the shapes validation applies as a result. A graph some dataset holds as private is named only to who may read it by the `/sparql` rule (its dataset's writers, graph-ACL readers, admins): for anyone else it is left out of `graphs`, `shape_graphs`, `reasoning_sources` and `validation_shapes`.",
             vec![], vec![("200", "Conformance layer JSON"), ("404", "Dataset not found or not visible")], false)),
     ]);
     mount(paths, "/api/datasets/:dataset_id/provenance", vec![
         (M::Get, o("Datasets", "PROV-O provenance",
-            "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple.",
+            "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple. It covers the graphs the caller may read and the commits that touched them, and names the agent of a commit or a version only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset); the dataset's owner is always named.",
             vec![], vec![("200", "PROV-O (text/turtle)"), ("404", "Dataset not found or not visible")], false)),
     ]);
     // A container archive as the request body.
@@ -1550,7 +1554,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Versions",
                     "List versions",
-                    "Version snapshots of the dataset, newest first.",
+                    "Version snapshots of the dataset, newest first. A caller who may write the dataset gets each record whole. Any other caller gets it for the graphs they may read: `source_map` and `snapshot_graphs` leave out the graphs whose live source graph is private (and a snapshot the map does not tie to a source graph), `quad_count` and `content_hash` are the totals of the graphs that remain (absent when one of them has none), and `change_count` is absent. A version that covers no private graph is returned as it is. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). The same holds on `…/versions/{ver}`.",
                     vec![],
                     vec![("200", "Array of versions")],
                     false,
@@ -1581,7 +1585,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Versions",
                     "Get version",
-                    "Metadata for one version.",
+                    "Metadata for one version: its status, kind, graph map (`source_map`, `snapshot_graphs`), totals and notes. A caller who may not write the dataset gets the record without its private graphs and with the totals of the graphs that remain, as on the versions listing.",
                     vec![],
                     vec![("200", "Version metadata"), ("404", "Not found")],
                     false,
@@ -1709,7 +1713,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Removed"), ("404", "No such prefix"), ("401", "Authentication required"), ("403", "Write access required")], true)),
     ]);
     mount(paths, "/api/datasets/:dataset_id/log", vec![
-        (M::Get, o("Versions", "Dataset patch log", "The dataset's RDF Patch log (RDF Delta patch log, named by the dataset id): `{name, init, latest: {version, id}, entries: [{version, id, prev, kind, author, dataset_version, default_graph, graphs, created_at}]}`. `kind` is `patch` (appended here) or `version` (a version cut, the diff from the previous cut). An entry that changes a graph the caller may not read is listed as `{version, id, prev, kind, withheld: true}`. Page with `?after={version}&limit=`.",
+        (M::Get, o("Versions", "Dataset patch log", "The dataset's RDF Patch log (RDF Delta patch log, named by the dataset id): `{name, init, latest: {version, id}, entries: [{version, id, prev, kind, author, dataset_version, default_graph, graphs, created_at}]}`. `kind` is `patch` (appended here) or `version` (a version cut, the diff from the previous cut). An entry that changes a graph the caller may not read is listed as `{version, id, prev, kind, withheld: true}`. `author` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Page with `?after={version}&limit=`.",
             vec![], vec![("200", "The log"), ("404", "Dataset not found")], false)),
         (M::Post, o("Versions", "Append to the patch log", "Append an RDF Patch. It needs exactly one `H id` (an IRI the log does not hold) and at most one `H prev`, which must name the log's latest entry — none only when the log is empty; a mismatch is a 409 naming the latest entry, and nothing changes. The patch is then applied exactly as `POST …/patch` applies one (with `?graph=` for triples) and appended only when that succeeds. Writes made any other way are not journaled. Response: the apply result plus `{version, prev}`.",
             vec![], vec![("200", "Applied and appended"), ("400", "Invalid patch or headers"), ("401", "Authentication required"), ("403", "Write access required"), ("409", "H id taken, or H prev is not the latest entry"), ("422", "A SHACL write gate refused it")], true)),
@@ -1753,7 +1757,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "History",
                     "List branches",
-                    "Branches of the dataset's commit history.",
+                    "Branches of the dataset's commit history. A branch's `owner` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). A tip's `ahead` and `behind` against the latest published version count the graphs the caller may read: for a caller who may not write the dataset, a change in a private graph is not counted.",
                     vec![],
                     vec![("200", "Array of branches")],
                     false,
@@ -1783,7 +1787,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "History",
                 "List commits",
-                "Commit history for the dataset (optionally per branch).",
+                "Commit history for the dataset (optionally per branch): the commits that touched a graph the caller may read, each listing only those graphs. `actor_iri`, `actor_username` and `actor_display_name` are present only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset).",
                 vec![
                     qp("branch", false, "Branch name"),
                     qp("limit", false, "Max commits"),
@@ -1865,7 +1869,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Validation",
                 "Configure SHACL-on-write",
-                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
+                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. A caller who may not read the linked graph is served `shapes_graph_iri: null` and `shapes_graph_withheld: true` in the dataset record; from such a caller a request without `shapes_graph_iri` (or with `null`) leaves the link as it is, so saving the on-write setting does not unlink a graph they were not shown, and an empty string clears it. From anyone else `null` clears it. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
                 vec![],
                 ref_body(
                     "DatasetShaclRequest",
@@ -2048,9 +2052,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "List validation reports",
-                "Stored SHACL validation reports for the dataset.",
+                "The dataset's report history, newest first, without the report bodies: one record per run of the dataset's `shacl_on_write` gate (`source` `on-write`; `data_ref` is the graph written, `shapes_ref` the gate's shapes graph) and one per validate-and-commit (`source` `platform`; `data_ref` is `inline`, `version` the version the commit cut). A record names the graphs it is about, so a caller is listed the records they may read, by the rule of a stored validation run, asked at every read. Administrators get every record. Nobody else gets a record whose shapes graph some dataset holds as private and they may not read. A caller without write access to the dataset also needs to be able to read every graph the record validated, by the rule `/sparql` applies (for a commit: every graph its version was cut from; a commit whose version is gone goes to writers only). The other records are left out: a caller who cannot write the dataset, an anonymous caller of a public dataset included, is listed no record about one of its private graphs.",
                 vec![],
-                vec![("200", "Array of report summaries")],
+                vec![
+                    ("200", "Array of the report records the caller may read"),
+                    ("404", "No such dataset, or one the caller may not read"),
+                ],
                 false,
             ),
         )],
@@ -2063,9 +2070,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation report",
-                "One stored validation report in full.",
+                "One record of the dataset's report history with its body (`report_ttl`, Turtle): the gate's verdict and number of results for an `on-write` record, the validator's report for a `platform` record. A record the caller may not read (the rule is the listing's: a record about a private graph for a caller who may not read that graph) answers 404, as one that does not exist.",
                 vec![],
-                vec![("200", "Validation report"), ("404", "Not found")],
+                vec![
+                    ("200", "The report record"),
+                    (
+                        "404",
+                        "No such dataset or report, or one the caller may not read",
+                    ),
+                ],
                 false,
             ),
         )],
@@ -2135,8 +2148,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         )],
     );
     mount(paths, "/api/shacl/dataset-shape-graphs", vec![
-        (M::Get, o("Validation", "List datasets' shape graphs", "Datasets accessible to the user that have a shapes graph configured (Validation-page selector).",
-            vec![], vec![("200", "Array of {dataset_id, dataset_name, shapes_graph_iri}")], false)),
+        (M::Get, o("Validation", "List datasets' shape graphs", "The shapes graphs of the datasets accessible to the user: the configured one, SHACL Studio bindings and shapes-role graphs (Validation-page selector). A graph some dataset holds as private is listed only to who may read it by the `/sparql` rule.",
+            vec![], vec![("200", "`{shape_graphs: [{dataset_id, dataset_name, shapes_graph_iri, source}]}`")], false)),
     ]);
 
     // ── SHACL Studio: shape graphs, the validation layer, pipelines ──────────
@@ -6359,7 +6372,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Change log rows",
-                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`). Admins only. See docs/versioning.md.",
+                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`), and how far retention has deleted rows: `max_deleted_seq`, and `max_deleted_ephemeral_seq` for the rows of version snapshot and restore staging graphs, which go after a day whatever cursors exist. A reader whose `after` is below either was not given every write. Admins only. See docs/versioning.md.",
                 vec![
                     qp("after", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
@@ -6484,7 +6497,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "The dataset's change feed",
-                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
+                "Change-log rows of the dataset's graphs the caller may read (plus store-scoped rows, which bound every chain) above `since`, in commit order, without their quads. Rows of its statement-provenance graphs are listed and served to callers who can write the dataset only. Returns `enabled`, `epoch`, `rows` and `next` (pass it back as `since`). A row's `actor_iri` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). Empty while change capture is off. See docs/versioning.md, \"The dataset's change feed\".",
                 vec![
                     qp("since", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
@@ -6503,15 +6516,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "One change as an RDF Patch",
-                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`.",
+                "The change as `application/rdf-patch`: its removed quads as `D` lines, its added ones as `A`, with `H seq`, `H epoch`, `H dataset` and `H commit`. A patch holds quads the graph may no longer hold, so it is served to OTS_CHANGE_PATCH_ACCESS's audience: `writers` by default (accounts that may write the dataset), `signed-in` (any account that may read it) or `readers` (anonymous readers of a public dataset too).",
                 vec![],
                 vec![
                     ("200", "The patch"),
+                    ("401", "Authentication required (unless OTS_CHANGE_PATCH_ACCESS is `readers`)"),
+                    ("403", "Not in OTS_CHANGE_PATCH_ACCESS's audience"),
                     ("404", "Not a change of this dataset, or not readable"),
                     ("409", "The row carries no quads (`extent` counts or unknown)"),
                     ("410", "Retention removed the change"),
                 ],
-                false,
+                true,
             ),
         )],
     );
@@ -6523,15 +6538,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Versions",
                 "The patch that undoes one change",
-                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch.",
+                "The inverse of the change's patch: `A` and `D` swapped, lines reversed, `H prev` naming the forward patch. Served to OTS_CHANGE_PATCH_ACCESS's audience, like the patch itself.",
                 vec![],
                 vec![
                     ("200", "The patch"),
+                    ("401", "Authentication required (unless OTS_CHANGE_PATCH_ACCESS is `readers`)"),
+                    ("403", "Not in OTS_CHANGE_PATCH_ACCESS's audience"),
                     ("404", "Not a change of this dataset, or not readable"),
                     ("409", "The row carries no quads"),
                     ("410", "Retention removed the change"),
                 ],
-                false,
+                true,
             ),
         )],
     );
@@ -6544,7 +6561,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 ob(
                     "Versions",
                     "Set a feed cursor",
-                    "Keep a reader's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it.",
+                    "Keep a consumer's position in the dataset's change feed (the last seq it applied). It pins retention until it expires (OTS_CURSOR_TTL_DAYS, refreshed by every PUT); it belongs to whoever set it. Because it holds rows back from the sweep, only an account OTS_CHANGE_PATCH_ACCESS serves patches to may set one (default `writers`: accounts that may write the dataset).",
                     vec![],
                     json_body(
                         ObjectBuilder::new()
@@ -6556,7 +6573,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         ("200", "The cursor"),
                         ("400", "Invalid name or seq beyond the log"),
                         ("401", "Authentication required"),
-                        ("403", "Someone else's cursor"),
+                        ("403", "Someone else's cursor, or not in OTS_CHANGE_PATCH_ACCESS's audience"),
                         ("409", "Change capture is off"),
                     ],
                     true,
@@ -6567,7 +6584,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Versions",
                     "Delete a feed cursor",
-                    "Drop a cursor; its owner or an admin.",
+                    "Drop a cursor; its owner or an admin, whatever OTS_CHANGE_PATCH_ACCESS says.",
                     vec![],
                     vec![
                         ("204", "Deleted"),
@@ -6589,7 +6606,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Versions",
                     "Dataset settings",
-                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, which needs change capture).",
+                    "The dataset's opt-ins: `skolem` (blank nodes imported into its graphs become content-derived Skolem IRIs) and `provenance` (`off`, `minimal`, `full`: statement-level provenance in `urn:ots:statement-provenance:{id}`, and for the dataset's private graphs in the private graph `urn:ots:statement-provenance:{id}:private`; it needs change capture).",
                     vec![],
                     vec![("200", "The settings"), ("404", "Dataset not found")],
                     false,
@@ -7473,7 +7490,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Linked Data",
                 "VoID/DCAT description",
-                "Machine-readable dataset description in VoID/DCAT.",
+                "Machine-readable dataset description in VoID/DCAT, scoped to the caller: the datasets they may access, and of those the graphs they may read. A dataset validated on write `dct:conformsTo` its shapes graph, unless that is a private graph the caller may not read.",
                 vec![],
                 vec![("200", "Description (text/turtle)")],
                 false,
@@ -7488,7 +7505,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Linked Data",
                 "Organisation VoID/DCAT",
-                "VoID/DCAT description scoped to one organisation.",
+                "VoID/DCAT description scoped to one organisation, and to the caller as `/.well-known/void` is.",
                 vec![],
                 vec![("200", "Description (text/turtle)")],
                 false,

@@ -4875,8 +4875,36 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Register `graph_iri` to `dataset_id` as a private graph with
+    /// `graph_role`, in one statement: at no moment is the graph registered
+    /// and readable by the dataset's readers. A registration that exists is
+    /// made private and keeps its role. A detach record for the graph ends
+    /// here too ([`Self::reclaim_detached_privacy`]): the row carries the
+    /// flag again. So does a record left by a deleted dataset, whether or not
+    /// the row is new: the flag is set here either way.
+    pub fn add_private_dataset_graph(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+        graph_role: Option<GraphKind>,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.pool.get()?;
+        let role_str = graph_role.map(|r| r.as_str().to_string());
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO dataset_graphs (dataset_id, graph_iri, graph_role, private) \
+             VALUES (?1,?2,?3,1) \
+             ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET private = 1",
+            params![dataset_id, graph_iri, role_str],
+        )?;
+        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri, true)?;
+        tx.commit()?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
     /// The other half of [`Self::remove_dataset_graph`] and
-    /// [`Self::delete_dataset`], run by both registration paths in the
+    /// [`Self::delete_dataset`], run by every registration path in the
     /// transaction that makes the row: a graph on record as private when it
     /// left `dataset_id` gets the flag back, and the record goes (the row
     /// carries it again). So does a graph on record as private when a dataset
@@ -5230,6 +5258,30 @@ impl AuthDb {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         Ok(iris)
+    }
+
+    /// Every `(dataset_id, graph_iri)` a dataset holds privately while it also
+    /// has its statement-provenance graph
+    /// (`urn:ots:statement-provenance:{id}`) registered: the graphs whose
+    /// annotations must not be in that graph. The provenance graphs
+    /// themselves are left out.
+    pub fn list_private_graphs_with_statement_provenance(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT g.dataset_id, g.graph_iri FROM dataset_graphs g
+             WHERE g.private != 0
+               AND g.graph_iri NOT LIKE 'urn:ots:statement-provenance:%'
+               AND EXISTS (SELECT 1 FROM dataset_graphs p
+                           WHERE p.dataset_id = g.dataset_id
+                             AND p.graph_iri = 'urn:ots:statement-provenance:' || g.dataset_id)
+             ORDER BY g.dataset_id, g.graph_iri",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// The datasets that have their validation report graph
@@ -8482,6 +8534,23 @@ mod detached_private_graph_tests {
         assert!(private(&db).is_empty(), "a writer made it public");
         assert!(db.remove_dataset_graph("a", PRIV).unwrap());
         assert!(private(&db).is_empty(), "it left public");
+    }
+
+    /// The third registration path, [`AuthDb::add_private_dataset_graph`]
+    /// (the private statement-provenance graph), ends the record as well: the
+    /// row is private, and nothing stays behind once the flag is cleared.
+    #[test]
+    fn registering_a_graph_as_private_ends_its_record() {
+        let db = db();
+        assert!(db.remove_dataset_graph("a", PRIV).unwrap());
+        assert_eq!(withheld(&db, "a"), [PRIV]);
+        db.add_private_dataset_graph("a", PRIV, None).unwrap();
+        assert_eq!(flag(&db, "a", PRIV), Some(true));
+        assert_eq!(withheld(&db, "a"), [PRIV]);
+
+        db.set_dataset_graph_private("a", PRIV, false).unwrap();
+        assert!(withheld(&db, "a").is_empty(), "no record outlives the row");
+        assert!(private(&db).is_empty());
     }
 
     /// The record goes with the dataset: one that reuses the id starts clean.

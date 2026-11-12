@@ -18,8 +18,9 @@ use axum::Router;
 use common::*;
 use tower::ServiceExt as _;
 
-use open_triplestore::auth::models::{OwnerType, Visibility};
+use open_triplestore::auth::models::{OwnerType, ResourceRole, SystemRole, Visibility};
 use open_triplestore::dataset_versions::{models::DatasetVersion, snapshot_as_version};
+use serde_json::Value;
 
 // Distinctive marker literals so we can assert presence/absence in raw response
 // bodies without depending on a specific result-serialisation shape.
@@ -621,6 +622,20 @@ fn version_reads(
             uri: format!("/api/browse/triples?dataset_id=ds1&versions=ds1:{VERSION}&limit=100"),
             always: vec![s(other)],
             guarded: vec![s(first)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "version record",
+            uri: format!("/api/datasets/ds1/versions/{VERSION}"),
+            always: vec![],
+            guarded: vec![s(source), snap.clone()],
+            refuses: false,
+        },
+        VersionRead {
+            name: "version list",
+            uri: "/api/datasets/ds1/versions".to_string(),
+            always: vec![],
+            guarded: vec![s(source)],
             refuses: false,
         },
         VersionRead {
@@ -1289,5 +1304,262 @@ async fn viewer_cannot_read_private_snapshot_via_padded_form_version() {
             !body.contains(PRIVATE_MARKER),
             "version={padded}: the private snapshot triple must NOT leak, body: {body}"
         );
+    }
+}
+
+// ─── Version records (CB5, part 4) ───────────────────────────────────────────
+//
+// The routes above withhold a private graph's *data*. The version record itself
+// (`GET …/versions`, `GET …/versions/:ver`) was still returned whole: its
+// `source_map` and `snapshot_graphs` name every graph the version covers, so a
+// caller who may read the dataset but not write it — anonymous, on a public
+// dataset — learned the IRIs of its private graphs and of their snapshots, and
+// from the totals how many quads they hold. A non-writer now gets the record of
+// the graphs they may read; writers and admins get it whole.
+
+/// [`setup_state`] plus the accounts the audience tests sign in as: `viewer`
+/// (a Viewer grant), `editor` (an Editor grant) and `adm` (an administrator),
+/// beside the dataset's `owner`.
+fn setup_with_accounts() -> (open_triplestore::server::AppState, DatasetVersion) {
+    let (state, record) = setup_state();
+    for (id, role) in [
+        ("viewer", SystemRole::User),
+        ("editor", SystemRole::User),
+        ("adm", SystemRole::Admin),
+    ] {
+        state
+            .auth_db
+            .create_user(id, id, &format!("{id}@test.com"), "hash", role)
+            .unwrap();
+    }
+    for (id, role) in [
+        ("viewer", ResourceRole::Viewer),
+        ("editor", ResourceRole::Editor),
+    ] {
+        state
+            .auth_db
+            .set_resource_grant("dataset", "ds1", "user", id, role, "owner")
+            .unwrap();
+    }
+    (state, record)
+}
+
+/// `(label, bearer token, may write the dataset)` for every kind of caller.
+fn callers() -> Vec<(&'static str, Option<String>, bool)> {
+    vec![
+        ("anonymous", None, false),
+        (
+            "viewer",
+            Some(mint_token("viewer", "viewer", "user")),
+            false,
+        ),
+        ("editor", Some(mint_token("editor", "editor", "user")), true),
+        ("owner", Some(mint_token("owner", "owner", "user")), true),
+        ("admin", Some(mint_token("adm", "adm", "admin")), true),
+    ]
+}
+
+/// Version `1.0.0`'s record from both routes that serve it: the single-record
+/// route, and its entry in the listing. Each as `(route, raw body, record)`.
+async fn version_records(app: &Router, token: Option<&str>) -> Vec<(String, String, Value)> {
+    let mut out = Vec::new();
+    let uri = format!("/api/datasets/ds1/versions/{VERSION}");
+    let (status, body) = get_auth(app, &uri, token).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let record: Value = serde_json::from_str(&body).unwrap();
+    out.push((uri, body, record));
+
+    let uri = "/api/datasets/ds1/versions".to_string();
+    let (status, body) = get_auth(app, &uri, token).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let list: Value = serde_json::from_str(&body).unwrap();
+    let record = list
+        .as_array()
+        .and_then(|l| l.iter().find(|v| v["version"] == VERSION))
+        .unwrap_or_else(|| panic!("{uri} does not list {VERSION}: {body}"))
+        .clone();
+    out.push((uri, body, record));
+    out
+}
+
+/// A JSON array of strings, sorted (the registry does not keep an order).
+fn strings(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// CB5 — a non-writer's version record names neither the private graph nor its
+/// snapshot, and its totals are those of the graphs it lists; a writer's record
+/// is the registry's.
+#[tokio::test]
+async fn version_records_name_private_graphs_only_to_writers() {
+    let (state, record) = setup_with_accounts();
+    let app = test_app(state);
+    let priv_snap = snapshot_iri_for(&record, PRIV_GRAPH);
+    let pub_snap = snapshot_iri_for(&record, PUB_GRAPH);
+    let pub_mapping = record
+        .source_map
+        .iter()
+        .find(|m| m.source_graph == PUB_GRAPH)
+        .unwrap();
+    // The setup this test reads its expectations from.
+    assert_eq!(record.quad_count, Some(2));
+    assert_eq!(pub_mapping.quad_count, Some(1));
+    assert!(record.content_hash.is_some() && pub_mapping.content_hash.is_some());
+    assert_ne!(record.content_hash, pub_mapping.content_hash);
+
+    for (who, token, writer) in callers() {
+        for (uri, body, v) in version_records(&app, token.as_deref()).await {
+            let ctx = format!("{who}, GET {uri}: {body}");
+            let snapshots = strings(&v["snapshot_graphs"]);
+            let sources = sorted(
+                v["source_map"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("no source_map — {ctx}"))
+                    .iter()
+                    .map(|m| m["source_graph"].as_str().unwrap_or_default().to_string())
+                    .collect(),
+            );
+            if writer {
+                assert_eq!(
+                    snapshots,
+                    sorted(record.snapshot_graphs.clone()),
+                    "a writer gets every snapshot graph — {ctx}"
+                );
+                assert_eq!(
+                    sources,
+                    sorted(vec![PUB_GRAPH.to_string(), PRIV_GRAPH.to_string()]),
+                    "a writer gets the whole graph map — {ctx}"
+                );
+                assert_eq!(v["quad_count"], 2, "{ctx}");
+                assert_eq!(
+                    v["content_hash"].as_str(),
+                    record.content_hash.as_deref(),
+                    "{ctx}"
+                );
+            } else {
+                assert!(
+                    !body.contains(PRIV_GRAPH),
+                    "the private graph's IRI must not reach a non-writer — {ctx}"
+                );
+                assert!(
+                    !body.contains(&priv_snap),
+                    "the private graph's snapshot IRI must not reach a non-writer — {ctx}"
+                );
+                assert_eq!(
+                    snapshots,
+                    vec![pub_snap.clone()],
+                    "the public snapshot is still listed — {ctx}"
+                );
+                assert_eq!(
+                    sources,
+                    vec![PUB_GRAPH.to_string()],
+                    "the public graph is still mapped — {ctx}"
+                );
+                // The totals are those of the listed graphs: the registry's
+                // would give away the private graph's size, and (the content
+                // hash being additive) a hash of its content.
+                assert_eq!(v["quad_count"], 1, "{ctx}");
+                assert_eq!(
+                    v["content_hash"].as_str(),
+                    pub_mapping.content_hash.as_deref(),
+                    "{ctx}"
+                );
+            }
+        }
+    }
+}
+
+/// A dataset with no private graph: every caller gets the registry's record.
+#[tokio::test]
+async fn version_records_are_whole_when_no_graph_is_private() {
+    let (state, record) = setup_with_accounts();
+    state
+        .auth_db
+        .set_dataset_graph_private("ds1", PRIV_GRAPH, false)
+        .unwrap();
+    let app = test_app(state);
+
+    for (who, token, _) in callers() {
+        for (uri, body, v) in version_records(&app, token.as_deref()).await {
+            let ctx = format!("{who}, GET {uri}: {body}");
+            assert_eq!(
+                strings(&v["snapshot_graphs"]),
+                sorted(record.snapshot_graphs.clone()),
+                "{ctx}"
+            );
+            assert_eq!(v["source_map"].as_array().map(Vec::len), Some(2), "{ctx}");
+            assert_eq!(v["quad_count"], 2, "{ctx}");
+            assert_eq!(
+                v["content_hash"].as_str(),
+                record.content_hash.as_deref(),
+                "{ctx}"
+            );
+        }
+    }
+}
+
+/// CB5 — `GET …/branches`: a tip's `ahead` / `behind` against the published
+/// version count only the graphs the caller may read. Here the only change
+/// since `1.0.0` is one quad in the private graph.
+#[tokio::test]
+async fn branch_counts_leave_out_private_graphs_for_non_writers() {
+    let (state, _record) = setup_with_accounts();
+    open_triplestore::dataset_versions::registry::update_latest_published(
+        &state.store,
+        state.base_url.as_str(),
+        "ds1",
+        VERSION,
+    )
+    .unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{PRIV_GRAPH}> {{ <http://example.org/s3> <http://example.org/p> \"later\" }} }}"
+        ))
+        .unwrap();
+    // created_at orders the tips; keep the two cuts apart.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    snapshot_as_version(
+        &state.store,
+        state.base_url.as_str(),
+        "ds1",
+        "1.1.0",
+        &[PUB_GRAPH.to_string(), PRIV_GRAPH.to_string()],
+        open_triplestore::dataset_versions::models::VersionStatus::Draft,
+        None,
+        None,
+    )
+    .expect("second snapshot should succeed");
+    let app = test_app(state);
+
+    for (who, token, writer) in callers() {
+        let (status, body) = get_auth(&app, "/api/datasets/ds1/branches", token.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{who}: {body}");
+        let branches: Value = serde_json::from_str(&body).unwrap();
+        let main = branches
+            .as_array()
+            .and_then(|b| b.iter().find(|b| b["branch"] == "main"))
+            .unwrap_or_else(|| panic!("{who}: no main branch in {body}"));
+        assert_eq!(main["tip_version"], "1.1.0", "{who}: {body}");
+        let expected = if writer { 1 } else { 0 };
+        assert_eq!(
+            main["ahead"], expected,
+            "{who}: `ahead` counts the graphs the caller may read: {body}"
+        );
+        assert_eq!(main["behind"], 0, "{who}: {body}");
     }
 }

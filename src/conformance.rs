@@ -82,6 +82,21 @@ pub struct ConformanceLayer {
     pub validation_shapes: Vec<String>,
 }
 
+impl ConformanceLayer {
+    /// The layer as served to a reader who may not read the `withheld` graphs
+    /// ([`crate::auth::acl::withheld_private_graphs`]): it names none of them,
+    /// as a graph of the dataset, a shape graph bound to it or a premise.
+    /// The model version is the model registry's to show or hide.
+    fn without(mut self, withheld: &std::collections::HashSet<String>) -> Self {
+        self.graphs.retain(|g| !withheld.contains(&g.graph_iri));
+        self.shape_graphs
+            .retain(|s| !withheld.contains(&s.graph_iri));
+        self.reasoning_sources.retain(|g| !withheld.contains(g));
+        self.validation_shapes.retain(|g| !withheld.contains(g));
+        self
+    }
+}
+
 /// Graph roles that carry premises for reasoning. Unclassified graphs count:
 /// most datasets never set a role.
 fn is_reasoning_source(role: Option<GraphKind>) -> bool {
@@ -278,6 +293,12 @@ pub fn model_graph_readable(state: &AppState, user_id: Option<&str>, iri: &str) 
 }
 
 /// GET /api/datasets/:dataset_id/conformance
+///
+/// The layer names the dataset's graphs and the shape graphs bound to it. A
+/// graph some dataset holds as private is named only to who may read it, by
+/// the rule a `/sparql` query is scoped to (admins read every graph): the
+/// dataset's own private graphs to its writers and graph-ACL readers, and
+/// another dataset's private graph bound here as shapes to that one's.
 pub async fn get_dataset_conformance(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -297,5 +318,7 @@ pub async fn get_dataset_conformance(
         // Same answer as for a dataset that does not exist: no existence leak.
         return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
     }
-    Ok(Json(resolve(&state, &ds)))
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, user.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(resolve(&state, &ds).without(&withheld)))
 }

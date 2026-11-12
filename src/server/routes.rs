@@ -2674,8 +2674,11 @@ struct ChangesQuery {
 
 /// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
 /// a sequence number above `after`, in commit order; `graph` narrows to one
-/// graph's rows plus the store-scoped rows every reader must see. Admins
-/// only: rows carry quads from every tenant.
+/// graph's rows plus the store-scoped rows every reader must see. With them,
+/// how far retention has deleted rows (`max_deleted_seq`,
+/// `max_deleted_ephemeral_seq`): a reader whose position is below either
+/// was not given every write. Admins only: rows carry quads from every
+/// tenant.
 async fn admin_changes(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -2695,12 +2698,8 @@ async fn admin_changes(
         let _ = tokio::time::timeout(std::time::Duration::from_millis(wait), notified).await;
         rows = log.rows_after_in(after, limit, q.graph.as_deref());
     }
-    let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
-    Ok(Json(serde_json::json!({
-        "epoch": log.epoch(),
-        "rows": rows,
-        "next_after": next_after,
-    })))
+    // Built after the rows were read: see `Page::of` for why that order.
+    Ok(Json(crate::store::replication::Page::of(log, after, rows)))
 }
 
 /// GET /api/admin/changes/status — the log's epoch, sequence, row states,
@@ -12601,7 +12600,9 @@ pub async fn detect_shapes(
 /// the configured `shapes_graph_iri`, SHACL Studio bindings, and shapes-role
 /// dataset graphs (one entry per dataset × graph, deduped). This powers the
 /// shape-graph selector in the Validation page so users only see shapes for
-/// data they can access.
+/// data they can access. A graph some dataset holds as private is listed
+/// only to who may read it, by the rule a `/sparql` query is scoped to
+/// (admins read every graph), whichever dataset links or binds it.
 pub async fn list_accessible_shape_graphs(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -12609,6 +12610,8 @@ pub async fn list_accessible_shape_graphs(
     let datasets = state
         .auth_db
         .list_accessible_datasets(Some(&current_user.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut shape_graphs: Vec<serde_json::Value> = Vec::new();
@@ -12624,6 +12627,9 @@ pub async fn list_accessible_shape_graphs(
             }
         }
         for iri in iris {
+            if withheld.contains(&iri) {
+                continue;
+            }
             let source = if sources.configured.as_deref() == Some(iri.as_str()) {
                 "configured"
             } else if sources.bound.contains(&iri) {

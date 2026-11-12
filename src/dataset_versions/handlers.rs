@@ -112,13 +112,7 @@ pub(crate) fn readable_snapshot_graphs(
 ) -> Result<Vec<String>, AppError> {
     match private_source_filter(state, ds, uid)? {
         None => Ok(record.snapshot_graphs.clone()),
-        Some(private) if private.is_empty() => Ok(record.snapshot_graphs.clone()),
-        Some(private) => Ok(record
-            .source_map
-            .iter()
-            .filter(|m| !private.contains(&m.source_graph))
-            .map(|m| m.snapshot_graph.clone())
-            .collect()),
+        Some(private) => Ok(record.snapshots_outside(&private)),
     }
 }
 
@@ -142,6 +136,13 @@ fn validate_version(v: &str) -> Result<(), AppError> {
     crate::data_models::version_iri::validate_version(v).map_err(AppError::BadRequest)
 }
 
+/// Whether `uid` sees who cut the dataset's versions (`created_by`, a
+/// branch's `owner`): `OTS_ACTOR_VISIBILITY`'s audience.
+fn shows_actors(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<bool, AppError> {
+    crate::auth::policy::shows_actors(&state.auth_db, ds, uid)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 // ─── list / get ─────────────────────────────────────────────────────────────
 
 /// GET /api/datasets/:id/versions
@@ -153,7 +154,20 @@ pub async fn list_versions(
     let ds = load_dataset(&state, &id)?;
     let uid = user.as_deref().map(|u| u.user_id.as_str());
     require_read(&state, &ds, uid)?;
-    let versions = registry::list_versions(&state.store, &state.base_url, &id);
+    let mut versions = registry::list_versions(&state.store, &state.base_url, &id);
+    if !shows_actors(&state, &ds, uid)? {
+        for v in &mut versions {
+            v.created_by = None;
+        }
+    }
+    // Dataset access does not imply access to its private graphs, their IRIs
+    // included: a caller who may not write the dataset gets each record
+    // without them.
+    if let Some(private) = private_source_filter(&state, &ds, uid)? {
+        for v in &mut versions {
+            v.hide_sources(&private);
+        }
+    }
     Ok(Json(versions))
 }
 
@@ -166,8 +180,15 @@ pub async fn get_version(
     let ds = load_dataset(&state, &id)?;
     let uid = user.as_deref().map(|u| u.user_id.as_str());
     require_read(&state, &ds, uid)?;
-    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+    let mut record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    if !shows_actors(&state, &ds, uid)? {
+        record.created_by = None;
+    }
+    // As in `list_versions`: without the private graphs, for a non-writer.
+    if let Some(private) = private_source_filter(&state, &ds, uid)? {
+        record.hide_sources(&private);
+    }
     Ok(Json(record))
 }
 
@@ -823,6 +844,10 @@ pub async fn list_branches(
     let ds = load_dataset(&state, &id)?;
     let uid = user.as_deref().map(|u| u.user_id.as_str());
     require_read(&state, &ds, uid)?;
+    let actors = shows_actors(&state, &ds, uid)?;
+    // `ahead` / `behind` count the graphs the caller may read: a change in a
+    // private graph is not a non-writer's to know about.
+    let hidden = private_source_filter(&state, &ds, uid)?.unwrap_or_default();
 
     let versions = registry::list_versions(&state.store, &state.base_url, &id);
     let (latest_pub, _) = registry::get_pointers(&state.store, &state.base_url, &id);
@@ -847,7 +872,7 @@ pub async fn list_branches(
     for (branch, tip) in tips {
         let (ahead, behind) = match &base_record {
             Some(base) if base.version != tip.version => {
-                version_delta_counts(&state, base, &tip, uid.is_none()).await?
+                version_delta_counts(&state, base, &tip, uid.is_none(), &hidden).await?
             }
             _ => (0, 0),
         };
@@ -856,7 +881,7 @@ pub async fn list_branches(
             tip_version: tip.version.clone(),
             status: tip.status.as_str().to_string(),
             base_version: tip.derived_from.clone(),
-            owner: tip.created_by.clone(),
+            owner: tip.created_by.clone().filter(|_| actors),
             created_at: tip.created_at.clone(),
             ahead,
             behind,
@@ -866,17 +891,23 @@ pub async fn list_branches(
     Ok(Json(out))
 }
 
-/// `(ahead, behind)` of `to` against `from`: from the change log when both
-/// are anchored on one chain (delta note §3.5), else by comparing their
-/// content — building a delta for an authenticated caller; for an anonymous
-/// one an unbuilt delta counts as unknown, `(0, 0)`.
+/// `(ahead, behind)` of `to` against `from`, over the source graphs outside
+/// `hidden`: from the change log when both are anchored on one chain (delta
+/// note §3.5), else by comparing their content — building a delta for an
+/// authenticated caller; for an anonymous one an unbuilt delta counts as
+/// unknown, `(0, 0)`.
 async fn version_delta_counts(
     state: &AppState,
     from: &DatasetVersion,
     to: &DatasetVersion,
     anonymous: bool,
+    hidden: &std::collections::HashSet<String>,
 ) -> Result<(usize, usize), AppError> {
-    let graphs = from.covered_graphs();
+    let graphs: Vec<String> = from
+        .covered_graphs()
+        .into_iter()
+        .filter(|g| !hidden.contains(g))
+        .collect();
     if same_cover(from, to) {
         if let (Some(a), Some(b)) = (&from.anchor, &to.anchor) {
             if let Some(fold) = chain_delta(&state.store, a, b, &graphs) {
@@ -896,8 +927,8 @@ async fn version_delta_counts(
     }
     Ok(triple_delta(
         &state.store,
-        &from.snapshot_graphs,
-        &to.snapshot_graphs,
+        &from.snapshots_outside(hidden),
+        &to.snapshots_outside(hidden),
     ))
 }
 

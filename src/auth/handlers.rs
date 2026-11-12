@@ -411,6 +411,57 @@ pub struct DatasetView {
     /// no graph has a role tag yet.
     #[serde(default)]
     pub roles: Vec<crate::auth::models::GraphKind>,
+    /// See [`DatasetRecord::shapes_graph_withheld`].
+    pub shapes_graph_withheld: bool,
+}
+
+/// A stored dataset as one of its readers is served it ([`record_for_reader`]).
+#[derive(Debug, serde::Serialize)]
+pub struct DatasetRecord {
+    #[serde(flatten)]
+    pub dataset: Dataset,
+    /// The dataset is configured with a shapes graph the caller may not read:
+    /// `shapes_graph_iri` is `null` all the same, and the graph still gates
+    /// writes when `shacl_on_write` is set. Lets a client tell "no shapes
+    /// graph" from "one you may not read" (which `GET …/shapes` already tells
+    /// by its 404 message) instead of offering to link one over it.
+    pub shapes_graph_withheld: bool,
+}
+
+/// A dataset record as one of its readers is served it: without the shapes
+/// graph it is configured with (`shapes_graph_iri` served as `null`, and
+/// `shapes_graph_withheld` set) when `withheld` says the reader may not be
+/// told of that graph. That is a graph some dataset holds as private that the
+/// reader may not read by the `/sparql` rule
+/// ([`crate::auth::acl::private_graph_withheld`]): the dataset's own private
+/// graph for its viewers and anonymous callers, and another dataset's private
+/// graph linked here for this dataset's writers too, who need not be readers
+/// of that one. Every handler that serves a stored [`Dataset`] goes through
+/// this (a dataset just created has no shapes graph yet); the record names no
+/// other graph.
+fn record_for_reader(mut dataset: Dataset, withheld: impl FnOnce(&str) -> bool) -> DatasetRecord {
+    let shapes_graph_withheld = dataset
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .is_some_and(withheld);
+    if shapes_graph_withheld {
+        dataset.shapes_graph_iri = None;
+    }
+    DatasetRecord {
+        dataset,
+        shapes_graph_withheld,
+    }
+}
+
+/// Whether `user` (`None`: an anonymous caller) is not to be told of
+/// `graph_iri` as a dataset's shapes graph. A lookup that fails shows no one
+/// to be a reader of the graph: it is withheld. An admin needs no lookup.
+fn shapes_link_withheld(db: &AuthDb, user: Option<&AuthenticatedUser>, graph_iri: &str) -> bool {
+    crate::auth::acl::private_graph_withheld(db, user, graph_iri).unwrap_or_else(|e| {
+        tracing::warn!("private graph flags unreadable, shapes graph withheld: {e}");
+        true
+    })
 }
 
 // ─── Dataset request types ────────────────────────────────────────────────────
@@ -3998,10 +4049,21 @@ pub async fn list_datasets(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Distinct roles per dataset, fetched once for the whole list.
     let mut roles_by_dataset = db.all_dataset_roles().unwrap_or_default();
+    // The private graphs the caller may not read, looked up once for the
+    // whole list: a record names none of them as its shapes graph. A failed
+    // lookup withholds every shapes graph (an admin needs none).
+    let withheld = crate::auth::acl::withheld_private_graphs(&db, user.as_deref());
+    if let Err(e) = &withheld {
+        tracing::warn!("private graph flags unreadable, shapes graphs withheld: {e}");
+    }
 
     let views: Vec<DatasetView> = datasets
         .into_iter()
         .map(|ds| {
+            let DatasetRecord {
+                dataset: ds,
+                shapes_graph_withheld,
+            } = record_for_reader(ds, |g| withheld.as_ref().map_or(true, |w| w.contains(g)));
             let effective_role = db.effective_dataset_role(user_id, &ds).ok().flatten();
             let can_write = effective_role.map(|r| r.can_write()).unwrap_or(false);
             let can_manage = effective_role.map(|r| r.can_manage()).unwrap_or(false);
@@ -4020,6 +4082,7 @@ pub async fn list_datasets(
                 can_manage,
                 effective_role,
                 roles,
+                shapes_graph_withheld,
             }
         })
         .collect();
@@ -4104,6 +4167,10 @@ pub async fn get_dataset(
         }
     }
     let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &dataset.id);
+    let DatasetRecord {
+        dataset,
+        shapes_graph_withheld,
+    } = record_for_reader(dataset, |g| shapes_link_withheld(&db, user.as_deref(), g));
     Ok(Json(DatasetView {
         dataset,
         dataset_iri,
@@ -4111,6 +4178,7 @@ pub async fn get_dataset(
         can_manage,
         effective_role,
         roles,
+        shapes_graph_withheld,
     }))
 }
 
@@ -4282,7 +4350,11 @@ pub async fn update_dataset(
     // Rewrite the DCAT metadata named graph.
     refresh_dataset_metadata(&state, &dataset_id);
 
-    Ok(Json(updated))
+    // A writer of this dataset need not be a reader of a private graph of
+    // another dataset linked as its shapes graph.
+    Ok(Json(record_for_reader(updated, |g| {
+        shapes_link_withheld(&db, Some(&current_user), g)
+    })))
 }
 
 /// DELETE /api/datasets/:dataset_id
@@ -4499,7 +4571,8 @@ pub async fn list_dataset_graphs(
 }
 
 /// GET /api/datasets/:dataset_id/commits — provenance trail for writes touching
-/// any graph registered to this dataset. Readable by anyone with dataset access.
+/// any graph registered to this dataset. Readable by anyone with dataset access;
+/// the actor of a commit only by `OTS_ACTOR_VISIBILITY`'s audience.
 pub async fn list_dataset_commits(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
@@ -4527,9 +4600,23 @@ pub async fn list_dataset_commits(
     let graphs = db
         .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let scope = crate::commit_log::CommitScope::Graphs(graphs);
+    let scope = crate::commit_log::CommitScope::Graphs(graphs.clone());
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
-    crate::commit_log::resolve_actors(db.as_ref(), &mut commits);
+    // A commit can touch graphs the caller may not read besides the one that
+    // put it in this trail (one update over a public and a private graph, or
+    // over two datasets): those are not named.
+    for c in &mut commits {
+        c.affected_graphs.retain(|g| graphs.contains(g));
+    }
+    // Who made a commit is for `OTS_ACTOR_VISIBILITY`'s audience; below it the
+    // trail keeps its messages, times and counts and names nobody.
+    if crate::auth::policy::shows_actors(db.as_ref(), &dataset, user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        crate::commit_log::resolve_actors(db.as_ref(), &mut commits);
+    } else {
+        crate::commit_log::withhold_actors(&mut commits);
+    }
     Ok(Json(commits))
 }
 
@@ -4707,10 +4794,25 @@ pub async fn patch_dataset_graph_role(
     // A request carrying `private` is a privacy toggle and leaves the role
     // untouched; otherwise it is a role update (where a null role clears it).
     if let Some(private) = req.private {
+        // The private statement-provenance graph holds the annotations of the
+        // dataset's private graphs, which are those graphs' statements: it
+        // is private for as long as it exists.
+        if !private
+            && req.graph_iri == crate::provenance::private_statement_provenance_graph(&dataset_id)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Graph <{}> holds the statement provenance of the dataset's private graphs \
+                     and stays private.",
+                    req.graph_iri
+                ),
+            ));
+        }
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        // A validation report on the graph goes with it.
         if private {
+            // A validation report on the graph goes with it.
             crate::server::routes::report_graphs_follow_private_graph(&state, &req.graph_iri)
                 .map_err(|e| {
                     (
@@ -4721,6 +4823,30 @@ pub async fn patch_dataset_graph_role(
                         ),
                     )
                 })?;
+            // So does its statement provenance: an annotation is the
+            // statement. Before the response, so a caller told the graph is
+            // private finds nothing of it left where the dataset's readers
+            // read; the change-log consumer repeats the move on its next
+            // tick should this one fail.
+            let st = state.clone();
+            let (ds, graph) = (dataset_id.clone(), req.graph_iri.clone());
+            let followed = match tokio::task::spawn_blocking(move || {
+                crate::statement_provenance::follow_private_graph(&st, &ds, &graph)
+            })
+            .await
+            {
+                Ok(moved) => moved,
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            };
+            if let Err(e) = followed {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "The graph is private now, but its statement provenance could not all \
+                         follow: {e}"
+                    ),
+                ));
+            }
         }
     } else {
         let graph_role = parse_graph_role(req.graph_role.as_deref())?;
@@ -5450,12 +5576,25 @@ pub async fn update_dataset_shacl(
         }
     }
 
-    db.update_dataset_shacl(
-        &dataset_id,
-        req.shacl_on_write,
-        req.shapes_graph_iri.as_deref(),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // A writer the linked graph is withheld from reads no `shapes_graph_iri`
+    // in the dataset record (`record_for_reader`), and a client saving the
+    // on-write setting sends back the one it read. Taken as "no shapes
+    // graph", that would unlink a graph the writer was never shown and leave
+    // `shacl_on_write` with nothing to validate against. So from such a
+    // caller a request that names no graph leaves the link as it is; an
+    // empty string still clears it, which is a write of this dataset.
+    let linked = dataset
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty());
+    let shapes_graph_iri = match (req.shapes_graph_iri.as_deref(), linked) {
+        (None, Some(linked)) if shapes_link_withheld(&db, Some(&current_user), linked) => {
+            Some(linked)
+        }
+        (requested, _) => requested,
+    };
+    db.update_dataset_shacl(&dataset_id, req.shacl_on_write, shapes_graph_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Newly-linked shapes: adopt the graph into the SHACL Studio Library and
     // bind it to the dataset (idempotent; best-effort, never fails the update).
