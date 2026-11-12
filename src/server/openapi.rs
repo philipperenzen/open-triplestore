@@ -937,7 +937,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Add graph to dataset",
-                    "Register a named graph with the dataset: one in its own namespace, a new graph (which the dataset creates), or — for a caller who may write it directly (an admin, or a graph-ACL write grant) — an existing graph that already holds data. The dataset's editors can then write it and a detach can delete it, so a graph someone else made is never attached on dataset authority alone. A new graph the graph ACL already grants to someone counts as theirs, like one that holds data. Graphs of another dataset, the system, the model registry or a server feature (`urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`, `urn:ots:`, `urn:config:`, `urn:entailment:`, another dataset's assets graph) are refused.",
+                    "Register a named graph with the dataset: one in its own namespace, a new graph (which the dataset creates), or — for a caller who may write it directly (an admin, or a graph-ACL write grant) — an existing graph that already holds data. The dataset's editors can then write it and a detach can delete it, so a graph someone else made is never attached on dataset authority alone. A new graph the graph ACL already grants to someone counts as theirs, like one that holds data. Graphs of another dataset, the system, the model registry or a server feature (`urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`, `urn:ots:`, `urn:config:`, `urn:entailment:`, another dataset's assets graph) are refused. A graph that was private when it last left this dataset is registered private again; `PATCH` with `\"private\": false` makes it public.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
@@ -981,7 +981,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Remove graph from dataset",
-                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, the graph is the dataset's own (in its namespace, created by it, or one the caller may delete directly: an admin, or a graph-ACL write grant), no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system, SHACL Studio Library nor model-registry graph. Otherwise only the registration is removed.",
+                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, the graph is the dataset's own (in its namespace, created by it, or one the caller may delete directly: an admin, or a graph-ACL write grant), no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system, SHACL Studio Library nor model-registry graph. Otherwise only the registration is removed. The dataset's versions and patch log keep their copies either way: those of a graph that is private when it is detached stay withheld from callers who may not write the dataset.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",

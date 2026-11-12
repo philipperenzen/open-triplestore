@@ -45,17 +45,38 @@ pub(crate) fn require_read(
     }
 }
 
-/// The dataset's private *live source*-graph IRIs, as they bear on what `uid`
-/// may see of a version snapshot.
+/// The source graphs of `dataset_id` whose copies in a version — and whose
+/// names, and entries in the patch log — are kept from a caller who may not
+/// write the dataset: the graphs flagged private now, and the graphs that were
+/// private when they were detached from it.
+///
+/// Every version read gets its set here (the routes below, the dataset
+/// service's and browse's `?version=` in `server::routes`, saved-query runs,
+/// the RDF Patch log), so they cannot come apart; the rule itself is
+/// `AuthDb::private_graphs_incl_detached`. Fails closed: a lookup error is a
+/// `500`, so nothing is served, rather than "nothing private".
+pub(crate) fn withheld_sources(
+    state: &AppState,
+    dataset_id: &str,
+) -> Result<std::collections::HashSet<String>, AppError> {
+    state
+        .auth_db
+        .private_graphs_incl_detached(dataset_id)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// [`withheld_sources`], as it bears on what `uid` may see of a version
+/// snapshot.
 ///
 /// A version snapshot copies every graph the dataset held at the time — private
 /// ones included — into version-scoped IRIs that are absent from
 /// `list_dataset_graph_entries`, so the plain private filter that guards `/sparql`
 /// is a no-op on a version read. This maps a snapshot's *source* graph back to
-/// the live `private` flag instead.
+/// the graph's `private` flag instead — the flag it has now or, for a graph
+/// since detached, the one it left with.
 ///
 /// Returns `None` when the caller may write the dataset (writers and admins see
-/// every graph). Otherwise `Some(set)` of the live graphs flagged private, which
+/// every graph). Otherwise `Some(set)` of the withheld source graphs, which
 /// the callers below use to drop the matching snapshot graphs. Fails closed: a
 /// lookup error propagates as `500`, so nothing is served, rather than defaulting
 /// to "nothing private".
@@ -74,17 +95,7 @@ pub(crate) fn private_source_filter(
     if can_write {
         return Ok(None);
     }
-    let entries = state
-        .auth_db
-        .list_dataset_graph_entries(&ds.id)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    Ok(Some(
-        entries
-            .into_iter()
-            .filter(|e| e.private)
-            .map(|e| e.graph_iri)
-            .collect(),
-    ))
+    Ok(Some(withheld_sources(state, &ds.id)?))
 }
 
 /// The snapshot graphs of `record` that `uid` may read. Writers get them all;

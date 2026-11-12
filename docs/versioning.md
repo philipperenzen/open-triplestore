@@ -24,16 +24,16 @@ read:
 
 | Field | For a caller who may not write the dataset |
 |---|---|
-| `source_map`, `snapshot_graphs` | Without the graphs whose live source graph is flagged private, and without a snapshot the map does not tie to a source graph. |
+| `source_map`, `snapshot_graphs` | Without the graphs whose source graph is withheld (flagged private now, or detached from the dataset while private; see [Private graphs in versions](#private-graphs-in-versions)), and without a snapshot the map does not tie to a source graph. |
 | `quad_count`, `content_hash` | The totals of the graphs that remain: what `…/versions/{version}/data` returns to that caller. Left out when one of those graphs has no figure of its own. |
 | `change_count` | Left out. It counts a delta's changes across all its graphs. |
 
 Nothing else changes, and a version that covers no private graph is returned
 as it is. Private is the graph's flag now, not when the version was cut:
-flagging a graph private hides it in every version that already holds it. The
-version's data, its diffs and the [patch log](#patch-logs) follow the same
-rule, and a branch's `ahead` / `behind` count only the graphs the caller may
-read.
+flagging a graph private hides it in every version that already holds it, and
+a graph detached while private stays hidden. The version's data, its diffs and
+the [patch log](#patch-logs) follow the same rule, and a branch's `ahead` /
+`behind` count only the graphs the caller may read.
 
 ## Delta versions
 
@@ -127,6 +127,35 @@ per-graph counts, the changes row by row from the RDF Patch, and the patch to
 download. **Clean up** asks how many unpublished versions to keep, shows which
 versions would go, and deletes them after the app's confirmation dialog.
 
+## Private graphs in versions
+
+A version copies every graph it covers, private ones included. A caller who
+may read the dataset but not write it — a viewer, or anyone at all on a public
+dataset — is served a version without those copies: in the version's data, in
+its diffs, on a `?version=` read of the dataset's SPARQL service, in browse,
+in an API-service run and in the [patch log](#patch-logs). The version record
+leaves those graphs' names out too
+([What a reader gets of a version record](#what-a-reader-gets-of-a-version-record)).
+Writers and administrators are served all of it.
+
+Whether a copy is withheld follows the graph it was cut from:
+
+| The source graph | Its copies in the dataset's versions |
+|---|---|
+| is flagged private | Withheld. The flag counts as it is now, not as it was at the cut: flagging a graph private hides it in every version that already holds it, and making it public shows it there again. |
+| was detached from the dataset while private | Still withheld. The dataset keeps on record that the graph was private when it left — by `DELETE /api/datasets/{id}/graphs` or any other way a graph leaves a dataset, and whether or not its stored data was deleted with it. |
+| was detached while public | Served, as before the detach. |
+| is attached to the dataset again after it left private | Private again, as a live graph and in the versions. That holds for the registration route, for a [restore](#restore), and for a graph created later under the same name. Only a writer's `PATCH /api/datasets/{id}/graphs` with `"private": false` makes it public. |
+
+The record is the dataset's own: another dataset that holds the same graph is
+not affected. It ends when the graph is attached to the dataset again (its
+registration carries the flag from then on) or when the dataset is deleted.
+
+A graph that was detached while private on release 0.8.1 or earlier left no
+record, and its copies in the versions cut before the detach are served to
+readers. To hide them, attach the graph to the dataset again, flag it
+private and detach it; or delete those versions.
+
 ## Restore
 
 `POST /api/datasets/:id/versions/:ver/restore` puts the dataset's live graphs
@@ -148,6 +177,10 @@ Either way the restore is one commit in the dataset's history, captured by
 its LDES stream, entailment and full-text index. Snapshot, branch and
 restore stream their copies in batches rather than holding every quad in
 memory.
+
+A restore registers the graphs it writes to the dataset again. One that left
+the dataset while private comes back private
+(see [Private graphs in versions](#private-graphs-in-versions)).
 
 ## Branches
 
@@ -378,9 +411,10 @@ is a diff from the empty graph for those graphs: it adds what the version
 holds but cannot delete what replay may still carry.
 
 Reading the log needs read access to the dataset. An entry that changes a
-graph the caller may not read (a private graph, for a caller who cannot
-write the dataset) is listed as `withheld` and refused with `403`, and
-version 0 leaves those graphs out.
+graph the caller may not read (a private graph, or one that was private when
+it was detached from the dataset, for a caller who cannot write the dataset)
+is listed as `withheld` and refused with `403`, and version 0 leaves those
+graphs out.
 
 ## Change log
 

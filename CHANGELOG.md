@@ -374,6 +374,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account IRI and quads until retention; the purge's deletion of the profile
   graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
+- **A private graph stays private in a dataset's versions after it is
+  detached.** What a version shows a caller who may not write the dataset
+  follows the `private` flag of the graph each snapshot was cut from, and that
+  flag was a column of the graph's registration. Detaching the graph deleted
+  the registration, so from then on every version that covered the graph
+  served its copy, under its name, to anyone who could read the dataset:
+  `…/versions/{ver}/data`, `…/diff/{other}`, a `?version=` read on the
+  dataset's SPARQL service, browse, an API-service run, and the entries of the
+  RDF Patch log that changed the graph. A later restore, or anything else that
+  registered the graph again, brought it back as a public live graph. A
+  dataset now keeps on record that a graph was private when it left, by
+  whichever path (the detach route, a source run replacing its graph, the
+  assets graph going with the last asset) and whether or not the stored graph
+  was deleted with it. Version reads and the patch log keep withholding it
+  from non-writers, and a graph attached to that dataset again under the same
+  name is private again until a writer makes it public. A graph that is
+  public when it leaves stays readable in its versions. **Graphs detached
+  while private before this release left no record** and stay readable in the
+  versions that cover them: attach such a graph again, flag it private and
+  detach it, or delete those versions. One new table in the identity
+  database, created on start; nothing to migrate.
 
 ## [0.8.1] — 2026-10-22
 
