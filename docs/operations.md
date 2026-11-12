@@ -474,7 +474,11 @@ model. Three things to know:
 
 - **RDF data**, per graph, per the scope. Version-snapshot graphs
   (`…/version/…`) come across whole (the leader records them `unknown`
-  rather than copy them into its log).
+  rather than copy them into its log). So do user profile graphs
+  (`urn:system:user:{id}`): the leader records their writes
+  [without the statements](versioning.md#what-a-row-says), so that an erased
+  profile does not live on in a log, and the follower fetches the graph on
+  each profile change. After a purge that fetch comes back empty.
 - **The identity database** (`auth.db`: users, organisations, datasets,
   tokens, ACLs), shipped whole — see "Identity database" below.
 - **Not the object store.** Point both nodes at the same S3 bucket; with the

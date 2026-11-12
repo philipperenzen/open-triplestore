@@ -214,6 +214,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preview). The new §4.8 documents saved assistant conversations and feedback
   reports; the §7 retention list and `docs/gdpr.md` name all three. Operators
   who published a notice from the earlier template should update theirs.
+- **The change log no longer keeps the values of a user profile.** With
+  change capture on (`OTS_CHANGE_CAPTURE_ENABLED=on`, or on a replication
+  leader or cluster member), every write to a profile graph
+  (`urn:system:user:{id}`) was recorded with its statements. An edit left the
+  old name and contact details in `changes.db`, and a purge left the whole
+  profile there, in the row of its own delete. Admins could read those rows at
+  `GET /api/admin/changes`, followers received them and backups copied them,
+  for `OTS_CHANGE_RETENTION_DAYS` (90 by default) or for as long as a cursor
+  or pin held the row. Rows of a profile graph are now `counts` rows: they
+  give the time, the graph and the number of statements changed, and no
+  statement. A follower fetches the graph for such a row, and after a purge
+  that fetch comes back empty, so an edit or a purge reaches followers as
+  before.
+  At its next start each node also takes out the statements that earlier
+  versions recorded for these graphs, and then compacts the log (`VACUUM`) so
+  that no copy stays in the unused space of the file. A log over 512 MiB is
+  not compacted at start: the server logs a warning, and `VACUUM` on
+  `changes.db` with the server stopped does it. The clean-up skips a profile
+  graph that an administrator registered to a dataset, because that
+  dataset's delta versions are replayed from those rows. Backups already
+  taken keep what they copied. Unchanged: a purge leaves `actor_iri` on the
+  user's earlier rows, and a profile graph's IRI contains the account id.
 - **Purging a user erases their LLM request-log rows and usage events.** Both
   tables carry the user ID without a foreign key, so an admin purge, a
   self-service purge (`POST /api/auth/account/purge`) and an admin delete left
