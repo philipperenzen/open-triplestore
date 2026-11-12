@@ -325,8 +325,9 @@ cannot be told apart from the rest once they sit in the public graph.
 > when change capture was on, a dataset recorded provenance, that dataset
 > held a private graph, and the dataset had readers who are not writers.
 
-Turning it on publishes history to every reader of the dataset: the graph
-keeps each removed statement as a triple term, and the `full` profile writes
+Turning it on publishes the history of the dataset's graphs that are not
+private to every reader of the dataset: the graph keeps each removed
+statement as a triple term, and the `full` profile writes
 the actor of every change into it. `OTS_ACTOR_VISIBILITY` and
 `OTS_CHANGE_PATCH_ACCESS` do not filter a graph; choose `minimal`, or leave
 it off, for a dataset whose readers should not see who changed what.

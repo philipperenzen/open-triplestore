@@ -144,7 +144,7 @@ Whether a copy is withheld follows the graph it was cut from:
 |---|---|
 | is flagged private | Withheld. The flag counts as it is now, not as it was at the cut: flagging a graph private hides it in every version that already holds it, and making it public shows it there again. |
 | was detached from the dataset while private | Still withheld. The dataset keeps on record that the graph was private when it left — by `DELETE /api/datasets/{id}/graphs` or any other way a graph leaves a dataset, and whether or not its stored data was deleted with it. |
-| was detached while public | Served, as before the detach. |
+| was detached while public | Served, as before the detach. The version's stored validation report is not: it goes to a reader only while they may read every graph it validated, and a graph no dataset holds is not one `/sparql` serves them ([the report history](/docs/shacl#the-report-history)). |
 | is attached to the dataset again after it left private | Private again, as a live graph and in the versions. That holds for the registration route, for a [restore](#restore), and for a graph created later under the same name. Only a writer's `PATCH /api/datasets/{id}/graphs` with `"private": false` makes it public. |
 
 The record is the dataset's own: another dataset that holds the same graph is
@@ -595,8 +595,11 @@ order to publish history:
 - **LDES.** Earlier versions of an entity stay members of the stream until
   its retention policy drops them; a stream has none unless one is set.
 - **Statement provenance.** The statement-provenance graph holds every
-  removed statement as a triple term, and under the `full` profile the actor
-  of each change, readable over `/sparql` by every reader of the dataset.
+  removed statement of the dataset's graphs that are not private as a triple
+  term, and under the `full` profile the actor of each change, readable over
+  `/sparql` by every reader of the dataset. A private graph's annotations are
+  in the private provenance graph, which the dataset's writers read
+  ([statement provenance](/docs/datasets#statement-provenance-opt-in)).
 
 Neither setting erases anything: writers and administrators read the rows
 until retention sweeps them, and a patch a consumer fetched earlier is the
