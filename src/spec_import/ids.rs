@@ -989,13 +989,9 @@ fn str_matches(v: &Value, s: &str) -> bool {
             }
             let len = s.chars().count();
             let n = |o: &Option<String>| o.as_deref().and_then(|v| v.trim().parse::<usize>().ok());
-            if n(&r.length).is_some_and(|l| len != l)
+            !(n(&r.length).is_some_and(|l| len != l)
                 || n(&r.min_length).is_some_and(|l| len < l)
-                || n(&r.max_length).is_some_and(|l| len > l)
-            {
-                return false;
-            }
-            true
+                || n(&r.max_length).is_some_and(|l| len > l))
         }
     }
 }
