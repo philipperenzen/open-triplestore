@@ -39,7 +39,8 @@
 
   $: scheduled = pipelines.filter((p) => p.schedule_cron && p.schedule_cron.length > 0).length;
   $: gating = pipelines.filter((p) => p.gate_writes).length;
-  $: datasetsWithoutShapes = datasets.filter((d) => !d.shapes_graph_iri).length;
+  // A shapes graph the caller may not read is still a shapes graph.
+  $: datasetsWithoutShapes = datasets.filter((d) => !d.shapes_graph_iri && !d.shapes_graph_withheld).length;
   $: recent = [...pipelines].filter((p) => p.last_run_at).sort((a, b) => (b.last_run_at || '').localeCompare(a.last_run_at || '')).slice(0, 6);
 
   function relativeTime(iso) {

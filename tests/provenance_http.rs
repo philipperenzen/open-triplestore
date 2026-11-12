@@ -157,6 +157,29 @@ async fn commits_generate_graph_entities_and_the_dataset_has_a_prov_trail() {
         ttl.contains("Cut version 1.0.0"),
         "the version commit is an activity in the trail"
     );
+    // The version's agent is the account that cut it. The record's
+    // `created_by` already is that account's IRI, so it is written as it is
+    // (it used to be prefixed again: `<{base}/users/{base}/users/adm>`).
+    assert!(
+        ttl.contains("prov:wasAttributedTo <http://localhost:7878/users/adm> ;"),
+        "the version is attributed to the account's IRI:\n{ttl}"
+    );
+    assert!(
+        !ttl.contains("/users/http"),
+        "no agent IRI is nested in another:\n{ttl}"
+    );
+    let ask_prov = |q: &str| {
+        let doc = open_triplestore::store::TripleStore::in_memory().unwrap();
+        doc.load_str(&ttl, oxigraph::io::RdfFormat::Turtle, Some("urn:check"))
+            .expect("valid Turtle");
+        matches!(doc.query(q), Ok(QueryResults::Boolean(true)))
+    };
+    assert!(
+        ask_prov(&format!(
+            "ASK {{ GRAPH <urn:check> {{ <http://localhost:7878/dataset/{id}/version/1.0.0> <http://www.w3.org/ns/prov#wasAttributedTo> <http://localhost:7878/users/adm> }} }}"
+        )),
+        "{ttl}"
+    );
 
     // 4. DCAT attributes the dataset and names its last activity.
     let (st, void) = text(&app, Method::GET, "/.well-known/void", None, None, "").await;

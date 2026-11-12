@@ -2,8 +2,10 @@
 //!
 //! Stored reports carry provenance (dataset, version, who, when, data/shapes refs)
 //! and are written by the validate-and-commit path and the continuous
-//! (validate-on-write) path. Read endpoints are visibility-scoped like the rest of
-//! the dataset API.
+//! (validate-on-write) path. The read endpoints serve a report only to a caller
+//! who may read the graphs it is about ([`ReportReader`]).
+
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -12,9 +14,16 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthenticatedUser;
-use crate::auth::models::ValidationReportRecord;
+use crate::auth::models::{Dataset, ValidationReportRecord};
 use crate::server::error::AppError;
 use crate::server::AppState;
+
+use super::registry;
+
+/// `data_ref` of a report whose data came in the request body rather than
+/// from a graph (validate-and-commit): what it validated is the graph its
+/// `version` was cut from.
+pub(crate) const INLINE_DATA: &str = "inline";
 
 /// Persist a validation report. Returns the new report id.
 #[allow(clippy::too_many_arguments)]
@@ -46,7 +55,13 @@ pub fn persist_report(
     Ok(id)
 }
 
-fn require_read(state: &AppState, dataset_id: &str, uid: Option<&str>) -> Result<(), AppError> {
+/// The dataset, when `uid` may read it; `404` otherwise, as for one that does
+/// not exist.
+fn require_read(
+    state: &AppState,
+    dataset_id: &str,
+    uid: Option<&str>,
+) -> Result<Dataset, AppError> {
     let ds = state
         .auth_db
         .get_dataset(dataset_id)
@@ -57,7 +72,7 @@ fn require_read(state: &AppState, dataset_id: &str, uid: Option<&str>) -> Result
         .can_access_dataset(uid, &ds)
         .map_err(|e| AppError::Internal(e.to_string()))?
     {
-        Ok(())
+        Ok(ds)
     } else {
         Err(AppError::NotFound(format!(
             "Dataset '{dataset_id}' not found"
@@ -65,34 +80,168 @@ fn require_read(state: &AppState, dataset_id: &str, uid: Option<&str>) -> Result
     }
 }
 
-/// GET /api/datasets/:dataset_id/validation-reports
+/// What a caller may read of a dataset's stored reports.
+///
+/// A report is about graphs: the one it validated and its shapes graph. Its
+/// record names them (`data_ref`, `shapes_ref`), and a commit's report is the
+/// validator's findings on the committed data. So a report is served by the
+/// rule a stored validation run's report is (`stored_run_view` in
+/// `server::routes`), asked at every read:
+///
+/// * nobody but an admin reads a report whose shapes graph some dataset holds
+///   as private and they may not read
+///   ([`crate::auth::acl::withheld_private_graphs`]), the dataset's writers
+///   included: a shapes graph linked from another dataset need not be theirs
+///   to read;
+/// * the dataset's writers, admins among them, read every other report;
+/// * anyone else reads a report when they may read each graph it validated,
+///   by the `/sparql` rule ([`crate::auth::acl::readable_graph_iris`]): a
+///   private graph only with a graph-ACL read grant. A report that does not
+///   say what it validated goes to writers only.
+///
+/// A report the caller may not read is not served at all (left out of the
+/// listing, `404` by id) rather than served without the two names: what is
+/// left of it (that a write to some graph was checked, when, and how it came
+/// out) is about that graph too.
+///
+/// Fails closed: when the private flags or the caller's graphs cannot be
+/// read, resolving is an error (`500`) and no report is served.
+struct ReportReader {
+    /// May write the dataset.
+    writer: bool,
+    /// Graphs some dataset holds as private that the caller may not read;
+    /// none for an admin.
+    withheld: HashSet<String>,
+    /// The graphs a caller who is no writer may read.
+    readable: HashSet<String>,
+}
+
+impl ReportReader {
+    fn resolve(
+        state: &AppState,
+        ds: &Dataset,
+        user: Option<&AuthenticatedUser>,
+    ) -> Result<Self, AppError> {
+        let internal = |e: anyhow::Error| AppError::Internal(e.to_string());
+        let writer = match user {
+            Some(u) => state
+                .auth_db
+                .can_write_dataset(&u.user_id, ds)
+                .map_err(internal)?,
+            None => false,
+        };
+        let withheld =
+            crate::auth::acl::withheld_private_graphs(&state.auth_db, user).map_err(internal)?;
+        let readable = if writer {
+            HashSet::new()
+        } else {
+            crate::auth::acl::readable_graph_iris(
+                &state.auth_db,
+                user.map(|u| (u.user_id.as_str(), u.role.as_str())),
+            )
+            .map_err(internal)?
+        };
+        Ok(Self {
+            writer,
+            withheld,
+            readable,
+        })
+    }
+
+    /// Whether `report` is the caller's to read. `sources_of` gives the
+    /// graphs a version of the dataset was cut from ([`version_sources`]); it
+    /// is asked only for a caller who is no writer.
+    fn serves(
+        &self,
+        report: &ValidationReportRecord,
+        sources_of: &mut dyn FnMut(&str) -> Option<Vec<String>>,
+    ) -> bool {
+        if report
+            .shapes_ref
+            .as_deref()
+            .is_some_and(|g| self.withheld.contains(g))
+        {
+            return false;
+        }
+        if self.writer {
+            return true;
+        }
+        let mut validated: Vec<String> = match report.data_ref.as_deref() {
+            None | Some(INLINE_DATA) => Vec::new(),
+            Some(graph) => vec![graph.to_string()],
+        };
+        if let Some(version) = report.version.as_deref() {
+            match sources_of(version) {
+                Some(sources) if !sources.is_empty() => validated.extend(sources),
+                // The version is gone, or its record maps no graph: what the
+                // report validated cannot be told.
+                _ => return false,
+            }
+        }
+        !validated.is_empty() && validated.iter().all(|g| self.readable.contains(g))
+    }
+}
+
+/// The graphs `version` of the dataset was cut from, by its registry record;
+/// `None` when the registry holds no such version.
+fn version_sources(state: &AppState, dataset_id: &str, version: &str) -> Option<Vec<String>> {
+    registry::get_version(&state.store, &state.base_url, dataset_id, version).map(|record| {
+        record
+            .source_map
+            .into_iter()
+            .map(|m| m.source_graph)
+            .collect()
+    })
+}
+
+/// GET /api/datasets/:dataset_id/validation-reports — the reports the caller
+/// may read ([`ReportReader`]), newest first, without their bodies.
 pub async fn list_reports(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
     Path(dataset_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let uid = user.as_ref().map(|u| u.user_id.as_str());
-    require_read(&state, &dataset_id, uid)?;
-    let reports = state
+    let ds = require_read(&state, &dataset_id, uid)?;
+    let reader = ReportReader::resolve(&state, &ds, user.as_deref())?;
+    let mut reports = state
         .auth_db
         .list_validation_reports(&dataset_id)
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    // One registry read per version, however many reports name it.
+    let mut versions: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut sources_of = |version: &str| {
+        versions
+            .entry(version.to_string())
+            .or_insert_with(|| version_sources(&state, &dataset_id, version))
+            .clone()
+    };
+    reports.retain(|r| reader.serves(r, &mut sources_of));
     Ok(Json(reports))
 }
 
-/// GET /api/datasets/:dataset_id/validation-reports/:rid
+/// GET /api/datasets/:dataset_id/validation-reports/:rid — one report with
+/// its body. A report the caller may not read ([`ReportReader`]) answers as
+/// one that does not exist.
 pub async fn get_report(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
     Path((dataset_id, rid)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     let uid = user.as_ref().map(|u| u.user_id.as_str());
-    require_read(&state, &dataset_id, uid)?;
+    let ds = require_read(&state, &dataset_id, uid)?;
+    let reader = ReportReader::resolve(&state, &ds, user.as_deref())?;
+    let not_found = || AppError::NotFound(format!("Report '{rid}' not found"));
     let report = state
         .auth_db
         .get_validation_report(&dataset_id, &rid)
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| AppError::NotFound(format!("Report '{rid}' not found")))?;
+        .ok_or_else(not_found)?;
+    if !reader.serves(&report, &mut |version| {
+        version_sources(&state, &dataset_id, version)
+    }) {
+        return Err(not_found());
+    }
     Ok(Json(report))
 }
 
