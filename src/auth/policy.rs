@@ -22,6 +22,12 @@
 //!   clients must not silently make every IdP user read-only, and loosening it
 //!   for one legacy client must not reopen minting for every IdP token.
 //!
+//! * [`actor_audience`] and [`change_patch_audience`] — `OTS_ACTOR_VISIBILITY`
+//!   and `OTS_CHANGE_PATCH_ACCESS`, both default `writers`. Not a principal's
+//!   power but a reader's reach: a dataset's history names who changed it and
+//!   keeps quads its graphs no longer hold, and every reader — anonymous ones
+//!   on a public dataset — used to get both.
+//!
 //! The parsing is pure so the decisions are unit-testable without a server.
 
 use crate::auth::db::AuthDb;
@@ -223,6 +229,91 @@ pub fn idp_token_policy(db: &AuthDb) -> OidcSessionPolicy {
     parse_idp_token_policy(&runtime::get(db, &crate::config::OIDC_IDP_TOKEN_POLICY))
 }
 
+/// The lowest dataset role a part of a dataset's history is shown to. The
+/// caller has always passed the dataset's read check first; this narrows what
+/// that reader gets, it never widens who reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryAudience {
+    /// Accounts that may write the dataset, administrators included. Default:
+    /// who changed what and when is personal data, and quads a graph no longer
+    /// holds were removed for a reason, so neither goes to an open-ended
+    /// audience unless the operator decides so.
+    Writers,
+    /// Any account that may read the dataset. No bound at all where anyone
+    /// can register.
+    SignedIn,
+    /// Everyone who may read the dataset, anonymous callers on a public one
+    /// included: the behaviour before the setting existed.
+    Readers,
+}
+
+/// Parse an audience setting (`writers`, `signed-in`, `readers`). The
+/// registry refuses anything else, so the fallback only meets a value another
+/// version stored: it is the narrow one, never the open one.
+pub fn parse_history_audience(var: &str, raw: &str) -> HistoryAudience {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "readers" => HistoryAudience::Readers,
+        "signed-in" => HistoryAudience::SignedIn,
+        "writers" | "" => HistoryAudience::Writers,
+        other => {
+            tracing::warn!(
+                "{var}: unknown value {other:?}, using 'writers' (known: writers, signed-in, readers)"
+            );
+            HistoryAudience::Writers
+        }
+    }
+}
+
+impl HistoryAudience {
+    /// Whether `user_id` (`None`: anonymous), who may read `dataset`, is in
+    /// the audience. The account's role on the dataset decides, not the
+    /// credential's scope: a read-only API token of a writer is a writer's.
+    /// A failed lookup is an error, never a yes.
+    pub fn admits(
+        self,
+        db: &AuthDb,
+        dataset: &crate::auth::models::Dataset,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        match (self, user_id) {
+            (HistoryAudience::Readers, _) => Ok(true),
+            (_, None) => Ok(false),
+            (HistoryAudience::SignedIn, Some(_)) => Ok(true),
+            (HistoryAudience::Writers, Some(uid)) => db.can_write_dataset(uid, dataset),
+        }
+    }
+}
+
+/// Who sees the author of a dataset's changes — `actor_iri` on change-feed
+/// rows, the actor and its resolved names on the commit trail, the agents of
+/// the PROV-O document, `created_by` on versions, `owner` on branches and
+/// `author` on patch-log entries: the runtime setting `OTS_ACTOR_VISIBILITY`.
+pub fn actor_audience(db: &AuthDb) -> HistoryAudience {
+    parse_history_audience(
+        "OTS_ACTOR_VISIBILITY",
+        &runtime::get(db, &crate::config::ACTOR_VISIBILITY),
+    )
+}
+
+/// Who may fetch one change of a dataset's feed as an RDF Patch (or its
+/// inverse) and hold a cursor on the feed: the runtime setting
+/// `OTS_CHANGE_PATCH_ACCESS`.
+pub fn change_patch_audience(db: &AuthDb) -> HistoryAudience {
+    parse_history_audience(
+        "OTS_CHANGE_PATCH_ACCESS",
+        &runtime::get(db, &crate::config::CHANGE_PATCH_ACCESS),
+    )
+}
+
+/// Whether `user_id` sees who made `dataset`'s changes.
+pub fn shows_actors(
+    db: &AuthDb,
+    dataset: &crate::auth::models::Dataset,
+    user_id: Option<&str>,
+) -> anyhow::Result<bool> {
+    actor_audience(db).admits(db, dataset, user_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +409,17 @@ mod tests {
         // No aliases: the registry refuses `legacy` at startup.
         assert_eq!(parse_idp_token_policy("legacy"), OidcSessionPolicy::Session);
         assert_eq!(parse_idp_token_policy("banana"), OidcSessionPolicy::Session);
+    }
+
+    #[test]
+    fn a_history_audience_defaults_to_writers_and_never_falls_open() {
+        let p = |raw| parse_history_audience("OTS_ACTOR_VISIBILITY", raw);
+        assert_eq!(p(""), HistoryAudience::Writers);
+        assert_eq!(p("writers"), HistoryAudience::Writers);
+        assert_eq!(p("Signed-In"), HistoryAudience::SignedIn);
+        assert_eq!(p("readers"), HistoryAudience::Readers);
+        // A value another version stored is the narrow audience, not the open one.
+        assert_eq!(p("everyone"), HistoryAudience::Writers);
+        assert_eq!(p("signed_in"), HistoryAudience::Writers);
     }
 }

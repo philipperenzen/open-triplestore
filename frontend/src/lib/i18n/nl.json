@@ -1260,6 +1260,8 @@
       "running": "Bezig…",
       "issueCount": "{count} probleem/problemen",
       "noShapes": "Geen shapes",
+      "shapesWithheld": "Shapes die je niet mag lezen",
+      "shapesWithheldDesc": "De shapes-graph van deze dataset is er een die je niet mag lezen, dus je kunt er niet tegen valideren. Schrijfbewerkingen worden er nog steeds tegen gecontroleerd als valideren bij schrijven aan staat.",
       "linkShapesPlaceholder": "+ Shapes koppelen…",
       "notRunPill": "Niet uitgevoerd",
       "configureShapesFirst": "Configureer eerst SHACL-shapes",
