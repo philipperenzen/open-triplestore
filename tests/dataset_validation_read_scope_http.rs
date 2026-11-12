@@ -15,13 +15,22 @@
 //! * A stored run's full report (`…/validation/latest`, `…/validation/runs/
 //!   {run_id}`) goes to the dataset's writers and to callers who may read
 //!   every graph that run validated; everyone else gets its summary.
+//! * The dataset's report history (`…/validation-reports`: one record per
+//!   run of its write gate and per validate-and-commit) follows the same rule,
+//!   a record at a time: a record names the graph it validated and its shapes
+//!   graph, so one the caller may not read is left out of the listing and
+//!   answers 404.
 
 mod common;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use open_triplestore::auth::models::{GraphKind, OwnerType, SystemRole, Visibility};
+use open_triplestore::auth::models::{
+    GraphKind, OwnerType, ResourceRole, SystemRole, ValidationReportRecord, Visibility,
+};
+use open_triplestore::dataset_versions::cut::{cut, CutRequest};
+use open_triplestore::dataset_versions::models::VersionStatus;
 use open_triplestore::server::AppState;
 use open_triplestore::store::TripleStore;
 use serde_json::{json, Value};
@@ -482,6 +491,532 @@ async fn a_reader_cannot_record_forge_or_evict_an_official_run() {
         ids.contains(&alice_run),
         "the owner's official run must still be in history: {ids:?}"
     );
+}
+
+// ─── The report history ─────────────────────────────────────────────────────
+//
+// `GET …/validation-reports` lists what the dataset's write gate and
+// validate-and-commit recorded. A record names the graph it validated
+// (`data_ref`) and its shapes graph (`shapes_ref`), and a commit's record
+// carries the validator's report on the committed data. So a record is served
+// as a stored run's report is: to admins, to the dataset's writers, and to
+// callers who may read every graph it validated; and to nobody but an admin
+// who may not read a private shapes graph it used. A record the caller is not
+// served is left out of the listing and answers 404.
+
+/// A second shapes graph of `pub-ds`, private there.
+const PRIV_SHAPES: &str = "http://pub.example/private-shapes";
+const REPORTS: &str = "/api/datasets/pub-ds/validation-reports";
+
+/// GET `uri` as `token`, or anonymously.
+async fn get_as(state: &AppState, uri: &str, token: Option<&str>) -> (StatusCode, String) {
+    let mut req = Request::builder().method(Method::GET).uri(uri);
+    if let Some(token) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let resp = test_app(state.clone())
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// PUT `ttl` into `graph` over the Graph Store, as `token`.
+async fn put_graph(state: &AppState, token: &str, graph: &str, ttl: &str) -> StatusCode {
+    test_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/store?graph={}", url_encode(graph)))
+                .header(header::CONTENT_TYPE, "text/turtle")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(ttl.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Turn `pub-ds`'s own write gate on, with `shapes` as its shapes graph.
+fn gate_with(state: &AppState, shapes: &str) {
+    state
+        .auth_db
+        .update_dataset_shacl("pub-ds", true, Some(shapes))
+        .unwrap();
+}
+
+/// What `…/validation-reports` lists for `token` (`None`: anonymous): the
+/// body as sent, and its records.
+async fn report_history(state: &AppState, token: Option<&str>) -> (String, Vec<Value>) {
+    let (st, text) = get_as(state, REPORTS, token).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let records = serde_json::from_str::<Value>(&text)
+        .unwrap()
+        .as_array()
+        .expect("an array of reports")
+        .clone();
+    (text, records)
+}
+
+fn listed_ids(records: &[Value]) -> Vec<String> {
+    let mut ids: Vec<String> = records
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(String::from))
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn sorted<const N: usize>(ids: [&String; N]) -> Vec<String> {
+    let mut ids: Vec<String> = ids.into_iter().cloned().collect();
+    ids.sort();
+    ids
+}
+
+/// One stored report as `token` gets it.
+async fn report(state: &AppState, token: Option<&str>, id: &str) -> (StatusCode, String) {
+    get_as(state, &format!("{REPORTS}/{id}"), token).await
+}
+
+/// A withheld report answers as one that does not exist: 404, the same body,
+/// and no private graph's name.
+async fn assert_reads_as_missing(state: &AppState, who: &str, token: Option<&str>, id: &str) {
+    let (st, missing) = report(state, token, "no-such-report").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{who}: {missing}");
+    let (st, text) = report(state, token, id).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{who}: {text}");
+    for private in [PRIV_DATA, PRIV_SHAPES, SECRET_VALUE] {
+        assert!(!text.contains(private), "{who}: {private} in {text}");
+    }
+    assert_eq!(
+        text.replace(id, "<id>"),
+        missing.replace("no-such-report", "<id>"),
+        "{who}: a withheld report answers like a missing one"
+    );
+}
+
+/// The gate's record of a write to `data_ref` checked against `shapes_ref`.
+fn gate_report(records: &[Value], data_ref: &str, shapes_ref: &str, conforms: bool) -> String {
+    records
+        .iter()
+        .find(|r| {
+            r["source"] == json!("on-write")
+                && r["data_ref"] == json!(data_ref)
+                && r["shapes_ref"] == json!(shapes_ref)
+                && r["conforms"] == json!(conforms)
+        })
+        .and_then(|r| r["id"].as_str())
+        .unwrap_or_else(|| panic!("no on-write report on <{data_ref}> in {records:?}"))
+        .to_string()
+}
+
+/// `fixture()` plus a private shapes graph, the dataset's write gate, and four
+/// runs of that gate in the report history.
+struct GateHistory {
+    state: AppState,
+    admin: String,
+    alice: String,
+    bob: String,
+    /// A write to the public graph, checked against the public shapes.
+    control: String,
+    /// A write to the private graph, checked against the public shapes.
+    on_private_data: String,
+    /// A refused write to the private graph.
+    refused: String,
+    /// A write to the public graph, checked against the private shapes.
+    by_private_shapes: String,
+}
+
+async fn gate_history() -> GateHistory {
+    let (state, admin, alice, bob) = fixture();
+    load(&state.store, PRIV_SHAPES, SSN_SHAPES);
+    state
+        .auth_db
+        .add_dataset_graph("pub-ds", PRIV_SHAPES)
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("pub-ds", PRIV_SHAPES, Some(GraphKind::Shapes))
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("pub-ds", PRIV_SHAPES, true)
+        .unwrap();
+
+    gate_with(&state, SHAPES);
+    let ok = patient("p0", "ok");
+    assert!(put_graph(&state, &admin, PUB_DATA, &ok).await.is_success());
+    assert!(put_graph(&state, &admin, PRIV_DATA, &patient("p1", "ok"))
+        .await
+        .is_success());
+    assert_eq!(
+        put_graph(&state, &admin, PRIV_DATA, &patient("p1", SECRET_VALUE)).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the gate refuses a value longer than 3"
+    );
+    gate_with(&state, PRIV_SHAPES);
+    assert!(put_graph(&state, &admin, PUB_DATA, &ok).await.is_success());
+
+    let (text, records) = report_history(&state, Some(&admin)).await;
+    assert_eq!(records.len(), 4, "one report per run of the gate: {text}");
+    GateHistory {
+        control: gate_report(&records, PUB_DATA, SHAPES, true),
+        on_private_data: gate_report(&records, PRIV_DATA, SHAPES, true),
+        refused: gate_report(&records, PRIV_DATA, SHAPES, false),
+        by_private_shapes: gate_report(&records, PUB_DATA, PRIV_SHAPES, true),
+        state,
+        admin,
+        alice,
+        bob,
+    }
+}
+
+/// The gate's reports name the graph written and the shapes graph. A caller
+/// who may not write the dataset (anonymous on a public dataset, a signed-in
+/// viewer) gets neither a report on a private graph nor one shaped by a
+/// private shapes graph: not in the listing, and 404 by id. The report on
+/// public graphs stays theirs. Writers and admins get them all.
+#[tokio::test]
+async fn the_report_history_names_private_graphs_only_to_who_may_read_them() {
+    let h = gate_history().await;
+    let state = &h.state;
+    let erin = make_user(state, "erin");
+    state
+        .auth_db
+        .set_resource_grant(
+            "dataset",
+            "pub-ds",
+            "user",
+            "erin",
+            ResourceRole::Editor,
+            "adm",
+        )
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    for (who, token) in [("anonymous", None), ("a viewer", Some(h.bob.as_str()))] {
+        let (text, records) = report_history(state, token).await;
+        assert_eq!(
+            listed_ids(&records),
+            vec![h.control.clone()],
+            "{who} is listed the report on public graphs only: {text}"
+        );
+        for private in [PRIV_DATA, PRIV_SHAPES] {
+            assert!(
+                !text.contains(private),
+                "{who}: the listing names <{private}>: {text}"
+            );
+        }
+        let (st, text) = report(state, token, &h.control).await;
+        assert_eq!(st, StatusCode::OK, "{who}: {text}");
+        let j: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(j["data_ref"], json!(PUB_DATA), "{who}: {j}");
+        assert_eq!(j["shapes_ref"], json!(SHAPES), "{who}: {j}");
+        assert!(
+            j["report_ttl"]
+                .as_str()
+                .is_some_and(|t| t.contains("sh:conforms")),
+            "{who}: the body comes with it: {j}"
+        );
+        for id in [&h.on_private_data, &h.refused, &h.by_private_shapes] {
+            assert_reads_as_missing(state, who, token, id).await;
+        }
+    }
+
+    let all = sorted([
+        &h.control,
+        &h.on_private_data,
+        &h.refused,
+        &h.by_private_shapes,
+    ]);
+    for (who, token) in [
+        ("the owner", &h.alice),
+        ("an editor", &erin),
+        ("an admin", &h.admin),
+    ] {
+        let (text, records) = report_history(state, Some(token)).await;
+        assert_eq!(listed_ids(&records), all, "{who} is listed all: {text}");
+        for (id, data_ref, shapes_ref) in [
+            (&h.control, PUB_DATA, SHAPES),
+            (&h.on_private_data, PRIV_DATA, SHAPES),
+            (&h.refused, PRIV_DATA, SHAPES),
+            (&h.by_private_shapes, PUB_DATA, PRIV_SHAPES),
+        ] {
+            let (st, text) = report(state, Some(token), id).await;
+            assert_eq!(st, StatusCode::OK, "{who}: {text}");
+            let j: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(j["data_ref"], json!(data_ref), "{who}: {j}");
+            assert_eq!(j["shapes_ref"], json!(shapes_ref), "{who}: {j}");
+        }
+    }
+}
+
+/// Who may read a graph is asked when the report is: a report on a graph made
+/// private since is withheld, one on a graph made public again is back, and a
+/// graph-ACL read grant on a private graph gives its reports as it gives the
+/// graph over `/sparql`.
+#[tokio::test]
+async fn a_report_follows_its_graphs_as_they_are_when_it_is_read() {
+    let h = gate_history().await;
+    let state = &h.state;
+    let bob = Some(h.bob.as_str());
+    let private = |graph: &str, private: bool| {
+        state
+            .auth_db
+            .set_dataset_graph_private("pub-ds", graph, private)
+            .unwrap()
+    };
+
+    private(PUB_DATA, true);
+    for who in [None, bob] {
+        let (text, records) = report_history(state, who).await;
+        assert!(
+            records.is_empty(),
+            "every report is on a private graph: {text}"
+        );
+        assert!(!text.contains(PUB_DATA), "{text}");
+        assert_reads_as_missing(state, "a non-writer", who, &h.control).await;
+    }
+    let (_, records) = report_history(state, Some(&h.alice)).await;
+    assert_eq!(records.len(), 4, "the owner keeps them: {records:?}");
+
+    private(PUB_DATA, false);
+    private(PRIV_SHAPES, false);
+    let (text, records) = report_history(state, None).await;
+    assert_eq!(
+        listed_ids(&records),
+        sorted([&h.control, &h.by_private_shapes]),
+        "public again, shapes graph included: {text}"
+    );
+    private(PRIV_SHAPES, true);
+
+    // bob is granted read on the private data graph: he reads it over
+    // /sparql, and so the reports on it. Anonymous callers still do not.
+    state
+        .auth_db
+        .grant_graph_permission("r-bob", PRIV_DATA, "user", "bob", "read", "adm")
+        .unwrap();
+    let (text, records) = report_history(state, bob).await;
+    assert_eq!(
+        listed_ids(&records),
+        sorted([&h.control, &h.on_private_data, &h.refused]),
+        "bob reads the private data graph by grant, not the private shapes: {text}"
+    );
+    let (st, text) = report(state, bob, &h.on_private_data).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let (_, records) = report_history(state, None).await;
+    assert_eq!(listed_ids(&records), vec![h.control.clone()]);
+}
+
+/// Record a validate-and-commit report on `version` as the server does
+/// (`data_ref: "inline"`), with `body` as the validator's report.
+fn commit_report(state: &AppState, version: &str, body: &str) -> String {
+    let id = format!("commit-{version}");
+    state
+        .auth_db
+        .insert_validation_report(&ValidationReportRecord {
+            id: id.clone(),
+            dataset_id: "pub-ds".to_string(),
+            version: Some(version.to_string()),
+            conforms: true,
+            report_ttl: body.to_string(),
+            data_ref: Some("inline".to_string()),
+            shapes_ref: None,
+            source: "platform".to_string(),
+            created_by: Some("alice".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+    id
+}
+
+/// Cut `version` of `pub-ds` from `graph` alone, as a commit into it does.
+fn cut_version(state: &AppState, version: &str, graph: &str) {
+    let req = CutRequest {
+        dataset_id: "pub-ds".to_string(),
+        version: version.to_string(),
+        source_graphs: vec![graph.to_string()],
+        status: VersionStatus::Draft,
+        created_by: None,
+        notes: None,
+        branch: None,
+        derived_from: None,
+        force_checkpoint: true,
+        shared: Default::default(),
+        conforms_to_model: None,
+        conforms_to_version: None,
+    };
+    cut(&state.store, &state.base_url, &req).unwrap();
+}
+
+/// A validate-and-commit report records its data as `inline` and carries the
+/// validator's report on it: the data is the graph its version was cut from.
+/// A non-writer gets the report of a commit into a graph they may read; one
+/// into a private graph, and one whose version no longer says which graph it
+/// was, go to writers and admins only.
+#[tokio::test]
+async fn a_commit_report_is_about_the_graph_its_version_was_cut_from() {
+    let (state, admin, alice, bob) = fixture();
+    cut_version(&state, "1.0.0", PUB_DATA);
+    cut_version(&state, "1.1.0", PRIV_DATA);
+    let warning = |value: &str| {
+        format!(
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:ValidationReport ; \
+             sh:conforms true ; sh:result [ sh:resultSeverity sh:Warning ; sh:value \"{value}\" ] .\n"
+        )
+    };
+    let public = commit_report(&state, "1.0.0", &warning(PUBLIC_VALUE));
+    let private = commit_report(&state, "1.1.0", &warning(SECRET_VALUE));
+    let gone = commit_report(&state, "0.9.0", &warning(SECRET_VALUE));
+
+    for (who, token) in [("anonymous", None), ("a viewer", Some(bob.as_str()))] {
+        let (text, records) = report_history(&state, token).await;
+        assert_eq!(listed_ids(&records), vec![public.clone()], "{who}: {text}");
+        let (st, text) = report(&state, token, &public).await;
+        assert_eq!(st, StatusCode::OK, "{who}: {text}");
+        assert!(text.contains(PUBLIC_VALUE), "{who}: {text}");
+        for id in [&private, &gone] {
+            assert_reads_as_missing(&state, who, token, id).await;
+        }
+    }
+    for (who, token) in [("the owner", &alice), ("an admin", &admin)] {
+        let (text, records) = report_history(&state, Some(token)).await;
+        assert_eq!(
+            listed_ids(&records),
+            sorted([&public, &private, &gone]),
+            "{who}: {text}"
+        );
+        let (st, text) = report(&state, Some(token), &private).await;
+        assert_eq!(st, StatusCode::OK, "{who}: {text}");
+        assert!(
+            text.contains(SECRET_VALUE),
+            "{who} reads it in full: {text}"
+        );
+    }
+}
+
+/// A shapes graph another dataset holds as private is read by that dataset's
+/// writers. Linked as this dataset's gate, it shapes reports this dataset's
+/// own writers may not read either, as with a stored run: only an admin, and
+/// a writer who may read the shapes graph, get them.
+#[tokio::test]
+async fn a_report_shaped_by_another_datasets_private_graph_is_not_this_datasets_to_share() {
+    let (state, admin, alice, bob) = fixture();
+    let carol = make_user(&state, "carol");
+    let foreign = "http://other.example/shapes";
+    state
+        .auth_db
+        .create_dataset(
+            "other-ds",
+            "other-ds",
+            None,
+            OwnerType::User,
+            "carol",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    load(&state.store, foreign, SSN_SHAPES);
+    state
+        .auth_db
+        .add_dataset_graph("other-ds", foreign)
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("other-ds", foreign, true)
+        .unwrap();
+    // carol also writes pub-ds: the one writer of it who may read the shapes.
+    state
+        .auth_db
+        .set_resource_grant(
+            "dataset",
+            "pub-ds",
+            "user",
+            "carol",
+            ResourceRole::Editor,
+            "adm",
+        )
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    gate_with(&state, SHAPES);
+    let ok = patient("p0", "ok");
+    assert!(put_graph(&state, &admin, PUB_DATA, &ok).await.is_success());
+    gate_with(&state, foreign);
+    assert!(put_graph(&state, &admin, PUB_DATA, &ok).await.is_success());
+    let (_, records) = report_history(&state, Some(&admin)).await;
+    let control = gate_report(&records, PUB_DATA, SHAPES, true);
+    let shaped = gate_report(&records, PUB_DATA, foreign, true);
+
+    for (who, token) in [
+        ("anonymous", None),
+        ("a viewer", Some(bob.as_str())),
+        (
+            "the owner, who may not read the shapes",
+            Some(alice.as_str()),
+        ),
+    ] {
+        let (text, records) = report_history(&state, token).await;
+        assert_eq!(listed_ids(&records), vec![control.clone()], "{who}: {text}");
+        assert!(!text.contains(foreign), "{who}: {text}");
+        let (st, text) = report(&state, token, &shaped).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{who}: {text}");
+        assert!(!text.contains(foreign), "{who}: {text}");
+    }
+    for (who, token) in [("a writer of both", &carol), ("an admin", &admin)] {
+        let (text, records) = report_history(&state, Some(token)).await;
+        assert_eq!(
+            listed_ids(&records),
+            sorted([&control, &shaped]),
+            "{who}: {text}"
+        );
+        let (st, text) = report(&state, Some(token), &shaped).await;
+        assert_eq!(st, StatusCode::OK, "{who}: {text}");
+        assert!(text.contains(foreign), "{who}: {text}");
+    }
+}
+
+/// When the private flags cannot be read, nobody whose answer depends on them
+/// gets a report: the routes fail (500) rather than serve the history as if
+/// nothing were private. An admin, who reads every graph, is still answered.
+#[tokio::test]
+async fn the_report_history_fails_closed_when_private_flags_cannot_be_read() {
+    let h = gate_history().await;
+    let state = &h.state;
+    state
+        .auth_db
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE dataset_graphs")
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    for (who, token) in [
+        ("anonymous", None),
+        ("a viewer", Some(h.bob.as_str())),
+        ("the owner", Some(h.alice.as_str())),
+    ] {
+        for uri in [
+            REPORTS.to_string(),
+            format!("{REPORTS}/{}", h.control),
+            format!("{REPORTS}/{}", h.on_private_data),
+        ] {
+            let (st, text) = get_as(state, &uri, token).await;
+            assert_eq!(
+                st,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{who}, {uri}: {text}"
+            );
+            for private in [PRIV_DATA, PRIV_SHAPES] {
+                assert!(!text.contains(private), "{who}, {uri}: {text}");
+            }
+        }
+    }
+    let (text, records) = report_history(state, Some(&h.admin)).await;
+    assert_eq!(records.len(), 4, "an admin reads every graph: {text}");
 }
 
 // ─── ShEx ───────────────────────────────────────────────────────────────────
