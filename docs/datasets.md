@@ -447,6 +447,43 @@ deleted only by an admin or a graph-ACL writer. (One exception to "never
 deleted with it": a linked shapes graph left in the namespace of a dataset
 that was deleted earlier goes with its last user.)
 
+#### Who reads a graph that stays in the store
+
+A graph no dataset holds is not public. `/sparql`, the Graph Store and the
+browser serve it to administrators and to callers with a graph-ACL read grant
+on it. Nobody else reads it there: not the dataset's viewers, and no longer
+its writers. A writer who is not an administrator can attach it again only if
+they may write it directly (see above); an administrator always can. A graph
+another dataset still holds is read by that dataset's readers, as before.
+
+Other things can name a graph besides its registration, and they outlive the
+detach: a SHACL Studio Library entry that adopted the graph, a dataset's
+shapes graph setting, a link from another dataset, a validation binding. What
+they serve after the detach depends on how the graph left:
+
+| The graph left the dataset | What still names it serves it to |
+|---|---|
+| while private | Only callers who may read it by the `/sparql` rule: administrators, graph-ACL readers, and the readers of another dataset that holds it. It stays a private graph. |
+| while public | Whoever that entry, setting or binding admits, as for any graph no dataset holds as private. |
+
+So for a graph that was private, nothing changes for the dataset's viewers or
+for anonymous callers: `GET /api/datasets/{id}/shapes` leaves it out (404 when
+it was the only shapes graph), the form manifest and the Library do not show
+it, validation and inference runs leave it out, a stored report that names its
+shapes stays withheld, and it cannot be linked into another dataset. The
+writers of the dataset that let it go are now in the same position. If it was
+the dataset's shapes graph, their runs leave it out until it is attached
+again; validation on write keeps applying it and withholds the details of a
+refusal.
+
+Attached to the dataset again, the graph is private again, and only a
+writer's `PATCH /api/datasets/{id}/graphs` with `"private": false` makes it
+public. The dataset keeps on record that the graph left private until then,
+or until the dataset is deleted (see
+[Private graphs in versions](/docs/versioning#private-graphs-in-versions)).
+A graph that was detached while private on release 0.8.1 or earlier left no
+record: attach it again, flag it private and detach it.
+
 ```bash
 # Add a graph (without specifying role)
 curl -X POST http://localhost:7878/api/datasets/<dataset_id>/graphs \

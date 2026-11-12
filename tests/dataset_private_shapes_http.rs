@@ -855,3 +855,215 @@ async fn a_private_shapes_graph_linked_by_a_writer_infers_only_for_its_readers()
     assert_eq!(j["partial"], json!(false), "{text}");
     assert!(derived(&state, secret), "alice's run applies it");
 }
+
+// ─── After the graph leaves its dataset ──────────────────────────────────────
+//
+// The flag is a column of the registration. A detach removes the registration
+// and, for a graph the dataset may not delete (it did not create it, another
+// dataset uses it, it is the dataset's own shapes graph), leaves the graph in
+// the store. Whatever else names the graph still does: a Library entry, a link
+// from another dataset, the dataset's own shapes setting. The graph left as a
+// private one, and it stays one for all of them.
+
+/// Detach `SHAPES` from `pub-ds` as `token`, through the route a writer uses.
+async fn detach_shapes(state: &AppState, token: &str) {
+    let (st, text) = send(
+        state,
+        Method::DELETE,
+        "/api/datasets/pub-ds/graphs",
+        Some(token),
+        json!({ "graph_iri": SHAPES }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "detach: {text}");
+    assert!(
+        !state.auth_db.dataset_has_graph("pub-ds", SHAPES).unwrap(),
+        "the registration is gone"
+    );
+}
+
+/// Whether the store still holds the shapes graph.
+fn shapes_stored(state: &AppState) -> bool {
+    matches!(
+        state
+            .store
+            .query(&format!("ASK {{ GRAPH <{SHAPES}> {{ ?s ?p ?o }} }}")),
+        Ok(QueryResults::Boolean(true))
+    )
+}
+
+/// A Library entry adopted the graph in place while it was public, so the
+/// entry is public; the graph was then made private. The owner detaches it:
+/// she did not create it, so it stays in the store, and the entry still
+/// points at it. The entry goes on following the graph. A viewer of the
+/// dataset gets nothing of it, by any path the Library serves.
+#[tokio::test]
+async fn a_detached_private_shapes_graph_stays_private_in_the_library() {
+    let (state, admin, alice, bob) = fixture();
+    set_private(&state, false);
+    let entry = adopt(&state, &alice).await;
+    let id = entry["id"].as_str().unwrap().to_string();
+    assert_eq!(entry["visibility"], json!("public"), "{entry}");
+    set_private(&state, true);
+    assert_library_withholds(&state, &bob, &id).await;
+
+    detach_shapes(&state, &alice).await;
+    assert!(shapes_stored(&state), "alice did not create the graph");
+    assert_library_withholds(&state, &bob, &id).await;
+
+    // An administrator still reads the graph itself.
+    let by_name = format!("/store?graph={}", url_encode(SHAPES));
+    let (st, text) = get(&state, &by_name, &admin).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(text.contains("SecretShape"), "{text}");
+    let (st, text) = get(&state, &by_name, &bob).await;
+    assert_ne!(st, StatusCode::OK, "{text}");
+    assert!(!leaks(&text), "{text}");
+
+    // Attached again it is private again, and its dataset's writers read the
+    // entry as before.
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        "/api/datasets/pub-ds/graphs",
+        Some(&admin),
+        json!({ "graph_iri": SHAPES }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "attach again: {text}");
+    assert_library_withholds(&state, &bob, &id).await;
+    let (st, text) = get(
+        &state,
+        &format!("/api/shacl/shape-graphs/{id}/turtle"),
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(text.contains("SecretShape"), "{text}");
+}
+
+/// The dataset names the graph as its shapes graph (`shapes_graph_iri`), so
+/// no detach deletes it, an administrator's included. `GET …/shapes` and the
+/// form manifest (anonymous, for a public dataset) keep it from the dataset's
+/// viewers after the detach as before it.
+#[tokio::test]
+async fn a_detached_private_shapes_graph_is_not_served_as_the_datasets_shapes() {
+    for by_admin in [false, true] {
+        let (state, admin, alice, bob) = fixture();
+        state
+            .auth_db
+            .update_dataset_shacl("pub-ds", false, Some(SHAPES))
+            .unwrap();
+        let viewer_reads = |when: &'static str| {
+            let (state, bob) = (state.clone(), bob.clone());
+            async move {
+                for uri in [
+                    "/api/datasets/pub-ds/shapes",
+                    "/api/datasets/pub-ds/shapes?format=shaclc",
+                ] {
+                    let (st, text) = get(&state, uri, &bob).await;
+                    assert!(!leaks(&text), "{when}, {uri} to a viewer: {text}");
+                    assert_eq!(st, StatusCode::NOT_FOUND, "{when}, {uri}: {text}");
+                }
+                let manifest = "/api/datasets/pub-ds/form-manifest";
+                for token in [None, Some(bob.as_str())] {
+                    let (st, text) = send(&state, Method::GET, manifest, token, Value::Null).await;
+                    assert_eq!(st, StatusCode::OK, "{when}: {text}");
+                    assert!(!leaks(&text), "{when}, manifest ({token:?}): {text}");
+                }
+                let (st, text) = send(
+                    &state,
+                    Method::POST,
+                    "/api/datasets/pub-ds/validate?test=true",
+                    Some(&bob),
+                    Value::Null,
+                )
+                .await;
+                assert!(!leaks(&text), "{when}, a viewer's test run: {st}: {text}");
+            }
+        };
+        viewer_reads("attached").await;
+
+        detach_shapes(&state, if by_admin { &admin } else { &alice }).await;
+        assert!(
+            shapes_stored(&state),
+            "the dataset's own shapes graph is never deleted by a detach"
+        );
+        viewer_reads(if by_admin {
+            "detached by an admin"
+        } else {
+            "detached by the owner"
+        })
+        .await;
+
+        // An administrator reads every graph.
+        let (st, text) = get(&state, "/api/datasets/pub-ds/shapes", &admin).await;
+        assert_eq!(st, StatusCode::OK, "{text}");
+        assert!(text.contains("SecretShape"), "{text}");
+
+        // The dataset's writers read its graphs, and this is no longer one
+        // of them: the owner gets it here no more than over `/sparql`. Nor
+        // may she attach it again, as it holds data she may not write
+        // directly. An administrator may, and it comes back private: hers
+        // to read again, and still not a viewer's.
+        let (st, text) = get(&state, "/api/datasets/pub-ds/shapes", &alice).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "the owner: {text}");
+        assert!(!leaks(&text), "{text}");
+        let attach = json!({ "graph_iri": SHAPES });
+        let graphs = "/api/datasets/pub-ds/graphs";
+        let (st, text) = send(&state, Method::POST, graphs, Some(&alice), attach.clone()).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "the owner attaches: {text}");
+        let (st, text) = send(&state, Method::POST, graphs, Some(&admin), attach).await;
+        assert_eq!(st, StatusCode::CREATED, "an admin attaches: {text}");
+        let (st, text) = get(&state, "/api/datasets/pub-ds/shapes", &alice).await;
+        assert_eq!(st, StatusCode::OK, "attached again, the owner: {text}");
+        assert!(text.contains("SecretShape"), "{text}");
+        viewer_reads("attached again").await;
+    }
+}
+
+/// Alice linked the private graph into her other public dataset while she
+/// could read it. Detached from `pub-ds`, it stays in the store (`alice-pub`
+/// uses it) and stays private: `alice-pub`'s viewers get neither the graph nor
+/// a report that names its shapes, exactly as before the detach.
+#[tokio::test]
+async fn a_detached_private_shapes_graph_is_not_read_through_a_link() {
+    let (state, _admin, alice, bob) = fixture();
+    alice_pub(&state);
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let run = validate_alice_pub(&state, &alice).await;
+    let viewer_reads = |when: &'static str| {
+        let (state, bob, run) = (state.clone(), bob.clone(), run.clone());
+        async move {
+            let (st, text) = get(&state, "/api/datasets/alice-pub/shapes", &bob).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{when}: {text}");
+            assert!(!leaks(&text), "{when}: {text}");
+            for uri in [
+                "/api/datasets/alice-pub/validation/latest".to_string(),
+                format!("/api/datasets/alice-pub/validation/runs/{run}"),
+            ] {
+                let (st, text) = get(&state, &uri, &bob).await;
+                assert_eq!(st, StatusCode::OK, "{when}, {uri}: {text}");
+                assert!(!leaks(&text), "{when}, {uri}: {text}");
+            }
+            let manifest = "/api/datasets/alice-pub/form-manifest";
+            let (st, text) = send(&state, Method::GET, manifest, None, Value::Null).await;
+            assert_eq!(st, StatusCode::OK, "{when}: {text}");
+            assert!(!leaks(&text), "{when}, anonymous manifest: {text}");
+            let (st, text) = send(
+                &state,
+                Method::POST,
+                "/api/datasets/alice-pub/validate?test=true",
+                Some(&bob),
+                Value::Null,
+            )
+            .await;
+            assert!(!leaks(&text), "{when}, a viewer's test run: {st}: {text}");
+        }
+    };
+    viewer_reads("attached").await;
+
+    detach_shapes(&state, &alice).await;
+    assert!(shapes_stored(&state), "alice-pub still uses the graph");
+    viewer_reads("detached").await;
+}

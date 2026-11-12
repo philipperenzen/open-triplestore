@@ -284,6 +284,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   versions that cover them: attach such a graph again, flag it private and
   detach it, or delete those versions. One new table in the identity
   database, created on start; nothing to migrate.
+- **A private graph stays private after it is detached, for whatever else
+  names it.** A SHACL Studio Library entry that adopted a graph, a dataset's
+  shapes graph setting, a link from another dataset and a validation binding
+  each serve a graph by their own rule and withhold a private one from
+  callers who may not read it. "Private" was the flag on the graph's
+  registration, so a detach that left the graph in the store (one the dataset
+  did not create, one another dataset uses, the dataset's own shapes graph)
+  took it away. From then on the dataset's viewers, and anonymous callers on
+  a public dataset, were served the graph by `GET /api/datasets/{id}/shapes`,
+  the form manifest, the Library (list, entry, Turtle, revisions, clone,
+  catalogue, pipelines) and validation reports, and could link it into a
+  dataset of their own. A graph on record as private when it left a dataset
+  now counts as private on all of those paths: it is served only to callers
+  who may read it by the rule `/sparql` applies (administrators, graph-ACL
+  readers, the readers of another dataset that holds it). That no longer
+  includes the writers of the dataset that detached it; attached again, the
+  graph is theirs again, and private. `/sparql`, the Graph Store and the
+  browser were not affected: they serve a graph no dataset holds to
+  administrators and graph-ACL readers only, as before. The record is the
+  one the entry above adds, so it has the same limits: it ends when the
+  dataset is deleted, and graphs detached while private before this release
+  have none.
 
 ## [0.8.1] — 2026-10-22
 
