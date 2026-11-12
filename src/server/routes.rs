@@ -4229,7 +4229,8 @@ async fn ensure_pinned_versions_built(
 
 /// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` that a caller who
 /// cannot write the dataset must not read: those whose SOURCE (live) graph is
-/// flagged `private`.
+/// flagged `private`, or was when it was detached from the dataset
+/// (`dataset_versions::handlers::withheld_sources`).
 ///
 /// A version snapshot copies *all* of a dataset's selected graphs — including
 /// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
@@ -4255,15 +4256,9 @@ fn private_snapshot_graphs(
     if !is_pinned_version(version) {
         return Ok(std::collections::HashSet::new());
     }
-    // Live graph IRIs the owner marked private for this dataset.
-    let private_sources: std::collections::HashSet<String> = state
-        .auth_db
-        .list_dataset_graph_entries(dataset_id)
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .into_iter()
-        .filter(|e| e.private)
-        .map(|e| e.graph_iri)
-        .collect();
+    // The graphs flagged private now, and those that were private when they
+    // left the dataset: the one set every version read withholds.
+    let private_sources = crate::dataset_versions::handlers::withheld_sources(state, dataset_id)?;
     if private_sources.is_empty() {
         return Ok(std::collections::HashSet::new());
     }
