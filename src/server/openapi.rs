@@ -1554,7 +1554,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Versions",
                     "List versions",
-                    "Version snapshots of the dataset, newest first. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset); the same holds on `…/versions/{ver}`.",
+                    "Version snapshots of the dataset, newest first. A caller who may write the dataset gets each record whole. Any other caller gets it for the graphs they may read: `source_map` and `snapshot_graphs` leave out the graphs whose live source graph is private (and a snapshot the map does not tie to a source graph), `quad_count` and `content_hash` are the totals of the graphs that remain (absent when one of them has none), and `change_count` is absent. A version that covers no private graph is returned as it is. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). The same holds on `…/versions/{ver}`.",
                     vec![],
                     vec![("200", "Array of versions")],
                     false,
@@ -1585,7 +1585,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Versions",
                     "Get version",
-                    "Metadata for one version.",
+                    "Metadata for one version: its status, kind, graph map (`source_map`, `snapshot_graphs`), totals and notes. A caller who may not write the dataset gets the record without its private graphs and with the totals of the graphs that remain, as on the versions listing.",
                     vec![],
                     vec![("200", "Version metadata"), ("404", "Not found")],
                     false,
@@ -1757,7 +1757,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "History",
                     "List branches",
-                    "Branches of the dataset's commit history. A branch's `owner` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset).",
+                    "Branches of the dataset's commit history. A branch's `owner` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset). A tip's `ahead` and `behind` against the latest published version count the graphs the caller may read: for a caller who may not write the dataset, a change in a private graph is not counted.",
                     vec![],
                     vec![("200", "Array of branches")],
                     false,

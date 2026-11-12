@@ -96,6 +96,17 @@ pub fn refuse_direct_write(graph: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The agent of a version as an IRI. A record's `created_by` is the account's
+/// IRI (`{base}/users/{id}`) wherever the server cuts a version, and is
+/// written as it is; a record that holds a bare account id gets that form.
+fn version_agent_iri(base: &str, created_by: &str) -> String {
+    if oxigraph::model::NamedNode::new(created_by).is_ok() {
+        created_by.to_string()
+    } else {
+        format!("{base}/users/{created_by}")
+    }
+}
+
 /// The dataset's PROV-O trail as Turtle, over `graphs` — the dataset's graphs
 /// the caller may read — with the agents of commits and versions when
 /// `actors` is set.
@@ -222,7 +233,12 @@ pub fn dataset_provenance_turtle(
             .unwrap();
         }
         if let Some(by) = v.created_by.as_ref().filter(|_| actors) {
-            writeln!(out, "    prov:wasAttributedTo <{base}/users/{by}> ;").unwrap();
+            writeln!(
+                out,
+                "    prov:wasAttributedTo <{}> ;",
+                version_agent_iri(base, by)
+            )
+            .unwrap();
         }
         writeln!(
             out,
@@ -266,4 +282,32 @@ pub async fn get_dataset_provenance(
         [(header::CONTENT_TYPE, "text/turtle; charset=utf-8")],
         dataset_provenance_turtle(&state, &ds, &graphs, actors),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_agent_iri;
+
+    const BASE: &str = "http://localhost:7878";
+
+    #[test]
+    fn a_version_agent_that_is_an_iri_is_written_as_it_is() {
+        for iri in [
+            "http://localhost:7878/users/u1",
+            "https://elsewhere.example/users/u1",
+            "urn:uuid:5a1c8d76-0000-4000-8000-000000000000",
+        ] {
+            assert_eq!(version_agent_iri(BASE, iri), iri);
+        }
+    }
+
+    #[test]
+    fn a_bare_account_id_becomes_the_account_iri() {
+        for id in ["u1", "5a1c8d76-0000-4000-8000-000000000000"] {
+            assert_eq!(
+                version_agent_iri(BASE, id),
+                format!("http://localhost:7878/users/{id}")
+            );
+        }
+    }
 }

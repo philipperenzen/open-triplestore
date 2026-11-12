@@ -84,6 +84,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A version's agent in the PROV-O trail is the account's IRI.**
+  `GET /api/datasets/{id}/provenance` attributed every version to
+  `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
+  account's IRI and was prefixed a second time, so the agent matched no
+  account and no commit's `prov:wasAssociatedWith`. It is now written as it
+  is. A record that holds a bare account id still gets `{base}/users/{id}`.
 - **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
   admin-only hard delete removed the account row but left `urn:system:user:{id}`,
   the FOAF/vCard profile graph holding the person's name and username and, for
@@ -251,6 +257,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     sequence number and a count only, and stay where they are.
 
   See [Statement provenance](docs/datasets.md#statement-provenance-opt-in).
+- **Version records no longer name a dataset's private graphs to its
+  readers.** `GET /api/datasets/{id}/versions` and `…/versions/{ver}` returned
+  the registry record whole. Its `source_map` and `snapshot_graphs` list every
+  graph the version covers, so a caller who may read the dataset but not write
+  it (a viewer, or anyone at all on a public dataset) learned the IRIs of its
+  private graphs and of their snapshots, and from `quad_count` how many quads
+  they hold. The data behind those IRIs was already withheld. Such a caller
+  now gets the record of the graphs they may read: the private graphs are left
+  out of both lists, `quad_count` and `content_hash` are the totals of the
+  graphs that remain, and `change_count` is left out. The content hash is
+  additive, so the old total minus the readable graphs' hashes was a hash of
+  the private graph's content. A branch's `ahead` / `behind` on
+  `GET …/branches` count only the readable graphs as well. Writers and
+  administrators get what they got before, and so does everyone on a dataset
+  without a private graph. A client that showed a reader the registry's totals
+  now shows the totals of what that reader can download.
 - **Change-log retention runs on a timer.** `OTS_CHANGE_RETENTION_DAYS`
   (default 90) and `OTS_CURSOR_TTL_DAYS` were enforced only by a sweep on the
   write path, once every 1,000 recorded rows, counted in memory from each

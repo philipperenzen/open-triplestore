@@ -388,6 +388,12 @@ With change capture on, a version may be a *delta* rather than a copy (see
   `materialised`; each `source_map` entry adds its graph's `content_hash`
   and `quad_count`. A delta's `snapshot_graphs` name the graphs it builds
   into.
+- `GET …/versions` and `GET …/versions/<ver>` return that record whole only
+  to a caller who may write the dataset. Any other caller gets it without the
+  dataset's private graphs: they are left out of `source_map` and
+  `snapshot_graphs`, `content_hash` and `quad_count` are the totals of the
+  graphs that remain, and `change_count` is absent (see `docs/versioning.md`,
+  "What a reader gets of a version record").
 - A read of a delta's data (`…/versions/<ver>/data`, a `versions=` pin, a
   dataset service's `?version=`, a saved query) builds it first: `503` with
   `Retry-After` for an anonymous caller until it is built, `503` when the

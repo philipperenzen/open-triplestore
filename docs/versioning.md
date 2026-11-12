@@ -13,6 +13,28 @@ Datasets can be snapshotted into immutable versions, organised on branches, and 
 
 Each version records who created it, an optional note, and its source-graph mapping. Download any version's data (content-negotiated, defaulting to TriG) at `/api/datasets/{id}/versions/{version}/data`.
 
+### What a reader gets of a version record
+
+Reading a dataset does not include its private graphs, and that covers their
+names. `GET /api/datasets/{id}/versions` and `…/versions/{version}` return the
+whole record only to a caller who may write the dataset (its writers and
+administrators). Any other caller — a viewer, a signed-in account or an
+anonymous caller on a public dataset — gets the record of the graphs they may
+read:
+
+| Field | For a caller who may not write the dataset |
+|---|---|
+| `source_map`, `snapshot_graphs` | Without the graphs whose live source graph is flagged private, and without a snapshot the map does not tie to a source graph. |
+| `quad_count`, `content_hash` | The totals of the graphs that remain: what `…/versions/{version}/data` returns to that caller. Left out when one of those graphs has no figure of its own. |
+| `change_count` | Left out. It counts a delta's changes across all its graphs. |
+
+Nothing else changes, and a version that covers no private graph is returned
+as it is. Private is the graph's flag now, not when the version was cut:
+flagging a graph private hides it in every version that already holds it. The
+version's data, its diffs and the [patch log](#patch-logs) follow the same
+rule, and a branch's `ahead` / `behind` count only the graphs the caller may
+read.
+
 ## Delta versions
 
 Without the change log every version is a full physical copy of the graphs
