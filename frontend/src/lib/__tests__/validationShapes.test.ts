@@ -123,3 +123,34 @@ describe('Validation — link shapes picker', () => {
     unmount();
   });
 });
+
+describe('Validation — a shapes graph the caller may not read', () => {
+  // Fresh records with the IRI spelled out: linking in the tests above writes
+  // `shapes_graph_iri` into the shared DATASET object.
+  const record = (shapes_graph_withheld: boolean) => ({
+    ...DATASET, shapes_graph_iri: null, shapes_graph_withheld,
+  });
+
+  it('says the dataset has shapes the caller may not read, and offers no picker over them', async () => {
+    // Withheld from the caller: no IRI, and the flag that says one is linked.
+    api.listDatasets.mockResolvedValue([record(true)]);
+    const { findByText, container, queryByText, unmount } = render(Validation);
+    await findByText('Buildings');
+    expect(await findByText('Shapes you may not read')).toBeTruthy();
+    expect(queryByText('No shapes')).toBeNull();
+    // Picking a graph here would replace a link the caller cannot see.
+    expect(container.querySelector('.inline-shapes-picker')).toBeNull();
+    expect(api.updateDatasetShacl).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('still offers the picker on a dataset with no shapes graph at all', async () => {
+    api.listDatasets.mockResolvedValue([record(false)]);
+    const { findByText, container, queryByText, unmount } = render(Validation);
+    await findByText('Buildings');
+    expect(await findByText('No shapes')).toBeTruthy();
+    expect(queryByText('Shapes you may not read')).toBeNull();
+    expect(container.querySelector('.inline-shapes-picker')).not.toBeNull();
+    unmount();
+  });
+});

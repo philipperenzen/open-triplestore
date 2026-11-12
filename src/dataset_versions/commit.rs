@@ -418,7 +418,7 @@ pub async fn validate_and_commit(
         Some(&version),
         true,
         &result.report,
-        Some("inline"),
+        Some(reports::INLINE_DATA),
         shapes_ref.as_deref(),
         "platform",
         Some(&user.user_id),

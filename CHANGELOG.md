@@ -84,6 +84,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A version's agent in the PROV-O trail is the account's IRI.**
+  `GET /api/datasets/{id}/provenance` attributed every version to
+  `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
+  account's IRI and was prefixed a second time, so the agent matched no
+  account and no commit's `prov:wasAssociatedWith`. It is now written as it
+  is. A record that holds a bare account id still gets `{base}/users/{id}`.
 - **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
   admin-only hard delete removed the account row but left `urn:system:user:{id}`,
   the FOAF/vCard profile graph holding the person's name and username and, for
@@ -159,15 +165,129 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and stale code anchors and versions. The web UI's `frontend/package.json`
   now carries the release version, and `release_prepare.py` keeps it, and the
   Windows guide's sample response, in step.
+- **A replication follower that was away too long resynchronises, as
+  documented.** A follower away for longer than its cursor lived
+  (`OTS_CURSOR_TTL_DAYS`) came back to a log from which the leader's retention
+  had deleted rows it never applied, and tailed what was left: those writes
+  never reached it, and a graph healed only when a later row for it disagreed
+  on the count. `GET /api/admin/changes` now reports how far retention has
+  deleted (`max_deleted_seq`), and a follower whose position is below that
+  fetches every graph in scope again, at most once per catch-up, then tails
+  from the leader's position. The same held for a follower more than a day
+  behind with its cursor alive: rows of version snapshot graphs and restore
+  staging graphs leave the log after a day whatever cursors exist, so a
+  version cut while it was down never reached it. Those deletions are
+  reported apart (`max_deleted_ephemeral_seq`, recorded from this version
+  on), and the follower fetches the snapshot and staging graphs in scope
+  again. A follower of a leader on an earlier version behaves as before.
 - **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
   names it under access (each row's account IRI), erasure (deleted quads and
   a purged user's rows stay until retention, and a purge's own profile-graph
   delete is recorded as counts only), data minimisation (leave capture off unless something
   reads the log), storage limitation, security (the dataset change feed shows
-  the writer's account IRI to the dataset's readers) and the retention
-  checklist.
+  the writer's account IRI to the audience of `OTS_ACTOR_VISIBILITY`) and the
+  retention checklist.
 
 ### Security
+- **A dataset's history no longer shows every reader who changed it, or the
+  quads it no longer holds (breaking for unprivileged feed consumers).** Two
+  runtime settings, both `writers` by default, with `signed-in` and `readers`
+  as the wider values (**Admin → Workspace settings**, or the environment):
+  - `OTS_ACTOR_VISIBILITY` decides who sees the author of a change. Outside
+    its audience `actor_iri` is `null` on `GET /api/datasets/{id}/changes`
+    rows; `actor_iri`, `actor_username` and `actor_display_name` are left off
+    `…/commits`; `…/provenance` names no agent for a commit or a version;
+    `created_by` on `…/versions`, `owner` on `…/branches` and `author` on
+    `…/log` entries are `null`. Before, all of these went to anyone who could
+    read the dataset: for a public dataset, an anonymous caller got the
+    account IRI of every editor and, from `…/commits`, their username and
+    display name.
+  - `OTS_CHANGE_PATCH_ACCESS` decides who may fetch `…/changes/{seq}` and
+    `…/changes/{seq}/inverse`, and who may set a cursor on the feed. A patch
+    holds deleted data on both sides (what the change removed, and what it
+    added that a later change removed), so data taken out of a public dataset
+    stayed readable by anyone for as long as the row was kept; and any
+    signed-in reader could keep every dataset's rows from being swept with a
+    cursor. Outside the audience the three routes answer `401` or `403`. The
+    listing of changes, without quads, is unchanged.
+
+  `writers` means the accounts that may write the dataset, administrators
+  included; a read-only API token of such an account counts (it reads authors
+  and patches; a cursor needs write scope, as before). **Upgrading:** a
+  consumer that mirrors a dataset from its change feed without write access
+  now gets `403` on patches and on `PUT …/changes/cursors/{name}`. Give it a
+  token of an account that may write the dataset, have it refetch a graph
+  when the listing shows a change, publish an LDES stream for it, or set
+  `OTS_CHANGE_PATCH_ACCESS` to `signed-in` or `readers`. Cursors readers set
+  before the upgrade expire after `OTS_CURSOR_TTL_DAYS`; their owners and
+  administrators can delete them sooner. Neither setting erases anything, and
+  neither covers what a writer publishes on purpose: version data and diffs,
+  patch-log entries, LDES members and the statement-provenance graph. See
+  `docs/versioning.md`, "Who sees what of the history".
+- **`GET /api/datasets/{id}/provenance` and `…/commits` no longer name a
+  graph the caller may not read.** The PROV-O document listed every graph of
+  the dataset and every commit on them, so a reader of a public dataset got
+  its private graphs' IRIs, commit messages and counts. It now covers the
+  graphs the caller may read, as `…/commits` does. On both routes a commit
+  that changed a readable and an unreadable graph in one write lists only the
+  readable one.
+- **Statement provenance no longer shows a private graph's statements to the
+  dataset's readers.** A dataset that records statement provenance
+  (`provenance: minimal | full`) annotated every one of its graphs into the
+  one graph `urn:ots:statement-provenance:<id>`, which every reader of the
+  dataset reads. An annotation is the statement itself (`rdf:reifies
+  <<( s p o )>>`, its graph, and under `full` the actor and time), and a
+  removed statement stays as a `remove` event. So a viewer, or an anonymous
+  caller on a public dataset, could read the statements of a graph marked
+  private, over `/sparql`, over `GET /store?graph=`, and as RDF Patch text
+  over `GET /api/datasets/<id>/changes/<seq>`, because the consumer's own
+  writes are change-captured. Affected: 0.8.0 and 0.8.1, on an install with
+  change capture on, a dataset that records provenance and holds a private
+  graph, and readers of that dataset who are not its writers.
+  - The annotations of a graph the dataset holds privately now go to a second
+    graph, `urn:ots:statement-provenance:<id>:private`, registered private:
+    the dataset's writers and admins read it, nobody else. Its flag cannot be
+    cleared (`403`), and it is system-managed like the first.
+    `GET /api/datasets/<id>/settings` names it as `provenance_private_graph`.
+  - A graph made private takes its annotations along, in the
+    `PATCH /api/datasets/<id>/graphs` request and again every few seconds
+    (which covers a report graph that follows a private graph and a pipeline
+    target, with provenance or change capture turned off since). A graph made
+    public again is annotated publicly from then on; the private period stays
+    private.
+  - The change feed lists and serves the rows of a dataset's
+    statement-provenance graphs to callers who can write the dataset only.
+    A reader's feed no longer lists them.
+  - **On upgrade**, the first start moves, once, the annotations of every
+    private graph, and of every graph its dataset no longer holds, into the
+    private graph, also for datasets that have since turned provenance off.
+    Nothing is deleted. It logs `moved N statement-provenance quad(s) about
+    private graphs`. Two things it cannot reach: annotations made while a
+    graph was private, of a graph that is public again now; and a version cut
+    with the provenance graph named explicitly, which keeps its own copy
+    (delete that version or mark the provenance graph private). What was
+    read before the upgrade stays read.
+  - `ots:ProvenanceGap` nodes for skipped blank-node statements now carry
+    `ots:graph`, so they move with their graph. Those written earlier hold a
+    sequence number and a count only, and stay where they are.
+
+  See [Statement provenance](docs/datasets.md#statement-provenance-opt-in).
+- **Version records no longer name a dataset's private graphs to its
+  readers.** `GET /api/datasets/{id}/versions` and `…/versions/{ver}` returned
+  the registry record whole. Its `source_map` and `snapshot_graphs` list every
+  graph the version covers, so a caller who may read the dataset but not write
+  it (a viewer, or anyone at all on a public dataset) learned the IRIs of its
+  private graphs and of their snapshots, and from `quad_count` how many quads
+  they hold. The data behind those IRIs was already withheld. Such a caller
+  now gets the record of the graphs they may read: the private graphs are left
+  out of both lists, `quad_count` and `content_hash` are the totals of the
+  graphs that remain, and `change_count` is left out. The content hash is
+  additive, so the old total minus the readable graphs' hashes was a hash of
+  the private graph's content. A branch's `ahead` / `behind` on
+  `GET …/branches` count only the readable graphs as well. Writers and
+  administrators get what they got before, and so does everyone on a dataset
+  without a private graph. A client that showed a reader the registry's totals
+  now shows the totals of what that reader can download.
 - **Change-log retention runs on a timer.** `OTS_CHANGE_RETENTION_DAYS`
   (default 90) and `OTS_CURSOR_TTL_DAYS` were enforced only by a sweep on the
   write path, once every 1,000 recorded rows, counted in memory from each
@@ -185,6 +305,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The first sweep after the upgrade deletes whatever is already past the
   window, so raise `OTS_CHANGE_RETENTION_DAYS` first if those rows are still
   needed.
+- **A dataset's validation-report history no longer names its private graphs
+  to readers.** `GET /api/datasets/{id}/validation-reports` and
+  `…/validation-reports/{report_id}` returned every record to anyone who may
+  read the dataset. A record of the dataset's write gate names the graph
+  written (`data_ref`) and the gate's shapes graph (`shapes_ref`), so a caller
+  without write access, an anonymous caller of a public dataset included,
+  learned the IRIs of the dataset's private graphs, that they were written,
+  when, and whether the write conformed. A validate-and-commit record also
+  carries the validator's report on the committed data, whichever graph the
+  commit went into. A record is now served by the rule a stored validation
+  run's report already follows, asked at every read: admins get every record;
+  nobody else gets one whose shapes graph some dataset holds as private and
+  they may not read; a caller who cannot write the dataset gets a record only
+  when they may read every graph it validated (for a commit, the graphs its
+  version was cut from; a commit whose version is gone goes to writers only).
+  A record the caller does not get is left out of the listing and answers 404
+  by id. The dataset's writers keep every record about its own graphs. When
+  the private flags cannot be read the routes answer 500 rather than serve
+  the history unfiltered.
 - **`ctutils` 0.4.3 → 0.4.5** (RUSTSEC-2026-0385: non-constant-time mask
   generation and `u128` comparisons in the constant-time helpers that
   `aes-gcm`, `argon2` and `hmac` build on). Lockfile only.
@@ -242,6 +381,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dataset's delta versions are replayed from those rows. Backups already
   taken keep what they copied. Unchanged: a purge leaves `actor_iri` on the
   user's earlier rows, and a profile graph's IRI contains the account id.
+- **The dataset record names a private shapes graph only to who may read
+  it.** `GET /api/datasets` and `GET /api/datasets/{id}` served the dataset
+  record whole, its configured shapes graph (`shapes_graph_iri`) included, to
+  anyone who may read the dataset. When that graph is one some dataset holds
+  as private, callers who may not read it learned its IRI: viewers and
+  anonymous callers of a public dataset whose shapes graph is one of its
+  private graphs, and the writers of a dataset that links another dataset's
+  private graph. The record now carries `"shapes_graph_iri": null` for a
+  caller who may not read the graph by the rule `/sparql` applies (its
+  dataset's writers, graph-ACL readers and admins read it), and so does the
+  answer to `PUT /api/datasets/{id}`. The new `shapes_graph_withheld` field
+  is `true` then, so a client can tell this from a dataset with no shapes
+  graph: the Validation page says *Shapes you may not read* and no longer
+  offers to link a graph over one the caller cannot see. The same rule now holds in the other
+  places that named the graph to those callers:
+  `GET /api/datasets/{id}/conformance`, which also listed a dataset's own
+  private graphs under `graphs` and `reasoning_sources`;
+  `GET /api/shacl/dataset-shape-graphs`; and `dct:conformsTo` in the DCAT
+  catalogue (`/.well-known/void`). When the private flags cannot be read, the
+  graph is withheld from everyone but an admin. A client that saves the
+  on-write setting sends back the shapes graph it read, so from a writer the
+  graph is withheld from, `PUT /api/datasets/{id}/shacl` without
+  `shapes_graph_iri` now leaves the link as it is; an empty string unlinks it.
 - **Purging a user erases their LLM request-log rows and usage events.** Both
   tables carry the user ID without a foreign key, so an admin purge, a
   self-service purge (`POST /api/auth/account/purge`) and an admin delete left
@@ -259,16 +421,59 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Graph Store protocol, RDF Patch, a version restore or a repair, the
   writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). Rows of user
   profile graphs carry counts only. The section names the readers: admins
-  and replication followers see every row; anyone who may read a dataset,
-  anonymous callers included, sees the account IRI and the quads of the
-  dataset's graphs they may read. It also explains retention
-  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly, keeping every row a
-  live cursor or delta-version pin still needs), says that
+  and replication followers see every row; a dataset's writers, or the wider
+  audiences `OTS_ACTOR_VISIBILITY` and `OTS_CHANGE_PATCH_ACCESS` name, see the
+  account IRI and the quads of the dataset's graphs they may read. It also
+  explains retention (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly,
+  keeping every row a live cursor or delta-version pin still needs), says that
   switching capture off keeps an earlier log, and says that backups carry it.
   **A user purge does not erase the change log**: the user's rows keep their
   account IRI and quads until retention; the purge's deletion of the profile
   graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
+- **A private graph stays private in a dataset's versions after it is
+  detached.** What a version shows a caller who may not write the dataset
+  follows the `private` flag of the graph each snapshot was cut from, and that
+  flag was a column of the graph's registration. Detaching the graph deleted
+  the registration, so from then on every version that covered the graph
+  served its copy, under its name, to anyone who could read the dataset:
+  `…/versions/{ver}/data`, `…/diff/{other}`, a `?version=` read on the
+  dataset's SPARQL service, browse, an API-service run, and the entries of the
+  RDF Patch log that changed the graph. A later restore, or anything else that
+  registered the graph again, brought it back as a public live graph. A
+  dataset now keeps on record that a graph was private when it left, by
+  whichever path (the detach route, a source run replacing its graph, the
+  assets graph going with the last asset) and whether or not the stored graph
+  was deleted with it. Version reads and the patch log keep withholding it
+  from non-writers, and a graph attached to that dataset again under the same
+  name is private again until a writer makes it public. A graph that is
+  public when it leaves stays readable in its versions. **Graphs detached
+  while private before this release left no record** and stay readable in the
+  versions that cover them: attach such a graph again, flag it private and
+  detach it, or delete those versions. One new table in the identity
+  database, created on start; nothing to migrate.
+- **A private graph stays private after it is detached, for whatever else
+  names it.** A SHACL Studio Library entry that adopted a graph, a dataset's
+  shapes graph setting, a link from another dataset and a validation binding
+  each serve a graph by their own rule and withhold a private one from
+  callers who may not read it. "Private" was the flag on the graph's
+  registration, so a detach that left the graph in the store (one the dataset
+  did not create, one another dataset uses, the dataset's own shapes graph)
+  took it away. From then on the dataset's viewers, and anonymous callers on
+  a public dataset, were served the graph by `GET /api/datasets/{id}/shapes`,
+  the form manifest, the Library (list, entry, Turtle, revisions, clone,
+  catalogue, pipelines) and validation reports, and could link it into a
+  dataset of their own. A graph on record as private when it left a dataset
+  now counts as private on all of those paths: it is served only to callers
+  who may read it by the rule `/sparql` applies (administrators, graph-ACL
+  readers, the readers of another dataset that holds it). That no longer
+  includes the writers of the dataset that detached it; attached again, the
+  graph is theirs again, and private. `/sparql`, the Graph Store and the
+  browser were not affected: they serve a graph no dataset holds to
+  administrators and graph-ACL readers only, as before. The record is the
+  one the entry above adds, so it has the same limits: it ends when the
+  dataset is deleted, and graphs detached while private before this release
+  have none.
 
 ## [0.8.1] — 2026-10-22
 

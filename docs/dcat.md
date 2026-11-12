@@ -17,7 +17,7 @@ The triplestore generates a [W3C DCAT 3](https://www.w3.org/TR/vocab-dcat-3/) ca
 | `dcat:Distribution` | SPARQL endpoint, Graph Store HTTP Protocol, one Turtle download per graph, LDES when published, OGC API – Features / 3D Tiles / viewer feed when there is geometry |
 | `dcat:DataService` | The SPARQL endpoint (and the OGC API when a dataset has geometry): `dcat:servesDataset`, `dcat:endpointURL`, `dcat:endpointDescription` (the SPARQL service description), publisher, contact point, access rights, the served datasets' themes |
 | `dcat:CatalogRecord` | Under `dcat-ap` / `dcat-ap-nl`: one record per dataset with `foaf:primaryTopic`, `dct:issued`/`modified`, `dct:conformsTo` (the profile) and `dct:language` |
-| `dct:conformsTo` | The dataset's SHACL shapes graph when configured; the model version its instance data conforms to |
+| `dct:conformsTo` | The dataset's SHACL shapes graph when it is validated on write, unless that is a private graph the caller may not read; the model version its instance data conforms to |
 | Agents | `foaf:Agent` publishers with `foaf:name`: organisations (`foaf:Organization` + ORG types), users (`foaf:Person`, ADMS publisher type *Private Individual(s)*), groups |
 | `sd:Service` | The SPARQL service description |
 

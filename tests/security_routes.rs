@@ -18,8 +18,9 @@ use axum::Router;
 use common::*;
 use tower::ServiceExt as _;
 
-use open_triplestore::auth::models::{OwnerType, Visibility};
+use open_triplestore::auth::models::{OwnerType, ResourceRole, SystemRole, Visibility};
 use open_triplestore::dataset_versions::{models::DatasetVersion, snapshot_as_version};
+use serde_json::Value;
 
 // Distinctive marker literals so we can assert presence/absence in raw response
 // bodies without depending on a specific result-serialisation shape.
@@ -34,6 +35,12 @@ const VERSION: &str = "1.0.0";
 /// holding a distinctively-marked triple), snapshot both into version `1.0.0`,
 /// and register a SPARQL service. Returns `(app, version_record)`.
 fn setup() -> (Router, DatasetVersion) {
+    let (state, record) = setup_state();
+    (test_app(state), record)
+}
+
+/// [`setup`], with the state still in hand for a test that adds to it.
+fn setup_state() -> (open_triplestore::server::AppState, DatasetVersion) {
     let state = test_state();
 
     // Owner user (a non-anonymous principal that owns the dataset). The viewer in
@@ -108,7 +115,7 @@ fn setup() -> (Router, DatasetVersion) {
         .create_sparql_service("svc1", &ds.id, "Default", "default", None)
         .unwrap();
 
-    (test_app(state), record)
+    (state, record)
 }
 
 /// The snapshot IRI whose SOURCE is `source` (from the version's graph map).
@@ -385,6 +392,827 @@ async fn viewer_diff_hides_private_snapshot_graphs() {
     );
 }
 
+// ─── A private graph detached from the dataset (CB5, part 5) ─────────────────
+//
+// Every filter above asks whether a snapshot's source graph is flagged private
+// *now*. The flag was a column of the graph's registration, and detaching the
+// graph deleted the registration: from then on every version that held a
+// snapshot of the graph served it to anyone who could read the dataset. A
+// private graph now stays hidden in the versions that cover it after it is
+// detached.
+
+const LATER_MARKER: &str = "PRIVATE_TRIPLE_LATER_MARKER";
+const LATER_VERSION: &str = "1.1.0";
+
+/// [`setup_state`], plus what the detach tests need: the accounts they sign in
+/// as beside the dataset's `owner` — `viewer` (a Viewer grant), `editor` (an
+/// Editor grant) and `adm` (an administrator) — and a second version `1.1.0`,
+/// cut after one more quad went into the private graph. Returns the state and
+/// the records of `1.0.0` and `1.1.0`.
+fn detach_state() -> (
+    open_triplestore::server::AppState,
+    DatasetVersion,
+    DatasetVersion,
+) {
+    use open_triplestore::auth::models::{ResourceRole, SystemRole};
+    let (state, record) = setup_state();
+    for (id, role) in [
+        ("viewer", SystemRole::User),
+        ("editor", SystemRole::User),
+        ("adm", SystemRole::Admin),
+    ] {
+        state
+            .auth_db
+            .create_user(id, id, &format!("{id}@test.com"), "hash", role)
+            .unwrap();
+    }
+    for (id, role) in [
+        ("viewer", ResourceRole::Viewer),
+        ("editor", ResourceRole::Editor),
+    ] {
+        state
+            .auth_db
+            .set_resource_grant("dataset", "ds1", "user", id, role, "owner")
+            .unwrap();
+    }
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{PRIV_GRAPH}> {{ <http://example.org/s3> <http://example.org/p> \"{LATER_MARKER}\" }} }}"
+        ))
+        .unwrap();
+    // created_at orders the versions; keep the two cuts apart.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let later = snapshot_as_version(
+        &state.store,
+        state.base_url.as_str(),
+        "ds1",
+        LATER_VERSION,
+        &[PUB_GRAPH.to_string(), PRIV_GRAPH.to_string()],
+        open_triplestore::dataset_versions::models::VersionStatus::Draft,
+        None,
+        None,
+    )
+    .expect("second snapshot should succeed");
+    (state, record, later)
+}
+
+/// `(label, bearer token, may write the dataset)` for every kind of caller.
+fn audience() -> Vec<(&'static str, Option<String>, bool)> {
+    vec![
+        ("anonymous", None, false),
+        (
+            "viewer",
+            Some(mint_token("viewer", "viewer", "user")),
+            false,
+        ),
+        ("editor", Some(mint_token("editor", "editor", "user")), true),
+        ("owner", Some(mint_token("owner", "owner", "user")), true),
+        ("admin", Some(mint_token("adm", "adm", "admin")), true),
+    ]
+}
+
+/// A bearer token for one of the accounts [`detach_state`] makes.
+fn token_of(who: &str) -> String {
+    match who {
+        "adm" => mint_token("adm", "adm", "admin"),
+        other => mint_token(other, other, "user"),
+    }
+}
+
+/// A request with a JSON body as `who`.
+async fn send_json(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    who: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", token_of(who)),
+        )
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// Detach `graph` from `ds1` as `who`, through the route a writer uses.
+async fn detach(app: &Router, who: &str, graph: &str) {
+    let (status, body) = send_json(
+        app,
+        Method::DELETE,
+        "/api/datasets/ds1/graphs",
+        who,
+        serde_json::json!({ "graph_iri": graph }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{who} detaches <{graph}>: {body}"
+    );
+}
+
+/// Whether the store holds a quad in the live graph `graph`.
+fn stored(state: &open_triplestore::server::AppState, graph: &str) -> bool {
+    use oxigraph::sparql::QueryResults;
+    match state
+        .store
+        .query(&format!("ASK {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}"))
+        .unwrap()
+    {
+        QueryResults::Boolean(b) => b,
+        _ => panic!("ASK returns a boolean"),
+    }
+}
+
+/// One read of a version, and what it may show of the graph under test.
+struct VersionRead {
+    /// What the route is, for the report.
+    name: &'static str,
+    uri: String,
+    /// In every caller's response: the route works and still serves the
+    /// other graph.
+    always: Vec<String>,
+    /// Only in the response of a caller who may see the graph under test.
+    guarded: Vec<String>,
+    /// The route refuses (404) a caller who may not see the graph.
+    refuses: bool,
+}
+
+/// Every version read of `ds1` that serves the data or the name of a covered
+/// graph, set up for a graph whose snapshot holds `markers` and for `other`,
+/// a marker of a graph every caller reads.
+fn version_reads(
+    record: &DatasetVersion,
+    source: &str,
+    markers: (&str, &str),
+    other: &str,
+) -> Vec<VersionRead> {
+    let (first, later) = markers;
+    let snap = snapshot_iri_for(record, source);
+    let select = url_encode("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }");
+    let listing = url_encode("SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }");
+    let s = |v: &str| v.to_string();
+    vec![
+        VersionRead {
+            name: "version data",
+            uri: format!("/api/datasets/ds1/versions/{VERSION}/data?graph=all"),
+            always: vec![s(other)],
+            guarded: vec![s(first), s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "later version data",
+            uri: format!("/api/datasets/ds1/versions/{LATER_VERSION}/data?graph=all"),
+            always: vec![s(other)],
+            guarded: vec![s(first), s(later), s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "diff between versions (json)",
+            uri: format!("/api/datasets/ds1/versions/{VERSION}/diff/{LATER_VERSION}"),
+            always: vec![],
+            guarded: vec![s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "diff between versions (rdf-patch)",
+            uri: format!(
+                "/api/datasets/ds1/versions/{VERSION}/diff/{LATER_VERSION}?format=rdf-patch"
+            ),
+            always: vec![],
+            guarded: vec![s(later), s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "diff against live (json)",
+            uri: format!("/api/datasets/ds1/versions/{VERSION}/diff/live"),
+            always: vec![],
+            guarded: vec![s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "dataset service ?version=",
+            uri: format!(
+                "/api/datasets/ds1/services/default/sparql?query={select}&version={VERSION}"
+            ),
+            always: vec![s(other)],
+            guarded: vec![s(first)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "dataset service ?version= graph listing",
+            uri: format!(
+                "/api/datasets/ds1/services/default/sparql?query={listing}&version={VERSION}"
+            ),
+            always: vec![],
+            guarded: vec![snap.clone()],
+            refuses: false,
+        },
+        VersionRead {
+            name: "browse versions=",
+            uri: format!("/api/browse/triples?dataset_id=ds1&versions=ds1:{VERSION}&limit=100"),
+            always: vec![s(other)],
+            guarded: vec![s(first)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "version record",
+            uri: format!("/api/datasets/ds1/versions/{VERSION}"),
+            always: vec![],
+            guarded: vec![s(source), snap.clone()],
+            refuses: false,
+        },
+        VersionRead {
+            name: "version list",
+            uri: "/api/datasets/ds1/versions".to_string(),
+            always: vec![],
+            guarded: vec![s(source)],
+            refuses: false,
+        },
+        VersionRead {
+            name: "browse graph= drill-down",
+            uri: format!(
+                "/api/browse/triples?graph={}&versions=ds1:{VERSION}&limit=100",
+                url_encode(&snap)
+            ),
+            always: vec![],
+            guarded: vec![s(first)],
+            refuses: true,
+        },
+    ]
+}
+
+/// Run `reads` as every caller in [`audience`] and report each response that
+/// is not what that caller should get: `hidden` says whether the graph under
+/// test is one only the dataset's writers may see. Empty when all is as it
+/// should be.
+async fn audience_findings(app: &Router, reads: &[VersionRead], hidden: bool) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (who, token, writer) in audience() {
+        let sees = writer || !hidden;
+        for read in reads {
+            let (status, body) = get_auth(app, &read.uri, token.as_deref()).await;
+            let at = format!("{who}, {}", read.name);
+            if read.refuses && !sees {
+                if status != StatusCode::NOT_FOUND {
+                    findings.push(format!("{at}: expected 404, got {status}"));
+                }
+            } else if status != StatusCode::OK {
+                findings.push(format!("{at}: expected 200, got {status}: {body}"));
+                continue;
+            }
+            for needle in &read.always {
+                if !body.contains(needle.as_str()) && !(read.refuses && !sees) {
+                    findings.push(format!("{at}: `{needle}` is missing"));
+                }
+            }
+            for needle in &read.guarded {
+                match (sees, body.contains(needle.as_str())) {
+                    (false, true) => findings.push(format!("{at}: LEAK of `{needle}`")),
+                    (true, false) => findings.push(format!("{at}: `{needle}` is missing")),
+                    _ => {}
+                }
+            }
+        }
+    }
+    findings
+}
+
+/// CB5 — a private graph that is detached from its dataset stays hidden, in
+/// every version that covers it, from callers who may not write the dataset.
+/// Writers and admins still read it there.
+///
+/// Detached by the owner, the stored graph stays (the dataset did not create
+/// it); detached by an administrator it is deleted with the registration. The
+/// versions hold their own copies either way.
+#[tokio::test]
+async fn detached_private_graph_stays_hidden_in_versions() {
+    for (by, kept) in [("owner", true), ("adm", false)] {
+        let (state, record, _later) = detach_state();
+        let app = test_app(state.clone());
+        let reads = version_reads(
+            &record,
+            PRIV_GRAPH,
+            (PRIVATE_MARKER, LATER_MARKER),
+            PUBLIC_MARKER,
+        );
+
+        // Control: with the graph attached and private, every read is as it
+        // should be — so a finding below is the detach's doing.
+        let before = audience_findings(&app, &reads, true).await;
+        assert!(
+            before.is_empty(),
+            "before the detach:\n{}",
+            before.join("\n")
+        );
+
+        detach(&app, by, PRIV_GRAPH).await;
+        assert_eq!(
+            stored(&state, PRIV_GRAPH),
+            kept,
+            "the stored graph after a detach by {by}"
+        );
+
+        let after = audience_findings(&app, &reads, true).await;
+        assert!(
+            after.is_empty(),
+            "after the detach by {by}:\n{}",
+            after.join("\n")
+        );
+    }
+}
+
+/// A public graph that is detached stays readable in the versions that cover
+/// it: only a graph that was private when it left is hidden there.
+#[tokio::test]
+async fn detached_public_graph_stays_readable_in_versions() {
+    let (state, record, _later) = detach_state();
+    state
+        .auth_db
+        .set_dataset_graph_private("ds1", PRIV_GRAPH, false)
+        .unwrap();
+    let app = test_app(state);
+    let reads = version_reads(
+        &record,
+        PRIV_GRAPH,
+        (PRIVATE_MARKER, LATER_MARKER),
+        PUBLIC_MARKER,
+    );
+    detach(&app, "owner", PRIV_GRAPH).await;
+    let after = audience_findings(&app, &reads, false).await;
+    assert!(after.is_empty(), "{}", after.join("\n"));
+}
+
+/// What each caller gets of the *live* dataset: the graph listing and a query
+/// on the dataset's service. Reports whatever is not as it should be for a
+/// private graph holding `marker`.
+async fn live_findings(app: &Router, graph: &str, marker: &str) -> Vec<String> {
+    let select = url_encode("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }");
+    let mut findings = Vec::new();
+    for (who, token, writer) in audience() {
+        for (name, uri, needle) in [
+            (
+                "graph listing",
+                "/api/datasets/ds1/graphs".to_string(),
+                graph,
+            ),
+            (
+                "live dataset service",
+                format!("/api/datasets/ds1/services/default/sparql?query={select}"),
+                marker,
+            ),
+        ] {
+            let (status, body) = get_auth(app, &uri, token.as_deref()).await;
+            if status != StatusCode::OK {
+                findings.push(format!("{who}, {name}: expected 200, got {status}: {body}"));
+                continue;
+            }
+            match (writer, body.contains(needle)) {
+                (false, true) => findings.push(format!("{who}, {name}: LEAK of `{needle}`")),
+                (true, false) => findings.push(format!("{who}, {name}: `{needle}` is missing")),
+                _ => {}
+            }
+        }
+    }
+    findings
+}
+
+/// Restoring a version registers the graphs it covers to the dataset again.
+/// A graph that was private when it was detached comes back private: the
+/// restore must not publish it.
+#[tokio::test]
+async fn restore_brings_a_detached_private_graph_back_private() {
+    let (state, record, _later) = detach_state();
+    let app = test_app(state.clone());
+    // An administrator's detach deletes the stored graph with the registration.
+    detach(&app, "adm", PRIV_GRAPH).await;
+    assert!(!stored(&state, PRIV_GRAPH));
+
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/ds1/versions/{VERSION}/restore"),
+        "owner",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "restore: {body}");
+    assert!(
+        stored(&state, PRIV_GRAPH),
+        "the restore wrote the graph back: {body}"
+    );
+    assert!(
+        state.auth_db.dataset_has_graph("ds1", PRIV_GRAPH).unwrap(),
+        "the restore registered the graph again: {body}"
+    );
+
+    let live = live_findings(&app, PRIV_GRAPH, PRIVATE_MARKER).await;
+    assert!(live.is_empty(), "after the restore:\n{}", live.join("\n"));
+    let reads = version_reads(
+        &record,
+        PRIV_GRAPH,
+        (PRIVATE_MARKER, LATER_MARKER),
+        PUBLIC_MARKER,
+    );
+    let versions = audience_findings(&app, &reads, true).await;
+    assert!(
+        versions.is_empty(),
+        "after the restore:\n{}",
+        versions.join("\n")
+    );
+}
+
+/// Attached again under the same IRI, the graph is private again, so the
+/// versions keep hiding it. What publishes it — in the versions too, as for a
+/// graph that never left — is a writer making it public; and a graph that is
+/// public when it leaves stays readable in its versions.
+#[tokio::test]
+async fn reattached_graph_is_private_until_a_writer_makes_it_public() {
+    let (state, record, _later) = detach_state();
+    let app = test_app(state.clone());
+    let reads = version_reads(
+        &record,
+        PRIV_GRAPH,
+        (PRIVATE_MARKER, LATER_MARKER),
+        PUBLIC_MARKER,
+    );
+    let flag = || {
+        state
+            .auth_db
+            .list_dataset_graph_entries("ds1")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.graph_iri == PRIV_GRAPH)
+            .map(|e| e.private)
+    };
+
+    detach(&app, "adm", PRIV_GRAPH).await;
+    assert_eq!(flag(), None, "detached");
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/datasets/ds1/graphs",
+        "owner",
+        serde_json::json!({ "graph_iri": PRIV_GRAPH }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach again: {body}");
+    assert_eq!(flag(), Some(true), "attached again, the graph is private");
+    let findings = audience_findings(&app, &reads, true).await;
+    assert!(
+        findings.is_empty(),
+        "attached again:\n{}",
+        findings.join("\n")
+    );
+    // The graph list shows it to writers only.
+    for (who, token, writer) in audience() {
+        let (status, body) = get_auth(&app, "/api/datasets/ds1/graphs", token.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{who}: {body}");
+        assert_eq!(body.contains(PRIV_GRAPH), writer, "{who}: {body}");
+    }
+
+    let (status, body) = send_json(
+        &app,
+        Method::PATCH,
+        "/api/datasets/ds1/graphs",
+        "owner",
+        serde_json::json!({ "graph_iri": PRIV_GRAPH, "private": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "make public: {body}");
+    assert_eq!(flag(), Some(false));
+    let findings = audience_findings(&app, &reads, false).await;
+    assert!(findings.is_empty(), "made public:\n{}", findings.join("\n"));
+
+    // Public when it leaves: nothing is on record, the versions stay readable,
+    // and the next registration is public as well.
+    detach(&app, "adm", PRIV_GRAPH).await;
+    let findings = audience_findings(&app, &reads, false).await;
+    assert!(
+        findings.is_empty(),
+        "detached while public:\n{}",
+        findings.join("\n")
+    );
+    state.auth_db.add_dataset_graph("ds1", PRIV_GRAPH).unwrap();
+    assert_eq!(flag(), Some(false));
+}
+
+// ─── The stored graph after a detach ─────────────────────────────────────────
+//
+// A detach by a writer who may not delete the graph (the dataset did not create
+// it, and they hold no graph-ACL write grant on it) removes the registration
+// and leaves the graph in the store. A graph no dataset holds is not "unmanaged,
+// readable by everyone": `/sparql`, the Graph Store and the browser scope every
+// caller but an administrator to the graphs of the datasets they can access plus
+// their graph-ACL grants. The tests below pin that, caller by caller, for a
+// graph that was private when it left.
+
+const LIVE_MARKER: &str = "PRIVATE_TRIPLE_LIVE_ONLY_MARKER";
+
+/// [`detach_state`], plus one quad in the private graph that no version holds:
+/// a response carrying [`LIVE_MARKER`] was served the live graph.
+fn live_state() -> open_triplestore::server::AppState {
+    let (mut state, _record, _later) = detach_state();
+    // The matrix of reads below is longer than the SPARQL tier's burst, and
+    // this harness buckets every request under one key. Take the limiter out
+    // of this state's router rather than work around it with sleeps.
+    state.config = std::sync::Arc::new(open_triplestore::config::Config::live_from(|name| {
+        if name == "OTS_RATE_LIMIT_ENABLED" {
+            Some("false".to_string())
+        } else {
+            std::env::var(name).ok()
+        }
+    }));
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{PRIV_GRAPH}> {{ <http://example.org/s4> <http://example.org/p> \"{LIVE_MARKER}\" }} }}"
+        ))
+        .unwrap();
+    state
+}
+
+/// One read of the live store, and what in a response shows the caller was
+/// served [`PRIV_GRAPH`].
+struct LiveRead {
+    name: &'static str,
+    uri: String,
+    needle: &'static str,
+}
+
+/// The reads of a live graph: by name on `/sparql`, the Graph Store and the
+/// browser, each of them without naming a graph, and through the dataset.
+fn live_reads() -> Vec<LiveRead> {
+    let g = url_encode(PRIV_GRAPH);
+    let sparql = |name: &'static str, query: &str, rest: &str| LiveRead {
+        name,
+        uri: format!("/sparql?query={}{rest}", url_encode(query)),
+        needle: LIVE_MARKER,
+    };
+    vec![
+        sparql(
+            "sparql, GRAPH <g>",
+            &format!("SELECT ?o WHERE {{ GRAPH <{PRIV_GRAPH}> {{ ?s ?p ?o }} }}"),
+            "",
+        ),
+        sparql(
+            "sparql, FROM <g>",
+            &format!("SELECT ?o FROM <{PRIV_GRAPH}> WHERE {{ ?s ?p ?o }}"),
+            "",
+        ),
+        sparql(
+            "sparql, default-graph-uri",
+            "SELECT ?o WHERE { ?s ?p ?o }",
+            &format!("&default-graph-uri={g}"),
+        ),
+        sparql("sparql, no graph named", "SELECT ?o WHERE { ?s ?p ?o }", ""),
+        LiveRead {
+            name: "graph store",
+            uri: format!("/store?graph={g}"),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, graph=",
+            uri: format!("/api/browse/triples?graph={g}&limit=100"),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, no graph named",
+            uri: "/api/browse/triples?limit=100".to_string(),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "browse, graph list",
+            uri: "/api/browse/graphs".to_string(),
+            needle: PRIV_GRAPH,
+        },
+        LiveRead {
+            name: "dataset service",
+            uri: format!(
+                "/api/datasets/ds1/services/default/sparql?query={}",
+                url_encode("SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }")
+            ),
+            needle: LIVE_MARKER,
+        },
+        LiveRead {
+            name: "dataset graph list",
+            uri: "/api/datasets/ds1/graphs".to_string(),
+            needle: PRIV_GRAPH,
+        },
+    ]
+}
+
+/// Who is served the private graph: one line per read of [`live_reads`],
+/// naming the callers of [`audience`] whose response carries its needle.
+async fn who_reads(app: &Router) -> String {
+    let mut lines = Vec::new();
+    for read in live_reads() {
+        let mut served = Vec::new();
+        for (who, token, _writer) in audience() {
+            let (status, body) = get_auth(app, &read.uri, token.as_deref()).await;
+            // A throttled request carries no marker and would read as "not
+            // served".
+            assert_ne!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{}, {who}: {body}",
+                read.name
+            );
+            if body.contains(read.needle) {
+                served.push(who);
+            }
+        }
+        lines.push(format!("{}: {}", read.name, served.join(", ")));
+    }
+    lines.join("\n")
+}
+
+/// What [`who_reads`] returns when read `name` serves the graph to `to(name)`.
+fn served(to: impl Fn(&str) -> &'static [&'static str]) -> String {
+    live_reads()
+        .iter()
+        .map(|read| format!("{}: {}", read.name, to(read.name).join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The dataset's writers and administrators.
+const WRITERS: &[&str] = &["editor", "owner", "admin"];
+
+/// What an administrator alone is served of a graph no dataset holds: every
+/// read that names it as the query's dataset or as the graph to fetch, and
+/// the browser (an administrator browses the whole store). A query that
+/// names no dataset covers the registered graphs only, `GRAPH <g>` included,
+/// and the dataset no longer has the graph.
+fn admin_only(read: &str) -> &'static [&'static str] {
+    match read {
+        "sparql, GRAPH <g>"
+        | "sparql, no graph named"
+        | "dataset service"
+        | "dataset graph list" => &[],
+        _ => &["admin"],
+    }
+}
+
+/// A private graph the dataset did not create is detached by the dataset's
+/// owner: the stored graph stays, and from then on an administrator is the
+/// only caller who reads it. Not an anonymous caller, not a viewer, and no
+/// longer the dataset's writers either, who also cannot attach it again (it
+/// holds data they may not write directly). An administrator can: it comes
+/// back private, and the dataset's writers read it again.
+#[tokio::test]
+async fn detached_private_graph_is_not_served_as_an_unmanaged_graph() {
+    let state = live_state();
+    let app = test_app(state.clone());
+
+    assert_eq!(
+        who_reads(&app).await,
+        served(|_| WRITERS),
+        "attached and private (control)"
+    );
+
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(
+        stored(&state, PRIV_GRAPH),
+        "the dataset did not create the graph, so its owner's detach leaves it in the store"
+    );
+    assert_eq!(who_reads(&app).await, served(admin_only), "detached");
+
+    let attach = serde_json::json!({ "graph_iri": PRIV_GRAPH });
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/datasets/ds1/graphs",
+        "owner",
+        attach.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the owner attaches: {body}");
+    assert_eq!(who_reads(&app).await, served(admin_only), "still detached");
+
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/datasets/ds1/graphs",
+        "adm",
+        attach,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "an admin attaches: {body}");
+    assert_eq!(
+        who_reads(&app).await,
+        served(|_| WRITERS),
+        "attached again, private again"
+    );
+}
+
+/// A graph-ACL grant is on the graph, not on the registration, so it outlives
+/// the detach: a caller granted read keeps reading the stored graph where the
+/// grant counts (`/sparql`, the Graph Store), and nobody else starts to. A
+/// writer granted write may delete the graph directly, so their detach takes
+/// the stored graph with it and nothing is left to read.
+#[tokio::test]
+async fn detached_private_graph_keeps_its_graph_acl_readers() {
+    let granted = |read: &str| -> bool { read.starts_with("sparql, ") || read == "graph store" };
+
+    let state = live_state();
+    state
+        .auth_db
+        .grant_graph_permission("rule-read", PRIV_GRAPH, "user", "viewer", "read", "adm")
+        .unwrap();
+    let app = test_app(state.clone());
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if granted(read) {
+            &["viewer", "editor", "owner", "admin"]
+        } else {
+            WRITERS
+        }),
+        "attached, private, read granted to the viewer (control)"
+    );
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(stored(&state, PRIV_GRAPH));
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| match read {
+            // No dataset named: the caller's readable graphs, and for an
+            // administrator the registered ones.
+            "sparql, GRAPH <g>" | "sparql, no graph named" => &["viewer"],
+            read if granted(read) => &["viewer", "admin"],
+            read => admin_only(read),
+        }),
+        "detached, read granted to the viewer"
+    );
+
+    let state = live_state();
+    state
+        .auth_db
+        .grant_graph_permission("rule-write", PRIV_GRAPH, "user", "owner", "write", "adm")
+        .unwrap();
+    let app = test_app(state.clone());
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(
+        !stored(&state, PRIV_GRAPH),
+        "a writer who may delete the graph directly takes it with the detach"
+    );
+    assert_eq!(who_reads(&app).await, served(|_| &[]), "deleted");
+}
+
+/// A graph another dataset also holds stays in the store and follows that
+/// dataset: here the viewer's own private dataset `ds2`, which holds the graph
+/// without the flag. Its owner read the graph before the detach and reads it
+/// after; `ds1`'s writers no longer do; an anonymous caller never does.
+#[tokio::test]
+async fn detached_private_graph_follows_the_dataset_that_still_holds_it() {
+    let state = live_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ds2",
+            "DS2",
+            None,
+            OwnerType::User,
+            "viewer",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("ds2", PRIV_GRAPH).unwrap();
+    let app = test_app(state.clone());
+    // The dataset reads are `ds1`'s, where the viewer only views.
+    let of_ds1 = |read: &str| read.starts_with("dataset ");
+
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if of_ds1(read) {
+            WRITERS
+        } else {
+            &["viewer", "editor", "owner", "admin"]
+        }),
+        "attached to both (control)"
+    );
+    detach(&app, "owner", PRIV_GRAPH).await;
+    assert!(stored(&state, PRIV_GRAPH), "ds2 still uses the graph");
+    assert_eq!(
+        who_reads(&app).await,
+        served(|read| if of_ds1(read) {
+            &[]
+        } else {
+            &["viewer", "admin"]
+        }),
+        "detached from ds1"
+    );
+}
+
 // ─── Padded version labels (CB5, part 3) ─────────────────────────────────────
 //
 // The dataset service trimmed `version` before resolving the snapshot graphs but
@@ -476,5 +1304,262 @@ async fn viewer_cannot_read_private_snapshot_via_padded_form_version() {
             !body.contains(PRIVATE_MARKER),
             "version={padded}: the private snapshot triple must NOT leak, body: {body}"
         );
+    }
+}
+
+// ─── Version records (CB5, part 4) ───────────────────────────────────────────
+//
+// The routes above withhold a private graph's *data*. The version record itself
+// (`GET …/versions`, `GET …/versions/:ver`) was still returned whole: its
+// `source_map` and `snapshot_graphs` name every graph the version covers, so a
+// caller who may read the dataset but not write it — anonymous, on a public
+// dataset — learned the IRIs of its private graphs and of their snapshots, and
+// from the totals how many quads they hold. A non-writer now gets the record of
+// the graphs they may read; writers and admins get it whole.
+
+/// [`setup_state`] plus the accounts the audience tests sign in as: `viewer`
+/// (a Viewer grant), `editor` (an Editor grant) and `adm` (an administrator),
+/// beside the dataset's `owner`.
+fn setup_with_accounts() -> (open_triplestore::server::AppState, DatasetVersion) {
+    let (state, record) = setup_state();
+    for (id, role) in [
+        ("viewer", SystemRole::User),
+        ("editor", SystemRole::User),
+        ("adm", SystemRole::Admin),
+    ] {
+        state
+            .auth_db
+            .create_user(id, id, &format!("{id}@test.com"), "hash", role)
+            .unwrap();
+    }
+    for (id, role) in [
+        ("viewer", ResourceRole::Viewer),
+        ("editor", ResourceRole::Editor),
+    ] {
+        state
+            .auth_db
+            .set_resource_grant("dataset", "ds1", "user", id, role, "owner")
+            .unwrap();
+    }
+    (state, record)
+}
+
+/// `(label, bearer token, may write the dataset)` for every kind of caller.
+fn callers() -> Vec<(&'static str, Option<String>, bool)> {
+    vec![
+        ("anonymous", None, false),
+        (
+            "viewer",
+            Some(mint_token("viewer", "viewer", "user")),
+            false,
+        ),
+        ("editor", Some(mint_token("editor", "editor", "user")), true),
+        ("owner", Some(mint_token("owner", "owner", "user")), true),
+        ("admin", Some(mint_token("adm", "adm", "admin")), true),
+    ]
+}
+
+/// Version `1.0.0`'s record from both routes that serve it: the single-record
+/// route, and its entry in the listing. Each as `(route, raw body, record)`.
+async fn version_records(app: &Router, token: Option<&str>) -> Vec<(String, String, Value)> {
+    let mut out = Vec::new();
+    let uri = format!("/api/datasets/ds1/versions/{VERSION}");
+    let (status, body) = get_auth(app, &uri, token).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let record: Value = serde_json::from_str(&body).unwrap();
+    out.push((uri, body, record));
+
+    let uri = "/api/datasets/ds1/versions".to_string();
+    let (status, body) = get_auth(app, &uri, token).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let list: Value = serde_json::from_str(&body).unwrap();
+    let record = list
+        .as_array()
+        .and_then(|l| l.iter().find(|v| v["version"] == VERSION))
+        .unwrap_or_else(|| panic!("{uri} does not list {VERSION}: {body}"))
+        .clone();
+    out.push((uri, body, record));
+    out
+}
+
+/// A JSON array of strings, sorted (the registry does not keep an order).
+fn strings(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// CB5 — a non-writer's version record names neither the private graph nor its
+/// snapshot, and its totals are those of the graphs it lists; a writer's record
+/// is the registry's.
+#[tokio::test]
+async fn version_records_name_private_graphs_only_to_writers() {
+    let (state, record) = setup_with_accounts();
+    let app = test_app(state);
+    let priv_snap = snapshot_iri_for(&record, PRIV_GRAPH);
+    let pub_snap = snapshot_iri_for(&record, PUB_GRAPH);
+    let pub_mapping = record
+        .source_map
+        .iter()
+        .find(|m| m.source_graph == PUB_GRAPH)
+        .unwrap();
+    // The setup this test reads its expectations from.
+    assert_eq!(record.quad_count, Some(2));
+    assert_eq!(pub_mapping.quad_count, Some(1));
+    assert!(record.content_hash.is_some() && pub_mapping.content_hash.is_some());
+    assert_ne!(record.content_hash, pub_mapping.content_hash);
+
+    for (who, token, writer) in callers() {
+        for (uri, body, v) in version_records(&app, token.as_deref()).await {
+            let ctx = format!("{who}, GET {uri}: {body}");
+            let snapshots = strings(&v["snapshot_graphs"]);
+            let sources = sorted(
+                v["source_map"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("no source_map — {ctx}"))
+                    .iter()
+                    .map(|m| m["source_graph"].as_str().unwrap_or_default().to_string())
+                    .collect(),
+            );
+            if writer {
+                assert_eq!(
+                    snapshots,
+                    sorted(record.snapshot_graphs.clone()),
+                    "a writer gets every snapshot graph — {ctx}"
+                );
+                assert_eq!(
+                    sources,
+                    sorted(vec![PUB_GRAPH.to_string(), PRIV_GRAPH.to_string()]),
+                    "a writer gets the whole graph map — {ctx}"
+                );
+                assert_eq!(v["quad_count"], 2, "{ctx}");
+                assert_eq!(
+                    v["content_hash"].as_str(),
+                    record.content_hash.as_deref(),
+                    "{ctx}"
+                );
+            } else {
+                assert!(
+                    !body.contains(PRIV_GRAPH),
+                    "the private graph's IRI must not reach a non-writer — {ctx}"
+                );
+                assert!(
+                    !body.contains(&priv_snap),
+                    "the private graph's snapshot IRI must not reach a non-writer — {ctx}"
+                );
+                assert_eq!(
+                    snapshots,
+                    vec![pub_snap.clone()],
+                    "the public snapshot is still listed — {ctx}"
+                );
+                assert_eq!(
+                    sources,
+                    vec![PUB_GRAPH.to_string()],
+                    "the public graph is still mapped — {ctx}"
+                );
+                // The totals are those of the listed graphs: the registry's
+                // would give away the private graph's size, and (the content
+                // hash being additive) a hash of its content.
+                assert_eq!(v["quad_count"], 1, "{ctx}");
+                assert_eq!(
+                    v["content_hash"].as_str(),
+                    pub_mapping.content_hash.as_deref(),
+                    "{ctx}"
+                );
+            }
+        }
+    }
+}
+
+/// A dataset with no private graph: every caller gets the registry's record.
+#[tokio::test]
+async fn version_records_are_whole_when_no_graph_is_private() {
+    let (state, record) = setup_with_accounts();
+    state
+        .auth_db
+        .set_dataset_graph_private("ds1", PRIV_GRAPH, false)
+        .unwrap();
+    let app = test_app(state);
+
+    for (who, token, _) in callers() {
+        for (uri, body, v) in version_records(&app, token.as_deref()).await {
+            let ctx = format!("{who}, GET {uri}: {body}");
+            assert_eq!(
+                strings(&v["snapshot_graphs"]),
+                sorted(record.snapshot_graphs.clone()),
+                "{ctx}"
+            );
+            assert_eq!(v["source_map"].as_array().map(Vec::len), Some(2), "{ctx}");
+            assert_eq!(v["quad_count"], 2, "{ctx}");
+            assert_eq!(
+                v["content_hash"].as_str(),
+                record.content_hash.as_deref(),
+                "{ctx}"
+            );
+        }
+    }
+}
+
+/// CB5 — `GET …/branches`: a tip's `ahead` / `behind` against the published
+/// version count only the graphs the caller may read. Here the only change
+/// since `1.0.0` is one quad in the private graph.
+#[tokio::test]
+async fn branch_counts_leave_out_private_graphs_for_non_writers() {
+    let (state, _record) = setup_with_accounts();
+    open_triplestore::dataset_versions::registry::update_latest_published(
+        &state.store,
+        state.base_url.as_str(),
+        "ds1",
+        VERSION,
+    )
+    .unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{PRIV_GRAPH}> {{ <http://example.org/s3> <http://example.org/p> \"later\" }} }}"
+        ))
+        .unwrap();
+    // created_at orders the tips; keep the two cuts apart.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    snapshot_as_version(
+        &state.store,
+        state.base_url.as_str(),
+        "ds1",
+        "1.1.0",
+        &[PUB_GRAPH.to_string(), PRIV_GRAPH.to_string()],
+        open_triplestore::dataset_versions::models::VersionStatus::Draft,
+        None,
+        None,
+    )
+    .expect("second snapshot should succeed");
+    let app = test_app(state);
+
+    for (who, token, writer) in callers() {
+        let (status, body) = get_auth(&app, "/api/datasets/ds1/branches", token.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{who}: {body}");
+        let branches: Value = serde_json::from_str(&body).unwrap();
+        let main = branches
+            .as_array()
+            .and_then(|b| b.iter().find(|b| b["branch"] == "main"))
+            .unwrap_or_else(|| panic!("{who}: no main branch in {body}"));
+        assert_eq!(main["tip_version"], "1.1.0", "{who}: {body}");
+        let expected = if writer { 1 } else { 0 };
+        assert_eq!(
+            main["ahead"], expected,
+            "{who}: `ahead` counts the graphs the caller may read: {body}"
+        );
+        assert_eq!(main["behind"], 0, "{who}: {body}");
     }
 }

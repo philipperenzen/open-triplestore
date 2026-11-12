@@ -938,3 +938,321 @@ fn a_row_that_fetched_a_graph_whole_is_bookmarked_at_once() {
     );
     assert_eq!(f.replication().status().applied_seq, rows[2]);
 }
+
+// ─── Rows the leader's retention deleted ────────────────────────────────────
+
+/// A version's snapshot graph and a restore's staging graph: the leader's
+/// retention drops their rows after a day, whatever cursors exist.
+const SNAPSHOT: &str = "https://example.org/dataset/rep-ds/version/1.0.0/people";
+const STAGING: &str = "urn:ots:restore:rep-1";
+
+/// One whole retention sweep on the leader, as its timer runs one.
+fn sweep(l: &TripleStore) -> usize {
+    l.changes()
+        .sweep_until(&std::sync::atomic::AtomicBool::new(false))
+        .unwrap()
+}
+
+fn insert(l: &TripleStore, g: &str, n: u32) {
+    l.update(&format!(
+        "INSERT DATA {{ GRAPH <{g}> {{ {} }} }}",
+        ttl(&[n])
+    ))
+    .unwrap();
+}
+
+fn delete(l: &TripleStore, g: &str, n: u32) {
+    l.update(&format!(
+        "DELETE DATA {{ GRAPH <{g}> {{ {} }} }}",
+        ttl(&[n])
+    ))
+    .unwrap();
+}
+
+/// A follower that was away for longer than its cursor lived comes back to a
+/// log with a hole in it: the leader's retention deleted rows the follower
+/// never applied. Applying what is left would skip those writes for good —
+/// here one graph gets no later row at all, and the other gets one whose
+/// count after the write happens to be what the follower's stale copy comes
+/// to, so the row's own check sees nothing. The leader says how far its
+/// retention deleted, and a follower below that fetches every graph in scope
+/// again, once, and tails from there.
+#[test]
+fn a_follower_resynchronises_when_retention_deleted_rows_it_never_applied() {
+    let l = leader();
+    l.graph_store_put(Some(G1), &ttl(&[1, 2]), RdfFormat::Turtle)
+        .unwrap();
+    l.graph_store_put(Some(G2), &ttl(&[3]), RdfFormat::Turtle)
+        .unwrap();
+    let src = InProcessLeader::new(l.clone());
+    let f = follower(Scope::All);
+    f.replicate_once(&src).unwrap();
+    let node = f.replication().status().node_id;
+    let left_at = l.changes().last_seq();
+    assert_eq!(l.changes().cursor(&node).map(|c| c.seq), Some(left_at));
+
+    // The follower goes away and its cursor goes with it (the sweep drops a
+    // cursor idle for `OTS_CURSOR_TTL_DAYS`; an administrator can too). The
+    // leader writes on: G1 gains a statement, G2 swaps one for another.
+    assert!(l.changes().delete_cursor(&node));
+    insert(&l, G1, 9);
+    delete(&l, G2, 3);
+    insert(&l, G2, 4);
+    // Those rows leave the retention window, and nothing holds them.
+    let swept_to = l.changes().last_seq();
+    l.changes().backdate(left_at + 1..=swept_to, 91);
+    assert_eq!(sweep(&l), 3);
+    assert_eq!(l.changes().max_deleted_seq(), swept_to);
+    // One more write to G2, which the log still has. G2 holds two statements
+    // after it — and so does the follower's copy once it applied the row to
+    // the one statement it kept.
+    insert(&l, G2, 5);
+
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        graph(&f, G1),
+        graph(&l, G1),
+        "the write to G1 was in a deleted row: {p:?}"
+    );
+    assert_eq!(
+        graph(&f, G2),
+        graph(&l, G2),
+        "G2's later row agrees on the count, not on the statements: {p:?}"
+    );
+    assert_eq!(f.graph_count_cached(Some(G1)), Some(3));
+    assert_eq!(p.resyncs, 1, "{p:?}");
+    assert!(!p.bootstrapped && p.caught_up, "{p:?}");
+    // It tails from the leader's position, and holds retention there again.
+    let head = l.changes().last_seq();
+    assert_eq!(f.replication().status().applied_seq, head);
+    assert_eq!(l.changes().cursor(&node).map(|c| c.seq), Some(head));
+
+    // Once: the next catch-up is past what was deleted.
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        (p.resyncs, p.refetched_graphs, p.applied_rows),
+        (0, 0, 0),
+        "{p:?}"
+    );
+
+    // Away again, and this time nothing is left above its position: every
+    // row since was deleted, so the page it gets is empty.
+    assert!(l.changes().delete_cursor(&node));
+    insert(&l, G1, 7);
+    l.graph_store_delete(Some(G2)).unwrap();
+    l.changes().backdate(head + 1..=l.changes().last_seq(), 91);
+    assert!(sweep(&l) >= 2);
+    assert!(l.changes().rows_after(head, 10).is_empty());
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(graph(&f, G1), graph(&l, G1), "{p:?}");
+    assert_eq!(graph(&f, G1).len(), 4);
+    assert!(graph(&f, G2).is_empty(), "the dropped graph is gone: {p:?}");
+    assert_eq!(p.resyncs, 1, "{p:?}");
+}
+
+/// A leader on which a write lands and leaves the retention window before
+/// every request for rows, and which keeps no cursor for the follower: its
+/// retention deletes above the follower's position whatever the follower
+/// does.
+struct Shedding {
+    inner: InProcessLeader,
+    store: TripleStore,
+    asked: std::sync::atomic::AtomicU32,
+}
+
+impl LeaderSource for Shedding {
+    fn manifest(&self) -> Result<Manifest, String> {
+        self.inner.manifest()
+    }
+    fn changes_after(
+        &self,
+        after: i64,
+        limit: usize,
+        wait: std::time::Duration,
+    ) -> Result<Page, String> {
+        let n = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = self.store.changes().last_seq();
+        insert(&self.store, G1, 100 + n);
+        self.store.changes().backdate(at + 1..=at + 1, 91);
+        sweep(&self.store);
+        self.inner.changes_after(after, limit, wait)
+    }
+    fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String> {
+        self.inner.graph_ntriples(graph)
+    }
+    fn set_cursor(&self, _name: &str, _seq: i64) -> Result<(), String> {
+        Err("this leader keeps no cursor".to_string())
+    }
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.inner.identity_snapshot()
+    }
+}
+
+/// One catch-up fetches every graph in scope at most once. If the leader's
+/// retention deletes above the position that resynchronisation left the
+/// follower at — its cursor was not back yet — the catch-up ends there, not
+/// caught up, and the next one starts over.
+#[test]
+fn a_catch_up_resynchronises_at_most_once() {
+    let l = leader();
+    l.graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    let f = follower(Scope::All);
+    f.replicate_once(&InProcessLeader::new(l.clone())).unwrap();
+    let node = f.replication().status().node_id;
+    assert!(l.changes().delete_cursor(&node));
+
+    let src = Shedding {
+        inner: InProcessLeader::new(l.clone()),
+        store: l.clone(),
+        asked: Default::default(),
+    };
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(p.resyncs, 1, "{p:?}");
+    assert!(!p.caught_up, "{p:?}");
+    assert_eq!(
+        src.asked.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the page that asked for the resynchronisation, and the one after it"
+    );
+    // It holds what the leader held when it fetched: the first write the
+    // sweep took, not yet the second.
+    assert_eq!(graph(&f, G1).len(), 2, "{p:?}");
+    assert_eq!(p.applied_seq, l.changes().last_seq() - 1);
+
+    // Against a leader that keeps its cursor, the next catch-up finishes.
+    let p = f.replicate_once(&InProcessLeader::new(l.clone())).unwrap();
+    assert_eq!(p.resyncs, 1, "{p:?}");
+    assert!(p.caught_up, "{p:?}");
+    assert_eq!(graph(&f, G1), graph(&l, G1));
+    assert_eq!(graph(&f, G1).len(), 3);
+}
+
+/// Rows of a version's snapshot graphs and of restore staging graphs leave
+/// the leader's log after a day, below a live cursor or not. A follower more
+/// than a day behind — one that was down over a weekend — therefore never
+/// sees them, though its cursor kept every other row for it. The leader says
+/// how far it deleted such rows too, and the follower fetches those graphs
+/// (and drops the ones the leader no longer has) without fetching the rest.
+#[test]
+fn a_follower_a_day_behind_still_gets_snapshot_and_staging_graphs() {
+    let l = leader();
+    l.graph_store_put(Some(G1), &ttl(&[1, 2]), RdfFormat::Turtle)
+        .unwrap();
+    l.graph_store_put(Some(STAGING), &ttl(&[7]), RdfFormat::Turtle)
+        .unwrap();
+    let src = InProcessLeader::new(l.clone());
+    let f = follower(Scope::All);
+    f.replicate_once(&src).unwrap();
+    assert_eq!(graph(&f, STAGING).len(), 1);
+    let node = f.replication().status().node_id;
+    let left_at = l.changes().last_seq();
+
+    // While the follower is down the leader cuts a version (its snapshot
+    // graph is written), finishes a restore (its staging graph is dropped)
+    // and writes to an ordinary graph.
+    l.graph_store_put(Some(SNAPSHOT), &ttl(&[1, 2]), RdfFormat::Turtle)
+        .unwrap();
+    l.graph_store_delete(Some(STAGING)).unwrap();
+    insert(&l, G1, 9);
+    // Two days on, the sweep takes the snapshot and staging rows. The
+    // follower's cursor is alive and keeps the ordinary one.
+    l.changes()
+        .backdate(left_at + 1..=l.changes().last_seq(), 2);
+    assert_eq!(sweep(&l), 2);
+    assert_eq!(l.changes().cursor(&node).map(|c| c.seq), Some(left_at));
+    assert_eq!(l.changes().rows_after(left_at, 10).len(), 1);
+    assert_eq!(
+        l.changes().max_deleted_seq(),
+        0,
+        "not a gap in any chain, and no reason to fetch every graph"
+    );
+
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        graph(&f, SNAPSHOT),
+        graph(&l, SNAPSHOT),
+        "the version's snapshot graph reached the follower: {p:?}"
+    );
+    assert_eq!(graph(&f, SNAPSHOT).len(), 2);
+    assert!(
+        graph(&f, STAGING).is_empty(),
+        "the staging graph the leader dropped is gone here too: {p:?}"
+    );
+    assert_eq!(graph(&f, G1), graph(&l, G1));
+    assert_eq!(
+        (p.resyncs, p.applied_rows, p.refetched_graphs),
+        (0, 1, 1),
+        "the ordinary row as a delta, the snapshot graph fetched, nothing else: {p:?}"
+    );
+
+    // Made up for once: the next catch-up fetches nothing.
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        (p.resyncs, p.refetched_graphs, p.applied_rows),
+        (0, 0, 0),
+        "{p:?}"
+    );
+
+    // The same when the deleted rows are the newest there are, so that no
+    // later row carries the follower's position past them: made up for once,
+    // not at every catch-up from then on.
+    let at = l.changes().last_seq();
+    l.graph_store_delete(Some(SNAPSHOT)).unwrap();
+    l.changes().backdate(at + 1..=l.changes().last_seq(), 2);
+    assert_eq!(sweep(&l), 1);
+    let p = f.replicate_once(&src).unwrap();
+    assert!(graph(&f, SNAPSHOT).is_empty(), "{p:?}");
+    assert_eq!(p.resyncs, 0, "{p:?}");
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(
+        (p.resyncs, p.refetched_graphs, p.applied_rows),
+        (0, 0, 0),
+        "{p:?}"
+    );
+    // …and a follower of only G1 has nothing to make up for at all.
+    let scoped = follower(Scope::Graphs(vec![Some(G1.to_string())]));
+    scoped.replicate_once(&src).unwrap();
+    let at = l.changes().last_seq();
+    l.graph_store_put(Some(SNAPSHOT), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    l.changes().backdate(at + 1..=l.changes().last_seq(), 2);
+    assert_eq!(sweep(&l), 1);
+    let p = scoped.replicate_once(&src).unwrap();
+    assert_eq!((p.resyncs, p.refetched_graphs), (0, 0), "{p:?}");
+    assert!(graph(&scoped, SNAPSHOT).is_empty());
+}
+
+/// What a reader of `GET /api/admin/changes` is told with every page: how
+/// far retention has deleted rows, the short-lived ones counted apart.
+#[tokio::test]
+async fn the_change_endpoint_says_how_far_retention_deleted() {
+    let (state, token) = admin_state_with_store(leader());
+    let l = state.store.clone();
+    let base = l.changes().last_seq();
+    l.graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    l.graph_store_put(Some(SNAPSHOT), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    insert(&l, G1, 2);
+    let app = test_app(state.clone());
+    let uri = format!("/api/admin/changes?after={base}");
+
+    let (st, v) = call(&app, Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["rows"].as_array().unwrap().len(), 3, "{v}");
+    assert_eq!(v["max_deleted_seq"], 0, "{v}");
+    assert_eq!(v["max_deleted_ephemeral_seq"], 0, "{v}");
+
+    // The first row leaves the retention window; the snapshot graph's row is
+    // two days old.
+    l.changes().backdate(base + 1..=base + 1, 91);
+    l.changes().backdate(base + 2..=base + 2, 2);
+    assert_eq!(sweep(&l), 2);
+    let (st, v) = call(&app, Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["rows"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["next_after"], base + 3, "{v}");
+    assert_eq!(v["max_deleted_seq"], base + 1, "{v}");
+    assert_eq!(v["max_deleted_ephemeral_seq"], base + 2, "{v}");
+}
