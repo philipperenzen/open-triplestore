@@ -334,6 +334,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Graph Store and the browser were not affected. Datasets deleted before this
   release left no record. One new table in the identity database, created on
   start; nothing to migrate.
+- **A SHACL Studio pipeline no longer publishes a graph on record as private
+  when it attaches it.** A pipeline that writes its report or inferred
+  triples into a graph its owner names attaches that graph to the dataset
+  holding the data it ran over, and then set the registration's `private`
+  flag from the run's scope: off when nothing in scope was private. A graph
+  on record as private (detached while private, or kept by the delete of the
+  dataset that held it as private; the entries above) gets the flag back
+  when a dataset registers it, and the pipeline cleared it again at once. The
+  graph's data, including what it held while private, was then served to
+  that dataset's readers. The pipeline now only sets the flag, never clears
+  it. Writing into a graph its owner names needs write access to that graph,
+  so only administrators and graph-ACL writers could reach this.
 
 ## [0.8.1] — 2026-10-22
 

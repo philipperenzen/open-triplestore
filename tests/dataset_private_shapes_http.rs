@@ -1291,3 +1291,81 @@ async fn a_private_shapes_graph_kept_by_a_dataset_delete_stays_private_in_the_li
         assert!(!leaks(&text), "{who:?}, the former owner: {text}");
     }
 }
+
+/// Shapes with nothing of `PRIVATE_SHAPES` in them, for an admin's pipeline.
+const LABEL_SHAPES: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+    @prefix ex: <http://ex.org/> .\n\
+    ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Thing ;\n\
+      sh:property [ sh:path ex:label ; sh:minCount 1 ] .\n";
+
+/// A SHACL Studio pipeline writes its report into a graph its owner names
+/// (`results_target_graph`) and attaches that graph to the dataset holding
+/// the data it ran over. A graph on record as private (detached while
+/// private, or kept by the delete of the dataset that held it as private)
+/// comes back private when a dataset registers it, and the pipeline's attach
+/// is such a registration: it must not clear the flag the registration got
+/// back. Here an administrator's pipeline writes its report into the private
+/// shapes graph; the dataset it lands in holds it as private, so that
+/// dataset's viewers and anonymous callers read nothing of it.
+#[tokio::test]
+async fn a_pipeline_attaches_a_graph_on_record_as_private_as_private() {
+    for deleted in [false, true] {
+        let (state, admin, alice, bob) = fixture();
+        alice_pub(&state);
+        let (home, data) = if deleted {
+            delete_pub_ds(&state, Deleter::Owner, &admin, &alice).await;
+            ("alice-pub", ALICE_DATA)
+        } else {
+            detach_shapes(&state, &alice).await;
+            ("pub-ds", DATA)
+        };
+        assert!(shapes_stored(&state), "{home}: alice did not create it");
+
+        let (st, text) = send(
+            &state,
+            Method::POST,
+            "/api/shacl/shape-graphs",
+            Some(&admin),
+            json!({ "name": "labels", "turtle": LABEL_SHAPES }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{text}");
+        let sg: Value = serde_json::from_str(&text).unwrap();
+        let (st, text) = send(
+            &state,
+            Method::POST,
+            "/api/shacl/pipelines",
+            Some(&admin),
+            json!({ "name": "report", "graph_iris": [data], "shape_graph_ids": [sg["id"]],
+                    "results_target": "new_graph", "results_target_graph": SHAPES }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{text}");
+        let pipeline: Value = serde_json::from_str(&text).unwrap();
+        let run = format!(
+            "/api/shacl/pipelines/{}/run",
+            pipeline["id"].as_str().unwrap()
+        );
+        let (st, text) = send(&state, Method::POST, &run, Some(&admin), Value::Null).await;
+        assert_eq!(st, StatusCode::OK, "{text}");
+
+        let flag = state
+            .auth_db
+            .list_dataset_graph_entries(home)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.graph_iri == SHAPES)
+            .map(|e| e.private);
+        assert_eq!(flag, Some(true), "{home}: attached, and private");
+
+        let by_name = format!("/store?graph={}", url_encode(SHAPES));
+        for token in [Some(bob.as_str()), None] {
+            let (st, text) = send(&state, Method::GET, &by_name, token, Value::Null).await;
+            assert!(!leaks(&text), "{home} ({token:?}): {text}");
+            assert_ne!(st, StatusCode::OK, "{home} ({token:?}): {text}");
+        }
+        let (st, text) = get(&state, &by_name, &admin).await;
+        assert_eq!(st, StatusCode::OK, "{home}, an admin: {text}");
+        assert!(text.contains("SecretShape"), "{home}: {text}");
+    }
+}

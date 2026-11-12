@@ -636,8 +636,14 @@ fn place_derived_graph(
     if !attachable {
         return Ok(());
     }
+    // The registration is new (the graph is not at home), so it is public
+    // unless the graph was on record as private: it left a dataset, or a
+    // deleted dataset held it, as a private one (`AuthDb::add_dataset_graph`
+    // gives the flag back). The run's scope may add the flag, never clear it.
     auth_db.add_dataset_graph(&ds, target)?;
-    auth_db.set_dataset_graph_private(&ds, target, private)?;
+    if private {
+        auth_db.set_dataset_graph_private(&ds, target, true)?;
+    }
     auth_db.set_dataset_graph_role(&ds, target, Some(role))?;
     Ok(())
 }
