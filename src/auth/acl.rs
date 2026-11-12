@@ -199,6 +199,11 @@ pub fn readable_graph_iris(
 /// dataset linking it as its shapes graph, a validation-layer binding. A path
 /// that serves a graph it did not find through [`readable_graph_iris`]
 /// withholds these. Empty for an admin, who reads every graph.
+///
+/// A graph that was private when it left its dataset is still one of them
+/// ([`AuthDb::list_private_dataset_graph_iris`]): the detach took its
+/// registration, not what else names it, and its dataset's writers are no
+/// longer among its readers.
 pub fn withheld_private_graphs(
     auth_db: &AuthDb,
     user: Option<&AuthenticatedUser>,

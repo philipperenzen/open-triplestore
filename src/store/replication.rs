@@ -17,6 +17,12 @@
 //!   adopted (a promoted follower, a restore, a quarantine), resynchronises
 //!   every graph in scope from the manifest — and drops the ones the leader
 //!   no longer has;
+//! - so does a page that says the leader's retention deleted rows above the
+//!   follower's position ([`Page::max_deleted_seq`]): the follower was away
+//!   for longer than its cursor lived, and what is left of the log has a
+//!   hole in it. Rows of short-lived graphs go after a day whatever cursors
+//!   exist ([`Page::max_deleted_ephemeral_seq`]); for those the follower
+//!   fetches the short-lived graphs in scope, not every graph;
 //! - after every page the follower bookmarks its position locally and on the
 //!   leader (`PUT /api/admin/changes/cursors/<node>`), so the leader's
 //!   retention never sweeps a row the follower still needs.
@@ -440,6 +446,12 @@ pub struct Bookmark {
     pub epoch: Option<String>,
     pub applied_seq: i64,
     pub synced_at: Option<String>,
+    /// The leader's position when this follower last fetched the short-lived
+    /// graphs in scope because rows of them were deleted unseen
+    /// ([`Page::max_deleted_ephemeral_seq`]): deletions up to here are made
+    /// up for, also when no later row has carried `applied_seq` past them.
+    #[serde(default)]
+    pub ephemeral_seq: i64,
 }
 
 #[derive(Default)]
@@ -634,10 +646,24 @@ impl Replication {
     }
 
     fn set_bookmark(&self, epoch: Option<String>, applied_seq: i64) {
-        let snapshot = {
-            let mut b = self.bookmark.lock().unwrap_or_else(|p| p.into_inner());
+        self.update_bookmark(|b| {
+            if b.epoch != epoch {
+                // A sequence number of one epoch says nothing in another.
+                b.ephemeral_seq = 0;
+            }
             b.epoch = epoch;
             b.applied_seq = applied_seq;
+        });
+    }
+
+    fn set_ephemeral_seq(&self, seq: i64) {
+        self.update_bookmark(|b| b.ephemeral_seq = seq);
+    }
+
+    fn update_bookmark(&self, change: impl FnOnce(&mut Bookmark)) {
+        let snapshot = {
+            let mut b = self.bookmark.lock().unwrap_or_else(|p| p.into_inner());
+            change(&mut b);
             b.synced_at = Some(now());
             b.clone()
         };
@@ -893,11 +919,43 @@ pub fn manifest_of(
     }
 }
 
+/// What `GET /api/admin/changes` answers: rows above a position, and how far
+/// the leader's retention has deleted rows.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Page {
     pub epoch: String,
     pub rows: Vec<ChangeRow>,
     pub next_after: i64,
+    /// The highest sequence number retention deleted, rows of short-lived
+    /// graphs aside (0: none). A reader whose position is below it was not
+    /// given every write: retention keeps every row above the lowest live
+    /// cursor, so this reader's cursor expired or was deleted. Absent from
+    /// a leader of an earlier version, which reads as 0.
+    #[serde(default)]
+    pub max_deleted_seq: i64,
+    /// The same for rows of a version's snapshot graphs and of restore
+    /// staging graphs ([`changes::is_ephemeral_graph`]), which retention
+    /// drops after a day whatever cursors exist: a reader more than a day
+    /// behind can be below it with its cursor alive.
+    #[serde(default)]
+    pub max_deleted_ephemeral_seq: i64,
+}
+
+impl Page {
+    /// The page around `rows`, which the caller has just read above `after`.
+    /// How far retention deleted is read here — after the rows, never
+    /// before: a sweep between the two then shows as rows deleted, where the
+    /// other order would hand out a page with a hole that nothing reports.
+    pub fn of(log: &changes::ChangeLog, after: i64, rows: Vec<ChangeRow>) -> Self {
+        let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
+        Self {
+            epoch: log.epoch(),
+            rows,
+            next_after,
+            max_deleted_seq: log.max_deleted_seq(),
+            max_deleted_ephemeral_seq: log.max_deleted_ephemeral_seq(),
+        }
+    }
 }
 
 /// A leader, however reached.
@@ -957,13 +1015,8 @@ impl LeaderSource for InProcessLeader {
     }
 
     fn changes_after(&self, after: i64, limit: usize, _wait: Duration) -> Result<Page, String> {
-        let rows = self.store.changes().rows_after(after, limit);
-        let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
-        Ok(Page {
-            epoch: self.store.changes().epoch().to_string(),
-            rows,
-            next_after,
-        })
+        let log = self.store.changes();
+        Ok(Page::of(log, after, log.rows_after(after, limit)))
     }
 
     fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String> {
@@ -1241,11 +1294,13 @@ impl LeaderSource for HttpLeader {
 pub struct Progress {
     /// The first catch-up of a fresh follower: every graph in scope fetched.
     pub bootstrapped: bool,
-    /// Full resynchronisations (an epoch change, a store-scoped row).
+    /// Full resynchronisations (an epoch change, a store-scoped row, rows
+    /// the leader's retention deleted above this follower's position).
     pub resyncs: usize,
     /// Rows applied as deltas.
     pub applied_rows: usize,
-    /// Graphs fetched whole (`counts` / `unknown` rows, a healed divergence).
+    /// Graphs fetched whole (`counts` / `unknown` rows, a healed divergence,
+    /// a resynchronisation).
     pub refetched_graphs: usize,
     pub applied_seq: i64,
     /// No more rows on the leader when the catch-up ended.
@@ -1280,17 +1335,20 @@ impl TripleStore {
         let config = rep.config().clone();
         let mut progress = Progress::default();
 
-        let manifest = source.manifest().map_err(StoreError::Other)?;
+        let mut manifest = source.manifest().map_err(StoreError::Other)?;
         if !manifest.capture_enabled || manifest.epoch.is_empty() {
             return Err(StoreError::Other(
                 "the leader has change capture off (set OTS_REPLICATION_ROLE=leader or OTS_CHANGE_CAPTURE_ENABLED=on there)"
                     .to_string(),
             ));
         }
-        let selected = selected_graphs(&config.scope, &manifest);
+        let mut selected = selected_graphs(&config.scope, &manifest);
 
         // The epoch: adopt it, resynchronising when it is not the one we hold.
         let bookmark = rep.bookmark();
+        // Every graph in scope is fetched at most once per catch-up for the
+        // position's sake, whichever of the two reasons asks.
+        let mut resynced = false;
         if bookmark.epoch.as_deref() != Some(manifest.epoch.as_str()) {
             progress.bootstrapped = bookmark.epoch.is_none();
             progress.resyncs += 1;
@@ -1299,10 +1357,13 @@ impl TripleStore {
             progress.refetched_graphs += fetched;
             rep.set_bookmark(Some(manifest.epoch.clone()), manifest.newest_seq);
             let _ = source.set_cursor(&config.node_id, manifest.newest_seq);
+            resynced = true;
         }
 
         // Pages, in sequence order.
-        let mut after = rep.bookmark().applied_seq;
+        let bookmark = rep.bookmark();
+        let mut after = bookmark.applied_seq;
+        let mut ephemeral_seq = bookmark.ephemeral_seq;
         let mut pages = 0;
         loop {
             // A hot follower long-polls: the request returns as soon as a
@@ -1320,12 +1381,63 @@ impl TripleStore {
                 .changes_after(after, config.page, wait)
                 .map_err(StoreError::Other)?;
             if page.epoch != manifest.epoch {
-                // The leader changed under us; the next catch-up adopts it.
-                rep.set_bookmark(None, 0);
-                return Err(StoreError::Other(format!(
-                    "leader epoch changed during catch-up ({} -> {}); resynchronising next time",
-                    manifest.epoch, page.epoch
-                )));
+                return Err(self.epoch_changed(&manifest.epoch, &page.epoch));
+            }
+            // The leader's retention deleted rows above our position: we
+            // were away for longer than our cursor lived (or it was
+            // deleted), and the rows that are left have a hole between
+            // them. Applying them would skip the deleted writes for good —
+            // a graph heals only when a later row for it disagrees on the
+            // count. So this page is not applied: every graph in scope is
+            // fetched again, as for a new epoch, and the tail goes on from
+            // the leader's position before the first fetch, which no
+            // deleted row is above.
+            if after < page.max_deleted_seq {
+                if resynced {
+                    // Deleted above where this catch-up's resynchronisation
+                    // left off — a sweep ran before the cursor was back. The
+                    // next catch-up starts over from a new manifest.
+                    break;
+                }
+                resynced = true;
+                tracing::warn!(
+                    "replication: the leader's retention deleted rows up to seq {} and this \
+                     follower stands at seq {after}; fetching every graph in scope again",
+                    page.max_deleted_seq
+                );
+                manifest = self.manifest_in_epoch(source, &manifest.epoch)?;
+                selected = selected_graphs(&config.scope, &manifest);
+                progress.resyncs += 1;
+                rep.resyncs.fetch_add(1, Ordering::Relaxed);
+                progress.refetched_graphs += self.resync_all(source, &manifest, &selected)?;
+                after = manifest.newest_seq;
+                rep.set_bookmark(Some(manifest.epoch.clone()), after);
+                let _ = source.set_cursor(&config.node_id, after);
+                continue;
+            }
+            // The same for the rows retention drops after a day whatever
+            // cursors exist — a version's snapshot graphs, restore staging
+            // graphs: a follower more than a day behind never saw them, its
+            // cursor alive or not. Every other row above our position is
+            // still there, so only those graphs are fetched (and the ones
+            // the leader no longer has, dropped), and this page is applied.
+            // The leader's position before the first fetch is remembered
+            // apart: no row may ever carry `after` past the deleted ones.
+            if page.max_deleted_ephemeral_seq > after.max(ephemeral_seq) {
+                manifest = self.manifest_in_epoch(source, &manifest.epoch)?;
+                selected = selected_graphs(&config.scope, &manifest);
+                let fetched = self.resync_where(source, &manifest, &selected, &|g| {
+                    g.as_deref().is_some_and(changes::is_ephemeral_graph)
+                })?;
+                tracing::info!(
+                    "replication: the leader's retention deleted snapshot and staging rows up \
+                     to seq {} and this follower stands at seq {after}; {fetched} such graph(s) \
+                     fetched again",
+                    page.max_deleted_ephemeral_seq
+                );
+                progress.refetched_graphs += fetched;
+                ephemeral_seq = manifest.newest_seq;
+                rep.set_ephemeral_seq(ephemeral_seq);
             }
             let n = page.rows.len();
             for row in &page.rows {
@@ -1416,6 +1528,30 @@ impl TripleStore {
         Ok(())
     }
 
+    /// The leader changed under a catch-up: forget the epoch, so that the
+    /// next catch-up adopts the new one and resynchronises.
+    fn epoch_changed(&self, from: &str, to: &str) -> StoreError {
+        self.replication().set_bookmark(None, 0);
+        StoreError::Other(format!(
+            "leader epoch changed during catch-up ({from} -> {to}); resynchronising next time"
+        ))
+    }
+
+    /// The leader's manifest once more, inside a catch-up that adopted
+    /// `epoch`: what the leader holds now, and its position before the
+    /// graphs are fetched. Another epoch ends the catch-up, as on a page.
+    fn manifest_in_epoch(
+        &self,
+        source: &dyn LeaderSource,
+        epoch: &str,
+    ) -> Result<Manifest, StoreError> {
+        let fresh = source.manifest().map_err(StoreError::Other)?;
+        if fresh.epoch != epoch {
+            return Err(self.epoch_changed(epoch, &fresh.epoch));
+        }
+        Ok(fresh)
+    }
+
     /// Every graph in scope, fetched whole from the leader; local graphs in
     /// scope the leader no longer lists are dropped. Returns the fetch count.
     fn resync_all(
@@ -1424,7 +1560,19 @@ impl TripleStore {
         manifest: &Manifest,
         selected: &Option<HashSet<Option<String>>>,
     ) -> Result<usize, StoreError> {
-        let in_scope = |g: &Option<String>| selected.as_ref().is_none_or(|s| s.contains(g));
+        self.resync_where(source, manifest, selected, &|_| true)
+    }
+
+    /// [`Self::resync_all`] for the graphs in scope that `only` picks.
+    fn resync_where(
+        &self,
+        source: &dyn LeaderSource,
+        manifest: &Manifest,
+        selected: &Option<HashSet<Option<String>>>,
+        only: &dyn Fn(&Option<String>) -> bool,
+    ) -> Result<usize, StoreError> {
+        let in_scope =
+            |g: &Option<String>| only(g) && selected.as_ref().is_none_or(|s| s.contains(g));
         let leader_graphs: Vec<Option<String>> = manifest
             .graphs
             .iter()
@@ -1689,6 +1837,44 @@ mod tests {
         let b = again.bookmark();
         assert_eq!((b.epoch.as_deref(), b.applied_seq), (Some("e1"), 42));
         assert!(b.synced_at.is_some());
+    }
+
+    /// What was made up for is kept with the position: read as nothing from
+    /// a file an earlier version wrote, kept across a reopen, and dropped
+    /// with the epoch its sequence number belongs to.
+    #[test]
+    fn the_bookmark_keeps_what_was_made_up_for_until_the_epoch_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("replication.json"),
+            r#"{"epoch":"e1","applied_seq":42,"synced_at":null}"#,
+        )
+        .unwrap();
+        let open = || {
+            Replication::with_config(
+                ReplicationConfig::follower("http://leader", Mode::Warm, Scope::All),
+                Some(dir.path()),
+            )
+        };
+        let r = open();
+        let b = r.bookmark();
+        assert_eq!((b.applied_seq, b.ephemeral_seq), (42, 0));
+        r.set_ephemeral_seq(50);
+        r.set_bookmark(Some("e1".into()), 60);
+        let again = open();
+        let b = again.bookmark();
+        assert_eq!((b.applied_seq, b.ephemeral_seq), (60, 50));
+        again.set_bookmark(Some("e2".into()), 7);
+        assert_eq!(open().bookmark().ephemeral_seq, 0);
+    }
+
+    /// A leader of an earlier version says nothing about deleted rows: its
+    /// page reads as "nothing deleted", and a follower tails it as before.
+    #[test]
+    fn a_page_without_the_deleted_marks_reads_as_nothing_deleted() {
+        let p: Page = serde_json::from_str(r#"{"epoch":"e1","rows":[],"next_after":3}"#).unwrap();
+        assert_eq!(p.next_after, 3);
+        assert_eq!((p.max_deleted_seq, p.max_deleted_ephemeral_seq), (0, 0));
     }
 
     #[test]
