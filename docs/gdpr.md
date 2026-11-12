@@ -66,9 +66,12 @@ graphs); account/identity data lives in a local metadata database.
   associated metadata.
 - **User accounts:** an admin can **deactivate** an account and **revoke its
   tokens**, then **permanently purge** a deactivated user
-  (`admin_delete_user` → `purge`); a user can **self-deactivate** their own
-  account (`DELETE /api/auth/account`) or, with their password, purge it
-  (`POST /api/auth/account/purge`). A purge deletes the user's saved chat
+  (`admin_delete_user` → `purge`; the admin-only legacy `DELETE /api/users/{id}`
+  purges directly, without the deactivation step); a user can
+  **self-deactivate** their own account (`DELETE /api/auth/account`) or, with
+  their password, purge it (`POST /api/auth/account/purge`). A purge deletes
+  the user's profile graph (`urn:system:user:{id}`: name, username and, for a
+  public profile, email, phone, organisation, bio and website), their saved chat
   conversations, feedback reports, LLM request-log rows (user ID, IP address,
   question preview) and usage events with the account; the append-only audit
   log keeps its entries by design. Plan for erasure in **backups** too
