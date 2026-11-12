@@ -1100,6 +1100,102 @@ async fn log_entries_respect_private_graphs_and_survive_version_deletes() {
     assert_eq!(before, after, "an entry never changes once appended");
 }
 
+/// A private graph that is detached from the dataset stays withheld in the
+/// log: the entries that changed it, and its part of version 0. The flag used
+/// to go with the registration, so the log served both from then on.
+#[tokio::test]
+async fn log_entries_of_a_detached_private_graph_stay_withheld() {
+    let (state, token, app) = prefix_dataset(Visibility::Public);
+    state
+        .auth_db
+        .set_dataset_graph_private("pfx", PG, true)
+        .unwrap();
+    let append = format!("H id <urn:uuid:det-1> .\nTX .\nA <urn:x> <urn:p> \"1\" <{PG}> .\nTC .\n");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/log",
+        Some(&token),
+        Some(MEDIA),
+        None,
+        &append,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+
+    // What an anonymous reader and the dataset's writer get of the log.
+    async fn check(app: &Router, token: &str, append: &str, when: &str) {
+        let (st, _, txt) = req(
+            app,
+            Method::GET,
+            "/api/datasets/pfx/log/patch/1",
+            None,
+            None,
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{when}: {txt}");
+        let (st, _, txt) = req(
+            app,
+            Method::GET,
+            "/api/datasets/pfx/log",
+            None,
+            None,
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{when}: {txt}");
+        assert!(
+            txt.contains("\"withheld\":true") && !txt.contains(PG),
+            "{when}: {txt}"
+        );
+        let (st, _, init) = req(
+            app,
+            Method::GET,
+            "/api/datasets/pfx/log/init",
+            None,
+            None,
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{when}: {init}");
+        assert!(
+            !init.contains("example.org/a/s") && !init.contains(PG),
+            "{when}: private data stays out of version 0: {init}"
+        );
+        // The writer still reads the entry.
+        let (st, _, txt) = req(
+            app,
+            Method::GET,
+            "/api/datasets/pfx/log/patch/1",
+            Some(token),
+            None,
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{when}: {txt}");
+        assert_eq!(txt, append, "{when}");
+    }
+
+    check(&app, &token, &append, "attached").await;
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        "/api/datasets/pfx/graphs",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "graph_iri": PG }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    check(&app, &token, &append, "detached").await;
+}
+
 // ─── Through the change log ────────────────────────────────────────────────
 
 async fn recording_dataset() -> (open_triplestore::server::AppState, String, Router, String) {
