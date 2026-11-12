@@ -83,12 +83,11 @@ graphs); account/identity data lives in a local metadata database.
   exists, by its readers (`GET /api/datasets/{id}/changes/{seq}`) until
   retention removes the row. **A user purge does not touch the log
   either**: the rows keep the account's IRI (with the user ID the audit log
-  also keeps) and the quads of its writes, and an admin or self-service
-  purge's own deletion of the user's profile graph is recorded with the
-  removed profile values. Rows go
-  after `OTS_CHANGE_RETENTION_DAYS` (default 90 days), and only when a sweep
-  runs (once every 1,000 rows recorded) and no live bookmark or delta-version
-  pin holds them. There is no targeted erasure from the log: the levers are a
+  also keeps) and the quads of its writes. An admin or self-service purge's
+  own deletion of the user's profile graph is recorded without the removed
+  profile values (rows of profile graphs carry counts only). Rows go within
+  an hour of passing `OTS_CHANGE_RETENTION_DAYS` (default 90 days), unless a
+  live bookmark or delta-version pin holds them. There is no targeted erasure from the log: the levers are a
   shorter retention, keeping capture off where nothing reads the log, or,
   with the server stopped, deleting `<data dir>/changes/` (which unpublished
   delta versions need). A restored backup brings its log back, and a

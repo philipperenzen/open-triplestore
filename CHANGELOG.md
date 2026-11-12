@@ -162,7 +162,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
   names it under access (each row's account IRI), erasure (deleted quads and
   a purged user's rows stay until retention, and a purge's own profile-graph
-  delete is recorded), data minimisation (leave capture off unless something
+  delete is recorded as counts only), data minimisation (leave capture off unless something
   reads the log), storage limitation, security (the dataset change feed shows
   the writer's account IRI to the dataset's readers) and the retention
   checklist.
@@ -257,17 +257,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leader or cluster member), every write keeps its time, graph and added and
   removed quads, deleted ones included, and, for writes through SPARQL Update,
   the Graph Store protocol, RDF Patch, a version restore or a repair, the
-  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). User profile
-  changes are recorded the same way. The section names the readers: admins
+  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). Rows of user
+  profile graphs carry counts only. The section names the readers: admins
   and replication followers see every row; anyone who may read a dataset,
   anonymous callers included, sees the account IRI and the quads of the
   dataset's graphs they may read. It also explains retention
-  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept once every 1,000 recorded rows,
-  keeping every row a live cursor or delta-version pin still needs), says that
+  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly, keeping every row a
+  live cursor or delta-version pin still needs), says that
   switching capture off keeps an earlier log, and says that backups carry it.
   **A user purge does not erase the change log**: the user's rows keep their
-  account IRI and quads until retention, and the purge's deletion of the
-  profile graph is itself recorded with the removed profile values. Operators
+  account IRI and quads until retention; the purge's deletion of the profile
+  graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
 
 ## [0.8.1] — 2026-10-22
