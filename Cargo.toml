@@ -217,15 +217,15 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 # Authentication & Identity
-rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks", "column_decltype"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup", "hooks", "column_decltype"] }
 r2d2 = "0.8"
-r2d2_sqlite = { version = "0.35", features = ["bundled"] }
+r2d2_sqlite = { version = "0.36", features = ["bundled"] }
 
 # IP CIDR matching for trusted proxy X-Forwarded-For validation (H-2)
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.18"
+lru = "0.19"
 # v11 ships no crypto backend by default — `rust_crypto` selects the pure-Rust
 # one (hmac/sha2/p256/…, all already in the tree via webauthn/openidconnect);
 # the alternative `aws_lc_rs` would add a C/cmake build dependency.
@@ -361,7 +361,7 @@ infer = "0.22"
 lopdf = { version = "0.45", optional = true }
 kamadak-exif = { version = "0.6", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
-calamine = { version = "0.37", optional = true }
+calamine = { version = "0.38", optional = true }
 mp4 = { version = "0.14", optional = true }
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "isomp4"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }

@@ -2674,8 +2674,11 @@ struct ChangesQuery {
 
 /// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
 /// a sequence number above `after`, in commit order; `graph` narrows to one
-/// graph's rows plus the store-scoped rows every reader must see. Admins
-/// only: rows carry quads from every tenant.
+/// graph's rows plus the store-scoped rows every reader must see. With them,
+/// how far retention has deleted rows (`max_deleted_seq`,
+/// `max_deleted_ephemeral_seq`): a reader whose position is below either
+/// was not given every write. Admins only: rows carry quads from every
+/// tenant.
 async fn admin_changes(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -2695,12 +2698,8 @@ async fn admin_changes(
         let _ = tokio::time::timeout(std::time::Duration::from_millis(wait), notified).await;
         rows = log.rows_after_in(after, limit, q.graph.as_deref());
     }
-    let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
-    Ok(Json(serde_json::json!({
-        "epoch": log.epoch(),
-        "rows": rows,
-        "next_after": next_after,
-    })))
+    // Built after the rows were read: see `Page::of` for why that order.
+    Ok(Json(crate::store::replication::Page::of(log, after, rows)))
 }
 
 /// GET /api/admin/changes/status — the log's epoch, sequence, row states,
@@ -4229,7 +4228,8 @@ async fn ensure_pinned_versions_built(
 
 /// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` that a caller who
 /// cannot write the dataset must not read: those whose SOURCE (live) graph is
-/// flagged `private`.
+/// flagged `private`, or was when it was detached from the dataset
+/// (`dataset_versions::handlers::withheld_sources`).
 ///
 /// A version snapshot copies *all* of a dataset's selected graphs — including
 /// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
@@ -4255,15 +4255,9 @@ fn private_snapshot_graphs(
     if !is_pinned_version(version) {
         return Ok(std::collections::HashSet::new());
     }
-    // Live graph IRIs the owner marked private for this dataset.
-    let private_sources: std::collections::HashSet<String> = state
-        .auth_db
-        .list_dataset_graph_entries(dataset_id)
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .into_iter()
-        .filter(|e| e.private)
-        .map(|e| e.graph_iri)
-        .collect();
+    // The graphs flagged private now, and those that were private when they
+    // left the dataset: the one set every version read withholds.
+    let private_sources = crate::dataset_versions::handlers::withheld_sources(state, dataset_id)?;
     if private_sources.is_empty() {
         return Ok(std::collections::HashSet::new());
     }
@@ -11456,17 +11450,23 @@ where
         return Ok(super::reasoning_jobs::accepted(&id));
     }
     // Bound concurrent expensive operations so a burst of reasoning calls can't
-    // occupy every Tokio worker and starve the runtime (held until handler return).
-    let _permit = state
+    // occupy every Tokio worker and starve the runtime.
+    let permit = state
         .expensive_semaphore
-        .acquire()
+        .clone()
+        .acquire_owned()
         .await
         .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
     // The rules are synchronous store work that can run for minutes: keep it
-    // off the async workers.
-    let body = tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
+    // off the async workers. The permit moves into the blocking task, so a
+    // client that disconnects (dropping this handler) does not free the slot
+    // while the work — and any sidecar call it makes — is still running.
+    let body = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -12600,7 +12600,9 @@ pub async fn detect_shapes(
 /// the configured `shapes_graph_iri`, SHACL Studio bindings, and shapes-role
 /// dataset graphs (one entry per dataset × graph, deduped). This powers the
 /// shape-graph selector in the Validation page so users only see shapes for
-/// data they can access.
+/// data they can access. A graph some dataset holds as private is listed
+/// only to who may read it, by the rule a `/sparql` query is scoped to
+/// (admins read every graph), whichever dataset links or binds it.
 pub async fn list_accessible_shape_graphs(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -12608,6 +12610,8 @@ pub async fn list_accessible_shape_graphs(
     let datasets = state
         .auth_db
         .list_accessible_datasets(Some(&current_user.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut shape_graphs: Vec<serde_json::Value> = Vec::new();
@@ -12623,6 +12627,9 @@ pub async fn list_accessible_shape_graphs(
             }
         }
         for iri in iris {
+            if withheld.contains(&iri) {
+                continue;
+            }
             let source = if sources.configured.as_deref() == Some(iri.as_str()) {
                 "configured"
             } else if sources.bound.contains(&iri) {
@@ -12911,6 +12918,73 @@ mod asset_etag_tests {
         let c = asset("a1", "datasets/ds/a1/f.ifc", 999, "2026-01-01T00:00:00Z");
         assert_ne!(asset_etag(&a), asset_etag(&b));
         assert_ne!(asset_etag(&a), asset_etag(&c));
+    }
+}
+
+#[cfg(test)]
+mod reasoning_permit_tests {
+    use super::run_reasoning_work;
+    use crate::auth::middleware::AuthenticatedUser;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "u".to_string(),
+            role: crate::auth::models::SystemRole::User,
+            can_publish: false,
+            write_access: true,
+            can_mint_api_tokens: false,
+            scopes: Vec::new(),
+        }
+    }
+
+    // A client that disconnects drops the handler future, but blocking work
+    // cannot be cancelled: the reasoning (and its sidecar call) runs on. Its
+    // expensive-operations slot must stay taken until the work ends, or the
+    // server admits more concurrent reasoning than its capacity allows.
+    #[tokio::test]
+    async fn disconnected_request_holds_its_slot_until_the_work_ends() {
+        let mut state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        state.expensive_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let sem = state.expensive_semaphore.clone();
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move {
+                run_reasoning_work(&state, &user(), "check", None, false, move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    done_tx.send(()).unwrap();
+                    Ok(serde_json::json!({}))
+                })
+                .await
+            }
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        // The client goes away while the work is running.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "slot freed while work still runs"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || done_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let reacquired = tokio::time::timeout(Duration::from_secs(5), sem.acquire()).await;
+        assert!(reacquired.is_ok(), "slot not returned once the work ended");
     }
 }
 

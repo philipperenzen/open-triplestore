@@ -204,9 +204,10 @@ memory for an in-memory store). Each row holds:
   250 000 quads each by default), when the row keeps only the counts or just
   the fact that the graph changed. Any personal data in your RDF (§4.1) is copied
   into the log this way, **including the quads a write deleted**. User profile
-  graphs (`urn:system:user:{id}`) are RDF too: each profile change records the
-  values it replaced and the new ones (display name and username and, for a
-  public profile, email address, phone, organisation, bio and website);
+  graphs (`urn:system:user:{id}`) are the exception: a row of one keeps the
+  time, the graph and the number of statements changed, and never the
+  statements, so neither the values an edit replaced nor the values of a
+  purged profile are in the log;
 - **the account that made the write** (`actor_iri`, of the form
   `{OTS_BASE_URL}/users/{user ID}`) when the write came through SPARQL Update,
   the Graph Store protocol, RDF Patch, a version restore or an applied repair.
@@ -224,15 +225,26 @@ with an administrator's credentials and so receives every row.
 
 **Anyone who may read a dataset** (anonymous callers too, for a public
 dataset) lists the rows of the dataset's graphs they may read
-(`GET /api/datasets/{id}/changes`): time, graph, kind, counts and **the
-account IRI**, without the quads. `GET /api/datasets/{id}/changes/{seq}`
-returns one change's quads, removed ones included, as an RDF Patch.
+(`GET /api/datasets/{id}/changes`): time, graph, kind and counts, without
+the quads. Two settings, both `writers` by default, decide who gets more:
+
+- **the account IRI** on those rows goes to the audience of
+  `OTS_ACTOR_VISIBILITY`;
+- `GET /api/datasets/{id}/changes/{seq}`, which returns one change's quads,
+  removed ones included, as an RDF Patch, answers the audience of
+  `OTS_CHANGE_PATCH_ACCESS`, and only that audience can set a bookmark on
+  the dataset's feed.
+
+`writers` is the accounts that may write the dataset, administrators
+included. An administrator can widen either setting to `signed-in` (any
+account that may read the dataset) or `readers` (everyone who may read it,
+anonymous callers on a public dataset included); a notice for an instance
+that does so should name the wider audience here.
 
 - **Retention:** rows older than `OTS_CHANGE_RETENTION_DAYS` (default **90**
-  days) are deleted by a sweep that runs once every 1,000 rows the log
-  records (the count starts again at every server start). There is no timed
-  sweep, so on an instance that writes little, rows stay past the window. The
-  sweep never deletes a row at or above the lowest live bookmark or pin, of
+  days) are deleted by a sweep that runs a minute after the server starts and
+  every hour from then on, so a row that nothing holds is gone within an hour
+  of leaving the window. The sweep never deletes a row at or above the lowest live bookmark or pin, of
   any graph: a bookmark holds rows until it goes unused for
   `OTS_CURSOR_TTL_DAYS` (default 30 days), and a delta version's pin holds
   them until the version is deleted or published. Rows of version-snapshot
@@ -240,9 +252,8 @@ returns one change's quads, removed ones included, as an RDF Patch.
 - **Off switch:** leave `OTS_CHANGE_CAPTURE_ENABLED` unset (or `off`) on a node
   that is not a replication leader or cluster member. Switching it off stops
   recording but **does not delete a log an earlier run wrote**: that file
-  stays readable through the routes above and goes into backups, and it is no
-  longer swept, because the sweep runs only as rows are recorded. To remove
-  it, stop the server and delete `<data dir>/changes/`; an unpublished delta
+  stays readable through the routes above and goes into backups, and the
+  hourly sweep keeps applying retention to it. To remove it, stop the server and delete `<data dir>/changes/`; an unpublished delta
   version, which is a checkpoint plus a range of the log, can then no longer
   be built.
 - **Backups:** a backup copies the change log whenever the store keeps one
@@ -252,9 +263,12 @@ returns one change's quads, removed ones included, as an RDF Patch.
   account's IRI and the quads of its writes until retention removes them. The
   instance can no longer turn that IRI into a username, but the user ID in it
   is the one the audit log (§4.4) keeps with the username. An admin purge
-  and a self-service purge also delete the user's profile graph, a write the
-  log records like any other, so the removed profile values (display name and username and, for a public
-  profile, the contact details) are kept in the log for the retention window.
+  and a self-service purge also delete the user's profile graph. The log
+  records that delete without the removed values: the row keeps the time, the
+  graph IRI (which contains the user ID) and the number of statements
+  removed. A log written by an earlier version is cleaned of profile values
+  at the first start after the upgrade; backups taken before then still hold
+  the earlier rows.
 - The log stays on your instance and on the replication followers you set
   up; nothing in it is sent anywhere else.
 

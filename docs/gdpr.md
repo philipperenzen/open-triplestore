@@ -75,9 +75,12 @@ graphs); account/identity data lives in a local metadata database.
   associated metadata.
 - **User accounts:** an admin can **deactivate** an account and **revoke its
   tokens**, then **permanently purge** a deactivated user
-  (`admin_delete_user` → `purge`); a user can **self-deactivate** their own
-  account (`DELETE /api/auth/account`) or, with their password, purge it
-  (`POST /api/auth/account/purge`). A purge deletes the user's saved chat
+  (`admin_delete_user` → `purge`; the admin-only legacy `DELETE /api/users/{id}`
+  purges directly, without the deactivation step); a user can
+  **self-deactivate** their own account (`DELETE /api/auth/account`) or, with
+  their password, purge it (`POST /api/auth/account/purge`). A purge deletes
+  the user's profile graph (`urn:system:user:{id}`: name, username and, for a
+  public profile, email, phone, organisation, bio and website), their saved chat
   conversations, feedback reports, LLM request-log rows (user ID, IP address,
   question preview) and usage events with the account; the append-only audit
   log keeps its entries by design. Plan for erasure in **backups** too
@@ -86,15 +89,15 @@ graphs); account/identity data lives in a local metadata database.
   not erased by any of the above. A SPARQL `DELETE`, a graph delete or a
   dataset delete records the quads it removed as the row's payload, and those
   stay readable by admins (`GET /api/admin/changes`) and, while the dataset
-  exists, by its readers (`GET /api/datasets/{id}/changes/{seq}`) until
+  exists, by its writers or the wider audience `OTS_CHANGE_PATCH_ACCESS`
+  names (`GET /api/datasets/{id}/changes/{seq}`) until
   retention removes the row. **A user purge does not touch the log
   either**: the rows keep the account's IRI (with the user ID the audit log
-  also keeps) and the quads of its writes, and an admin or self-service
-  purge's own deletion of the user's profile graph is recorded with the
-  removed profile values. Rows go
-  after `OTS_CHANGE_RETENTION_DAYS` (default 90 days), and only when a sweep
-  runs (once every 1,000 rows recorded) and no live bookmark or delta-version
-  pin holds them. There is no targeted erasure from the log: the levers are a
+  also keeps) and the quads of its writes. An admin or self-service purge's
+  own deletion of the user's profile graph is recorded without the removed
+  profile values (rows of profile graphs carry counts only). Rows go within
+  an hour of passing `OTS_CHANGE_RETENTION_DAYS` (default 90 days), unless a
+  live bookmark or delta-version pin holds them. There is no targeted erasure from the log: the levers are a
   shorter retention, keeping capture off where nothing reads the log, or,
   with the server stopped, deleting `<data dir>/changes/` (which unpublished
   delta versions need). A restored backup brings its log back, and a
@@ -210,14 +213,20 @@ operating them correctly is the operator's responsibility** (see
   ([PRIVACY.md](../PRIVACY.md) §2, §4.7). The change log as a whole is
   admin-only, but a dataset's change feed (`GET /api/datasets/{id}/changes`)
   shows anyone who may read the dataset, anonymous callers included for a
-  public one, each row's time and writer's account IRI for the graphs they may
-  read, and each change's quads on request ([PRIVACY.md](../PRIVACY.md) §4.9).
-  A dataset's commit history (`GET /api/datasets/{id}/commits`) likewise
-  shows anyone who may read the dataset each writer's account IRI, username
-  and display name for the graphs they may read, and a model's or shape
-  graph's history its readers; a statement-provenance graph shows the
-  dataset's readers, under `full`, the account behind every statement change.
-  The whole commit graph is admin-only ([PRIVACY.md](../PRIVACY.md) §4.10).
+  public one, each row's time and counts for the graphs they may read. The
+  writer's account IRI and each change's quads go to the dataset's writers
+  unless an administrator widens `OTS_ACTOR_VISIBILITY` or
+  `OTS_CHANGE_PATCH_ACCESS` ([PRIVACY.md](../PRIVACY.md) §4.9).
+  A dataset's commit history (`GET /api/datasets/{id}/commits`) and PROV-O
+  document (`GET /api/datasets/{id}/provenance`) follow the same rule: anyone
+  who may read the dataset gets the commits of the graphs they may read, and
+  each writer's account IRI, username and display name go to
+  `OTS_ACTOR_VISIBILITY`'s audience. That setting does not reach the history
+  of a model or shape graph, which shows each writer to everyone who may see
+  the model or shape graph, nor a statement-provenance graph: under `full`,
+  the account behind each statement change is read by every reader of the
+  dataset, or by its writers for a graph the dataset holds as private. The
+  whole commit graph is admin-only ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.

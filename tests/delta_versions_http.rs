@@ -546,6 +546,40 @@ async fn a_restore_applies_the_inverse_of_the_chain_in_one_transaction() {
     assert!(restore["seq_to"].is_i64(), "{restore}");
 }
 
+/// A tier-1 restore whose inverse is over the payload cap would write a
+/// `counts` row for the graph and close every chain through it; the plan
+/// sends it to tier 2 instead.
+#[tokio::test]
+async fn a_restore_whose_inverse_is_over_the_payload_cap_takes_tier_2() {
+    let store = TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, 2);
+    let (state, token) = admin_state_with_store(store);
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    // Two writes of two and one quads, each under the cap; their inverse
+    // (a back, c and d out) is three.
+    edit_after_v1(&state);
+    edit_after_v2(&state);
+    let (st, r, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/restore"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["tier"], 2, "{r}");
+    assert_eq!(live_subjects(&state), vec!["<urn:dv:a>", "<urn:dv:b>"]);
+    let rows = state.store.changes().rows_after(0, 1000);
+    assert!(
+        !rows.iter().any(|r| r.origin == "patch"),
+        "no tier-1 apply: {rows:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_restore_without_the_change_log_copies_the_version_back() {
     let store = TripleStore::in_memory()
@@ -994,4 +1028,122 @@ async fn an_unpublished_delta_survives_a_backup_restored_into_a_fresh_data_dir()
         vec!["<urn:dv:b>", "<urn:dv:c>", "<urn:dv:d>"],
         "the live graph is the dump's"
     );
+}
+
+/// A delta's record for a caller who may not write the dataset: without the
+/// dataset's private graph, with the totals of the graphs that remain, and
+/// without `change_count`, which counts the private graph's changes too. A
+/// branch's `ahead` / `behind` leave the private graph out as well — here
+/// folded from the change log, nothing built.
+#[tokio::test]
+async fn a_reader_gets_a_delta_record_without_the_private_graphs() {
+    const HIDDEN: &str = "urn:dv:hidden";
+    let (state, token) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "public").await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/graphs"),
+        Some(&token),
+        json!({ "graph_iri": HIDDEN }),
+    )
+    .await;
+    assert!(st.is_success(), "register graph: {st} {txt}");
+    state
+        .auth_db
+        .set_dataset_graph_private(&ds, HIDDEN, true)
+        .unwrap();
+    state
+        .store
+        .load_str(
+            "<urn:dv:x> <urn:dv:p> \"kept\" .",
+            RdfFormat::Turtle,
+            Some(HIDDEN),
+        )
+        .unwrap();
+
+    cut(&app, &token, &ds, "1.0.0").await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/publish"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    // One quad in, one out in the public graph; two in, in the private one.
+    edit_after_v1(&state);
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{HIDDEN}> {{ <urn:dv:y> <urn:dv:p> \"new\" . <urn:dv:z> <urn:dv:p> \"new\" }} }}"
+        ))
+        .unwrap();
+    let v2 = cut(&app, &token, &ds, "1.1.0").await;
+    assert_eq!(v2["kind"], "delta", "{v2}");
+    assert_eq!(v2["change_count"], 4, "{v2}");
+    assert_eq!(v2["quad_count"], 5, "{v2}");
+    let mapping = |source: &str| {
+        v2["source_map"]
+            .as_array()
+            .and_then(|m| m.iter().find(|m| m["source_graph"] == source))
+            .unwrap_or_else(|| panic!("no mapping for {source}: {v2}"))
+            .clone()
+    };
+    let public = mapping(G);
+    let hidden_snapshot = mapping(HIDDEN)["snapshot_graph"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(public["content_hash"].is_string(), "{v2}");
+
+    let uri = format!("/api/datasets/{ds}/versions/1.1.0");
+    // A writer reads the registry's record.
+    let (st, rec, txt) = req(&app, Method::GET, &uri, Some(&token), Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(rec["source_map"].as_array().map(Vec::len), Some(2), "{txt}");
+    assert_eq!(rec["change_count"], 4, "{txt}");
+    assert_eq!(rec["quad_count"], 5, "{txt}");
+    assert_eq!(rec["content_hash"], v2["content_hash"], "{txt}");
+
+    // A reader — anonymous, the dataset being public — the public graph's.
+    let (st, rec, txt) = req(&app, Method::GET, &uri, None, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(!txt.contains(HIDDEN), "{txt}");
+    assert!(!txt.contains(&hidden_snapshot), "{txt}");
+    assert_eq!(rec["kind"], "delta", "{txt}");
+    assert_eq!(rec["base_version"], "1.0.0", "{txt}");
+    assert_eq!(rec["source_map"].as_array().map(Vec::len), Some(1), "{txt}");
+    assert_eq!(rec["source_map"][0]["source_graph"], G, "{txt}");
+    assert_eq!(
+        rec["snapshot_graphs"],
+        json!([public["snapshot_graph"]]),
+        "{txt}"
+    );
+    assert_eq!(rec["quad_count"], 2, "{txt}");
+    assert_eq!(rec["content_hash"], public["content_hash"], "{txt}");
+    assert!(rec.get("change_count").is_none(), "{txt}");
+
+    // The branch tip against the published version, per caller.
+    for (who, ahead, behind) in [(Some(token.as_str()), 3, 1), (None, 1, 1)] {
+        let (st, branches, txt) = req(
+            &app,
+            Method::GET,
+            &format!("/api/datasets/{ds}/branches"),
+            who,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        let main = branches
+            .as_array()
+            .and_then(|b| b.iter().find(|b| b["branch"] == "main"))
+            .unwrap_or_else(|| panic!("no main branch: {txt}"));
+        assert_eq!(main["tip_version"], "1.1.0", "{txt}");
+        assert_eq!(main["ahead"], ahead, "{who:?}: {txt}");
+        assert_eq!(main["behind"], behind, "{who:?}: {txt}");
+    }
+    assert!(state.store.changes().materialisations(None).is_empty());
 }
