@@ -336,9 +336,9 @@ that leaves none). Linking one as a dataset's shapes graph
 (`PUT /api/datasets/<id>/shacl`) needs that right too. Its readers may link
 it into another dataset all the same: that dataset's runs then use it, and its
 own writers need not be allowed to read it. A graph that was private when it
-was detached from its dataset counts as one some dataset holds as private
-for all of this, whether it is still this dataset's shapes graph setting or
-linked from another dataset (see
+was detached from its dataset, or when its dataset was deleted, counts as one
+some dataset holds as private for all of this, whether it is still this
+dataset's shapes graph setting or linked from another dataset (see
 [Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
 
 So a stored run also records the shapes graphs it used, and its full report
@@ -504,7 +504,7 @@ curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
 
 Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
 
-A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back. A graph that was private when it was detached from its dataset stays one: its entry is still shown only to those who may read the graph, which no longer includes the dataset's writers, until the graph is attached again (see [Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
+A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back. A graph that was private when it was detached from its dataset, or when its dataset (or the dataset's organisation) was deleted, stays one: its entry is still shown only to those who may read the graph, which no longer includes the dataset's writers, until a dataset holds the graph again (see [Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store)).
 
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 

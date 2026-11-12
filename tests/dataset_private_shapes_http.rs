@@ -25,7 +25,9 @@ mod common;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use open_triplestore::auth::models::{GraphKind, OwnerType, ResourceRole, SystemRole, Visibility};
+use open_triplestore::auth::models::{
+    GraphKind, OwnerType, ResourceRole, Role, SystemRole, Visibility,
+};
 use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
 use open_triplestore::data_models::registry as dmr;
 use open_triplestore::server::AppState;
@@ -109,16 +111,35 @@ fn set_private(state: &AppState, private: bool) {
 /// data graph. bob, a plain signed-in user, views `pub-ds` and owns the
 /// private dataset `bob-ds`. Returns `(state, admin, alice, bob)`.
 fn fixture() -> (AppState, String, String, String) {
+    fixture_owned_by_org(false)
+}
+
+/// [`fixture`], with `pub-ds` owned by the organisation `acme` (alice its
+/// administrator) when `by_org`.
+fn fixture_owned_by_org(by_org: bool) -> (AppState, String, String, String) {
     let (state, admin) = admin_state();
     let alice = make_user(&state, "alice");
     let bob = make_user(&state, "bob");
-    for (id, owner, vis) in [
-        ("pub-ds", "alice", Visibility::Public),
-        ("bob-ds", "bob", Visibility::Private),
+    let pub_owner = if by_org {
+        state
+            .auth_db
+            .create_organisation("acme", "Acme", "acme", None, None)
+            .unwrap();
+        state
+            .auth_db
+            .add_org_member("alice", "acme", Role::Admin)
+            .unwrap();
+        (OwnerType::Organisation, "acme")
+    } else {
+        (OwnerType::User, "alice")
+    };
+    for (id, (owner_type, owner), vis) in [
+        ("pub-ds", pub_owner, Visibility::Public),
+        ("bob-ds", (OwnerType::User, "bob"), Visibility::Private),
     ] {
         state
             .auth_db
-            .create_dataset(id, id, None, OwnerType::User, owner, vis, None)
+            .create_dataset(id, id, None, owner_type, owner, vis, None)
             .unwrap();
     }
     load(&state.store, SHAPES, PRIVATE_SHAPES);
@@ -209,14 +230,24 @@ async fn assert_library_withholds(state: &AppState, bob: &str, id: &str) {
     assert_eq!(st, StatusCode::FORBIDDEN, "pipeline: {text}");
 
     // The dataset's bindings and effective shapes name the entry's graph and
-    // carry its target classes; the catalogue its shapes.
-    for uri in [
-        "/api/datasets/pub-ds/effective-shapes",
-        "/api/shacl/bindings?target_kind=dataset&target_id=pub-ds",
-        "/api/shacl/shapes",
+    // carry its target classes; the catalogue its shapes. (Once `pub-ds` is
+    // deleted, the routes about it answer 404.)
+    let pub_ds = state.auth_db.get_dataset("pub-ds").unwrap().is_some();
+    let of_pub_ds = if pub_ds {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    for (uri, expected) in [
+        ("/api/datasets/pub-ds/effective-shapes", of_pub_ds),
+        (
+            "/api/shacl/bindings?target_kind=dataset&target_id=pub-ds",
+            of_pub_ds,
+        ),
+        ("/api/shacl/shapes", StatusCode::OK),
     ] {
         let (st, text) = get(state, uri, bob).await;
-        assert_eq!(st, StatusCode::OK, "{uri}: {text}");
+        assert_eq!(st, expected, "{uri}: {text}");
         assert!(!text.contains(SHAPES), "{uri}: {text}");
     }
     let drill = format!("/api/shacl/shapes?graph={}", url_encode(SHAPES));
@@ -229,7 +260,7 @@ async fn assert_library_withholds(state: &AppState, bob: &str, id: &str) {
     let manifest = "/api/datasets/pub-ds/form-manifest";
     for token in [None, Some(bob)] {
         let (st, text) = send(state, Method::GET, manifest, token, Value::Null).await;
-        assert_eq!(st, StatusCode::OK, "{text}");
+        assert_eq!(st, of_pub_ds, "{text}");
         assert!(!leaks(&text), "manifest ({token:?}): {text}");
         assert!(!text.contains(SHAPES), "manifest ({token:?}): {text}");
     }
@@ -1066,4 +1097,197 @@ async fn a_detached_private_shapes_graph_is_not_read_through_a_link() {
     detach_shapes(&state, &alice).await;
     assert!(shapes_stored(&state), "alice-pub still uses the graph");
     viewer_reads("detached").await;
+}
+
+// ─── A private graph that a dataset delete keeps ─────────────────────────────
+//
+// Deleting a dataset deletes its registrations, and with them the flag and
+// the records of the graphs it detached while private. It keeps a stored
+// graph it did not create, or one another dataset uses
+// (`graphs_deletable_with_dataset`); deleting an organisation deletes its
+// datasets the same way. Whatever else names the kept graph still does: a
+// Library entry, a link from another dataset. The graph was private when its
+// dataset went, and it stays private for all of them.
+
+/// Who deletes `pub-ds`, and how.
+#[derive(Clone, Copy, Debug)]
+enum Deleter {
+    /// Its owner alice, through `DELETE /api/datasets/pub-ds`.
+    Owner,
+    /// An administrator, through the same route.
+    Admin,
+    /// Alice deletes the organisation that owns it
+    /// ([`fixture_owned_by_org`]).
+    Organisation,
+}
+
+/// `who` deletes `pub-ds`.
+async fn delete_pub_ds(state: &AppState, who: Deleter, admin: &str, alice: &str) {
+    let (uri, token) = match who {
+        Deleter::Owner => ("/api/datasets/pub-ds", alice),
+        Deleter::Admin => ("/api/datasets/pub-ds", admin),
+        Deleter::Organisation => ("/api/organisations/acme", alice),
+    };
+    let (st, text) = send(state, Method::DELETE, uri, Some(token), Value::Null).await;
+    assert!(st.is_success(), "{who:?} deletes: {st}: {text}");
+    assert!(
+        state.auth_db.get_dataset("pub-ds").unwrap().is_none(),
+        "{who:?}: pub-ds is gone"
+    );
+}
+
+/// Everything an anonymous caller could reach Library entry `id` by: all
+/// refused or silent.
+async fn assert_library_withholds_anonymously(state: &AppState, id: &str) {
+    let (st, text) = send(
+        state,
+        Method::GET,
+        "/api/shacl/shape-graphs",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert!(!text.contains(SHAPES), "listed anonymously: {st}: {text}");
+    for uri in [
+        format!("/api/shacl/shape-graphs/{id}"),
+        format!("/api/shacl/shape-graphs/{id}/turtle"),
+        format!("/api/shacl/shape-graphs/{id}/turtle?format=shaclc"),
+        format!("/api/shacl/shape-graphs/{id}/revisions"),
+        format!("/api/shacl/shape-graphs/{id}/revisions/1"),
+    ] {
+        let (st, text) = send(state, Method::GET, &uri, None, Value::Null).await;
+        assert_ne!(st, StatusCode::OK, "{uri} anonymously: {text}");
+        assert!(!leaks(&text), "{uri} anonymously: {text}");
+    }
+}
+
+/// Alice linked the private graph into her other public dataset while she
+/// could read it. Then `pub-ds` goes: she deletes it, an administrator does,
+/// or she deletes its organisation. `alice-pub` uses the graph, so it stays in
+/// the store, and it stays private: `alice-pub`'s viewers and anonymous
+/// callers get neither the graph nor a stored report that names its shapes,
+/// exactly as before the delete. An administrator and a graph-ACL reader
+/// still read it. Its former owner no longer does here, as over `/sparql`.
+#[tokio::test]
+async fn a_private_shapes_graph_kept_by_a_dataset_delete_is_not_read_through_a_link() {
+    for who in [Deleter::Owner, Deleter::Admin, Deleter::Organisation] {
+        let (state, admin, alice, bob) = fixture_owned_by_org(matches!(who, Deleter::Organisation));
+        alice_pub(&state);
+        link_shapes_into_alice_pub(&state, &alice).await;
+        let run = validate_alice_pub(&state, &alice).await;
+        let withheld = |when: String| {
+            let (state, bob, run) = (state.clone(), bob.clone(), run.clone());
+            async move {
+                for token in [Some(bob.as_str()), None] {
+                    // The shapes and the validation runs need a signed-in
+                    // caller; a public dataset's form manifest does not.
+                    let signed_in = |served: StatusCode| match token {
+                        Some(_) => served,
+                        None => StatusCode::UNAUTHORIZED,
+                    };
+                    for (uri, expected) in [
+                        (
+                            "/api/datasets/alice-pub/shapes".to_string(),
+                            signed_in(StatusCode::NOT_FOUND),
+                        ),
+                        (
+                            "/api/datasets/alice-pub/shapes?format=shaclc".to_string(),
+                            signed_in(StatusCode::NOT_FOUND),
+                        ),
+                        (
+                            "/api/datasets/alice-pub/validation/latest".to_string(),
+                            signed_in(StatusCode::OK),
+                        ),
+                        (
+                            format!("/api/datasets/alice-pub/validation/runs/{run}"),
+                            signed_in(StatusCode::OK),
+                        ),
+                        (
+                            "/api/datasets/alice-pub/form-manifest".to_string(),
+                            StatusCode::OK,
+                        ),
+                    ] {
+                        let (st, text) = send(&state, Method::GET, &uri, token, Value::Null).await;
+                        assert!(!leaks(&text), "{when}, {uri} ({token:?}): {text}");
+                        assert_eq!(st, expected, "{when}, {uri} ({token:?}): {text}");
+                    }
+                }
+                let (st, text) = send(
+                    &state,
+                    Method::POST,
+                    "/api/datasets/alice-pub/validate?test=true",
+                    Some(&bob),
+                    Value::Null,
+                )
+                .await;
+                assert!(!leaks(&text), "{when}, a viewer's test run: {st}: {text}");
+            }
+        };
+        withheld("attached".to_string()).await;
+
+        delete_pub_ds(&state, who, &admin, &alice).await;
+        assert!(shapes_stored(&state), "{who:?}: alice-pub uses the graph");
+        withheld(format!("deleted by {who:?}")).await;
+
+        let (st, text) = get(&state, "/api/datasets/alice-pub/shapes", &admin).await;
+        assert_eq!(st, StatusCode::OK, "{who:?}, an admin: {text}");
+        assert!(text.contains("SecretShape"), "{who:?}, an admin: {text}");
+        let (st, text) = get(&state, "/api/datasets/alice-pub/shapes", &alice).await;
+        assert_eq!(
+            st,
+            StatusCode::NOT_FOUND,
+            "{who:?}, the former owner: {text}"
+        );
+        assert!(!leaks(&text), "{who:?}, the former owner: {text}");
+
+        state
+            .auth_db
+            .grant_graph_permission("rule-1", SHAPES, "user", "bob", "read", "adm")
+            .unwrap();
+        let (st, text) = get(&state, "/api/datasets/alice-pub/shapes", &bob).await;
+        assert_eq!(st, StatusCode::OK, "{who:?}, a graph-ACL reader: {text}");
+        assert!(text.contains("SecretShape"), "{who:?}: {text}");
+    }
+}
+
+/// A Library entry adopted the graph in place while it was public, so the
+/// entry is public; the graph was then made private. Alice deletes `pub-ds`,
+/// or its organisation: she did not create the graph, so it stays in the
+/// store, and the entry still points at it. The entry goes on following the
+/// graph: a viewer and an anonymous caller get nothing of it, by any path the
+/// Library serves. An administrator still reads the graph itself; its former
+/// owner reads it no more than over `/sparql`.
+#[tokio::test]
+async fn a_private_shapes_graph_kept_by_a_dataset_delete_stays_private_in_the_library() {
+    for who in [Deleter::Owner, Deleter::Organisation] {
+        let (state, admin, alice, bob) = fixture_owned_by_org(matches!(who, Deleter::Organisation));
+        set_private(&state, false);
+        let entry = adopt(&state, &alice).await;
+        let id = entry["id"].as_str().unwrap().to_string();
+        assert_eq!(entry["visibility"], json!("public"), "{who:?}: {entry}");
+        set_private(&state, true);
+        assert_library_withholds(&state, &bob, &id).await;
+        assert_library_withholds_anonymously(&state, &id).await;
+
+        delete_pub_ds(&state, who, &admin, &alice).await;
+        assert!(
+            shapes_stored(&state),
+            "{who:?}: alice did not create the graph"
+        );
+        assert_library_withholds(&state, &bob, &id).await;
+        assert_library_withholds_anonymously(&state, &id).await;
+
+        let by_name = format!("/store?graph={}", url_encode(SHAPES));
+        let (st, text) = get(&state, &by_name, &admin).await;
+        assert_eq!(st, StatusCode::OK, "{who:?}, an admin: {text}");
+        assert!(text.contains("SecretShape"), "{who:?}: {text}");
+        let turtle = format!("/api/shacl/shape-graphs/{id}/turtle");
+        let (st, text) = get(&state, &turtle, &alice).await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "{who:?}, the former owner: {text}"
+        );
+        assert!(!leaks(&text), "{who:?}, the former owner: {text}");
+    }
 }

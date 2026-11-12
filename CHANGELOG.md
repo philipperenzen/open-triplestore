@@ -306,6 +306,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one the entry above adds, so it has the same limits: it ends when the
   dataset is deleted, and graphs detached while private before this release
   have none.
+- **A private graph stays private after its dataset is deleted, for whatever
+  else names it.** Deleting a dataset, or the organisation that owns it,
+  keeps in the store every graph the dataset did not create and every graph
+  another dataset registers or links as its shapes graph. The delete took the
+  dataset's registrations with it, and so the `private` flag and the record of
+  a graph detached while private (the two entries above). From then on a SHACL
+  Studio Library entry that adopted such a graph, or another dataset that
+  links it as its shapes graph, served it to that entry's or dataset's
+  audience: a signed-in viewer, and an anonymous caller on a public dataset,
+  got its Turtle from `GET /api/datasets/{id}/shapes`, the form manifest, the
+  Library and stored validation reports. The delete now records, in the same
+  transaction and by the graph's name, every private graph it leaves in the
+  store, and the graph stays private on all of those paths. It is served only
+  to callers who may read it by the rule `/sparql` applies: administrators,
+  graph-ACL readers, and the readers of another dataset that registers it.
+  The deleted dataset's writers are no longer among them. The record names no
+  dataset, so a dataset that reuses the id inherits nothing from it. It ends
+  when a dataset registers the graph (the graph comes back private) or when a
+  writer of a dataset that holds it sets its `private` flag. `/sparql`, the
+  Graph Store and the browser were not affected. Datasets deleted before this
+  release left no record. One new table in the identity database, created on
+  start; nothing to migrate.
 
 ## [0.8.1] — 2026-10-22
 

@@ -3373,9 +3373,13 @@ pub async fn delete_organisation(
         ) {
             let _ = state.store.graph_store_delete(Some(iri.as_str()));
         }
+        // A private graph the loop above kept stays private by its name
+        // (`AuthDb::delete_dataset`).
         state
             .auth_db
-            .delete_dataset(dataset_id)
+            .delete_dataset(dataset_id, |g| {
+                dataset_graph::graph_holds_data(&state.store, g)
+            })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         purge_dataset_versions(&state, dataset_id).await;
     }
@@ -4370,9 +4374,14 @@ pub async fn delete_dataset(
         )
     })?;
 
+    // The store deletes above kept some graphs. Each that the dataset held
+    // as private stays private by its name, whatever else names it
+    // (`AuthDb::delete_dataset`).
     state
         .auth_db
-        .delete_dataset(&dataset_id)
+        .delete_dataset(&dataset_id, |g| {
+            dataset_graph::graph_holds_data(&state.store, g)
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     purge_dataset_versions(&state, &dataset_id).await;
 
