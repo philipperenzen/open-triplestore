@@ -84,6 +84,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
+  admin-only hard delete removed the account row but left `urn:system:user:{id}`,
+  the FOAF/vCard profile graph holding the person's name and username and, for
+  a public profile, their email, phone, organisation, bio and website, in the
+  RDF store. It now deletes that graph before the row, as
+  `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
@@ -156,7 +162,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The GDPR guide covers the change log** (docs only). `docs/gdpr.md` now
   names it under access (each row's account IRI), erasure (deleted quads and
   a purged user's rows stay until retention, and a purge's own profile-graph
-  delete is recorded), data minimisation (leave capture off unless something
+  delete is recorded as counts only), data minimisation (leave capture off unless something
   reads the log), storage limitation, security (the dataset change feed shows
   the writer's account IRI to the dataset's readers) and the retention
   checklist.
@@ -274,17 +280,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leader or cluster member), every write keeps its time, graph and added and
   removed quads, deleted ones included, and, for writes through SPARQL Update,
   the Graph Store protocol, RDF Patch, a version restore or a repair, the
-  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). User profile
-  changes are recorded the same way. The section names the readers: admins
+  writer's account IRI (`{OTS_BASE_URL}/users/{user ID}`). Rows of user
+  profile graphs carry counts only. The section names the readers: admins
   and replication followers see every row; anyone who may read a dataset,
   anonymous callers included, sees the account IRI and the quads of the
   dataset's graphs they may read. It also explains retention
-  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept once every 1,000 recorded rows,
-  keeping every row a live cursor or delta-version pin still needs), says that
+  (`OTS_CHANGE_RETENTION_DAYS`, 90 days, swept hourly, keeping every row a
+  live cursor or delta-version pin still needs), says that
   switching capture off keeps an earlier log, and says that backups carry it.
   **A user purge does not erase the change log**: the user's rows keep their
-  account IRI and quads until retention, and the purge's deletion of the
-  profile graph is itself recorded with the removed profile values. Operators
+  account IRI and quads until retention; the purge's deletion of the profile
+  graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
 
 ## [0.8.1] — 2026-10-22
