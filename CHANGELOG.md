@@ -481,6 +481,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account IRI and quads until retention; the purge's deletion of the profile
   graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
+- **The privacy-notice template documents the commit trail and statement
+  provenance.** The new `PRIVACY.md` §4.10 covers the commit graph
+  `urn:system:commit-log`, which the template left out: SPARQL Update, Graph
+  Store, RDF Patch, import, version, editor, datasource, repair and restore
+  writes each leave a commit with the time, kind, graphs, counts and message
+  of the write and, for a signed-in caller, the account IRI
+  (`{OTS_BASE_URL}/users/{user ID}`); it cannot be switched off. It also
+  covers a dataset's opt-in statement-provenance graphs
+  (`urn:ots:statement-provenance:{id}` and, for its private graphs,
+  `…:{id}:private`), which keep a copy of every changed statement, removed
+  ones included, and under `full` the account and time of each change. The
+  section names the readers: an administrator reads the whole commit graph by
+  naming it; anyone who may read a dataset reads its history, and each
+  writer's account IRI, username and display name go to
+  `OTS_ACTOR_VISIBILITY`'s audience (the dataset's writers by default);
+  anyone who may see a model or shape graph reads its history with every
+  writer named, since that setting does not reach it; a dataset's readers
+  read its statement-provenance graph, under `full` with the account behind
+  each change whatever that setting says, and its writers the private one.
+  It states that **neither has any retention and a user purge touches neither**
+  (an administrator can empty the commit graph or strip one account's
+  attribution from it; a statement-provenance graph goes only with its
+  dataset), and that backups carry both. `docs/gdpr.md` covers them under
+  access, erasure, data minimisation, storage limitation, security and the
+  retention checklist. Operators who published a notice from the earlier
+  template should update theirs.
 - **A private graph stays private in a dataset's versions after it is
   detached.** What a version shows a caller who may not write the dataset
   follows the `private` flag of the graph each snapshot was cut from, and that
