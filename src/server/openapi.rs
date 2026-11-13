@@ -6478,10 +6478,10 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Sweep orphaned versions",
-                "Purge what deleted datasets and interrupted operations left behind: every version of a dataset that no longer exists (graphs, registry records, change-log pins), version graphs no registry record names, pins of versions the registry no longer holds, and builds of delta versions past their time-to-live.",
+                "Purge what deleted datasets and interrupted operations left behind: every version of a dataset that no longer exists (graphs, registry records, change-log pins), version graphs no registry record names, pins of versions the registry no longer holds, builds of delta versions past their time-to-live, and the SHACL Studio bindings of a dataset that no longer exists (its own, and those of graphs in its namespace that hold no data and no dataset holds).",
                 vec![],
                 vec![
-                    ("200", "`{purged_datasets, orphan_graphs_dropped, pins_released, builds_dropped}`"),
+                    ("200", "`{purged_datasets, orphan_graphs_dropped, pins_released, builds_dropped, bindings_removed}`"),
                     ("401", "Authentication required"),
                     ("403", "Admin role required"),
                 ],

@@ -82,7 +82,7 @@ Yes. In the dataset's graph list, each graph has a visibility toggle. A graph ma
 
 ### What happens to the data when I delete a dataset?
 
-Deleting a dataset permanently deletes the dataset and the named graphs it owns. Graphs that another dataset still uses are kept, and a shapes graph the dataset only links to is not deleted with it. Deleting an organisation deletes all datasets it owns in the same way. This cannot be undone. See [Datasets](/docs/datasets).
+Deleting a dataset permanently deletes the dataset and the named graphs it owns. Graphs that another dataset still uses are kept, and a shapes graph the dataset only links to is not deleted with it. Deleting an organisation deletes all datasets it owns in the same way. A private graph that is kept stays private for whatever else names it, such as a SHACL Studio Library entry or another dataset that links it as its shapes graph. This cannot be undone. See [Datasets](/docs/datasets).
 
 ### Can I keep versions of a dataset?
 

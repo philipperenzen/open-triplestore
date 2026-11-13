@@ -122,7 +122,7 @@ Three facts worth knowing before an instance is exposed:
 | `PUT` | `/api/admin/changes/cursors/{name}` | **admin** | Move a consumer's bookmark. |
 | `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
 | `GET` | `/api/admin/changes/stats` | **admin** | Change-log size per dataset, pins, cursors, delta-version builds. |
-| `POST` | `/api/admin/versions/sweep` | **admin** | Purges versions of deleted datasets, unreferenced version graphs, stale pins, expired builds. |
+| `POST` | `/api/admin/versions/sweep` | **admin** | Purges versions of deleted datasets, unreferenced version graphs, stale pins, expired builds, and the SHACL bindings deleted datasets left. |
 | `GET` | `/api/datasets/{id}/changes` | **none** | The dataset's change feed: rows of the graphs the caller may read, without quads. Rows of its statement-provenance graphs: dataset writers only. A row names its author (`actor_iri`) only to `OTS_ACTOR_VISIBILITY`'s audience. |
 | `GET` | `/api/datasets/{id}/changes/{seq}` | **token** | One change as an RDF Patch (`…/inverse` undoes it), if its graph is readable: for accounts that may write the dataset (`403` otherwise), unless `OTS_CHANGE_PATCH_ACCESS` is `signed-in` (any account that may read it) or `readers` (anonymous readers of a public dataset too). |
 | `PUT` | `/api/datasets/{id}/changes/cursors/{name}` | **token** | A consumer's position in the feed; pins retention; its owner or an admin moves or drops it. Set by the accounts `OTS_CHANGE_PATCH_ACCESS` serves patches to (`403` otherwise). |
