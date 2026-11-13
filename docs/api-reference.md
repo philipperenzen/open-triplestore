@@ -188,7 +188,7 @@ else). A version that is staged, published or deprecated answers `400`.
 | Field | Meaning |
 |---|---|
 | `add`, `remove` | Statements `{ "s", "p", "o", "graph"? }`; either list may be left out. `s` and `p` are IRIs, bare or in `<…>`. `o` as a JSON string is an IRI or a blank node (`_:label`); as a JSON object `{ "value", "lang"?, "datatype"? }` it is a literal. |
-| `graph` | The graph the statements are in, for the request or per statement: the absolute IRI of one of the version's graphs, or the last part of a sub-graph's IRI. Without it, the version's base graph. A graph of another version is a `400`. |
+| `graph` | The graph the statements are in, for the request or per statement: the absolute IRI of one of the version's graphs, or the name of a sub-graph in the version (`shapes` for `{version graph}/shapes`). Without it, the version's base graph. A graph of another version is a `400`, and so is a name that several nested sub-graphs end in and none bears. |
 | `nodes`, `remove_nodes` | The draft's blank nodes the request refers to, and those to remove; see below. |
 | `message`, `metadata` | Recorded with the edit in the commit trail (`GET /api/models/{id}/commits`). |
 

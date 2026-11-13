@@ -1,21 +1,31 @@
 //! data-model versions.
 
 use super::models::{ChangedTriple, DiffResult, DiffSummary, TripleView};
+use super::registry;
 use crate::store::{escape_sparql_iri, TripleStore};
 use oxigraph::sparql::QueryResults;
 
 /// Compute added, removed, and changed triples between two versions, given
 /// each one's base graph and the graphs holding its content.
 ///
-/// Graphs are compared by their place in their version (see [`graph_place`]):
-/// base graph with base graph, sub-graph `shapes` with sub-graph `shapes`. A
-/// graph only `to` has contributes additions, one only `from` has removals.
-/// Each triple is labelled with that place — `""` for the base graph, which
-/// is how the write endpoints name it too — so the label of a graph is the
-/// same on both sides, whatever the versions are called.
+/// Graphs are compared by their place in their version (see
+/// [`registry::version_graph_name`]): base graph with base graph, sub-graph
+/// `shapes` with sub-graph `shapes`. A graph only `to` has contributes
+/// additions, one only `from` has removals. Each triple is labelled with that
+/// place — `""` for the base graph, which is how the write endpoints name it
+/// too — so the label of a graph is the same on both sides, whatever the
+/// versions are called.
 ///
-/// `filter` narrows the comparison to the sub-graph of that name (a leading
-/// `/` is ignored; a nested sub-graph also answers to its trailing segments).
+/// A triple only one graph of a pair holds is an addition or a removal, and
+/// a removed and an added triple with the same subject and predicate are one
+/// changed value (see [`pair_values`]). Every differing triple is reported
+/// once, so the three lists together are the difference of the two versions
+/// and the summary counts it.
+///
+/// `filter` narrows the comparison to the sub-graphs of that name, read as
+/// the download and write endpoints read one (see
+/// [`registry::sub_graph_answers_to`]: a leading `/` is ignored, and a nested
+/// sub-graph also answers to its trailing segments).
 pub fn compute_diff(
     store: &TripleStore,
     from_base: &str,
@@ -27,7 +37,7 @@ pub fn compute_diff(
     let place = |base: &str, graphs: &[String]| -> Vec<(String, String)> {
         graphs
             .iter()
-            .map(|g| (graph_place(base, g).to_string(), g.clone()))
+            .map(|g| (registry::version_graph_name(base, g).to_string(), g.clone()))
             .collect()
     };
     let from_placed = place(from_base, from_graphs);
@@ -49,14 +59,8 @@ pub fn compute_diff(
             to_compare.push((from_place.clone(), from_g.clone(), String::new()));
         }
     }
-    if let Some(wanted) = filter.map(|f| f.trim_start_matches('/')) {
-        if !wanted.is_empty() {
-            to_compare.retain(|(place, _, _)| {
-                place
-                    .strip_suffix(wanted)
-                    .is_some_and(|head| head.is_empty() || head.ends_with('/'))
-            });
-        }
+    if let Some(wanted) = filter.filter(|f| !f.trim_start_matches('/').is_empty()) {
+        to_compare.retain(|(place, _, _)| registry::sub_graph_answers_to(place, wanted));
     }
 
     let mut added: Vec<TripleView> = Vec::new();
@@ -88,61 +92,35 @@ pub fn compute_diff(
             }
         } else {
             // Compare both graphs
-            let additions = additions_between(store, from_g, to_g);
             let removals = additions_between(store, to_g, from_g);
+            let additions = additions_between(store, from_g, to_g);
+            let paired = pair_values(removals, additions);
 
-            for t in &additions {
+            for (s, p, o) in paired.added {
                 added.push(TripleView {
-                    s: t.0.clone(),
-                    p: t.1.clone(),
-                    o: t.2.clone(),
+                    s,
+                    p,
+                    o,
                     graph: Some(graph_label.clone()),
                 });
             }
-            for t in &removals {
+            for (s, p, o) in paired.removed {
                 removed.push(TripleView {
-                    s: t.0.clone(),
-                    p: t.1.clone(),
-                    o: t.2.clone(),
+                    s,
+                    p,
+                    o,
                     graph: Some(graph_label.clone()),
                 });
             }
-
-            // Detect changed (same subject+predicate, different object)
-            // A triple is "changed" if it was removed AND a triple with the same s+p was added
-            for del in &removals {
-                if let Some(add) = additions.iter().find(|a| a.0 == del.0 && a.1 == del.1) {
-                    // Remove both from added/removed and put in changed
-                    // (We'll handle deduplication after all pairs are processed)
-                    changed.push(ChangedTriple {
-                        s: del.0.clone(),
-                        p: del.1.clone(),
-                        before: del.2.clone(),
-                        after: add.2.clone(),
-                        graph: Some(graph_label.clone()),
-                    });
-                }
+            for ((s, p, before), after) in paired.changed {
+                changed.push(ChangedTriple {
+                    s,
+                    p,
+                    before,
+                    after,
+                    graph: Some(graph_label.clone()),
+                });
             }
-
-            // Remove the "changed" triples from added/removed lists
-            let changed_subjects: std::collections::HashSet<(&str, &str, &str)> = changed
-                .iter()
-                .map(|c| (c.s.as_str(), c.p.as_str(), c.graph.as_deref().unwrap_or("")))
-                .collect();
-            added.retain(|t| {
-                !changed_subjects.contains(&(
-                    t.s.as_str(),
-                    t.p.as_str(),
-                    t.graph.as_deref().unwrap_or(""),
-                ))
-            });
-            removed.retain(|t| {
-                !changed_subjects.contains(&(
-                    t.s.as_str(),
-                    t.p.as_str(),
-                    t.graph.as_deref().unwrap_or(""),
-                ))
-            });
         }
     }
 
@@ -160,20 +138,64 @@ pub fn compute_diff(
     }
 }
 
-fn to_suffix_label(iri: &str) -> String {
-    iri.rsplit('/').next().unwrap_or(iri).to_string()
+/// A triple as its three N-Triples terms: subject, predicate, object.
+type Spo = (String, String, String);
+
+/// What differs between two graphs, each differing triple in one list.
+#[derive(Default)]
+struct PairedValues {
+    /// Triples only the newer graph holds.
+    added: Vec<Spo>,
+    /// Triples only the older graph holds.
+    removed: Vec<Spo>,
+    /// A triple only the older graph holds, with the object that replaced
+    /// its own in the newer one.
+    changed: Vec<(Spo, String)>,
 }
 
-/// Where `graph` sits in the version whose base graph is `base`: `""` for the
-/// base graph, the path under it for a sub-graph (`shapes` for
-/// `{base}/shapes`). A version may also list a graph that is not under its
-/// base graph; such a graph goes by its last path segment.
+/// Sort what differs between two graphs — `removals`, the triples only the
+/// older one holds, and `additions`, those only the newer one does — into
+/// changed values, additions and removals.
 ///
-/// The last segment of the IRI will not do for every graph: for a base graph
-/// it is the version's own name, which no graph of another version shares.
-fn graph_place<'a>(base: &str, graph: &'a str) -> &'a str {
-    super::registry::version_graph_suffix(base, graph)
-        .unwrap_or_else(|| graph.rsplit('/').next().unwrap_or(graph))
+/// A removed and an added triple with the same subject and predicate are one
+/// changed value, and each triple is used once. Where a subject has several
+/// removed or added values for a predicate, they pair off in the order of
+/// their terms and the ones left over stay removals or additions: `a` giving
+/// way to `b` and `c` is the change `a` to `b` and the addition `c`. So every
+/// differing triple is in exactly one of the three lists.
+///
+/// The lists come out in subject, predicate, object order, and the same two
+/// graphs always pair the same way.
+fn pair_values(mut removals: Vec<Spo>, mut additions: Vec<Spo>) -> PairedValues {
+    use std::cmp::Ordering;
+    removals.sort_unstable();
+    additions.sort_unstable();
+    let mut removals = removals.into_iter().peekable();
+    let mut additions = additions.into_iter().peekable();
+    let mut out = PairedValues::default();
+    loop {
+        // Which side's next triple comes first, by subject and predicate.
+        let next = match (removals.peek(), additions.peek()) {
+            (Some(del), Some(add)) => (&del.0, &del.1).cmp(&(&add.0, &add.1)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => break,
+        };
+        match next {
+            Ordering::Less => out.removed.extend(removals.next()),
+            Ordering::Greater => out.added.extend(additions.next()),
+            Ordering::Equal => {
+                if let (Some(del), Some(add)) = (removals.next(), additions.next()) {
+                    out.changed.push((del, add.2));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn to_suffix_label(iri: &str) -> String {
+    iri.rsplit('/').next().unwrap_or(iri).to_string()
 }
 
 /// Flatten every triple across a set of graphs into a de-duplicated list,

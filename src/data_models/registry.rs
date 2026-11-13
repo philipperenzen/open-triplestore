@@ -1191,6 +1191,33 @@ pub fn version_graph_suffix<'a>(version_graph: &str, graph_iri: &'a str) -> Opti
     }
 }
 
+/// The name a graph goes by in the version whose base graph is
+/// `version_graph`: its place there (see [`version_graph_suffix`]) — `""` for
+/// the base graph, `shapes` for `{version_graph}/shapes` — and, for a graph
+/// the version lists that is not under its base graph, the last path segment
+/// of its IRI.
+///
+/// The last segment of the IRI will not do for every graph: for a base graph
+/// it is the version's own name, which no graph of another version shares.
+pub fn version_graph_name<'a>(version_graph: &str, graph_iri: &'a str) -> &'a str {
+    version_graph_suffix(version_graph, graph_iri)
+        .unwrap_or_else(|| graph_iri.rsplit('/').next().unwrap_or(graph_iri))
+}
+
+/// Whether the graph called `name` in its version (see [`version_graph_name`])
+/// answers to `wanted`, a sub-graph name as a caller gives it. It does by its
+/// whole name, and a nested sub-graph also by its trailing segments: `a/b`
+/// answers to `a/b` and to `b`. The tail of a name is not one: `core-shapes`
+/// does not answer to `shapes`. A leading `/` on `wanted` is ignored, and
+/// what is then empty names no sub-graph.
+pub fn sub_graph_answers_to(name: &str, wanted: &str) -> bool {
+    let wanted = wanted.trim_start_matches('/');
+    !wanted.is_empty()
+        && name
+            .strip_suffix(wanted)
+            .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+}
+
 /// Record, replace or (with `None`) clear the attribution of a registry entry
 /// or version record, in one update.
 pub fn set_attribution(

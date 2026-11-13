@@ -340,7 +340,8 @@ pub struct PatchVersionRequest {
 /// (`POST /api/models/:id/versions/:ver/subgraph/{stage,publish,deprecate}`).
 #[derive(Debug, Deserialize)]
 pub struct SubGraphActionRequest {
-    /// Subgraph IRI or trailing suffix identifying which subgraph to transition.
+    /// The subgraph to transition: its full IRI, or its name in the version
+    /// (`shapes` for `{version graph}/shapes`).
     pub graph: String,
 }
 
