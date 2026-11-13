@@ -561,11 +561,37 @@ refusal.
 
 Attached to the dataset again, the graph is private again, and only a
 writer's `PATCH /api/datasets/{id}/graphs` with `"private": false` makes it
-public. The dataset keeps on record that the graph left private until then,
-or until the dataset is deleted (see
+public. The dataset keeps on record that the graph left private until then
+(see
 [Private graphs in versions](/docs/versioning#private-graphs-in-versions)).
 A graph that was detached while private on release 0.8.1 or earlier left no
 record: attach it again, flag it private and detach it.
+
+Deleting the dataset, or the organisation that owns it, leaves graphs in the
+store by the rule above: one the dataset did not create, one another dataset
+registers or links as its shapes graph, a system or SHACL Studio Library
+graph. The dataset's registrations and records go with it. So the delete
+records, in the same transaction and under the graph's own name, every graph
+it leaves in the store that the dataset held as private (flagged private, or
+detached while private). Such a graph stays a private graph for whatever else
+names it, exactly as after a detach. Administrators, graph-ACL readers and
+the readers of another dataset that registers it read it. The deleted
+dataset's writers no longer do. A graph the delete removes, or one that holds
+no data, gets no record.
+
+The record names no dataset, so a dataset created later under the same id
+inherits nothing from it. It ends when a dataset holds the graph under its own
+flag again:
+
+- a dataset registers the graph: it comes back private, and a writer's
+  `PATCH` with `"private": false` makes it public;
+- a writer of a dataset that already holds the graph sets its `private` flag,
+  either way.
+
+Deleting the graph from the store does not end the record. A graph created
+later under the same name counts as private on these paths, and is flagged
+private when a dataset registers it. A dataset deleted on release 0.8.1 or
+earlier left no record for its private graphs.
 
 ```bash
 # Add a graph (without specifying role)
