@@ -58,6 +58,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typo?)". The accounts-dashboard plugin declares its three
   (`OTS_ACCOUNTS_DASHBOARD_APP_GROUPS`, `…_GATEWAY_USAGE_URL`,
   `…_GATEWAY_KEY`).
+- **A draft edit can change and remove blank nodes.**
+  `PATCH /api/models/{id}/versions/{ver}/data` could add statements about a new
+  blank node, but not reach one the draft already had: a label in `add` is a
+  new node on every request, and a blank node in `remove` was refused
+  (`blank nodes are not allowed in DELETE DATA`). So an anonymous SHACL
+  property shape (`sh:property [ … ]`) or an RDF list (`sh:in ( … )`) could be
+  read from a draft and never changed or removed. A request can now declare
+  the blank nodes of the draft it means under `nodes`, each found by the
+  statement it is the object of, by the statements it has, or by the
+  identifier a read shows. `_:label` in `add` and `remove` is then that node,
+  and `remove_nodes` removes a node with everything below it: a whole property
+  shape, a whole list. A description that fits no blank node, or more than
+  one, answers `409` (`blank_node_not_found`, `blank_node_ambiguous`); such a
+  request is applied in one transaction or not at all, and the commit trail
+  records the statements it actually added and removed. Stored and exported
+  RDF is unchanged: blank nodes stay blank nodes. A request without `nodes`
+  works as before, except that `add` or `remove` may be left out and a blank
+  node in `remove` is refused with a message that says to declare it. See
+  `docs/api-reference.md#editing-a-model-draft`.
 
 ### Changed
 - With the accounts-dashboard plugin compiled in, a malformed

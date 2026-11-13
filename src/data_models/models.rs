@@ -279,10 +279,54 @@ pub struct RdfTriple {
     pub graph: Option<String>,
 }
 
+/// How a draft patch finds one blank node that is already in the draft.
+///
+/// Either `id`, or a description: the statement the node is the object of
+/// (`s` and `p`), the statements it has itself (`where`), or both. A
+/// description must fit exactly one blank node of the graph.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlankNodeLocator {
+    /// The store's identifier of the node: its label in a read of the draft
+    /// (`_:` in front is allowed).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// With `p`: the node is the object of this statement. An IRI, or the
+    /// `_:label` of another declared node.
+    #[serde(default)]
+    pub s: Option<String>,
+    #[serde(default)]
+    pub p: Option<String>,
+    /// Statements the node is the subject of.
+    #[serde(default, rename = "where")]
+    pub has: Vec<NodeStatement>,
+    /// The graph to look in, as on a statement; the request's graph when absent.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// One statement a blank node has, in a [`BlankNodeLocator`]: `o` is written
+/// as in [`RdfTriple`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeStatement {
+    pub p: String,
+    pub o: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PatchVersionRequest {
+    #[serde(default)]
     pub add: Vec<RdfTriple>,
+    #[serde(default)]
     pub remove: Vec<RdfTriple>,
+    /// Blank nodes of the draft this request refers to, by label: `_:label`
+    /// in `add` and `remove` is then that node rather than a new one.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, BlankNodeLocator>,
+    /// Labels declared in `nodes` to remove with everything below them.
+    #[serde(default)]
+    pub remove_nodes: Vec<String>,
     pub graph: Option<String>,
     /// Optional human commit message describing this change.
     #[serde(default)]
