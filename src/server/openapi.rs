@@ -5577,7 +5577,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ob(
                 "Auth",
                 "Purge account",
-                "Permanently erase the current user's account and owned private data.",
+                "Permanently erase the current user's account and owned private data. The commit trail and `full` statement provenance keep the account's IRI on its writes unless OTS_PURGE_ATTRIBUTION is `deleted-user`, which first attributes them to the shared `Deleted user` agent (`{base}/users/deleted`) and answers `500`, erasing nothing, if that fails.",
                 vec![],
                 ref_body(
                     "AccountActionRequest",
@@ -6319,7 +6319,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Purge user (admin)",
-                "Permanently erase a user and their owned private data.",
+                "Permanently erase a user and their owned private data. The commit trail and `full` statement provenance keep the account's IRI on its writes unless OTS_PURGE_ATTRIBUTION is `deleted-user`, which first attributes them to the shared `Deleted user` agent (`{base}/users/deleted`) and answers `500`, erasing nothing, if that fails.",
                 vec![],
                 vec![("204", "Purged"), ("403", "Admin role required")],
                 true,

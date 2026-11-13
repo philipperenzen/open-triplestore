@@ -2920,18 +2920,31 @@ pub async fn admin_purge_user(
             "Cannot purge user with equal or higher role".to_string(),
         ));
     }
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`),
+    // before anything is deleted: a failure refuses the purge.
+    let replaced = replace_history_attribution(&state, &db, &user_id)?;
+
     // Delete the user's FOAF/VCARD profile named graph before removing the row.
     let profile_graph = user_graph::user_profile_graph_iri(&user_id);
     let _ = state.store.graph_store_delete(Some(&profile_graph));
 
     db.delete_user(&user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let replaced = sweep_history_attribution(&state, &user_id, replaced);
 
     {
+        let mut details = serde_json::json!({ "username": target.username });
+        if let Some(r) = replaced {
+            details["history_attribution"] = serde_json::json!({
+                "replaced_by": "deleted-user",
+                "commits": r.commits,
+                "statement_changes": r.statement_changes,
+            });
+        }
         let mut b = AuditEventBuilder::new(AuditEventType::UserDeleted, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
-            .details(serde_json::json!({ "username": target.username }));
+            .details(details);
         b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
@@ -2939,6 +2952,94 @@ pub async fn admin_purge_user(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── History attribution on purge ────────────────────────────────────────────
+
+/// What a purge replaced where the RDF store says who made a write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AttributionReplaced {
+    /// Commits of the trail that named the account.
+    commits: usize,
+    /// Change events of `full` statement provenance that named it.
+    statement_changes: usize,
+}
+
+/// Attribute what the commit trail and the statement-provenance graphs say
+/// the account did to the agent that stands for purged accounts.
+fn reattribute_history(state: &AppState, user_id: &str) -> anyhow::Result<AttributionReplaced> {
+    let account = crate::commit_log::account_iri(&state.base_url, user_id);
+    Ok(AttributionReplaced {
+        commits: crate::commit_log::reattribute_to_deleted_user(
+            &state.store,
+            &state.base_url,
+            &account,
+        )?,
+        statement_changes: crate::statement_provenance::reattribute_to_deleted_user(
+            &state.store,
+            &state.base_url,
+            &account,
+        )?,
+    })
+}
+
+/// What a purge does to the account's name where the RDF store says who made
+/// a write, by `OTS_PURGE_ATTRIBUTION`. `keep`, the default, leaves the store
+/// as it is: the account's IRI stays on its commits and statement changes.
+/// `deleted-user` attributes them to the one agent that stands for purged
+/// accounts (`{base}/users/deleted`); the writes themselves stay, with their
+/// times, messages and counts.
+///
+/// Called before anything of the account is deleted, and a failure refuses
+/// the purge: the account is then still there to purge again, rather than
+/// gone with its IRI left where the operator chose not to keep it. `None`
+/// under `keep`.
+fn replace_history_attribution(
+    state: &AppState,
+    db: &AuthDb,
+    user_id: &str,
+) -> Result<Option<AttributionReplaced>, (StatusCode, String)> {
+    if crate::auth::policy::purge_attribution(db)
+        != crate::auth::policy::PurgeAttribution::DeletedUser
+    {
+        return Ok(None);
+    }
+    reattribute_history(state, user_id).map(Some).map_err(|e| {
+        tracing::error!("purge of {user_id}: history attribution not replaced: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The account's name could not be replaced in the commit trail and statement \
+             provenance, so the account was not purged. Try again."
+                .to_string(),
+        )
+    })
+}
+
+/// The second pass of [`replace_history_attribution`], once the account row
+/// is gone and nothing can be written in its name any more: it catches a
+/// write that landed between the first pass and the delete (an account that
+/// purges itself, or is deleted through the legacy route, is still active
+/// then). The account no longer exists to purge again, so a failure here is
+/// logged, not returned. Passes `replaced` through with what it added.
+fn sweep_history_attribution(
+    state: &AppState,
+    user_id: &str,
+    replaced: Option<AttributionReplaced>,
+) -> Option<AttributionReplaced> {
+    let first = replaced?;
+    match reattribute_history(state, user_id) {
+        Ok(second) => Some(AttributionReplaced {
+            commits: first.commits + second.commits,
+            statement_changes: first.statement_changes + second.statement_changes,
+        }),
+        Err(e) => {
+            tracing::error!(
+                "purge of {user_id}: late writes may still name the account in the commit \
+                 trail or statement provenance: {e}"
+            );
+            Some(first)
+        }
+    }
 }
 
 // ─── Deactivation side-effects helper ────────────────────────────────────────
@@ -3034,6 +3135,10 @@ pub async fn self_purge(
         return Err((StatusCode::UNAUTHORIZED, "Incorrect password".to_string()));
     }
 
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`),
+    // before any side-effect: a failure refuses the purge and changes nothing.
+    let replaced = replace_history_attribution(&state, &db, &current_user.user_id)?;
+
     // Apply side-effects before deleting (org cleanup, make datasets private)
     apply_deactivation_effects(&db, &current_user.user_id);
     let _ = db.revoke_all_user_refresh_tokens(&current_user.user_id);
@@ -3045,6 +3150,7 @@ pub async fn self_purge(
 
     db.delete_user(&current_user.user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    sweep_history_attribution(&state, &current_user.user_id, replaced);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5298,6 +5404,11 @@ pub async fn delete_user(
         ));
     }
 
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`),
+    // as on the purge routes and before anything is deleted: a failure refuses
+    // the delete.
+    let replaced = replace_history_attribution(&state, &db, &user_id)?;
+
     // Revoke tokens before removing the row so no session outlives the account.
     let _ = db.revoke_all_user_refresh_tokens(&user_id);
     let _ = db.revoke_all_user_api_tokens(&user_id);
@@ -5311,6 +5422,7 @@ pub async fn delete_user(
 
     db.delete_user(&user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    sweep_history_attribution(&state, &user_id, replaced);
 
     Ok(StatusCode::NO_CONTENT)
 }

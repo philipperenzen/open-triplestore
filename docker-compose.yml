@@ -82,6 +82,10 @@ services:
       # the default, writers) — see .env.example.
       - OTS_ACTOR_VISIBILITY=${OTS_ACTOR_VISIBILITY:-}
       - OTS_CHANGE_PATCH_ACCESS=${OTS_CHANGE_PATCH_ACCESS:-}
+      # What erasing an account leaves of it on the commit trail and in statement
+      # provenance (keep | deleted-user; empty keeps the default, keep) — see
+      # .env.example.
+      - OTS_PURGE_ATTRIBUTION=${OTS_PURGE_ATTRIBUTION:-}
       # Outbound account email (verification, password reset, reminders). With
       # OTS_SMTP_HOST unset every message — including its action link — goes to the
       # server log instead (fine for dev). For real delivery either enable the

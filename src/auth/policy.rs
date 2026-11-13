@@ -28,6 +28,13 @@
 //!   keeps quads its graphs no longer hold, and every reader — anonymous ones
 //!   on a public dataset — used to get both.
 //!
+//! * [`purge_attribution`] — `OTS_PURGE_ATTRIBUTION`, default `keep`. What a
+//!   purge leaves of the account where the store says who made a write: the
+//!   commit trail and `full` statement provenance. Whether an operator may
+//!   keep an account's identifier after erasing the account depends on the
+//!   ground it keeps it on, which the software cannot know, so both answers
+//!   exist.
+//!
 //! The parsing is pure so the decisions are unit-testable without a server.
 
 use crate::auth::db::AuthDb;
@@ -305,6 +312,43 @@ pub fn change_patch_audience(db: &AuthDb) -> HistoryAudience {
     )
 }
 
+/// What purging an account does to its identifier where the RDF store says
+/// who made a write (the commit trail, `full` statement provenance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeAttribution {
+    /// The account's IRI stays on its commits and statement changes. Default:
+    /// the history keeps saying which account made which write, and the
+    /// instance can no longer turn the IRI into a name.
+    Keep,
+    /// The account's IRI is replaced by the one agent that stands for every
+    /// purged account (`{base}/users/deleted`, "Deleted user"). The writes
+    /// stay; which account made them is no longer in the store.
+    DeletedUser,
+}
+
+/// Parse `OTS_PURGE_ATTRIBUTION` (`keep`, `deleted-user`). The registry
+/// refuses anything else, so the fallback only meets a value another version
+/// stored: it is `keep`, because the replacement cannot be undone and an
+/// administrator can still make it afterwards.
+pub fn parse_purge_attribution(raw: &str) -> PurgeAttribution {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "deleted-user" => PurgeAttribution::DeletedUser,
+        "keep" | "" => PurgeAttribution::Keep,
+        other => {
+            tracing::warn!(
+                "OTS_PURGE_ATTRIBUTION: unknown value {other:?}, using 'keep' (known: keep, deleted-user)"
+            );
+            PurgeAttribution::Keep
+        }
+    }
+}
+
+/// What a purge does to the account's identifier in the store's history: the
+/// runtime setting `OTS_PURGE_ATTRIBUTION`.
+pub fn purge_attribution(db: &AuthDb) -> PurgeAttribution {
+    parse_purge_attribution(&runtime::get(db, &crate::config::PURGE_ATTRIBUTION))
+}
+
 /// Whether `user_id` sees who made `dataset`'s changes.
 pub fn shows_actors(
     db: &AuthDb,
@@ -421,5 +465,22 @@ mod tests {
         // A value another version stored is the narrow audience, not the open one.
         assert_eq!(p("everyone"), HistoryAudience::Writers);
         assert_eq!(p("signed_in"), HistoryAudience::Writers);
+    }
+
+    #[test]
+    fn a_purge_keeps_attribution_unless_told_to_replace_it() {
+        assert_eq!(parse_purge_attribution(""), PurgeAttribution::Keep);
+        assert_eq!(parse_purge_attribution("keep"), PurgeAttribution::Keep);
+        assert_eq!(
+            parse_purge_attribution(" Deleted-User "),
+            PurgeAttribution::DeletedUser
+        );
+        // The replacement cannot be undone: an unknown value never causes it.
+        assert_eq!(parse_purge_attribution("anonymise"), PurgeAttribution::Keep);
+        assert_eq!(
+            parse_purge_attribution("deleted_user"),
+            PurgeAttribution::Keep
+        );
+        assert_eq!(purge_attribution(&db()), PurgeAttribution::Keep);
     }
 }

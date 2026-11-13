@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A purge can attribute an erased account's history to "Deleted user"
+  (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
+  provenance name the account behind each write
+  (`{OTS_BASE_URL}/users/{user ID}`), and a purge left that IRI there for
+  good. It still does by default (`keep`): the history keeps saying which
+  account made which write, which an operator may only do on a ground of its
+  own. With `OTS_PURGE_ATTRIBUTION=deleted-user`, a runtime setting, erasing
+  an account (an administrator's purge, the user's own, the legacy
+  `DELETE /api/users/{id}`) first attributes its commits and its statement
+  changes, in both of a dataset's provenance graphs, to one shared agent,
+  `{OTS_BASE_URL}/users/deleted`. Commit histories show it as "Deleted
+  user". The commits and annotations stay, with their times, messages,
+  graphs and statements. If the replacement fails the account is not erased
+  and the request answers `500`; an administrator's purge records in the
+  audit log how many commits and statement changes it re-attributed. The
+  setting covers those two records only: it does not rewrite accounts erased
+  earlier, the change log, backups, or other records that name who made
+  something. `PRIVACY.md` §4.10 and `docs/gdpr.md` (Art. 17) say when to
+  choose which.
 - **Spark draws query results in the visual their rows fit.** A new ` ```view `
   widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
   chart (label + number), a chronological timeline (date + number), a map on

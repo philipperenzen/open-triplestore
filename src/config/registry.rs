@@ -431,6 +431,10 @@ settings! {
         .default("writers")
         .doc("Who may fetch a change's quads from a dataset's change feed and hold a cursor on it: writers, signed-in or readers.")
         .runtime();
+    PURGE_ATTRIBUTION: String = Spec::new("OTS_PURGE_ATTRIBUTION", Kind::Enum(&["keep", "deleted-user"]), "auth")
+        .default("keep")
+        .doc("What purging an account does to its name on the commit trail and in statement provenance: keep the account IRI, or deleted-user to replace it with one shared placeholder agent.")
+        .runtime();
 
     // ── storage ──
     S3_ENDPOINT: Option<String> = Spec::new("OTS_S3_ENDPOINT", Kind::Url, "storage")

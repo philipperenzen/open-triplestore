@@ -367,14 +367,32 @@ graph named.
 - **Backups:** both are RDF in the store, so every backup's dump holds them
   and a restore brings them back (§4.6). A restored store's trail is the
   backup's, plus a commit recording the restore.
-- **Purging a user account touches neither.** The account's commits keep its
-  IRI, messages and graph names for good, and a statement-provenance graph
-  keeps its IRI, the times and the statements the account added or removed.
-  The instance can no longer turn that IRI into a username (the `/commits`
-  endpoints then show the IRI alone, to those they show it to), but the user
-  ID in it is the one the
-  audit log (§4.4) keeps with the username. The purge itself leaves no
-  commit; it deletes the profile graph directly.
+- **Purging a user account keeps its name in both, or replaces it, as you set
+  `OTS_PURGE_ATTRIBUTION`.** With `keep`, the default, a purge touches
+  neither. The account's commits keep its IRI, messages and graph names for
+  good, and a statement-provenance graph keeps its IRI, the times and the
+  statements the account added or removed. The instance can no longer turn
+  that IRI into a username (the `/commits` endpoints then show the IRI alone,
+  to those they show it to), but the user ID in it is the one the audit log
+  (§4.4) keeps with the username. With `deleted-user`, erasing an account (an
+  administrator's purge, the user's own, or `DELETE /api/users/{id}`) first
+  attributes the account's commits and, under `"full"`, its statement changes
+  to one shared agent, `{OTS_BASE_URL}/users/deleted`, shown as "Deleted
+  user". The commits and annotations stay, with their times, messages, graphs
+  and statements; which account made them is no longer in either record. If
+  the replacement fails, the account is not erased. The setting covers these
+  two records only. It does not rewrite an account erased earlier under
+  `keep`, the change log (§4.9 keeps the account on its rows, and the rows of
+  the replacement itself, until retention), backups taken before, a
+  replication follower's copy of the commit graph (the one it fetched at its
+  last full resynchronisation), a commit message that names the person, or
+  other records that say who made something, such as the creator of a
+  dataset or model version and the author of a datasource run or review.
+  Keeping the identifier of an erased account needs a ground of your own: a
+  legal duty to keep the record, or an interest in it that outweighs the
+  person's. Choose `deleted-user` if you have none, and say in your notice
+  which you chose. The purge itself leaves no commit; it deletes the profile
+  graph directly.
 - Both stay on your instance and the replication followers or cluster
   members you set up; nothing in them is sent anywhere else.
 
@@ -466,7 +484,8 @@ above are essential; document any others your customised deployment introduces.
   account IRI and the added and removed quads; `OTS_CHANGE_RETENTION_DAYS`,
   default 90 days, longer while a bookmark or delta-version pin holds the
   rows), the commit trail and, per dataset, statement provenance (incl. the
-  account IRI; nothing prunes them, see §4.10), backups]_
+  account IRI; nothing prunes them, and `OTS_PURGE_ATTRIBUTION` decides
+  whether a purge keeps it, see §4.10), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_
