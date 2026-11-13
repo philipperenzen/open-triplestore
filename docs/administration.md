@@ -663,7 +663,10 @@ triggers reject any modification at the database level.
 `OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS` (default `365`). `actor_id` is replaced with a
 SHA-256 hash so events stay linkable for forensic analysis without retaining
 the original UUID. No row is deleted — this is the data-minimisation control
-required by Article 5(1)(e) AVG / GDPR.
+required by Article 5(1)(e) AVG / GDPR. `resource_id` and `details` are not
+rewritten: an event about a user keeps that user's ID, an email-change event
+the address, and the deletion event of an admin purge the username
+([PRIVACY.md](../PRIVACY.md) §4.11).
 
 ### Backups
 

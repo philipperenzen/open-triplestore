@@ -87,8 +87,40 @@ graphs); account/identity data lives in a local metadata database.
   public profile, email, phone, organisation, bio and website), their saved chat
   conversations, feedback reports, LLM request-log rows (user ID, IP address,
   question preview) and usage events with the account; the append-only audit
-  log keeps its entries by design. Plan for erasure in **backups** too
-  (re-export or age them out per your retention policy).
+  log keeps its entries by design. It also deletes the account's sessions, API
+  keys, passkeys and memberships, what this instance holds of it as an
+  identity provider for client applications (authorization codes, client
+  refresh tokens, remembered consents), its failed-login counter, and **its
+  avatar and the files it uploaded to datasets**: the stored objects and their
+  descriptions in the datasets' assets graphs. A purge that cannot delete a
+  stored object is refused and can be repeated. Each of the three routes
+  records the erase in the audit log (`user_deleted`). Plan for erasure in
+  **backups** too (re-export or age them out per your retention policy).
+- **What a purge keeps** ([PRIVACY.md](../PRIVACY.md) §4.11 has the full
+  list). A purge erases the account, not everything the person made or is
+  named in. It keeps:
+  - **the datasets the account owned**, which are made private, not deleted.
+    If the request covers their content, delete them yourself, before or
+    after the purge;
+  - **the audit log**. Pseudonymisation by age
+    (`OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS`, 365 days) rewrites the actor
+    columns, the IP address and the user agent, and never `resource_id` or
+    `details`: the user ID stays on every event about the account, the email
+    address on "email verified" and email-change events, and the username on
+    the deletion event of an administrator's purge;
+  - **who made what**: the creator of each dataset version, model, vocabulary
+    and saved query, the author of datasource runs, mappings and reviews, the
+    author of each property state and the username on each rule set inside a
+    dataset's graphs, and the author and grantee columns of validation
+    reports, shape graphs, pipelines and access grants;
+  - **share links the account created**, which keep working until they expire
+    or are revoked.
+
+  Most of these hold the user ID or the account IRI
+  (`{OTS_BASE_URL}/users/{user ID}`), which the instance can no longer turn
+  into a name but which links the records to each other and to the audit log.
+  Nothing in the software removes or replaces them, so decide per request
+  whether your ground for keeping them holds, and record that decision.
 - **The change log** (when switched on, [PRIVACY.md](../PRIVACY.md) §4.9) is
   not erased by any of the above. A SPARQL `DELETE`, a graph delete or a
   dataset delete records the quads it removed as the row's payload, and those
