@@ -226,10 +226,14 @@ ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
 lru = "0.19"
-# v11 ships no crypto backend by default — `rust_crypto` selects the pure-Rust
-# one (hmac/sha2/p256/…, all already in the tree via webauthn/openidconnect);
-# the alternative `aws_lc_rs` would add a C/cmake build dependency.
-jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# v11 ships no crypto backend by default. `aws_lc_rs`, not `rust_crypto`: the
+# pure-Rust backend signs through p256 0.13 and crypto-bigint 0.5, whose
+# constant-time arithmetic leaks timing (RUSTSEC-2026-0387, no fixed 0.5
+# release), and the OIDC provider signs its ES256 tokens with a private key.
+# aws-lc-sys is a C build through the `cc` crate (no CMake on Linux or macOS).
+# It is a library here, not a TLS provider: rustls stays on ring (see
+# reqwest above). Windows targets get prebuilt NASM objects (below).
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 # ES256 keypair generation for the OIDC provider (also rustls's crypto backend
 # in this tree; no longer jsonwebtoken's, which moved off ring in v10).
 ring = "0.17"
@@ -263,13 +267,14 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 # S3 object storage.
 #
 # `default-features = false` is deliberate. The SDK's default feature set turns on
-# `default-https-client`, which hard-wires rustls to *aws-lc-rs*. That would (a) add
-# a CMake + C/asm native build (aws-lc-sys) to every cold build, and (b) put a second
-# rustls crypto provider in the tree next to the `ring` one that reqwest, lettre and
-# openidconnect already use — with both enabled, rustls can no longer pick a
-# process-default provider from crate features and panics at runtime in any consumer
-# that relies on that. So we drop the bundled client and hand the SDK an explicit
-# ring-backed one built from `aws-smithy-http-client` (see `storage::https_client`).
+# `default-https-client`, which hard-wires rustls to *aws-lc-rs*. That would put a
+# second rustls crypto provider in the tree next to the `ring` one that reqwest,
+# lettre and openidconnect already use — with both enabled, rustls can no longer pick
+# a process-default provider from crate features and panics at runtime in any
+# consumer that relies on that. (aws-lc-sys itself is built anyway, for jsonwebtoken;
+# what matters here is rustls's provider feature, not the C build.) So we drop the
+# bundled client and hand the SDK an explicit ring-backed one built from
+# `aws-smithy-http-client` (see `storage::https_client`).
 # (`plugin-mssql` does bring aws-lc-rs in: tiberius 0.13 links it. Builds with that
 # plugin rely on `http_client::install_crypto_provider` making ring the default.)
 #
@@ -386,6 +391,13 @@ hkdf = "0.13"
 # In-memory concurrent cache (OAuth PKCE sessions)
 dashmap = "6"
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+
+# Only to set a feature on jsonwebtoken's aws-lc-rs. On x86_64 Windows,
+# aws-lc-sys assembles with NASM unless `prebuilt-nasm` lets it use the objects
+# it ships, so the native Windows build (docs/windows.md) needs no NASM
+# install. A NASM on PATH still wins.
+[target.'cfg(windows)'.dependencies]
+aws-lc-rs = { version = "1.15", features = ["prebuilt-nasm"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

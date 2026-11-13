@@ -414,10 +414,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The AWS SDK crates and `openidconnect` 4.1 move to the patched
     `crypto-bigint` 0.7 (RUSTSEC-2026-0387) and drop the unmaintained
     `pin-utils` (RUSTSEC-2026-0441).
-  - RUSTSEC-2026-0387 is ignored in `deny.toml` for the two crates that still
-    use `crypto-bigint` 0.5 on their latest release. One is `jsonwebtoken`,
-    which signs the built-in OIDC provider's ES256 tokens; the other is `age`.
-    The comment there gives the exposure and the way out.
+  - `jsonwebtoken` moves from its pure-Rust crypto backend to `aws_lc_rs`.
+    The built-in OIDC provider signs its ES256 tokens with its private key
+    through this crate, and the pure-Rust backend did that arithmetic on
+    `crypto-bigint` 0.5, which leaks timing (RUSTSEC-2026-0387) and has no
+    fixed 0.5 release. Every build now compiles `aws-lc-sys` (C, through the
+    `cc` crate; Windows uses its prebuilt NASM objects). It is not a TLS
+    provider: rustls stays on ring. One visible difference: RS256/384/512
+    tokens from an external identity provider now verify only against RSA
+    keys of 2048 to 8192 bits. The old backend also accepted keys under 2048
+    bits and refused keys over 4096.
+  - RUSTSEC-2026-0387 stays ignored in `deny.toml` for `age` alone, the one
+    crate left on `crypto-bigint` 0.5. It reaches it only through P-256
+    recipients, which backups never use.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
