@@ -358,7 +358,7 @@ ots-plugin-mssql = { path = "plugins/mssql", optional = true }
 imagesize = "0.15"
 infer = "0.22"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
-lopdf = { version = "0.45", optional = true }
+lopdf = { version = "0.47", optional = true }
 kamadak-exif = { version = "0.6", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 calamine = { version = "0.38", optional = true }
@@ -367,7 +367,7 @@ symphonia = { version = "0.6", default-features = false, features = ["mp3", "fla
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 
 # Full-text search (text-search feature)
-tantivy = { version = "0.26", optional = true }
+tantivy = { version = "0.27", optional = true }
 
 # SAML 2.0 SSO (saml feature). openssl is already linked through samael and
 # webauthn-rs; the SP uses it directly for XML decryption, redirect-binding
