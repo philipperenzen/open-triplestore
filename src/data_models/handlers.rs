@@ -15,6 +15,7 @@ use crate::server::routes::run_store_write;
 use crate::server::AppState;
 use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 
+use super::blank_nodes;
 use super::diff::{collect_triples, compute_diff, triple_delta, version_revision};
 use super::merge;
 use super::models::{
@@ -1343,40 +1344,53 @@ pub async fn patch_version_data(
     };
 
     let mut affected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let (mut added, mut removed) = (body.add.len(), body.remove.len());
 
-    // Group the triples by target graph (per-triple graph overrides the
-    // request-level default), all of them before the first write: a graph the
-    // request may not name is refused with the draft as it was.
-    let removes = group_by_graph(&body.remove, &default_graph, &record)?;
-    let adds = group_by_graph(&body.add, &default_graph, &record)?;
+    if blank_nodes::names_existing_nodes(&body) {
+        // The request names blank nodes the draft already has. SPARQL cannot
+        // (`DELETE DATA` refuses a blank node, `INSERT DATA` makes a new one
+        // of every label), so its statements are written as quads, all in
+        // one transaction.
+        let applied = blank_nodes::apply(&state.store, &record, &default_graph, &body)?;
+        affected = applied.graphs;
+        (added, removed) = (applied.added, applied.removed);
+    } else {
+        blank_nodes::refuse_undeclared_removals(&body.remove)?;
 
-    for (graph, triples) in removes {
-        let block = sparql_triple_block(&triples)?;
-        if !block.is_empty() {
-            let q = format!(
-                "DELETE DATA {{ GRAPH <{}> {{ {block} }} }}",
-                escape_sparql_iri(&graph)
-            );
-            state
-                .store
-                .update(&q)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-            affected.insert(graph);
+        // Group the triples by target graph (per-triple graph overrides the
+        // request-level default), all of them before the first write: a graph
+        // the request may not name is refused with the draft as it was.
+        let removes = group_by_graph(&body.remove, &default_graph, &record)?;
+        let adds = group_by_graph(&body.add, &default_graph, &record)?;
+
+        for (graph, triples) in removes {
+            let block = sparql_triple_block(&triples)?;
+            if !block.is_empty() {
+                let q = format!(
+                    "DELETE DATA {{ GRAPH <{}> {{ {block} }} }}",
+                    escape_sparql_iri(&graph)
+                );
+                state
+                    .store
+                    .update(&q)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                affected.insert(graph);
+            }
         }
-    }
 
-    for (graph, triples) in adds {
-        let block = sparql_triple_block(&triples)?;
-        if !block.is_empty() {
-            let q = format!(
-                "INSERT DATA {{ GRAPH <{}> {{ {block} }} }}",
-                escape_sparql_iri(&graph)
-            );
-            state
-                .store
-                .update(&q)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-            affected.insert(graph);
+        for (graph, triples) in adds {
+            let block = sparql_triple_block(&triples)?;
+            if !block.is_empty() {
+                let q = format!(
+                    "INSERT DATA {{ GRAPH <{}> {{ {block} }} }}",
+                    escape_sparql_iri(&graph)
+                );
+                state
+                    .store
+                    .update(&q)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                affected.insert(graph);
+            }
         }
     }
 
@@ -1397,8 +1411,8 @@ pub async fn patch_version_data(
         &ver,
         record.branch.as_deref(),
         affected.into_iter().collect(),
-        body.add.len(),
-        body.remove.len(),
+        added,
+        removed,
         Some(current_revision),
         Some(new_revision.clone()),
         body.message.as_deref(),
@@ -1703,7 +1717,23 @@ fn group_by_graph<'a>(
     record: &super::models::DataModelVersion,
 ) -> Result<Vec<(String, Vec<&'a super::models::RdfTriple>)>, AppError> {
     use std::collections::BTreeMap;
-    // A per-triple absolute graph override may only target THIS version's content:
+    let mut map: BTreeMap<String, Vec<&super::models::RdfTriple>> = BTreeMap::new();
+    for t in triples {
+        let graph = target_graph(t.graph.as_deref(), default_graph, record)?;
+        map.entry(graph).or_default().push(t);
+    }
+    Ok(map.into_iter().collect())
+}
+
+/// The graph a statement of a draft edit is aimed at: the request's
+/// `default_graph` unless the statement names one, as an absolute IRI or by
+/// the name of a sub-graph in the version (see [`sub_graph_or_new`]).
+pub(super) fn target_graph(
+    graph: Option<&str>,
+    default_graph: &str,
+    record: &super::models::DataModelVersion,
+) -> Result<String, AppError> {
+    // An absolute graph override may only target THIS version's content:
     // the base graph, one of its recorded sub-graphs, or a sub-path beneath the
     // base graph. Anything else would let a writer reach another model/tenant's
     // graph, so it is rejected.
@@ -1713,26 +1743,21 @@ fn group_by_graph<'a>(
             || g.starts_with(&sub_prefix)
             || record.sub_graphs.iter().any(|sg| sg.as_str() == g)
     };
-    let mut map: BTreeMap<String, Vec<&super::models::RdfTriple>> = BTreeMap::new();
-    for t in triples {
-        let graph = match t.graph.as_deref() {
-            None | Some("") => default_graph.to_string(),
-            Some(g) => {
-                if g.starts_with("http://") || g.starts_with("https://") || g.starts_with("urn:") {
-                    if !is_authorized_target(g) {
-                        return Err(AppError::BadRequest(format!(
-                            "Graph '{g}' is not part of this version"
-                        )));
-                    }
-                    g.to_string()
-                } else {
-                    sub_graph_or_new(record, g)?
+    match graph {
+        None | Some("") => Ok(default_graph.to_string()),
+        Some(g) => {
+            if g.starts_with("http://") || g.starts_with("https://") || g.starts_with("urn:") {
+                if !is_authorized_target(g) {
+                    return Err(AppError::BadRequest(format!(
+                        "Graph '{g}' is not part of this version"
+                    )));
                 }
+                Ok(g.to_string())
+            } else {
+                sub_graph_or_new(record, g)
             }
-        };
-        map.entry(graph).or_default().push(t);
+        }
     }
-    Ok(map.into_iter().collect())
 }
 
 fn sparql_triple_block(triples: &[&super::models::RdfTriple]) -> Result<String, AppError> {
@@ -1775,7 +1800,7 @@ fn term_to_sparql(t: &str) -> Result<String, AppError> {
 /// SPARQL token. Literal text is escaped with `escape_sparql_literal`; language
 /// tags are validated against `[A-Za-z0-9-]` and datatype IRIs with
 /// `NamedNode::new`. Invalid input is rejected as `400 Bad Request`.
-fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
+pub(super) fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
     match v {
         serde_json::Value::String(s) => term_to_sparql(s),
         serde_json::Value::Object(map) => {
