@@ -854,20 +854,15 @@ pub async fn get_version_data(
         _ => "application/octet-stream",
     };
 
-    // Determine which graphs to dump
-    let graphs_to_dump: Vec<String> = if let Some(suffix) = &params.graph {
-        if suffix == "all" {
-            record.sub_graphs.clone()
-        } else {
-            record
-                .sub_graphs
-                .iter()
-                .filter(|g| g.ends_with(suffix.as_str()))
-                .cloned()
-                .collect()
-        }
-    } else {
-        record.sub_graphs.clone()
+    // Determine which graphs to dump: all of them, or the sub-graphs that
+    // answer to the name given.
+    let graphs_to_dump: Vec<String> = match params.graph.as_deref() {
+        None | Some("all") => record.sub_graphs.clone(),
+        Some(wanted) if wanted.trim_start_matches('/').is_empty() => record.sub_graphs.clone(),
+        Some(wanted) => sub_graphs_named(&record, wanted)
+            .into_iter()
+            .cloned()
+            .collect(),
     };
 
     // For a single graph (Turtle/NTriples), dump just that graph.
@@ -1342,24 +1337,20 @@ pub async fn patch_version_data(
     }
 
     // Determine default target graph (used when a triple has no graph override)
-    let default_graph = {
-        let suffix = body.graph.as_deref().unwrap_or("");
-        if suffix.is_empty() {
-            record.graph_iri.clone()
-        } else {
-            record
-                .sub_graphs
-                .iter()
-                .find(|g| g.ends_with(suffix))
-                .cloned()
-                .unwrap_or_else(|| format!("{}/{}", record.graph_iri, suffix))
-        }
+    let default_graph = match body.graph.as_deref().unwrap_or("") {
+        "" => record.graph_iri.clone(),
+        name => sub_graph_or_new(&record, name)?,
     };
 
     let mut affected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    // Group removes by target graph (per-triple graph overrides the request-level default)
-    for (graph, triples) in group_by_graph(&body.remove, &default_graph, &record)? {
+    // Group the triples by target graph (per-triple graph overrides the
+    // request-level default), all of them before the first write: a graph the
+    // request may not name is refused with the draft as it was.
+    let removes = group_by_graph(&body.remove, &default_graph, &record)?;
+    let adds = group_by_graph(&body.add, &default_graph, &record)?;
+
+    for (graph, triples) in removes {
         let block = sparql_triple_block(&triples)?;
         if !block.is_empty() {
             let q = format!(
@@ -1374,8 +1365,7 @@ pub async fn patch_version_data(
         }
     }
 
-    // Group adds by target graph
-    for (graph, triples) in group_by_graph(&body.add, &default_graph, &record)? {
+    for (graph, triples) in adds {
         let block = sparql_triple_block(&triples)?;
         if !block.is_empty() {
             let q = format!(
@@ -1634,9 +1624,79 @@ fn version_graphs(record: &super::models::DataModelVersion) -> Vec<String> {
     }
 }
 
+/// The sub-graphs of a version that answer to `wanted`, the `graph` a caller
+/// names one by: the recorded sub-graph with that IRI, or else every one whose
+/// name in the version is `wanted` or, for a nested sub-graph, ends in it at a
+/// path boundary (see [`registry::sub_graph_answers_to`]). The tail of an IRI
+/// is no name: `shapes` does not select `…/core-shapes`.
+fn sub_graphs_named<'a>(
+    record: &'a super::models::DataModelVersion,
+    wanted: &str,
+) -> Vec<&'a String> {
+    if let Some(exact) = record.sub_graphs.iter().find(|g| g.as_str() == wanted) {
+        return vec![exact];
+    }
+    record
+        .sub_graphs
+        .iter()
+        .filter(|g| {
+            registry::sub_graph_answers_to(
+                registry::version_graph_name(&record.graph_iri, g),
+                wanted,
+            )
+        })
+        .collect()
+}
+
+/// The one sub-graph of a version that `wanted` names, for a write or a
+/// lifecycle change: of those that answer to it (see [`sub_graphs_named`]),
+/// the one named exactly so, else the only one. `Ok(None)` when none answers.
+/// A name several sub-graphs answer to and none bears is refused: taking one
+/// of them would put the change in a graph the caller may not have meant.
+fn sub_graph_named(
+    record: &super::models::DataModelVersion,
+    wanted: &str,
+) -> Result<Option<String>, AppError> {
+    let answering = sub_graphs_named(record, wanted);
+    let name = wanted.trim_start_matches('/');
+    let exact: Vec<&String> = answering
+        .iter()
+        .copied()
+        .filter(|g| registry::version_graph_name(&record.graph_iri, g) == name)
+        .collect();
+    let named = if exact.is_empty() { answering } else { exact };
+    match named.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).clone())),
+        several => Err(AppError::BadRequest(format!(
+            "Graph '{wanted}' names {} sub-graphs of this version ({}); give one by its whole name or IRI",
+            several.len(),
+            several
+                .iter()
+                .map(|g| g.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// The graph a write addressed to the sub-graph `wanted` goes to: the
+/// sub-graph of that name (see [`sub_graph_named`]) or, the version having
+/// none, the graph of that name under its base graph.
+fn sub_graph_or_new(
+    record: &super::models::DataModelVersion,
+    wanted: &str,
+) -> Result<String, AppError> {
+    Ok(match sub_graph_named(record, wanted)? {
+        Some(graph) => graph,
+        None => format!("{}/{}", record.graph_iri, wanted.trim_start_matches('/')),
+    })
+}
+
 /// Group a slice of `RdfTriple` by their effective target graph.
-/// A triple's `graph` field overrides the request-level `default_graph`; if the
-/// override is a suffix it is matched against `record.sub_graphs`.
+/// A triple's `graph` field overrides the request-level `default_graph`; a
+/// name rather than an IRI is resolved against the version's sub-graphs (see
+/// [`sub_graph_or_new`]).
 fn group_by_graph<'a>(
     triples: &'a [super::models::RdfTriple],
     default_graph: &str,
@@ -1666,12 +1726,7 @@ fn group_by_graph<'a>(
                     }
                     g.to_string()
                 } else {
-                    record
-                        .sub_graphs
-                        .iter()
-                        .find(|sg| sg.ends_with(g))
-                        .cloned()
-                        .unwrap_or_else(|| format!("{}/{}", record.graph_iri, g))
+                    sub_graph_or_new(record, g)?
                 }
             }
         };
@@ -2944,19 +2999,6 @@ pub async fn delete_version(
 
 // ─── Per-subgraph lifecycle (Phase 6) ──────────────────────────────────────────
 
-/// Resolve the body's `graph` (full IRI or trailing suffix) to one of the
-/// version's actual subgraph IRIs.
-fn resolve_sub_graph(record: &super::models::DataModelVersion, wanted: &str) -> Option<String> {
-    if record.sub_graphs.iter().any(|g| g == wanted) {
-        return Some(wanted.to_string());
-    }
-    record
-        .sub_graphs
-        .iter()
-        .find(|g| g.ends_with(wanted))
-        .cloned()
-}
-
 /// Shared implementation for subgraph stage/publish/deprecate.
 async fn transition_sub_graph(
     state: AppState,
@@ -2994,7 +3036,8 @@ async fn transition_sub_graph(
     if new_status == VersionStatus::Published {
         refuse_in_no_derivatives_entry(&state, &id, "Publishing a subgraph")?;
     }
-    let sub_graph_iri = resolve_sub_graph(&record, &graph).ok_or_else(|| {
+    // The body's `graph`: the sub-graph's full IRI, or its name in the version.
+    let sub_graph_iri = sub_graph_named(&record, &graph)?.ok_or_else(|| {
         AppError::BadRequest(format!("Subgraph '{graph}' not found in version '{ver}'"))
     })?;
 
