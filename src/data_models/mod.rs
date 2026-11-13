@@ -3,8 +3,10 @@
 //! Handles uploading, versioning, diffing, and merging reusable data models,
 //! plus minting their version IRIs and dereferencing them over HTTP. See
 //! [`registry`] for storage, [`upload`] for ingest, [`diff`]/[`merge`] for
-//! version comparison, and [`routes`]/[`handlers`] for the HTTP surface.
+//! version comparison, [`blank_nodes`] for the blank nodes a draft edit names,
+//! and [`routes`]/[`handlers`] for the HTTP surface.
 
+pub mod blank_nodes;
 pub mod content_digest;
 pub mod deref;
 pub mod diff;
