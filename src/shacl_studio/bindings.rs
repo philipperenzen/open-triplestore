@@ -106,6 +106,33 @@ pub fn remove_binding(
     store.update(&q)
 }
 
+/// Remove every binding of `target_iri` (both triples of each), for a target
+/// that goes away: a deleted dataset, a graph deleted with it. Bindings are
+/// keyed by IRI, so a dataset or graph made later under the same IRI would
+/// otherwise inherit them. A target that is not an IRI holds no binding.
+pub fn remove_target_bindings(store: &TripleStore, target_iri: &str) -> Result<(), StoreError> {
+    if NamedNode::new(target_iri).is_err() {
+        return Ok(());
+    }
+    let q = format!(
+        r#"PREFIX ots: <{OTS}>
+        PREFIX dct: <{DCT}>
+        DELETE WHERE {{ GRAPH <{VALIDATION_GRAPH}> {{ <{target_iri}> ots:validatedBy ?ss }} }} ;
+        DELETE WHERE {{ GRAPH <{VALIDATION_GRAPH}> {{ <{target_iri}> dct:conformsTo ?ss }} }}"#
+    );
+    store.update(&q)
+}
+
+/// Every IRI some shape graph is bound to (the subjects of the validation
+/// layer).
+pub fn bound_targets(store: &TripleStore) -> Result<Vec<String>, StoreError> {
+    let q = format!(
+        r#"PREFIX ots: <{OTS}>
+        SELECT DISTINCT ?t WHERE {{ GRAPH <{VALIDATION_GRAPH}> {{ ?t ots:validatedBy ?ss }} }}"#
+    );
+    try_col0(store, &q)
+}
+
 /// Shape-set graph IRIs bound to `target_iri` (its `ots:validatedBy` objects).
 pub fn bindings_for_target(store: &TripleStore, target_iri: &str) -> Vec<String> {
     try_bindings_for_target(store, target_iri).unwrap_or_default()
