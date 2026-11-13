@@ -2976,21 +2976,12 @@ pub async fn diff_versions(
     ensure_servable(&state, &id, &parent, &params.from, user.as_deref())?;
     ensure_servable(&state, &id, &parent, &params.to, user.as_deref())?;
 
-    let from_graphs = if from_record.sub_graphs.is_empty() {
-        vec![from_record.graph_iri]
-    } else {
-        from_record.sub_graphs
-    };
-    let to_graphs = if to_record.sub_graphs.is_empty() {
-        vec![to_record.graph_iri]
-    } else {
-        to_record.sub_graphs
-    };
-
     let result = compute_diff(
         &state.store,
-        &from_graphs,
-        &to_graphs,
+        &from_record.graph_iri,
+        &version_graphs(&from_record),
+        &to_record.graph_iri,
+        &version_graphs(&to_record),
         params.graph.as_deref(),
     );
 
