@@ -115,6 +115,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a public profile, their email, phone, organisation, bio and website, in the
   RDF store. It now deletes that graph before the row, as
   `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
+- **A draft copies the graphs of its source version only.**
+  `POST /api/models/:id/versions/:ver/draft` and a new branch took every graph
+  whose IRI starts with the source version's as the source's own, so a version
+  whose name only starts the same came along: with versions `9.1` and `9.10`, a
+  draft `9.2` of `9.1` also held 9.10's triples, in a second graph named
+  `…/version/9.20`, and an existing version `9.20` had its graph cleared and
+  filled with them. A version's graphs are now its base graph and the
+  sub-graphs under it (`…/version/9.1/…`).
+- **The diff of two single-graph model versions shows what changed.**
+  `GET /api/models/:id/diff` paired the graphs of the two versions by the last
+  segment of their IRI, which for a version's base graph is the version's own
+  name: versions with one graph each never paired, and the diff listed every
+  triple of the older one as removed and every triple of the newer one as
+  added. Graphs are now paired by their place in the version, base graph with
+  base graph and sub-graph with the sub-graph of the same name. The `graph` of
+  a diff item is that place: a sub-graph's name as before, and `""` for the
+  base graph (it was the version's name), which is what
+  `PATCH /api/models/:id/versions/:ver/data` takes for the base graph too.
+  `?graph=shapes` no longer takes a sub-graph `core-shapes` for `shapes`, and a
+  filtered diff no longer leaves out a sub-graph that only one of the versions
+  has.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
