@@ -84,6 +84,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A version's agent in the PROV-O trail is the account's IRI.**
+  `GET /api/datasets/{id}/provenance` attributed every version to
+  `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
+  account's IRI and was prefixed a second time, so the agent matched no
+  account and no commit's `prov:wasAssociatedWith`. It is now written as it
+  is. A record that holds a bare account id still gets `{base}/users/{id}`.
+- **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
+  admin-only hard delete removed the account row but left `urn:system:user:{id}`,
+  the FOAF/vCard profile graph holding the person's name and username and, for
+  a public profile, their email, phone, organisation, bio and website, in the
+  RDF store. It now deletes that graph before the row, as
+  `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
 - **A draft copies the graphs of its source version only.**
   `POST /api/models/:id/versions/:ver/draft` and a new branch took every graph
   whose IRI starts with the source version's as the source's own, so a version
@@ -134,18 +146,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `removed` and `added`: the three lists together are the difference of the
   two versions, and `summary` counts it. Within a graph the lists come in
   subject, predicate, value order.
-- **A version's agent in the PROV-O trail is the account's IRI.**
-  `GET /api/datasets/{id}/provenance` attributed every version to
-  `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
-  account's IRI and was prefixed a second time, so the agent matched no
-  account and no commit's `prov:wasAssociatedWith`. It is now written as it
-  is. A record that holds a bare account id still gets `{base}/users/{id}`.
-- **The legacy `DELETE /api/users/{id}` erases the user's profile graph.** The
-  admin-only hard delete removed the account row but left `urn:system:user:{id}`,
-  the FOAF/vCard profile graph holding the person's name and username and, for
-  a public profile, their email, phone, organisation, bio and website, in the
-  RDF store. It now deletes that graph before the row, as
-  `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
