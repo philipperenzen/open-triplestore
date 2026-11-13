@@ -87,8 +87,40 @@ graphs); account/identity data lives in a local metadata database.
   public profile, email, phone, organisation, bio and website), their saved chat
   conversations, feedback reports, LLM request-log rows (user ID, IP address,
   question preview) and usage events with the account; the append-only audit
-  log keeps its entries by design. Plan for erasure in **backups** too
-  (re-export or age them out per your retention policy).
+  log keeps its entries by design. It also deletes the account's sessions, API
+  keys, passkeys and memberships, what this instance holds of it as an
+  identity provider for client applications (authorization codes, client
+  refresh tokens, remembered consents), its failed-login counter, and **its
+  avatar and the files it uploaded to datasets**: the stored objects and their
+  descriptions in the datasets' assets graphs. A purge that cannot delete a
+  stored object is refused and can be repeated. Each of the three routes
+  records the erase in the audit log (`user_deleted`). Plan for erasure in
+  **backups** too (re-export or age them out per your retention policy).
+- **What a purge keeps** ([PRIVACY.md](../PRIVACY.md) §4.11 has the full
+  list). A purge erases the account, not everything the person made or is
+  named in. It keeps:
+  - **the datasets the account owned**, which are made private, not deleted.
+    If the request covers their content, delete them yourself, before or
+    after the purge;
+  - **the audit log**. Pseudonymisation by age
+    (`OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS`, 365 days) rewrites the actor
+    columns, the IP address and the user agent, and never `resource_id` or
+    `details`: the user ID stays on every event about the account, the email
+    address on "email verified" and email-change events, and the username on
+    the deletion event of an administrator's purge;
+  - **who made what**: the creator of each dataset version, model, vocabulary
+    and saved query, the author of datasource runs, mappings and reviews, the
+    author of each property state and the username on each rule set inside a
+    dataset's graphs, and the author and grantee columns of validation
+    reports, shape graphs, pipelines and access grants;
+  - **share links the account created**, which keep working until they expire
+    or are revoked.
+
+  Most of these hold the user ID or the account IRI
+  (`{OTS_BASE_URL}/users/{user ID}`), which the instance can no longer turn
+  into a name but which links the records to each other and to the audit log.
+  Nothing in the software removes or replaces them, so decide per request
+  whether your ground for keeping them holds, and record that decision.
 - **The change log** (when switched on, [PRIVACY.md](../PRIVACY.md) §4.9) is
   not erased by any of the above. A SPARQL `DELETE`, a graph delete or a
   dataset delete records the quads it removed as the row's payload, and those
@@ -112,17 +144,28 @@ graphs); account/identity data lives in a local metadata database.
   graphs, counts, message and the account that made it, and a dataset
   recording statement provenance keeps a copy of every statement a write
   removed, as a triple term, with the change's time and account under
-  `full`. **A user purge touches neither**: the account's commits keep its
-  IRI for good, and the provenance graphs keep its IRI and the statements it
-  changed. The levers: an administrator can remove one account's attribution
+  `full`. **By default a user purge touches neither**
+  (`OTS_PURGE_ATTRIBUTION=keep`): the account's commits keep its IRI for
+  good, and the provenance graphs keep its IRI and the statements it changed.
+  That IRI still identifies the person to you, through the audit log, so
+  keeping it after an erasure request needs a ground of your own (Art. 17(3),
+  or grounds that override an objection): a legal duty to keep the record, a
+  public-interest archive, legal claims. **If you have none, set
+  `OTS_PURGE_ATTRIBUTION=deleted-user`** before you purge: the purge then
+  attributes the account's commits and its statement changes to one shared
+  agent (`{OTS_BASE_URL}/users/deleted`, shown as "Deleted user") and keeps
+  the writes themselves. The setting covers the commit trail and statement
+  provenance only; it does not rewrite accounts purged earlier, the change
+  log, backups, or other records that name who made something (the creator
+  of a dataset or model version, the author of a datasource run or review).
+  The other levers: an administrator can remove one account's attribution
   from the commit graph with a SPARQL `DELETE` that names the graph and
   deletes the triples naming the account's IRI (the commits stay,
   unattributed), or empty the graph with `DROP GRAPH <urn:system:commit-log>`.
-  There is no targeted erasure from a statement-provenance graph, for
-  administrators either: it goes only with its dataset (or with `CLEAR ALL` /
-  `DROP ALL`), so keep statement provenance off datasets whose statements you
-  may have to erase, and `full` off those whose writers you may have to
-  forget. Both come back with a restored backup.
+  There is no targeted erasure of statements from a statement-provenance
+  graph, for administrators either: it goes only with its dataset (or with
+  `CLEAR ALL` / `DROP ALL`), so keep statement provenance off datasets whose
+  statements you may have to erase. Both come back with a restored backup.
 
 ### Art. 18 — Right to restriction of processing
 
@@ -227,12 +270,13 @@ operating them correctly is the operator's responsibility** (see
   document (`GET /api/datasets/{id}/provenance`) follow the same rule: anyone
   who may read the dataset gets the commits of the graphs they may read, and
   each writer's account IRI, username and display name go to
-  `OTS_ACTOR_VISIBILITY`'s audience. That setting does not reach the history
-  of a model or shape graph, which shows each writer to everyone who may see
-  the model or shape graph, nor a statement-provenance graph: under `full`,
-  the account behind each statement change is read by every reader of the
-  dataset, or by its writers for a graph the dataset holds as private. The
-  whole commit graph is admin-only ([PRIVACY.md](../PRIVACY.md) §4.10).
+  `OTS_ACTOR_VISIBILITY`'s audience. The same setting covers the history of
+  a model or shape graph, where the audience is by default the accounts that
+  may write the model or manage the shape graph. It does not reach a
+  statement-provenance graph: under `full`, the account behind each statement
+  change is read by every reader of the dataset, or by its writers for a
+  graph the dataset holds as private. The whole commit graph is admin-only
+  ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.

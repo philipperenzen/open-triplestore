@@ -116,3 +116,48 @@ latest published version together with the model version *that* version conforme
 Publishing a model version is recorded on the model's commit log
 (`GET /api/models/:id/commits`), so dependants can be found and notified from either
 side. See "Following a model update" in [datasets.md](datasets.md).
+
+## Who sees the authors
+
+A registry entry records who registered it, who made each version, and who
+made each commit. Those names are personal data, so by default they go to the
+entry's writers only: its owning user, an administrator of the owning
+organisation, and administrators. Any other reader, an anonymous reader of a
+public entry included, gets the same answers without them:
+
+| Route | Without the author |
+|---|---|
+| `GET /api/models`, `GET /api/models/{id}` | `created_by` is `null` |
+| `GET /api/models/{id}/versions`, `…/versions/{ver}` | `created_by` is `null` |
+| `GET /api/models/{id}/branches` | a branch's `owner` is `null` |
+| `GET /api/models/{id}/commits` | `actor_iri`, `actor_username` and `actor_display_name` are absent; messages, times and counts stay |
+| `GET /api/models/{id}/collaborators` | the accounts that made a version are not listed |
+| `GET /api/public/catalog` | `published_by` is `null` and `publishers` is empty |
+
+The setting is `OTS_ACTOR_VISIBILITY`, the one that decides who sees the
+authors of a dataset's history: `writers` (the default), `signed-in` (any
+account that may read the entry) or `readers` (everyone who may read it). An
+administrator changes it under **Admin → Workspace settings**; see
+[versioning.md](versioning.md#who-sees-what-of-the-history). The public
+catalogue has no caller to ask, so it names the accounts only under
+`readers`.
+
+The owner of an entry is not an author: `owner_type` and `owner_id`, and the
+catalogue's `owner`, are always given. To publish a vocabulary under a
+person's name, state it in the content (`dct:creator`), which every reader of
+the version gets.
+
+`GET /api/models/{id}/collaborators` lists accounts, and two of its rules hold
+at every setting:
+
+- The members of the owning organisation are listed to its members and to
+  administrators only, as `GET /api/organisations/{id}/members` lists them.
+  Other readers of a public entry get no member list.
+- `email` is `null` unless the caller is the owning user, a member of the
+  owning organisation or an administrator. The owning user is still named to
+  every reader, as the entry's record names them.
+
+The shape graphs of the SHACL Library follow the same setting: `created_by`
+on an entry and on its revisions, and the actor on its commit trail, go to
+the accounts that manage the entry (its owning user, a member of the owning
+organisation, an administrator).

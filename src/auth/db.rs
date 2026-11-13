@@ -3116,13 +3116,44 @@ impl AuthDb {
         Ok((users, total))
     }
 
-    pub fn delete_user(&self, id: &str) -> anyhow::Result<()> {
+    /// The files `user_id` uploaded, in every dataset: the rows
+    /// [`Self::delete_user`] removes with the account.
+    pub fn list_assets_uploaded_by(&self, user_id: &str) -> anyhow::Result<Vec<Asset>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM assets WHERE uploaded_by = ?1 ORDER BY dataset_id, id",
+            Self::ASSET_COLS
+        ))?;
+        let assets = stmt
+            .query_map(params![user_id], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(assets)
+    }
+
+    /// Delete the account row and every row of this database that is keyed by
+    /// the account and would otherwise outlive it. Returns the file rows it
+    /// removed: their bytes are in the object store and their descriptions in
+    /// the RDF store, which this database cannot reach, so the caller erases
+    /// those (`auth::handlers::erase_account_files`).
+    ///
+    /// Rows that reference `users(id)` with `ON DELETE CASCADE` go with the
+    /// row. The statements below cover the tables that carry the account
+    /// without such a key. Author and grantee columns of records that belong
+    /// to a dataset, a shape graph or a saved query are not touched here: see
+    /// `PRIVACY.md` §4.11 for what stays.
+    pub fn delete_user(&self, id: &str) -> anyhow::Result<Vec<Asset>> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
-        // assets.uploaded_by has no CASCADE — clear it before deleting the user
-        // to avoid a FK constraint violation. Asset metadata is lost; S3 objects
-        // become orphaned (acceptable for a permanent purge operation).
-        tx.execute("DELETE FROM assets WHERE uploaded_by = ?1", params![id])?;
+        // assets.uploaded_by references users(id) without CASCADE, so the rows
+        // have to go before the account does.
+        let mut removed = tx.prepare(&format!(
+            "DELETE FROM assets WHERE uploaded_by = ?1 RETURNING {}",
+            Self::ASSET_COLS
+        ))?;
+        let assets = removed
+            .query_map(params![id], Self::row_to_asset)?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(removed);
         // The LLM request log (IP address, question preview) and the usage
         // events carry the user id without a foreign key, so nothing cascades
         // to them: erase them with the account. The audit log stays.
@@ -3134,9 +3165,39 @@ impl AuthDb {
             "DELETE FROM dataset_usage_events WHERE user_id = ?1",
             params![id],
         )?;
+        // This store as an identity provider: the authorization codes, the
+        // client refresh tokens and the remembered consents of the account.
+        // None of the three has a foreign key. A token of a deleted account
+        // already mints nothing (`oidc_provider` loads the user first), but
+        // the rows would keep the user id beside the client it signed in to.
+        for table in [
+            "oauth_auth_codes",
+            "oauth_client_refresh_tokens",
+            "oauth_consents",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id = ?1"),
+                params![id],
+            )?;
+        }
+        // The login throttle is keyed by the name typed into the login form:
+        // the account's username, or its email address when someone typed
+        // that instead. A row is otherwise cleared only by a successful
+        // login, which this account will not have again. The email-keyed row
+        // stays when another account has that string as its username, so one
+        // account's erase never lifts another's lockout.
+        tx.execute(
+            "DELETE FROM login_attempts
+              WHERE username = (SELECT username FROM users WHERE id = ?1)
+                 OR (username = (SELECT email FROM users WHERE id = ?1)
+                     AND NOT EXISTS (SELECT 1 FROM users other
+                                      WHERE other.username = login_attempts.username
+                                        AND other.id <> ?1))",
+            params![id],
+        )?;
         tx.execute("DELETE FROM users WHERE id = ?1", params![id])?;
         tx.commit()?;
-        Ok(())
+        Ok(assets)
     }
 
     // ─── Deactivation side-effects ────────────────────────────────────────────
@@ -7401,6 +7462,162 @@ mod tests {
         assert_eq!(rows("llm_request_log", "u2"), 1);
         assert_eq!(rows("dataset_usage_events", "u2"), 1);
         assert!(db.get_user_by_id("u1").unwrap().is_none());
+    }
+
+    /// A purge erases what this store keeps of the account as an identity
+    /// provider (authorization codes, client refresh tokens, remembered
+    /// consents) and its login-throttle rows. None of those tables has a
+    /// foreign key to cascade from. Another account's rows stay, and so does
+    /// a throttle row that is another account's username.
+    #[test]
+    fn a_purge_erases_the_users_provider_rows_and_login_throttle() {
+        let db = AuthDb::in_memory().unwrap();
+        for (id, name, email) in [
+            ("u1", "alice", "alice@example.com"),
+            ("u2", "bob", "bob@example.com"),
+            // An account from before usernames were validated, whose username
+            // is the email address of u1.
+            ("u3", "alice@example.com", "other@example.com"),
+        ] {
+            db.create_user(id, name, email, "hash", SystemRole::User)
+                .unwrap();
+        }
+        let later = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        for id in ["u1", "u2"] {
+            db.insert_oauth_code(
+                &format!("code-{id}"),
+                "app",
+                id,
+                "https://app.example/cb",
+                "openid",
+                None,
+                "challenge",
+                &later,
+            )
+            .unwrap();
+            db.insert_client_refresh_token(&format!("rt-{id}"), "app", id, "openid", &later)
+                .unwrap();
+            db.record_oauth_consent(id, "app", "openid").unwrap();
+        }
+        // A failed login under each username, and under each email address:
+        // the form takes a username, and people type their email into it.
+        for typed in ["alice", "alice@example.com", "bob", "bob@example.com"] {
+            db.record_login_failure(typed).unwrap();
+        }
+        let count = |sql: &str, arg: &str| -> i64 {
+            db.pool()
+                .get()
+                .unwrap()
+                .query_row(sql, params![arg], |r| r.get(0))
+                .unwrap()
+        };
+        let provider_rows = |user: &str| -> i64 {
+            [
+                "oauth_auth_codes",
+                "oauth_client_refresh_tokens",
+                "oauth_consents",
+            ]
+            .iter()
+            .map(|t| {
+                count(
+                    &format!("SELECT COUNT(*) FROM {t} WHERE user_id = ?1"),
+                    user,
+                )
+            })
+            .sum()
+        };
+        let throttled = |typed: &str| -> bool {
+            count(
+                "SELECT COUNT(*) FROM login_attempts WHERE username = ?1",
+                typed,
+            ) == 1
+        };
+        assert_eq!(provider_rows("u1"), 3);
+        assert_eq!(provider_rows("u2"), 3);
+
+        db.delete_user("u2").unwrap();
+
+        assert_eq!(provider_rows("u2"), 0, "bob's provider rows go with him");
+        assert!(!throttled("bob"), "the row under bob's username goes");
+        assert!(!throttled("bob@example.com"), "and the one under his email");
+        assert_eq!(provider_rows("u1"), 3, "alice's rows are not bob's");
+        assert!(throttled("alice") && throttled("alice@example.com"));
+
+        db.delete_user("u1").unwrap();
+
+        assert_eq!(provider_rows("u1"), 0);
+        assert!(!throttled("alice"));
+        assert!(
+            throttled("alice@example.com"),
+            "that string is u3's username: erasing u1 must not lift u3's throttle"
+        );
+    }
+
+    /// A purge returns the file rows it removed, so the caller can delete
+    /// their bytes and descriptions; files other accounts uploaded stay.
+    #[test]
+    fn a_purge_returns_the_file_rows_it_removed() {
+        let db = AuthDb::in_memory().unwrap();
+        for (id, name) in [("u1", "alice"), ("u2", "bob")] {
+            db.create_user(
+                id,
+                name,
+                &format!("{name}@example.com"),
+                "hash",
+                SystemRole::User,
+            )
+            .unwrap();
+        }
+        db.create_dataset(
+            "ds1",
+            "Shared",
+            None,
+            OwnerType::User,
+            "u2",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        for (id, by) in [("a1", "u1"), ("a2", "u1"), ("b1", "u2")] {
+            db.create_asset(
+                id,
+                "ds1",
+                &format!("{id}.txt"),
+                "text/plain",
+                &format!("datasets/ds1/{id}/{id}.txt"),
+                3,
+                by,
+                false,
+                "",
+            )
+            .unwrap();
+        }
+        let listed: Vec<String> = db
+            .list_assets_uploaded_by("u1")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(listed, ["a1", "a2"]);
+
+        let mut removed: Vec<String> = db
+            .delete_user("u1")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.s3_key)
+            .collect();
+        removed.sort();
+        assert_eq!(
+            removed,
+            ["datasets/ds1/a1/a1.txt", "datasets/ds1/a2/a2.txt"]
+        );
+        let left: Vec<String> = db
+            .list_dataset_assets("ds1")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, ["b1"], "bob's file is not alice's to take along");
     }
 
     /// The last-used stamp is written at most once a minute per token: a

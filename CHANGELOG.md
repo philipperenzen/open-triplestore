@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A purge can attribute an erased account's history to "Deleted user"
+  (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
+  provenance name the account behind each write
+  (`{OTS_BASE_URL}/users/{user ID}`), and a purge left that IRI there for
+  good. It still does by default (`keep`): the history keeps saying which
+  account made which write, which an operator may only do on a ground of its
+  own. With `OTS_PURGE_ATTRIBUTION=deleted-user`, a runtime setting, erasing
+  an account (an administrator's purge, the user's own, the legacy
+  `DELETE /api/users/{id}`) first attributes its commits and its statement
+  changes, in both of a dataset's provenance graphs, to one shared agent,
+  `{OTS_BASE_URL}/users/deleted`. Commit histories show it as "Deleted
+  user". The commits and annotations stay, with their times, messages,
+  graphs and statements. If the replacement fails the account is not erased
+  and the request answers `500`; the erase records in the audit log how many
+  commits and statement changes it re-attributed. The
+  setting covers those two records only: it does not rewrite accounts erased
+  earlier, the change log, backups, or other records that name who made
+  something. `PRIVACY.md` §4.10 and `docs/gdpr.md` (Art. 17) say when to
+  choose which.
 - **Spark draws query results in the visual their rows fit.** A new ` ```view `
   widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
   chart (label + number), a chronological timeline (date + number), a map on
@@ -293,6 +312,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither covers what a writer publishes on purpose: version data and diffs,
   patch-log entries, LDES members and the statement-provenance graph. See
   `docs/versioning.md`, "Who sees what of the history".
+- **Models, shape graphs and a dataset's validation reports no longer name
+  their authors to every reader (breaking for clients that read those
+  fields without write access).** `OTS_ACTOR_VISIBILITY` (default `writers`)
+  now decides this for them as it does for a dataset's history. Outside its
+  audience:
+  - a registry entry: `created_by` is `null` on `GET /api/models`,
+    `/api/models/{id}`, `…/versions` and `…/versions/{ver}`; a branch's
+    `owner` is `null` on `…/branches`; `actor_iri`, `actor_username` and
+    `actor_display_name` are left off `…/commits`; `…/collaborators` does
+    not list the accounts that made a version. A writer is an account that
+    may write the entry: its owning user, an administrator of the owning
+    organisation, an administrator.
+  - `GET /api/public/catalog`, which answers anonymous callers, gives
+    `published_by: null` and an empty `publishers` unless the setting is
+    `readers`. The owner of an entry is still named.
+  - a shape graph: `created_by` is `null` on the entry (`GET
+    /api/shacl/shape-graphs`, `…/{id}`, the shape graphs of
+    `/api/shacl/bindings` and `/api/datasets/{id}/effective-shapes`) and on
+    `…/revisions`; the actor fields are left off `…/commits`. A writer is an
+    account that manages the entry: its owning user, a member of the owning
+    organisation, an administrator.
+  - a dataset: `created_by` is `null` on `…/validation-reports` and
+    `…/validation-reports/{rid}`.
+
+  Before, each of these went to everyone who could read the entry: for a
+  public model, an anonymous caller got the account IRI, username and display
+  name of everyone who had uploaded or edited a version. **Upgrading:** to
+  keep naming authors to every reader, set `OTS_ACTOR_VISIBILITY` to
+  `readers` (or `signed-in`); it is one setting for datasets, models and
+  shape graphs. The owner of an entry (`owner_type`, `owner_id`) is always
+  given. See `docs/models.md`, "Who sees the authors".
+- **`GET /api/models/{id}/collaborators` no longer hands an organisation's
+  member list and e-mail addresses to every reader of its models.** The route
+  listed the owner, or every member of the owning organisation, and every
+  version author with `user_id`, `username`, `display_name` and `email`, to
+  anyone who could read the entry: an anonymous caller for a public one,
+  although `GET /api/organisations/{id}/members` is for members only. The
+  organisation's members are now listed to its members and to administrators
+  only, and `email` is `null` unless the caller is the owning user, a member
+  of the owning organisation or an administrator. The owning user is still
+  named to every reader.
 - **`GET /api/datasets/{id}/provenance` and `…/commits` no longer name a
   graph the caller may not read.** The PROV-O document listed every graph of
   the dataset and every commit on them, so a reader of a public dataset got
@@ -482,6 +542,66 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rows left behind by earlier purges stay until retention removes the log
   rows; usage events of deleted users can be removed with
   `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+- **Erasing an account deletes its avatar and the files it uploaded.** An
+  admin purge, a self-service purge (`POST /api/auth/account/purge`) and the
+  legacy `DELETE /api/users/{id}` deleted the rows that name those objects
+  and left the objects in the object store, where nothing could find them
+  again: the avatar under `avatars/{user ID}.{type}` (and an earlier avatar of
+  another image type, which a re-upload never removed), and every file the
+  account had uploaded to a dataset. The description of each such file also
+  stayed in the dataset's assets graph, with a download URL that answered
+  404. All three routes now delete the objects first, then the rows, then
+  the descriptions, and a dataset left without files gives up its assets
+  graph as it does when its last file is deleted. A file another account
+  uploaded is not touched. **If the object store cannot delete an object the
+  request answers `500` and erases nothing**, so it can be repeated; before,
+  a purge never called the object store. Objects left by earlier purges are
+  still there: `avatars/{id}.*` for an ID that is no longer in `users`, and
+  any object under `datasets/{dataset}/{file ID}/` whose file ID has no row in
+  `assets`.
+- **Erasing an account deletes what this instance kept of it as an identity
+  provider, and its failed-login counter.** `oauth_auth_codes`,
+  `oauth_client_refresh_tokens` and `oauth_consents` carry the user ID
+  without a foreign key, so the account's authorization codes, client refresh
+  tokens and remembered consents outlived it (no token could be issued from
+  them: the token endpoint loads the account first). `login_attempts` is
+  keyed by the name typed into the login form and a row was cleared only by a
+  successful login, so the counter under the account's username, and under
+  its email address when someone had typed that, stayed for good. The erase
+  now deletes all four in the same transaction as the account; a counter
+  that is another account's username is left alone. Rows left by earlier
+  purges can be removed with
+  `DELETE FROM <table> WHERE user_id NOT IN (SELECT id FROM users)` for the
+  three provider tables.
+- **Every route that erases an account records it, and the legacy delete
+  applies the effects of a deactivation.** Only the admin purge wrote a
+  `user_deleted` audit event. The self-service purge and the legacy
+  `DELETE /api/users/{id}` now write one too, with the erased account's user
+  ID as the resource and the route in `details.via` (`self_purge`,
+  `delete_user`); they do not write the username, which the audit log could
+  never drop again. Under `OTS_PURGE_ATTRIBUTION=deleted-user` all three
+  events say how many commits and statement changes the erase re-attributed
+  (`details.history_attribution`). The legacy route takes an active account and went
+  straight to the delete, so the account's personal datasets stayed
+  published under an owner that no longer existed. It now does what the purge
+  routes rely on a deactivation having done: the account's personal datasets
+  become private, and so do the datasets of an organisation it was the last
+  active member of.
+- **The privacy-notice template says what erasing an account keeps.** The new
+  `PRIVACY.md` §4.11 lists what the three erase routes remove and what they
+  leave, each item checked against the code: the account's datasets (made
+  private, not deleted); the audit log, where pseudonymisation by age never
+  reaches `resource_id` and `details`, so the user ID stays on events about
+  the account, the email address on email-verification and email-change
+  events and the username on an admin purge's event; the creator of dataset
+  versions, models, vocabularies and saved queries and the author of
+  datasource runs, mappings and reviews in the server's own graphs; the
+  author of property states and the username on rule sets inside dataset
+  graphs; author and grantee columns in the metadata database; share links
+  the account created, which keep working; repair proposals; and backups.
+  `docs/gdpr.md` (Art. 17) and the audit section of `docs/administration.md`
+  say the same. Operators who published a notice from the earlier template
+  should update theirs.
 - **The privacy-notice template documents the change log.** The new
   `PRIVACY.md` §4.9 covers `changes.db`, which the template still left out.
   While change capture is on (off by default; always on for a replication
@@ -515,10 +635,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   naming it; anyone who may read a dataset reads its history, and each
   writer's account IRI, username and display name go to
   `OTS_ACTOR_VISIBILITY`'s audience (the dataset's writers by default);
-  anyone who may see a model or shape graph reads its history with every
-  writer named, since that setting does not reach it; a dataset's readers
-  read its statement-provenance graph, under `full` with the account behind
-  each change whatever that setting says, and its writers the private one.
+  the same holds for the history of a model or shape graph, whose audience
+  is by default the accounts that may write the model or manage the shape
+  graph; a dataset's readers read its statement-provenance graph, under
+  `full` with the account behind each change whatever that setting says,
+  and its writers the private one.
   It states that **neither has any retention and a user purge touches neither**
   (an administrator can empty the commit graph or strip one account's
   attribution from it; a statement-provenance graph goes only with its

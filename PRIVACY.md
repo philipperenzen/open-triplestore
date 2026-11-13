@@ -109,11 +109,14 @@ fields (display name, bio, website, phone, organisation, avatar reference).
 An **append-only audit log** (`audit_events` table, enforced append-only by
 database triggers — `src/auth/audit.rs`) records security-relevant events:
 logins (success/failure), logout, token creation/revocation, password changes,
-user create/update/deactivate, role changes, SPARQL updates, graph create/delete,
+user create/update/deactivate/delete, role changes, SPARQL updates, graph create/delete,
 permission-denied/ACL events, backup events, and alert dispatches. Entries may
 include **actor ID/username/role, timestamp, IP address, user agent, request ID,
 and event details**. IP address and user agent are personal data; set your
-retention period accordingly (§7).
+retention period accordingly (§7). No entry is ever deleted. §4.11 says what
+the log keeps of an account that was erased, and which fields the
+pseudonymisation of older entries (`OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS`) does
+and does not reach.
 
 ### 4.5 Private usage tracking ("recently used")
 
@@ -331,13 +334,22 @@ and gets the same trail as PROV-O (`GET /api/datasets/{id}/provenance`).
 account exists, is on both only for the audience of `OTS_ACTOR_VISIBILITY`
 (§4.9): by default the accounts that may write the dataset, administrators
 included. The PROV-O document names the dataset's owner (a user, group or
-organisation) to every caller. **That setting does not reach the history of
-a model, vocabulary or shape graph**: anyone who may see a model or
-vocabulary reads its commits with each writer's account IRI, username and
-display name (`GET /api/models/{id}/commits`), and so does a signed-in user
-who may see a shape graph (`GET /api/shacl/shape-graphs/{id}/commits`). The
-web UI shows these histories. The DCAT catalogue names only each dataset's
-latest commit, without its account.
+organisation) to every caller. **The same setting covers the history of a
+model, vocabulary or shape graph**: anyone who may see a model or vocabulary
+reads its commits (`GET /api/models/{id}/commits`), and a signed-in user who
+may see a shape graph reads that graph's
+(`GET /api/shacl/shape-graphs/{id}/commits`), with each writer's account IRI,
+username and display name only for that audience: by default the accounts
+that may write the model or vocabulary (its owning user, an administrator of
+the owning organisation, administrators) or that manage the shape graph (its
+owning user, a member of the owning organisation, administrators). The model
+registry and the shape-graph library also keep, outside the commit graph,
+the account that registered an entry and the one that made each of its
+versions or revisions; those go to the same audience, and the public
+catalogue (`GET /api/public/catalog`) names them only when the setting is
+`readers`. The owning user or organisation of an entry is named to every
+reader. The web UI shows these histories. The DCAT catalogue names only each
+dataset's latest commit, without its account.
 
 **The statement-provenance graphs are graphs of the dataset.** Everyone who
 may read the dataset reads `urn:ots:statement-provenance:{id}`, over `/sparql`
@@ -367,16 +379,154 @@ graph named.
 - **Backups:** both are RDF in the store, so every backup's dump holds them
   and a restore brings them back (§4.6). A restored store's trail is the
   backup's, plus a commit recording the restore.
-- **Purging a user account touches neither.** The account's commits keep its
-  IRI, messages and graph names for good, and a statement-provenance graph
-  keeps its IRI, the times and the statements the account added or removed.
-  The instance can no longer turn that IRI into a username (the `/commits`
-  endpoints then show the IRI alone, to those they show it to), but the user
-  ID in it is the one the
-  audit log (§4.4) keeps with the username. The purge itself leaves no
-  commit; it deletes the profile graph directly.
+- **Purging a user account keeps its name in both, or replaces it, as you set
+  `OTS_PURGE_ATTRIBUTION`.** With `keep`, the default, a purge touches
+  neither. The account's commits keep its IRI, messages and graph names for
+  good, and a statement-provenance graph keeps its IRI, the times and the
+  statements the account added or removed. The instance can no longer turn
+  that IRI into a username (the `/commits` endpoints then show the IRI alone,
+  to those they show it to), but the user ID in it is the one the audit log
+  (§4.4) keeps with the username. With `deleted-user`, erasing an account (an
+  administrator's purge, the user's own, or `DELETE /api/users/{id}`) first
+  attributes the account's commits and, under `"full"`, its statement changes
+  to one shared agent, `{OTS_BASE_URL}/users/deleted`, shown as "Deleted
+  user". The commits and annotations stay, with their times, messages, graphs
+  and statements; which account made them is no longer in either record. If
+  the replacement fails, the account is not erased. The setting covers these
+  two records only. It does not rewrite an account erased earlier under
+  `keep`, the change log (§4.9 keeps the account on its rows, and the rows of
+  the replacement itself, until retention), backups taken before, a
+  replication follower's copy of the commit graph (the one it fetched at its
+  last full resynchronisation), a commit message that names the person, or
+  other records that say who made something, such as the creator of a
+  dataset or model version and the author of a datasource run or review.
+  Keeping the identifier of an erased account needs a ground of your own: a
+  legal duty to keep the record, or an interest in it that outweighs the
+  person's. Choose `deleted-user` if you have none, and say in your notice
+  which you chose. The purge itself leaves no commit; it deletes the profile
+  graph directly.
 - Both stay on your instance and the replication followers or cluster
   members you set up; nothing in them is sent anywhere else.
+
+### 4.11 What erasing an account removes and what it keeps
+
+Three routes erase an account for good (`src/auth/handlers.rs`): an
+administrator's purge of a deactivated account
+(`POST /api/admin/users/{id}/purge`), the user's own purge with their password
+(`POST /api/auth/account/purge`), and the administrators' legacy
+`DELETE /api/users/{id}`, which takes an active account. All three erase the
+same things. Deactivating an account does not erase it.
+
+**Erased:**
+
+- **the account row** (§4.2): user ID, username, email address, password
+  hash, role, profile fields and two-factor secret, and with it the rows that
+  exist for the account alone: email-verification and password-reset tokens,
+  two-factor recovery codes, passkeys, organisation and group memberships,
+  per-user access to private datasets, sessions and API keys (§4.3), links to
+  external identities and SAML sessions (§5), saved conversations, assistant
+  memory and feedback reports (§4.8), LLM request-log rows (§4.7) and usage
+  events (§4.5);
+- what the account left with this instance as an identity provider for
+  client applications (`/oauth/…`): its authorization codes, client refresh
+  tokens and remembered consents;
+- the failed-login counter kept under its username, and the one under its
+  email address if someone typed that into the login form;
+- **the profile graph** `urn:system:user:{id}` in the RDF store;
+- **the avatar image and every file the account uploaded to a dataset**, in
+  the object store, with each file's entry in the dataset's file list and its
+  description (title, type, size) in the dataset's assets graph. That
+  includes files it uploaded to datasets of other accounts and of
+  organisations. The files go first. If the object store cannot delete one
+  of them, the request answers `500`, nothing has changed and the request can
+  be repeated. If the step after it refuses the erase (replacing the account
+  in the history under `deleted-user`, §4.10), the account is still there
+  without its stored files, and repeating the request completes the erase.
+  While the change log is on (§4.9), it records the removed descriptions like
+  any other write.
+
+Before the row goes, the user's own purge and the legacy route apply what a
+deactivation applies (an administrator's purge needs an account that was
+deactivated earlier): **the account's personal datasets are made private**,
+and so are the datasets of an organisation it was the last active member of.
+
+**Kept.** An erase removes none of the following, and rewrites none except
+where `OTS_PURGE_ATTRIBUTION` says so below. The user ID is a random
+identifier; once the account is gone the instance can no longer turn it into
+a name, except where a record below holds both.
+
+- **The account's datasets.** A dataset the account owned stays in the store
+  with its graphs, versions and other accounts' files, private, under an
+  owner ID that names no account any more. Administrators still reach it, and
+  so does anyone who holds a grant on it. Its catalogue record and PROV-O
+  document name the owner as `{OTS_BASE_URL}/user/{user ID}`. To erase the
+  data, delete the datasets before the account, or have an administrator
+  delete them afterwards.
+- **The audit log** (§4.4), in which no row is ever deleted. Rows of what the
+  account did keep its user ID, username, role, IP address and user agent
+  until they are older than `OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS` (default 365
+  days). A daily task then replaces the username, role and user agent, zeroes
+  the IP address and turns the user ID into its SHA-256 hash, which anyone who
+  holds the ID can compute again. **That task does not reach a row's
+  `resource_id` and `details`.** They keep, for good: the user ID on every
+  event about the account (created, role changed, activated, deactivated,
+  password reset, deleted); the username and role on the event of an account
+  an administrator created; **the email address** on "email verified",
+  "email change requested" and "email changed"; and the username on the
+  deletion event of an administrator's purge. The deletion events of the
+  user's own purge and of the legacy route carry the user ID and the route.
+  Under `deleted-user`, each of the three also says how many commits and
+  statement changes it attributed to "Deleted user".
+- **The change log** (§4.9), and **the commit trail and statement
+  provenance** (§4.10), which keep the account's IRI unless
+  `OTS_PURGE_ATTRIBUTION=deleted-user` has the erase replace it there. That
+  setting reaches those two records and nothing else in this list.
+- **Who made what, in the server's own graphs.** These records name the
+  account by its IRI (`{OTS_BASE_URL}/users/{user ID}`) or its user ID, and
+  nothing removes them:
+  - each dataset version, and each model or vocabulary and its versions
+    (`dct:creator`), with the owner ID of a model or vocabulary the account
+    owned;
+  - each saved query (API service) and each of its revisions
+    (`dct:creator`);
+  - datasources, mappings, runs, review decisions, drift tickets and
+    profiling runs (`prov:wasAttributedTo` / `prov:wasAssociatedWith`), the
+    last editor of the mapping gates, and the reviewer of each review item;
+  - Linked Data Platform access rules that name the account as their agent
+    (`acl:agent <urn:ots:user:{user ID}>`).
+- **Authorship inside a dataset's own graphs.** Two graphs the server keeps
+  for a dataset name the account in the dataset's data, and a version that
+  includes them keeps a copy:
+  - `urn:ots:property-states:{dataset}`: every recorded property state and
+    calculation carries the account's IRI (`prov:wasAttributedTo`);
+  - `urn:ots:rules:{dataset}`: every rule set carries the **username** of
+    the account that last saved it (`dct:creator`).
+- **Author and grantee columns in the metadata database**, which hold the
+  user ID: validation reports and runs, share links, saved queries with
+  their revisions and acknowledged test results, shape graphs with their
+  revisions, validation pipelines and their runs, documentation pages edited
+  in the app, prefix overrides, dataset prefixes, RDF Patch log entries and
+  LDES sync jobs, and access grants: those made to the account, which match
+  no one any more, and those it made to others, which stay in force. A
+  scheduled LDES sync job of the account is paused with a message that names
+  its user ID, or its **username** if the job was paused when the account
+  was deactivated. **A share link the account created keeps working** until
+  it expires or is revoked.
+- **Repair proposals** the account generated: files under
+  `<data dir>/repair-proposals/` with its account IRI, kept for at most
+  `OTS_REPAIR_PROPOSAL_TTL_DAYS` (30 days by default).
+- **RDF data and free text that mention the person** (§4.1), such as a
+  contact name on a dataset or organisation, or a commit message. The
+  software does not look for them.
+- **Backups** taken before the erase hold everything listed here and
+  everything the erase removed (§4.6); restoring one brings the account back.
+  **Application logs**, mail the instance already sent, and the copies held by
+  an external identity provider or by client applications that signed the
+  user in through this instance are outside the software's reach.
+
+Accounts erased by an earlier version left their avatar, their uploaded
+files, their identity-provider rows and their failed-login counters behind;
+`CHANGELOG.md` says how to find them.
 
 ## 5. External network calls and how to disable each
 
@@ -466,7 +616,8 @@ above are essential; document any others your customised deployment introduces.
   account IRI and the added and removed quads; `OTS_CHANGE_RETENTION_DAYS`,
   default 90 days, longer while a bookmark or delta-version pin holds the
   rows), the commit trail and, per dataset, statement provenance (incl. the
-  account IRI; nothing prunes them, see §4.10), backups]_
+  account IRI; nothing prunes them, and `OTS_PURGE_ATTRIBUTION` decides
+  whether a purge keeps it, see §4.10), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_

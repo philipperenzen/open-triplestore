@@ -2920,18 +2920,35 @@ pub async fn admin_purge_user(
             "Cannot purge user with equal or higher role".to_string(),
         ));
     }
+    // The account's stored files, before anything else: the object store is
+    // the step most likely to fail, and a store that cannot delete one
+    // refuses the purge with nothing else changed.
+    let objects = erase_account_objects(&state, &target).await?;
+
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`).
+    // The last step that can refuse the purge: the account row is untouched,
+    // so the account is still there to purge again.
+    let replaced = replace_history_attribution(&state, &db, &user_id)?;
+
     // Delete the user's FOAF/VCARD profile named graph before removing the row.
     let profile_graph = user_graph::user_profile_graph_iri(&user_id);
     let _ = state.store.graph_store_delete(Some(&profile_graph));
 
-    db.delete_user(&user_id)
+    let files = db
+        .delete_user(&user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    erase_account_files(&state, &user_id, &files, &objects).await;
+    let replaced = sweep_history_attribution(&state, &user_id, replaced);
 
     {
+        let mut details = serde_json::json!({ "username": target.username });
+        if let Some(r) = replaced {
+            details["history_attribution"] = r.audit_detail();
+        }
         let mut b = AuditEventBuilder::new(AuditEventType::UserDeleted, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
-            .details(serde_json::json!({ "username": target.username }));
+            .details(details);
         b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
@@ -2939,6 +2956,260 @@ pub async fn admin_purge_user(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── What an erase removes outside the identity database ─────────────────────
+
+/// The image types `upload_user_avatar` accepts. It names the object after
+/// the type (`avatars/{id}.{type}`), so an avatar replaced by one of another
+/// type leaves the earlier object in the store.
+const AVATAR_TYPES: [&str; 5] = ["png", "jpeg", "jpg", "gif", "webp"];
+
+/// The object keys an account's avatar is, or was, stored under. Empty for an
+/// account that never uploaded one: `avatar_key` is set by the first upload
+/// and never cleared.
+fn avatar_object_keys(user_id: &str, avatar_key: Option<&str>) -> Vec<String> {
+    let Some(current) = avatar_key else {
+        return Vec::new();
+    };
+    let mut keys = vec![current.to_string()];
+    for kind in AVATAR_TYPES {
+        let key = format!("avatars/{user_id}.{kind}");
+        if key != current {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// The first step of every erase route (`admin_purge_user`, `self_purge`,
+/// the legacy `delete_user`): delete the account's stored files, its avatar
+/// and the files it uploaded to datasets, from the object store.
+///
+/// [`AuthDb::delete_user`] removes the rows that name those objects, and
+/// nothing knows their keys after that, so they go before the rows do. A
+/// store that cannot delete one refuses the erase, as deleting a single file
+/// through the API does: the account is then still there to erase again,
+/// rather than gone with its files left behind. For that reason this runs
+/// before any other effect of the route, [`replace_history_attribution`]
+/// included: the object store is the step most likely to fail, and a refusal
+/// here must not cost the history an attribution that cannot be put back.
+/// Returns the keys it deleted.
+///
+/// An instance without an object store has stored nothing.
+async fn erase_account_objects(
+    state: &AppState,
+    user: &User,
+) -> Result<std::collections::HashSet<String>, (StatusCode, String)> {
+    let mut deleted = std::collections::HashSet::new();
+    if !state.object_store.is_configured() {
+        return Ok(deleted);
+    }
+    let uploads = state
+        .auth_db
+        .list_assets_uploaded_by(&user.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let keys = avatar_object_keys(&user.id, user.avatar_key.as_deref())
+        .into_iter()
+        .chain(uploads.into_iter().map(|a| a.s3_key));
+    for key in keys {
+        if let Err(e) = state.object_store.delete(&key).await {
+            tracing::error!("erase of {}: stored object {key} not deleted: {e}", user.id);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "A stored file of the account could not be deleted, so the account was not \
+                 erased. Try again."
+                    .to_string(),
+            ));
+        }
+        deleted.insert(key);
+    }
+    Ok(deleted)
+}
+
+/// The last step of every erase route, with the file rows
+/// [`AuthDb::delete_user`] removed. Each file is described in its dataset's
+/// assets graph (title, type, size, download URL); that description goes
+/// here, as it does when the file is deleted through the API, and a dataset
+/// left without files gives up its assets graph the same way.
+///
+/// `deleted` is what [`erase_account_objects`] removed. A file that is not in
+/// it was uploaded after that step (an account that erases itself, or is
+/// deleted through the legacy route, is active until its row is gone), so its
+/// bytes are deleted here. The account no longer exists to erase again, so a
+/// failure is logged, not returned.
+async fn erase_account_files(
+    state: &AppState,
+    user_id: &str,
+    files: &[Asset],
+    deleted: &std::collections::HashSet<String>,
+) {
+    use crate::server::routes::{asset_iri, assets_graph_iri, remove_dcat_triples};
+
+    let mut datasets = std::collections::BTreeSet::new();
+    for file in files {
+        if state.object_store.is_configured() && !deleted.contains(&file.s3_key) {
+            if let Err(e) = state.object_store.delete(&file.s3_key).await {
+                tracing::error!(
+                    "erase of {user_id}: stored object {} not deleted: {e}",
+                    file.s3_key
+                );
+            }
+        }
+        let iri = asset_iri(&state.base_url, &file.dataset_id, &file.id);
+        let graph = assets_graph_iri(&state.base_url, &file.dataset_id);
+        if let Err(e) = remove_dcat_triples(state, &iri, &graph) {
+            tracing::warn!(
+                "erase of {user_id}: description of file {} not removed: {e}",
+                file.id
+            );
+        }
+        datasets.insert(file.dataset_id.as_str());
+    }
+    for dataset_id in datasets {
+        if let Ok(remaining) = state.auth_db.list_dataset_assets(dataset_id) {
+            if remaining.is_empty() {
+                let graph = assets_graph_iri(&state.base_url, dataset_id);
+                if let Err(e) = state.auth_db.remove_dataset_graph(dataset_id, &graph) {
+                    tracing::warn!(
+                        "erase of {user_id}: assets graph of dataset {dataset_id} not \
+                         unregistered: {e}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ─── History attribution on purge ────────────────────────────────────────────
+
+/// What a purge replaced where the RDF store says who made a write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AttributionReplaced {
+    /// Commits of the trail that named the account.
+    commits: usize,
+    /// Change events of `full` statement provenance that named it.
+    statement_changes: usize,
+}
+
+impl AttributionReplaced {
+    /// What the `user_deleted` audit event of an erase records under
+    /// `details.history_attribution`.
+    fn audit_detail(self) -> serde_json::Value {
+        serde_json::json!({
+            "replaced_by": "deleted-user",
+            "commits": self.commits,
+            "statement_changes": self.statement_changes,
+        })
+    }
+}
+
+/// Attribute what the commit trail and the statement-provenance graphs say
+/// the account did to the agent that stands for purged accounts.
+fn reattribute_history(state: &AppState, user_id: &str) -> anyhow::Result<AttributionReplaced> {
+    let account = crate::commit_log::account_iri(&state.base_url, user_id);
+    Ok(AttributionReplaced {
+        commits: crate::commit_log::reattribute_to_deleted_user(
+            &state.store,
+            &state.base_url,
+            &account,
+        )?,
+        statement_changes: crate::statement_provenance::reattribute_to_deleted_user(
+            &state.store,
+            &state.base_url,
+            &account,
+        )?,
+    })
+}
+
+/// What a purge does to the account's name where the RDF store says who made
+/// a write, by `OTS_PURGE_ATTRIBUTION`. `keep`, the default, leaves the store
+/// as it is: the account's IRI stays on its commits and statement changes.
+/// `deleted-user` attributes them to the one agent that stands for purged
+/// accounts (`{base}/users/deleted`); the writes themselves stay, with their
+/// times, messages and counts.
+///
+/// Called before the account row or anything keyed to it changes, and after
+/// [`erase_account_objects`], the one step likelier to fail. A failure
+/// refuses the purge: the account is then still there to purge again
+/// (without its stored files), rather than gone with its IRI left where the
+/// operator chose not to keep it. `None` under `keep`.
+fn replace_history_attribution(
+    state: &AppState,
+    db: &AuthDb,
+    user_id: &str,
+) -> Result<Option<AttributionReplaced>, (StatusCode, String)> {
+    if crate::auth::policy::purge_attribution(db)
+        != crate::auth::policy::PurgeAttribution::DeletedUser
+    {
+        return Ok(None);
+    }
+    reattribute_history(state, user_id).map(Some).map_err(|e| {
+        tracing::error!("purge of {user_id}: history attribution not replaced: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The account's name could not be replaced in the commit trail and statement \
+             provenance, so the account was not purged. Try again."
+                .to_string(),
+        )
+    })
+}
+
+/// The second pass of [`replace_history_attribution`], once the account row
+/// is gone and nothing can be written in its name any more: it catches a
+/// write that landed between the first pass and the delete (an account that
+/// purges itself, or is deleted through the legacy route, is still active
+/// then). The account no longer exists to purge again, so a failure here is
+/// logged, not returned. Passes `replaced` through with what it added.
+fn sweep_history_attribution(
+    state: &AppState,
+    user_id: &str,
+    replaced: Option<AttributionReplaced>,
+) -> Option<AttributionReplaced> {
+    let first = replaced?;
+    match reattribute_history(state, user_id) {
+        Ok(second) => Some(AttributionReplaced {
+            commits: first.commits + second.commits,
+            statement_changes: first.statement_changes + second.statement_changes,
+        }),
+        Err(e) => {
+            tracing::error!(
+                "purge of {user_id}: late writes may still name the account in the commit \
+                 trail or statement provenance: {e}"
+            );
+            Some(first)
+        }
+    }
+}
+
+/// The audit record of an account erased through `self_purge` or the legacy
+/// `delete_user`: the same `user_deleted` event `admin_purge_user` writes,
+/// with the route in `details.via` and, where `OTS_PURGE_ATTRIBUTION`
+/// replaced the account in the history, what it replaced
+/// (`details.history_attribution`). The erased account is named by its id
+/// alone. The audit log is append-only, and pseudonymisation by age reaches
+/// the actor columns only, so a username written here would stay for good.
+fn audit_account_erased(
+    audit_log: &AuditLogger,
+    actor_id: &str,
+    erased_id: &str,
+    via: &str,
+    replaced: Option<AttributionReplaced>,
+    client_ip: &ClientIp,
+    headers: &HeaderMap,
+) {
+    let mut details = serde_json::json!({ "via": via });
+    if let Some(r) = replaced {
+        details["history_attribution"] = r.audit_detail();
+    }
+    let mut b = AuditEventBuilder::new(AuditEventType::UserDeleted, AuditOutcome::Success)
+        .actor_id(actor_id)
+        .resource("user", erased_id)
+        .details(details);
+    b.ip_address = client_ip.as_string();
+    b.user_agent = audit::user_agent(headers);
+    b.request_id = audit::request_id_from_headers(headers);
+    audit_log.log(b);
 }
 
 // ─── Deactivation side-effects helper ────────────────────────────────────────
@@ -3009,11 +3280,16 @@ pub async fn self_deactivate(
 /// POST /api/auth/account/purge — the authenticated user permanently deletes their own account.
 ///
 /// Requires password confirmation. Account must not be super_admin.
-/// All personal data, org memberships, and asset metadata are removed permanently.
+/// The account row and what is keyed to it, the profile graph, the avatar and
+/// the files the account uploaded are removed permanently; `PRIVACY.md` §4.11
+/// lists what is kept.
 pub async fn self_purge(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
+    headers: HeaderMap,
     Json(req): Json<AccountActionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     if current_user.role == SystemRole::SuperAdmin {
@@ -3034,6 +3310,16 @@ pub async fn self_purge(
         return Err((StatusCode::UNAUTHORIZED, "Incorrect password".to_string()));
     }
 
+    // The account's stored files, before any other effect: the object store
+    // is the step most likely to fail, and a store that cannot delete one
+    // refuses the purge with nothing else changed.
+    let objects = erase_account_objects(&state, &user).await?;
+
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`).
+    // The last step that can refuse the purge, and before any side-effect on
+    // the account: it stays active, to purge itself again.
+    let replaced = replace_history_attribution(&state, &db, &current_user.user_id)?;
+
     // Apply side-effects before deleting (org cleanup, make datasets private)
     apply_deactivation_effects(&db, &current_user.user_id);
     let _ = db.revoke_all_user_refresh_tokens(&current_user.user_id);
@@ -3043,8 +3329,21 @@ pub async fn self_purge(
     let profile_graph = user_graph::user_profile_graph_iri(&current_user.user_id);
     let _ = state.store.graph_store_delete(Some(&profile_graph));
 
-    db.delete_user(&current_user.user_id)
+    let files = db
+        .delete_user(&current_user.user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    erase_account_files(&state, &current_user.user_id, &files, &objects).await;
+    let replaced = sweep_history_attribution(&state, &current_user.user_id, replaced);
+
+    audit_account_erased(
+        &audit_log,
+        &current_user.user_id,
+        &current_user.user_id,
+        "self_purge",
+        replaced,
+        &client_ip,
+        &headers,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5306,11 +5605,21 @@ pub async fn get_user(
 /// the install unadministrable. It now enforces the same guards as the maintained
 /// purge path plus a last-super-admin lockout check, and erases the same data:
 /// the account row (with its chat history, feedback, LLM request-log and usage
-/// rows) and the FOAF/vCard profile graph `urn:system:user:{id}`.
+/// rows), the FOAF/vCard profile graph `urn:system:user:{id}`, the avatar and
+/// the files the account uploaded.
+///
+/// The purge routes act on an account that was deactivated first; this route
+/// takes an active one. It therefore applies the effects of a deactivation
+/// itself (`apply_deactivation_effects`), so the account's personal datasets
+/// do not stay published under an owner that no longer exists, and records
+/// the delete in the audit log as `admin_purge_user` does.
 pub async fn delete_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
+    headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     authz::require_admin(&current_user)?;
@@ -5346,6 +5655,21 @@ pub async fn delete_user(
         ));
     }
 
+    // The account's stored files, before any other effect: the object store
+    // is the step most likely to fail, and a store that cannot delete one
+    // refuses the delete with nothing else changed.
+    let objects = erase_account_objects(&state, &target).await?;
+
+    // What the store's history keeps of the account (`OTS_PURGE_ATTRIBUTION`),
+    // as on the purge routes. The last step that can refuse the delete, and
+    // before any side-effect on the account.
+    let replaced = replace_history_attribution(&state, &db, &user_id)?;
+
+    // What a deactivation does, which the purge routes rely on having
+    // happened: personal datasets go private, as do the datasets of an
+    // organisation left without an active member.
+    apply_deactivation_effects(&db, &user_id);
+
     // Revoke tokens before removing the row so no session outlives the account.
     let _ = db.revoke_all_user_refresh_tokens(&user_id);
     let _ = db.revoke_all_user_api_tokens(&user_id);
@@ -5357,8 +5681,21 @@ pub async fn delete_user(
     let profile_graph = user_graph::user_profile_graph_iri(&user_id);
     let _ = state.store.graph_store_delete(Some(&profile_graph));
 
-    db.delete_user(&user_id)
+    let files = db
+        .delete_user(&user_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    erase_account_files(&state, &user_id, &files, &objects).await;
+    let replaced = sweep_history_attribution(&state, &user_id, replaced);
+
+    audit_account_erased(
+        &audit_log,
+        &current_user.user_id,
+        &user_id,
+        "delete_user",
+        replaced,
+        &client_ip,
+        &headers,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

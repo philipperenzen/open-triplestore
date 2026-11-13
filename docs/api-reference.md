@@ -81,7 +81,7 @@ Three facts worth knowing before an instance is exposed:
 | `PUT` | `/api/datasets/{dataset_id}/prefixes` | **token** | Replace the prefix table (writers only); `PUT` / `DELETE …/prefixes/{label}` change one entry. |
 | `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld; an entry's `author` is `null` outside `OTS_ACTOR_VISIBILITY`'s audience. |
 | `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
-| `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
+| `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. An entry's `created_by`, like the authors on its `…/versions`, `…/branches`, `…/commits` and `…/collaborators`, is `null` or absent outside `OTS_ACTOR_VISIBILITY`'s audience (default: accounts that may write the entry); see [models.md](models.md#who-sees-the-authors). |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
 | `DELETE` | `/api/models/{id}/versions/{ver}` | **token** | Delete one version, its graphs and its registry record: admins, and publishers who may write the entry (`403` otherwise). `409` for a published version without `?force=true`, and while datasets depend on it whatever `force` says; see [models.md](models.md#deleting-a-version). |
 | `PATCH` | `/api/models/{id}/versions/{ver}/data` | **token** | Add and remove statements in a draft version, blank nodes included; whoever may write the entry (its owner, an admin of the owning organisation, an admin), `401` otherwise. See [Editing a model draft](#editing-a-model-draft). |
@@ -95,7 +95,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/auth/me` | **token** | The caller's own account. |
 | `POST` | `/api/auth/login` | **none** | Rate-limited against brute force. |
 | `POST` | `/api/import/bulk` | **token** | Bulk import; rate-limited. |
-| `GET` | `/api/shacl/shape-graphs` | **token** | SHACL studio: the caller's shape-graph library. |
+| `GET` | `/api/shacl/shape-graphs` | **token** | SHACL studio: the caller's shape-graph library. An entry's `created_by`, like the authors on its `…/revisions` and `…/commits`, is `null` or absent outside `OTS_ACTOR_VISIBILITY`'s audience (default: accounts that manage the entry). |
 | `POST` | `/api/shacl/shape-graphs` | **token** | SHACL studio: create a shape graph. |
 | `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The shapes graphs of the datasets the caller may read; a private one only if they may read it. |
