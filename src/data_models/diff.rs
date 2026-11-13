@@ -4,71 +4,66 @@ use super::models::{ChangedTriple, DiffResult, DiffSummary, TripleView};
 use crate::store::{escape_sparql_iri, TripleStore};
 use oxigraph::sparql::QueryResults;
 
-/// Compute added, removed, and changed triples between two sets of sub-graphs.
+/// Compute added, removed, and changed triples between two versions, given
+/// each one's base graph and the graphs holding its content.
 ///
-/// Matching sub-graphs (by suffix) are compared. Any graph present only in
-/// `to_graphs` contributes to additions; only in `from_graphs` to removals.
+/// Graphs are compared by their place in their version (see [`graph_place`]):
+/// base graph with base graph, sub-graph `shapes` with sub-graph `shapes`. A
+/// graph only `to` has contributes additions, one only `from` has removals.
+/// Each triple is labelled with that place — `""` for the base graph, which
+/// is how the write endpoints name it too — so the label of a graph is the
+/// same on both sides, whatever the versions are called.
+///
+/// `filter` narrows the comparison to the sub-graph of that name (a leading
+/// `/` is ignored; a nested sub-graph also answers to its trailing segments).
 pub fn compute_diff(
     store: &TripleStore,
+    from_base: &str,
     from_graphs: &[String],
+    to_base: &str,
     to_graphs: &[String],
-    filter_suffix: Option<&str>,
+    filter: Option<&str>,
 ) -> DiffResult {
-    let to_compare: Vec<(String, String)> = if let Some(suffix) = filter_suffix {
-        // Only compare the specific sub-graph pair
-        let from = from_graphs
+    let place = |base: &str, graphs: &[String]| -> Vec<(String, String)> {
+        graphs
             .iter()
-            .find(|g| g.ends_with(suffix))
-            .cloned()
-            .or_else(|| from_graphs.iter().find(|g| !g.contains('/')).cloned());
-        let to = to_graphs
-            .iter()
-            .find(|g| g.ends_with(suffix))
-            .cloned()
-            .or_else(|| to_graphs.iter().find(|g| !g.contains('/')).cloned());
-        match (from, to) {
-            (Some(f), Some(t)) => vec![(f, t)],
-            _ => vec![],
-        }
-    } else {
-        // Match sub-graphs by their suffix (last segment)
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for to_g in to_graphs {
-            let to_suffix = to_g.rsplit('/').next().unwrap_or(to_g.as_str());
-            if let Some(from_g) = from_graphs
-                .iter()
-                .find(|fg| fg.rsplit('/').next().unwrap_or(fg.as_str()) == to_suffix)
-            {
-                pairs.push((from_g.clone(), to_g.clone()));
-            } else {
-                // No corresponding from-graph → all triples are additions
-                pairs.push((String::new(), to_g.clone()));
-            }
-        }
-        // Any from-graph without a matching to-graph → all triples are removals
-        for from_g in from_graphs {
-            let from_suffix = from_g.rsplit('/').next().unwrap_or(from_g.as_str());
-            if !to_graphs
-                .iter()
-                .any(|tg| tg.rsplit('/').next().unwrap_or(tg.as_str()) == from_suffix)
-            {
-                pairs.push((from_g.clone(), String::new()));
-            }
-        }
-        pairs
+            .map(|g| (graph_place(base, g).to_string(), g.clone()))
+            .collect()
     };
+    let from_placed = place(from_base, from_graphs);
+    let to_placed = place(to_base, to_graphs);
+
+    // (place, from graph, to graph); an empty graph IRI means that side has
+    // no graph there.
+    let mut to_compare: Vec<(String, String, String)> = Vec::new();
+    for (to_place, to_g) in &to_placed {
+        let from_g = from_placed
+            .iter()
+            .find(|(p, _)| p == to_place)
+            .map(|(_, g)| g.clone())
+            .unwrap_or_default();
+        to_compare.push((to_place.clone(), from_g, to_g.clone()));
+    }
+    for (from_place, from_g) in &from_placed {
+        if !to_placed.iter().any(|(p, _)| p == from_place) {
+            to_compare.push((from_place.clone(), from_g.clone(), String::new()));
+        }
+    }
+    if let Some(wanted) = filter.map(|f| f.trim_start_matches('/')) {
+        if !wanted.is_empty() {
+            to_compare.retain(|(place, _, _)| {
+                place
+                    .strip_suffix(wanted)
+                    .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+            });
+        }
+    }
 
     let mut added: Vec<TripleView> = Vec::new();
     let mut removed: Vec<TripleView> = Vec::new();
     let mut changed: Vec<ChangedTriple> = Vec::new();
 
-    for (from_g, to_g) in &to_compare {
-        let graph_label = if to_g.is_empty() {
-            to_suffix_label(from_g)
-        } else {
-            to_suffix_label(to_g)
-        };
-
+    for (graph_label, from_g, to_g) in &to_compare {
         if from_g.is_empty() {
             // Everything in to_g is an addition
             let triples = graph_triples(store, to_g);
@@ -169,6 +164,18 @@ fn to_suffix_label(iri: &str) -> String {
     iri.rsplit('/').next().unwrap_or(iri).to_string()
 }
 
+/// Where `graph` sits in the version whose base graph is `base`: `""` for the
+/// base graph, the path under it for a sub-graph (`shapes` for
+/// `{base}/shapes`). A version may also list a graph that is not under its
+/// base graph; such a graph goes by its last path segment.
+///
+/// The last segment of the IRI will not do for every graph: for a base graph
+/// it is the version's own name, which no graph of another version shares.
+fn graph_place<'a>(base: &str, graph: &'a str) -> &'a str {
+    super::registry::version_graph_suffix(base, graph)
+        .unwrap_or_else(|| graph.rsplit('/').next().unwrap_or(graph))
+}
+
 /// Flatten every triple across a set of graphs into a de-duplicated list,
 /// ignoring graph names. Term serialization matches [`graph_triples`]
 /// (`<iri>`, `"lit"`, `"lit"@lang`, `"lit"^^<dt>`, `_:bnode`).
@@ -188,10 +195,9 @@ pub fn collect_triples(store: &TripleStore, graphs: &[String]) -> Vec<(String, S
 
 /// Count triple-level ahead/behind between two versions, ignoring graph names.
 ///
-/// Unlike [`compute_diff`] (which pairs sub-graphs by IRI suffix), this flattens
-/// every triple across each version's graphs into a set and compares the sets.
-/// That makes it correct for branch ahead/behind, where the graph IRIs differ by
-/// version string and would never pair under suffix matching.
+/// Unlike [`compute_diff`] (which pairs graphs by their place in the version),
+/// this flattens every triple across each version's graphs into a set and
+/// compares the sets: a triple that moved to another sub-graph does not count.
 ///
 /// Returns `(ahead, behind)` = (triples in `to` not in `from`, in `from` not in `to`).
 pub fn triple_delta(
