@@ -331,13 +331,22 @@ and gets the same trail as PROV-O (`GET /api/datasets/{id}/provenance`).
 account exists, is on both only for the audience of `OTS_ACTOR_VISIBILITY`
 (§4.9): by default the accounts that may write the dataset, administrators
 included. The PROV-O document names the dataset's owner (a user, group or
-organisation) to every caller. **That setting does not reach the history of
-a model, vocabulary or shape graph**: anyone who may see a model or
-vocabulary reads its commits with each writer's account IRI, username and
-display name (`GET /api/models/{id}/commits`), and so does a signed-in user
-who may see a shape graph (`GET /api/shacl/shape-graphs/{id}/commits`). The
-web UI shows these histories. The DCAT catalogue names only each dataset's
-latest commit, without its account.
+organisation) to every caller. **The same setting covers the history of a
+model, vocabulary or shape graph**: anyone who may see a model or vocabulary
+reads its commits (`GET /api/models/{id}/commits`), and a signed-in user who
+may see a shape graph reads that graph's
+(`GET /api/shacl/shape-graphs/{id}/commits`), with each writer's account IRI,
+username and display name only for that audience: by default the accounts
+that may write the model or vocabulary (its owning user, an administrator of
+the owning organisation, administrators) or that manage the shape graph (its
+owning user, a member of the owning organisation, administrators). The model
+registry and the shape-graph library also keep, outside the commit graph,
+the account that registered an entry and the one that made each of its
+versions or revisions; those go to the same audience, and the public
+catalogue (`GET /api/public/catalog`) names them only when the setting is
+`readers`. The owning user or organisation of an entry is named to every
+reader. The web UI shows these histories. The DCAT catalogue names only each
+dataset's latest commit, without its account.
 
 **The statement-provenance graphs are graphs of the dataset.** Everyone who
 may read the dataset reads `urn:ots:statement-provenance:{id}`, over `/sparql`

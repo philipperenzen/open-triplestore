@@ -236,20 +236,21 @@ pub fn idp_token_policy(db: &AuthDb) -> OidcSessionPolicy {
     parse_idp_token_policy(&runtime::get(db, &crate::config::OIDC_IDP_TOKEN_POLICY))
 }
 
-/// The lowest dataset role a part of a dataset's history is shown to. The
-/// caller has always passed the dataset's read check first; this narrows what
-/// that reader gets, it never widens who reads.
+/// The lowest role a part of a resource's history is shown to: a dataset's,
+/// and for the author also a registry entry's and a shape graph's. The
+/// caller has always passed the resource's read check first; this narrows
+/// what that reader gets, it never widens who reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryAudience {
-    /// Accounts that may write the dataset, administrators included. Default:
+    /// Accounts that may write the resource, administrators included. Default:
     /// who changed what and when is personal data, and quads a graph no longer
     /// holds were removed for a reason, so neither goes to an open-ended
     /// audience unless the operator decides so.
     Writers,
-    /// Any account that may read the dataset. No bound at all where anyone
+    /// Any account that may read the resource. No bound at all where anyone
     /// can register.
     SignedIn,
-    /// Everyone who may read the dataset, anonymous callers on a public one
+    /// Everyone who may read the resource, anonymous callers on a public one
     /// included: the behaviour before the setting existed.
     Readers,
 }
@@ -282,19 +283,38 @@ impl HistoryAudience {
         dataset: &crate::auth::models::Dataset,
         user_id: Option<&str>,
     ) -> anyhow::Result<bool> {
+        self.admits_with(user_id, |uid| db.can_write_dataset(uid, dataset))
+    }
+
+    /// [`Self::admits`] for a resource that is not a dataset: `user_id`
+    /// (`None`: anonymous) may read it, and `may_write` is its write check
+    /// for an account. The check is asked only where it decides (`writers`,
+    /// of a signed-in caller); a failed one is an error, never a yes.
+    pub fn admits_with(
+        self,
+        user_id: Option<&str>,
+        may_write: impl FnOnce(&str) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
         match (self, user_id) {
             (HistoryAudience::Readers, _) => Ok(true),
             (_, None) => Ok(false),
             (HistoryAudience::SignedIn, Some(_)) => Ok(true),
-            (HistoryAudience::Writers, Some(uid)) => db.can_write_dataset(uid, dataset),
+            (HistoryAudience::Writers, Some(uid)) => may_write(uid),
         }
     }
 }
 
-/// Who sees the author of a dataset's changes — `actor_iri` on change-feed
-/// rows, the actor and its resolved names on the commit trail, the agents of
-/// the PROV-O document, `created_by` on versions, `owner` on branches and
-/// `author` on patch-log entries: the runtime setting `OTS_ACTOR_VISIBILITY`.
+/// Who sees the author of a change: the runtime setting
+/// `OTS_ACTOR_VISIBILITY`.
+///
+/// * A dataset: `actor_iri` on change-feed rows, the actor and its resolved
+///   names on the commit trail, the agents of the PROV-O document,
+///   `created_by` on versions and on stored validation reports, `owner` on
+///   branches and `author` on patch-log entries ([`shows_actors`]).
+/// * A registry entry and a shape graph: `created_by` on the entry, on its
+///   versions or revisions, a branch's `owner`, the actor on its commit
+///   trail, and the version authors among a model's collaborators
+///   ([`HistoryAudience::admits_with`], with the entry's own write check).
 pub fn actor_audience(db: &AuthDb) -> HistoryAudience {
     parse_history_audience(
         "OTS_ACTOR_VISIBILITY",
@@ -482,5 +502,29 @@ mod tests {
             PurgeAttribution::Keep
         );
         assert_eq!(purge_attribution(&db()), PurgeAttribution::Keep);
+    }
+
+    #[test]
+    fn a_history_audience_asks_the_write_check_only_where_it_decides() {
+        use HistoryAudience::{Readers, SignedIn, Writers};
+        let never = |_: &str| -> anyhow::Result<bool> { panic!("the write check was asked") };
+        // An anonymous caller is in no audience but `readers`.
+        assert!(!Writers.admits_with(None, never).unwrap());
+        assert!(!SignedIn.admits_with(None, never).unwrap());
+        assert!(Readers.admits_with(None, never).unwrap());
+        // An account is in `signed-in` and `readers` whatever it may write.
+        assert!(SignedIn.admits_with(Some("u"), never).unwrap());
+        assert!(Readers.admits_with(Some("u"), never).unwrap());
+        // `writers` is the write check's answer, for that account.
+        assert!(Writers
+            .admits_with(Some("u"), |uid| Ok(uid == "u"))
+            .unwrap());
+        assert!(!Writers
+            .admits_with(Some("v"), |uid| Ok(uid == "u"))
+            .unwrap());
+        // A failed check is an error, never a yes.
+        assert!(Writers
+            .admits_with(Some("u"), |_| anyhow::bail!("lookup failed"))
+            .is_err());
     }
 }

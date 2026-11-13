@@ -425,7 +425,7 @@ settings! {
         .doc("`assert`: send an identity assertion with SERVICE and LDES requests to peers.");
     ACTOR_VISIBILITY: String = Spec::new("OTS_ACTOR_VISIBILITY", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
         .default("writers")
-        .doc("Who sees the author of a dataset's changes (feed, commits, provenance, versions, patch log): writers, signed-in or readers.")
+        .doc("Who sees the author of a change to a dataset (feed, commits, provenance, versions, validation reports, patch log), a model or a shape graph (record, versions or revisions, commits): writers, signed-in or readers.")
         .runtime();
     CHANGE_PATCH_ACCESS: String = Spec::new("OTS_CHANGE_PATCH_ACCESS", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
         .default("writers")

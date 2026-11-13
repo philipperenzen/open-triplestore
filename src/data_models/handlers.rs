@@ -97,6 +97,46 @@ fn version_response(state: &AppState, version: DataModelVersion) -> DataModelVer
     }
 }
 
+// ─── Who sees the authors of an entry ─────────────────────────────────────────
+
+/// Whether `uid` (`None`: anonymous), who may read entry `record`, sees who
+/// made it, its versions and its commits: `created_by` on the entry and on a
+/// version, a branch's `owner`, a commit's actor, the version authors among
+/// the collaborators. That is `OTS_ACTOR_VISIBILITY`'s audience, as for a
+/// dataset's history; a writer here is an account that may write the entry
+/// (`can_write_ontology`). The owner (`owner_type`, `owner_id`) is not an
+/// author and stays named.
+fn shows_actors(
+    state: &AppState,
+    record: &DataModelRecord,
+    uid: Option<&str>,
+) -> Result<bool, AppError> {
+    actor_audience_admits(
+        state,
+        crate::auth::policy::actor_audience(&state.auth_db),
+        record,
+        uid,
+    )
+}
+
+/// [`shows_actors`] with the audience already read, for a listing.
+fn actor_audience_admits(
+    state: &AppState,
+    audience: crate::auth::policy::HistoryAudience,
+    record: &DataModelRecord,
+    uid: Option<&str>,
+) -> Result<bool, AppError> {
+    audience
+        .admits_with(uid, |uid| {
+            state.auth_db.can_write_ontology(
+                uid,
+                record.owner_type.as_deref(),
+                record.owner_id.as_deref(),
+            )
+        })
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 // ─── Content whose licence allows no altered copies ───────────────────────────
 
 /// The licence record that makes entry `id` hold content whose licence allows
@@ -324,9 +364,15 @@ pub async fn list_data_models(
         .collect();
     let mut attributions = registry::model_attributions(&state.store);
     let mut latest = registry::latest_published_attributions(&state.store);
-    let body: Vec<DataModelResponse> = filtered
-        .into_iter()
-        .map(|record| DataModelResponse {
+    // Who registered an entry is for `OTS_ACTOR_VISIBILITY`'s audience, entry
+    // by entry: the caller may write some of them and not others.
+    let audience = crate::auth::policy::actor_audience(&state.auth_db);
+    let mut body: Vec<DataModelResponse> = Vec::with_capacity(filtered.len());
+    for mut record in filtered {
+        if record.created_by.is_some() && !actor_audience_admits(&state, audience, &record, uid)? {
+            record.created_by = None;
+        }
+        body.push(DataModelResponse {
             attribution: entry_attribution(
                 &record,
                 attributions.remove(&record.id),
@@ -334,8 +380,8 @@ pub async fn list_data_models(
             )
             .map(|a| served_attribution(&state, a)),
             record,
-        })
-        .collect();
+        });
+    }
     Ok(Json(body))
 }
 
@@ -437,7 +483,7 @@ pub async fn get_data_model(
     user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let record = registry::get_data_model(&state.store, &state.base_url, &id)
+    let mut record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
     let uid = user.as_deref().map(|u| u.user_id.as_str());
     if !state
@@ -451,6 +497,9 @@ pub async fn get_data_model(
         .map_err(|e| AppError::Internal(e.to_string()))?
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
+    }
+    if !shows_actors(&state, &record, uid)? {
+        record.created_by = None;
     }
     Ok(Json(model_response(&state, record)))
 }
@@ -579,7 +628,12 @@ pub async fn list_versions(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let versions = registry::list_versions(&state.store, &state.base_url, &id);
+    let mut versions = registry::list_versions(&state.store, &state.base_url, &id);
+    if !shows_actors(&state, &ontology, uid)? {
+        for v in &mut versions {
+            v.created_by = None;
+        }
+    }
     let mut attributions = registry::version_attributions(&state.store, &state.base_url, &id);
     let body: Vec<DataModelVersionResponse> = versions
         .into_iter()
@@ -614,15 +668,29 @@ pub async fn get_version(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+    let mut record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    if !shows_actors(&state, &ontology, uid)? {
+        record.created_by = None;
+    }
     Ok(Json(version_response(&state, record)))
 }
 
 /// GET /api/models/:id/collaborators
 ///
-/// Lists who can see/edit this model: the owner (user) or org members, plus any
-/// users who authored a version (draft holders). Deduplicated, owner/org first.
+/// The accounts around this entry: its owner (a user) or the members of the
+/// owning organisation, plus any other account that made a version (draft
+/// holders). Deduplicated, owner/org first. A list of accounts is not every
+/// reader's in full:
+///
+/// * the members of the owning organisation are listed to its members and to
+///   administrators, as `GET /api/organisations/:id/members` lists them;
+/// * who made a version is for `OTS_ACTOR_VISIBILITY`'s audience
+///   ([`shows_actors`]);
+/// * an e-mail address is given only to the owner's side (the owning user,
+///   a member of the owning organisation) and to administrators.
+///
+/// The owning user is named to every reader: the entry's record names them.
 pub async fn list_collaborators(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -643,15 +711,27 @@ pub async fn list_collaborators(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let created_by: Vec<String> = registry::list_versions(&state.store, &state.base_url, &id)
-        .into_iter()
-        .filter_map(|v| v.created_by)
-        .collect();
+    let owners_side = on_owners_side(
+        state.auth_db.as_ref(),
+        user.as_deref(),
+        record.owner_type.as_deref(),
+        record.owner_id.as_deref(),
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let created_by: Vec<String> = if shows_actors(&state, &record, uid)? {
+        registry::list_versions(&state.store, &state.base_url, &id)
+            .into_iter()
+            .filter_map(|v| v.created_by)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let list = collaborators_for(
         state.auth_db.as_ref(),
         record.owner_type.as_deref(),
         record.owner_id.as_deref(),
         &created_by,
+        owners_side,
     );
     Ok(Json(list))
 }
@@ -681,7 +761,13 @@ pub async fn list_commits(
     let subject = format!("{}/data-model/{}", state.base_url, id);
     let scope = crate::commit_log::CommitScope::Subject(subject);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
-    crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    // Who made a commit is for `OTS_ACTOR_VISIBILITY`'s audience; below it the
+    // trail keeps its messages, times and counts and names nobody.
+    if shows_actors(&state, &record, uid)? {
+        crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    } else {
+        crate::commit_log::withhold_actors(&mut commits);
+    }
     Ok(Json(commits))
 }
 
@@ -1334,28 +1420,63 @@ pub async fn patch_version_data(
     Ok(resp)
 }
 
-/// JSON view of one collaborator on a model/vocabulary.
-fn collaborator_json(u: &crate::auth::models::User, role: &str, source: &str) -> serde_json::Value {
+/// JSON view of one collaborator on a model/vocabulary; `email` is `null`
+/// unless `with_email`.
+fn collaborator_json(
+    u: &crate::auth::models::User,
+    role: &str,
+    source: &str,
+    with_email: bool,
+) -> serde_json::Value {
     json!({
         "user_id": u.id,
         "username": u.username,
         "display_name": u.display_name,
-        "email": u.email,
+        "email": with_email.then_some(u.email.as_str()),
         "role": role,
         "source": source,
     })
 }
 
+/// Whether `user` is on the owner's side of an entry: the owning user, a
+/// member (any role) of the owning organisation, or an administrator. They
+/// are who the organisation's member list is served to, and who gets the
+/// e-mail addresses on the collaborators route.
+fn on_owners_side(
+    auth_db: &crate::auth::db::AuthDb,
+    user: Option<&AuthenticatedUser>,
+    owner_type: Option<&str>,
+    owner_id: Option<&str>,
+) -> anyhow::Result<bool> {
+    let Some(user) = user else {
+        return Ok(false);
+    };
+    if user.is_admin() {
+        return Ok(true);
+    }
+    Ok(match (owner_type, owner_id) {
+        (Some("user"), Some(oid)) => oid == user.user_id,
+        (Some("organisation"), Some(oid)) => {
+            auth_db.get_org_membership(&user.user_id, oid)?.is_some()
+        }
+        _ => false,
+    })
+}
+
 /// Build the collaborator list for a model/vocabulary given its owner and the
-/// set of version `created_by` IRIs (version/draft authors). Deduplicated by
-/// user; owner/org members are listed first, then any extra draft authors.
+/// `created_by` IRIs of the versions whose authors the caller may see (none
+/// below `OTS_ACTOR_VISIBILITY`'s audience). Deduplicated by user; owner/org
+/// members are listed first, then any extra draft authors.
 ///
-/// Shared by both the data-model and vocabulary collaborators endpoints.
+/// `owners_side` ([`on_owners_side`]) decides the rest: only then are the
+/// members of the owning organisation listed, and only then does an entry
+/// carry an e-mail address. The owning user is listed either way.
 pub fn collaborators_for(
     auth_db: &crate::auth::db::AuthDb,
     owner_type: Option<&str>,
     owner_id: Option<&str>,
     created_by_iris: &[String],
+    owners_side: bool,
 ) -> Vec<serde_json::Value> {
     use std::collections::HashSet;
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1365,14 +1486,19 @@ pub fn collaborators_for(
         (Some("user"), Some(oid)) => {
             if let Ok(Some(u)) = auth_db.get_user_by_id(oid) {
                 seen.insert(u.id.clone());
-                out.push(collaborator_json(&u, "owner", "owner"));
+                out.push(collaborator_json(&u, "owner", "owner", owners_side));
             }
         }
-        (Some("organisation"), Some(oid)) => {
+        (Some("organisation"), Some(oid)) if owners_side => {
             if let Ok(members) = auth_db.list_org_members(oid) {
                 for (u, role) in members {
                     if seen.insert(u.id.clone()) {
-                        out.push(collaborator_json(&u, role.as_str(), "organisation"));
+                        out.push(collaborator_json(
+                            &u,
+                            role.as_str(),
+                            "organisation",
+                            owners_side,
+                        ));
                     }
                 }
             }
@@ -1387,7 +1513,7 @@ pub fn collaborators_for(
         }
         if let Ok(Some(u)) = auth_db.get_user_by_id(uid) {
             seen.insert(u.id.clone());
-            out.push(collaborator_json(&u, "contributor", "draft"));
+            out.push(collaborator_json(&u, "contributor", "draft", owners_side));
         }
     }
 
@@ -1920,6 +2046,8 @@ pub async fn list_branches(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
+    // A branch's `owner` is who made its tip: `OTS_ACTOR_VISIBILITY`'s audience.
+    let actors = shows_actors(&state, &record, uid)?;
     let views: Vec<BranchVersionView> = registry::list_versions(&state.store, &state.base_url, &id)
         .into_iter()
         .map(|v| BranchVersionView {
@@ -1927,7 +2055,7 @@ pub async fn list_branches(
             version: v.version,
             status: v.status.as_str().to_string(),
             derived_from: v.derived_from,
-            created_by: v.created_by,
+            created_by: v.created_by.filter(|_| actors),
             created_at: v.created_at,
             sub_graphs: if v.sub_graphs.is_empty() {
                 vec![v.graph_iri]
