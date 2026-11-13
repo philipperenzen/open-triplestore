@@ -491,7 +491,12 @@ async fn deleting_a_dataset_removes_its_api_services() {
         "service should exist before delete"
     );
 
-    state.auth_db.delete_dataset("apids").unwrap();
+    state
+        .auth_db
+        .delete_dataset("apids", |g| {
+            open_triplestore::auth::dataset_graph::graph_holds_data(&state.store, g)
+        })
+        .unwrap();
 
     assert!(
         sq_store

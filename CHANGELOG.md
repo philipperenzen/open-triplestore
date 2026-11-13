@@ -96,6 +96,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a public profile, their email, phone, organisation, bio and website, in the
   RDF store. It now deletes that graph before the row, as
   `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
+- **A draft copies the graphs of its source version only.**
+  `POST /api/models/:id/versions/:ver/draft` and a new branch took every graph
+  whose IRI starts with the source version's as the source's own, so a version
+  whose name only starts the same came along: with versions `9.1` and `9.10`, a
+  draft `9.2` of `9.1` also held 9.10's triples, in a second graph named
+  `…/version/9.20`, and an existing version `9.20` had its graph cleared and
+  filled with them. A version's graphs are now its base graph and the
+  sub-graphs under it (`…/version/9.1/…`).
+- **The diff of two single-graph model versions shows what changed.**
+  `GET /api/models/:id/diff` paired the graphs of the two versions by the last
+  segment of their IRI, which for a version's base graph is the version's own
+  name: versions with one graph each never paired, and the diff listed every
+  triple of the older one as removed and every triple of the newer one as
+  added. Graphs are now paired by their place in the version, base graph with
+  base graph and sub-graph with the sub-graph of the same name. The `graph` of
+  a diff item is that place: a sub-graph's name as before, and `""` for the
+  base graph (it was the version's name), which is what
+  `PATCH /api/models/:id/versions/:ver/data` takes for the base graph too.
+  `?graph=shapes` no longer takes a sub-graph `core-shapes` for `shapes`, and a
+  filtered diff no longer leaves out a sub-graph that only one of the versions
+  has.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
@@ -542,6 +563,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one the entry above adds, so it has the same limits: it ends when the
   dataset is deleted, and graphs detached while private before this release
   have none.
+- **A private graph stays private after its dataset is deleted, for whatever
+  else names it.** Deleting a dataset, or the organisation that owns it,
+  keeps in the store every graph the dataset did not create and every graph
+  another dataset registers or links as its shapes graph. The delete took the
+  dataset's registrations with it, and so the `private` flag and the record of
+  a graph detached while private (the two entries above). From then on a SHACL
+  Studio Library entry that adopted such a graph, or another dataset that
+  links it as its shapes graph, served it to that entry's or dataset's
+  audience: a signed-in viewer, and an anonymous caller on a public dataset,
+  got its Turtle from `GET /api/datasets/{id}/shapes`, the form manifest, the
+  Library and stored validation reports. The delete now records, in the same
+  transaction and by the graph's name, every private graph it leaves in the
+  store, and the graph stays private on all of those paths. It is served only
+  to callers who may read it by the rule `/sparql` applies: administrators,
+  graph-ACL readers, and the readers of another dataset that registers it.
+  The deleted dataset's writers are no longer among them. The record names no
+  dataset, so a dataset that reuses the id inherits nothing from it. It ends
+  when a dataset registers the graph (the graph comes back private) or when a
+  writer of a dataset that holds it sets its `private` flag. `/sparql`, the
+  Graph Store and the browser were not affected. Datasets deleted before this
+  release left no record. One new table in the identity database, created on
+  start; nothing to migrate.
+- **A SHACL Studio pipeline no longer publishes a graph on record as private
+  when it attaches it.** A pipeline that writes its report or inferred
+  triples into a graph its owner names attaches that graph to the dataset
+  holding the data it ran over, and then set the registration's `private`
+  flag from the run's scope: off when nothing in scope was private. A graph
+  on record as private (detached while private, or kept by the delete of the
+  dataset that held it as private; the entries above) gets the flag back
+  when a dataset registers it, and the pipeline cleared it again at once. The
+  graph's data, including what it held while private, was then served to
+  that dataset's readers. The pipeline now only sets the flag, never clears
+  it. Writing into a graph its owner names needs write access to that graph,
+  so only administrators and graph-ACL writers could reach this.
+- **A deleted dataset's SHACL bindings no longer pass to the next dataset of
+  its name.** Bindings (`POST /api/shacl/bindings`) are triples keyed by IRI:
+  a dataset's by `{base}/dataset/{id}`, a graph's by its name. A dataset id is
+  a slug of the dataset's name and is free again after a delete, and deleting
+  a dataset or its organisation left its bindings in place. So anyone who
+  then created a dataset of the same name got the deleted dataset's bindings,
+  and with them shape graphs its owner never chose and may not read, even
+  private Library entries: listed in effective shapes, with their Turtle in
+  the form manifest (to anonymous callers too on a public dataset), shaping
+  validation runs and gating writes. The same held for a graph of the deleted
+  dataset written again under the same name. A dataset delete now removes the
+  dataset's bindings and those of every graph it removes from the store,
+  before the dataset itself goes; a graph it keeps keeps its bindings.
+  `POST /api/admin/versions/sweep` now also removes the bindings that earlier
+  deletes left (`bindings_removed` in its report): run it once after
+  upgrading.
 
 ## [0.8.1] — 2026-10-22
 

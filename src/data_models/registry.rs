@@ -1177,6 +1177,20 @@ pub fn version_record_iri(base_url: &str, data_model_id: &str, version: &str) ->
     format!("{base_url}/data-model/{data_model_id}/version/{version}")
 }
 
+/// Where `graph_iri` sits in the version whose base graph is `version_graph`:
+/// `Some("")` for the base graph itself, `Some("shapes")` for its sub-graph
+/// `{version_graph}/shapes`, `None` for a graph of anything else. A prefix
+/// test alone does not tell: `…/version/9.1` is also a prefix of the graphs of
+/// the versions `9.10` and `9.1-rc1`.
+pub fn version_graph_suffix<'a>(version_graph: &str, graph_iri: &'a str) -> Option<&'a str> {
+    let rest = graph_iri.strip_prefix(version_graph)?;
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix('/')
+    }
+}
+
 /// Record, replace or (with `None`) clear the attribution of a registry entry
 /// or version record, in one update.
 pub fn set_attribution(

@@ -212,11 +212,22 @@ fn read_dataset_row(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
 const RUN_SUMMARY_COLS: &str = "id, dataset_id, run_timestamp, conforms, results_count, violation_count, warning_count, info_count, triggered_by";
 
 /// The private graphs, as one column `graph_iri`: flagged private in some
-/// dataset, or on record as private when they left one. See
+/// dataset, on record as private when they left one, or on record as private
+/// in a dataset that was deleted. See
 /// [`AuthDb::list_private_dataset_graph_iris`], which states the rule.
 const PRIVATE_GRAPHS_SQL: &str = "SELECT graph_iri FROM dataset_graphs WHERE private != 0 \
      UNION \
-     SELECT graph_iri FROM dataset_detached_private_graphs";
+     SELECT graph_iri FROM dataset_detached_private_graphs \
+     UNION \
+     SELECT graph_iri FROM deleted_dataset_private_graphs";
+
+/// The graphs one dataset (`?1`) holds as private, as one column
+/// `graph_iri`: flagged private now, or on record as private when they left
+/// it. See [`AuthDb::private_graphs_incl_detached`].
+const DATASET_PRIVATE_GRAPHS_SQL: &str =
+    "SELECT graph_iri FROM dataset_graphs WHERE dataset_id=?1 AND private != 0 \
+     UNION \
+     SELECT graph_iri FROM dataset_detached_private_graphs WHERE dataset_id=?1";
 
 /// Helper to read a ShaclRunSummary from a row (columns per RUN_SUMMARY_COLS).
 fn read_run_summary(row: &rusqlite::Row) -> rusqlite::Result<ShaclRunSummary> {
@@ -693,6 +704,15 @@ impl AuthDb {
                 graph_iri TEXT NOT NULL,
                 detached_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_id, graph_iri)
+            );
+
+            -- Graphs that were private in a dataset when it was deleted, and
+            -- that the delete left in the store (see `delete_dataset`). Keyed
+            -- by graph alone: no dataset is left to hold the record, and one
+            -- that reuses the id must not inherit it.
+            CREATE TABLE IF NOT EXISTS deleted_dataset_private_graphs (
+                graph_iri TEXT PRIMARY KEY,
+                recorded_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS sparql_services (
@@ -4416,9 +4436,43 @@ impl AuthDb {
         Ok(())
     }
 
-    pub fn delete_dataset(&self, id: &str) -> anyhow::Result<()> {
+    /// Delete dataset `id`, and with it its registrations, flags and
+    /// records. The caller has already deleted from the store the graphs that
+    /// go with the dataset; `still_stored` says whether a graph is still there.
+    ///
+    /// A delete keeps a graph the dataset did not create, or that another
+    /// dataset uses, and whatever else names that graph (a Library entry, a
+    /// link from another dataset, a binding) goes on naming it. Its `private`
+    /// flag was a column of the registration this delete removes. So each
+    /// graph the dataset holds as private ([`Self::private_graphs_incl_detached`])
+    /// that is still stored is recorded here by its name, in the same
+    /// transaction, and stays one of [`Self::list_private_dataset_graph_iris`].
+    /// The record ends when a dataset holds the graph under a flag again
+    /// ([`Self::reclaim_detached_privacy`], [`Self::set_dataset_graph_private`]).
+    /// A graph that is gone, or empty, holds nothing of the dataset's and gets
+    /// no record.
+    pub fn delete_dataset(
+        &self,
+        id: &str,
+        still_stored: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
+        let kept_private: Vec<String> = {
+            let mut stmt = tx.prepare(DATASET_PRIVATE_GRAPHS_SQL)?;
+            let iris = stmt
+                .query_map(params![id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            iris.into_iter().filter(|g| still_stored(g)).collect()
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        for graph_iri in &kept_private {
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_dataset_private_graphs (graph_iri, recorded_at) \
+                 VALUES (?1,?2)",
+                params![graph_iri, now],
+            )?;
+        }
         // Drop the dataset's API services in the same transaction: dataset ids are
         // reusable slugs, so a leftover `visibility='public'` service would attach
         // to a future dataset that reused this id and expose its data.
@@ -4811,11 +4865,11 @@ impl AuthDb {
     pub fn add_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
-        tx.execute(
+        let inserted = tx.execute(
             "INSERT OR IGNORE INTO dataset_graphs (dataset_id, graph_iri) VALUES (?1,?2)",
             params![dataset_id, graph_iri],
         )?;
-        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri)?;
+        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri, inserted > 0)?;
         tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
@@ -4826,7 +4880,8 @@ impl AuthDb {
     /// and readable by the dataset's readers. A registration that exists is
     /// made private and keeps its role. A detach record for the graph ends
     /// here too ([`Self::reclaim_detached_privacy`]): the row carries the
-    /// flag again.
+    /// flag again. So does a record left by a deleted dataset, whether or not
+    /// the row is new: the flag is set here either way.
     pub fn add_private_dataset_graph(
         &self,
         dataset_id: &str,
@@ -4842,16 +4897,21 @@ impl AuthDb {
              ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET private = 1",
             params![dataset_id, graph_iri, role_str],
         )?;
-        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri)?;
+        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri, true)?;
         tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
     }
 
-    /// The other half of [`Self::remove_dataset_graph`], run by every
-    /// registration path in the transaction that makes the row: a graph on
-    /// record as private when it left `dataset_id` gets the flag back, and the
-    /// record goes (the row carries it again).
+    /// The other half of [`Self::remove_dataset_graph`] and
+    /// [`Self::delete_dataset`], run by every registration path in the
+    /// transaction that makes the row: a graph on record as private when it
+    /// left `dataset_id` gets the flag back, and the record goes (the row
+    /// carries it again). So does a graph on record as private when a dataset
+    /// that held it was deleted, when this registration is a `new_row`: any
+    /// dataset that takes the graph anew holds it as private. A registration
+    /// that already existed (a dataset that held the graph without the flag
+    /// when the other one was deleted) is left as it is.
     ///
     /// Every way a graph comes back to a dataset ends here — the registration
     /// route, a version restore, an upload that needs the assets graph again,
@@ -4861,11 +4921,18 @@ impl AuthDb {
         conn: &rusqlite::Connection,
         dataset_id: &str,
         graph_iri: &str,
+        new_row: bool,
     ) -> rusqlite::Result<()> {
-        let on_record = conn.execute(
+        let mut on_record = conn.execute(
             "DELETE FROM dataset_detached_private_graphs WHERE dataset_id=?1 AND graph_iri=?2",
             params![dataset_id, graph_iri],
         )?;
+        if new_row {
+            on_record += conn.execute(
+                "DELETE FROM deleted_dataset_private_graphs WHERE graph_iri=?1",
+                params![graph_iri],
+            )?;
+        }
         if on_record > 0 {
             conn.execute(
                 "UPDATE dataset_graphs SET private=1 WHERE dataset_id=?1 AND graph_iri=?2",
@@ -4888,13 +4955,18 @@ impl AuthDb {
     ) -> anyhow::Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
+        let existed: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2)",
+            params![dataset_id, graph_iri],
+            |row| row.get(0),
+        )?;
         tx.execute(
             "INSERT INTO dataset_graphs (dataset_id, graph_iri, origin) VALUES (?1,?2,?3) \
              ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET \
              origin = COALESCE(dataset_graphs.origin, excluded.origin)",
             params![dataset_id, graph_iri, origin],
         )?;
-        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri)?;
+        Self::reclaim_detached_privacy(&tx, dataset_id, graph_iri, !existed)?;
         tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
@@ -5008,11 +5080,7 @@ impl AuthDb {
         dataset_id: &str,
     ) -> anyhow::Result<HashSet<String>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT graph_iri FROM dataset_graphs WHERE dataset_id=?1 AND private != 0 \
-             UNION \
-             SELECT graph_iri FROM dataset_detached_private_graphs WHERE dataset_id=?1",
-        )?;
+        let mut stmt = conn.prepare_cached(DATASET_PRIVATE_GRAPHS_SQL)?;
         let iris = stmt
             .query_map(params![dataset_id], |row| row.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
@@ -5131,40 +5199,58 @@ impl AuthDb {
     /// Mark a registered graph private or public. A private graph is excluded
     /// from the accessible-graph set of users who cannot write the owning
     /// dataset, so it disappears from listings and SPARQL scope for them.
+    ///
+    /// A dataset that holds the graph decides its privacy from then on: a
+    /// record left by a deleted dataset ([`Self::delete_dataset`]) ends, in
+    /// the same transaction, whichever way the flag is set.
     pub fn set_dataset_graph_private(
         &self,
         dataset_id: &str,
         graph_iri: &str,
         private: bool,
     ) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute(
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
             "UPDATE dataset_graphs SET private=?1 WHERE dataset_id=?2 AND graph_iri=?3",
             params![private as i64, dataset_id, graph_iri],
         )?;
+        if updated > 0 {
+            tx.execute(
+                "DELETE FROM deleted_dataset_private_graphs WHERE graph_iri=?1",
+                params![graph_iri],
+            )?;
+        }
+        tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
     }
 
     /// The private graphs: those some dataset holds as private
-    /// ([`Self::set_dataset_graph_private`]), and those that were private
-    /// when they left a dataset ([`Self::remove_dataset_graph`]).
+    /// ([`Self::set_dataset_graph_private`]), those that were private when
+    /// they left a dataset ([`Self::remove_dataset_graph`]), and those that
+    /// were private in a dataset when it was deleted and are still stored
+    /// ([`Self::delete_dataset`]).
     ///
-    /// The flag is a column of the registration, and a detach removes the
-    /// registration. It does not always remove the stored graph (one the
-    /// dataset may not delete, one another dataset uses, the dataset's own
-    /// shapes graph), and it never removes what else names the graph: a SHACL
-    /// Studio Library entry, a dataset's shapes graph setting, a validation
-    /// binding. Each of those serves a graph by its own rule and withholds
-    /// what this set names from whoever may not read it by the `/sparql` rule
-    /// ([`crate::auth::acl::withheld_private_graphs`]). A graph that left as a
-    /// private one therefore stays in the set: nobody made it public, so the
-    /// detach must not.
+    /// The flag is a column of the registration, and a detach or a dataset
+    /// delete removes the registration. Neither always removes the stored
+    /// graph (one the dataset may not delete, one another dataset uses, the
+    /// dataset's own shapes graph), and neither removes what else names the
+    /// graph: a SHACL Studio Library entry, a dataset's shapes graph setting,
+    /// a validation binding. Each of those serves a graph by its own rule and
+    /// withholds what this set names from whoever may not read it by the
+    /// `/sparql` rule ([`crate::auth::acl::withheld_private_graphs`]). A graph
+    /// that left as a private one therefore stays in the set: nobody made it
+    /// public, so the detach or delete must not.
     ///
-    /// It leaves the set the way the record ends: its dataset attaches it
-    /// again (the registration carries the flag from then on, until a writer
-    /// clears it) or is deleted. This is the one place the set is defined;
-    /// [`Self::is_private_dataset_graph`] asks it about one graph.
+    /// It leaves the set the way its record ends. A detach record ends when
+    /// its dataset attaches the graph again (the registration carries the
+    /// flag from then on, until a writer clears it) or is deleted, which
+    /// turns it into a delete record if the graph is still stored. A delete
+    /// record ends when a dataset registers the graph anew (it comes back
+    /// private) or a writer of a dataset that holds it sets its flag. This is
+    /// the one place the set is defined; [`Self::is_private_dataset_graph`]
+    /// asks it about one graph.
     pub fn list_private_dataset_graph_iris(&self) -> anyhow::Result<HashSet<String>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(PRIVATE_GRAPHS_SQL)?;
@@ -8468,14 +8554,64 @@ mod detached_private_graph_tests {
     }
 
     /// The record goes with the dataset: one that reuses the id starts clean.
+    /// (The graph here is gone from the store; see the next test for one
+    /// that stays.)
     #[test]
     fn a_deleted_dataset_takes_its_record_with_it() {
         let db = db();
         assert!(db.remove_dataset_graph("a", PRIV).unwrap());
-        db.delete_dataset("a").unwrap();
+        db.delete_dataset("a", |_| false).unwrap();
         dataset(&db, "a");
         assert!(withheld(&db, "a").is_empty());
         db.add_dataset_graph("a", PRIV).unwrap();
         assert_eq!(flag(&db, "a", PRIV), Some(false));
+    }
+
+    /// A private graph a dataset delete leaves in the store stays a private
+    /// graph, by its name: whether the dataset flagged it or detached it
+    /// while private, and not for a graph the delete removed. The record ends
+    /// when a dataset registers the graph anew (private) or when a writer of
+    /// a dataset that holds it sets its flag; a registration that already
+    /// existed is left alone, and a dataset that reuses the id gets nothing.
+    #[test]
+    fn a_private_graph_a_dataset_delete_keeps_stays_a_private_graph() {
+        const GONE: &str = "http://ex.org/gone";
+        const DETACHED: &str = "http://ex.org/detached";
+        let db = db();
+        for g in [GONE, DETACHED] {
+            db.add_dataset_graph("a", g).unwrap();
+            db.set_dataset_graph_private("a", g, true).unwrap();
+        }
+        assert!(db.remove_dataset_graph("a", DETACHED).unwrap());
+        // `b` holds PRIV without the flag.
+        assert_eq!(flag(&db, "b", PRIV), Some(false));
+
+        db.delete_dataset("a", |g| g != GONE).unwrap();
+        assert_eq!(private(&db), [DETACHED, PRIV]);
+        assert!(!db.is_private_dataset_graph(GONE).unwrap());
+        assert!(db.is_private_dataset_graph(PRIV).unwrap());
+
+        // `b` writes to it again: its registration stays as it was.
+        db.add_dataset_graph_with_origin("b", PRIV, "adopted")
+            .unwrap();
+        assert_eq!(flag(&db, "b", PRIV), Some(false));
+        assert!(db.is_private_dataset_graph(PRIV).unwrap());
+
+        // A dataset that reuses the id inherits no record and no flag.
+        dataset(&db, "a");
+        assert!(withheld(&db, "a").is_empty());
+        db.add_dataset_graph("a", GONE).unwrap();
+        assert_eq!(flag(&db, "a", GONE), Some(false));
+
+        // Registered anew, the graph comes back private, and the record is
+        // gone: a writer's flag decides.
+        db.add_dataset_graph("a", DETACHED).unwrap();
+        assert_eq!(flag(&db, "a", DETACHED), Some(true));
+        db.set_dataset_graph_private("a", DETACHED, false).unwrap();
+        assert!(!db.is_private_dataset_graph(DETACHED).unwrap());
+
+        // A writer of `b`, which held PRIV all along, decides for it too.
+        db.set_dataset_graph_private("b", PRIV, false).unwrap();
+        assert!(private(&db).is_empty());
     }
 }
