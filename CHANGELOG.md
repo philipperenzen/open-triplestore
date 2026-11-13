@@ -487,10 +487,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   naming it; anyone who may read a dataset reads its history, and each
   writer's account IRI, username and display name go to
   `OTS_ACTOR_VISIBILITY`'s audience (the dataset's writers by default);
-  anyone who may see a model or shape graph reads its history with every
-  writer named, since that setting does not reach it; a dataset's readers
-  read its statement-provenance graph, under `full` with the account behind
-  each change whatever that setting says, and its writers the private one.
+  the same holds for the history of a model or shape graph, whose audience
+  is by default the accounts that may write the model or manage the shape
+  graph; a dataset's readers read its statement-provenance graph, under
+  `full` with the account behind each change whatever that setting says,
+  and its writers the private one.
   It states that **neither has any retention and a user purge touches neither**
   (an administrator can empty the commit graph or strip one account's
   attribution from it; a statement-provenance graph goes only with its

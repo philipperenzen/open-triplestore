@@ -227,12 +227,13 @@ operating them correctly is the operator's responsibility** (see
   document (`GET /api/datasets/{id}/provenance`) follow the same rule: anyone
   who may read the dataset gets the commits of the graphs they may read, and
   each writer's account IRI, username and display name go to
-  `OTS_ACTOR_VISIBILITY`'s audience. That setting does not reach the history
-  of a model or shape graph, which shows each writer to everyone who may see
-  the model or shape graph, nor a statement-provenance graph: under `full`,
-  the account behind each statement change is read by every reader of the
-  dataset, or by its writers for a graph the dataset holds as private. The
-  whole commit graph is admin-only ([PRIVACY.md](../PRIVACY.md) §4.10).
+  `OTS_ACTOR_VISIBILITY`'s audience. The same setting covers the history of
+  a model or shape graph, where the audience is by default the accounts that
+  may write the model or manage the shape graph. It does not reach a
+  statement-provenance graph: under `full`, the account behind each statement
+  change is read by every reader of the dataset, or by its writers for a
+  graph the dataset holds as private. The whole commit graph is admin-only
+  ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Transport security:** intended to run **behind a reverse proxy that
   terminates TLS**; bind addresses default to loopback; configurable CORS
   allowlist.
