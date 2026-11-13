@@ -117,6 +117,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `?graph=shapes` no longer takes a sub-graph `core-shapes` for `shapes`, and a
   filtered diff no longer leaves out a sub-graph that only one of the versions
   has.
+- **A sub-graph of a model version is selected by its name, not by the end of
+  its IRI.** The `graph` of `GET /api/models/:id/versions/:ver/data`, of
+  `PATCH /api/models/:id/versions/:ver/data` (the request's and each
+  triple's) and of
+  `POST /api/models/:id/versions/:ver/subgraph/{stage,publish,deprecate}` was
+  matched against the end of each sub-graph's IRI, so `shapes` also matched a
+  sub-graph `core-shapes`: the download returned both, and an edit or a
+  status change went to whichever of the two the registry listed first, and
+  to `core-shapes` in a version with no `shapes` at all. A sub-graph now
+  answers to its name in the version (`shapes` for `…/version/1.0/shapes`,
+  with or without a leading `/`) and to its full IRI; a nested sub-graph
+  `a/b` also answers to `b`, as in the diff's `?graph=`. An edit or a status
+  change takes the sub-graph named exactly so first, and a name that several
+  nested sub-graphs end in and none bears is refused (`400`) before anything
+  is written. A version's base graph is selected by leaving `graph` out or by
+  its full IRI; the version's own name, the end of that IRI, no longer
+  selects it.
+- **The diff of two model versions reports every differing triple once.**
+  `GET /api/models/:id/diff` paired each removed triple with the first added
+  triple of the same subject and predicate, and then dropped every added and
+  removed triple of that subject and predicate from `added` and `removed`.
+  Where a subject has several values for a predicate, a value replaced by two
+  came out as one change with the second new value in no list, and two values
+  replaced by one as two changes to the same new value. A removed value now
+  pairs with at most one added value and an added value with at most one
+  removed value, in the order of the values, and the ones left over stay in
+  `removed` and `added`: the three lists together are the difference of the
+  two versions, and `summary` counts it. Within a graph the lists come in
+  subject, predicate, value order.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
