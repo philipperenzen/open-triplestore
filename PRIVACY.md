@@ -437,19 +437,23 @@ same things. Deactivating an account does not erase it.
   the object store, with each file's entry in the dataset's file list and its
   description (title, type, size) in the dataset's assets graph. That
   includes files it uploaded to datasets of other accounts and of
-  organisations. If the object store cannot delete one of them, the request
-  answers `500`, nothing is erased and the request can be repeated. While the
-  change log is on (§4.9), it records the removed descriptions like any other
-  write.
+  organisations. The files go first. If the object store cannot delete one
+  of them, the request answers `500`, nothing has changed and the request can
+  be repeated. If the step after it refuses the erase (replacing the account
+  in the history under `deleted-user`, §4.10), the account is still there
+  without its stored files, and repeating the request completes the erase.
+  While the change log is on (§4.9), it records the removed descriptions like
+  any other write.
 
 Before the row goes, the user's own purge and the legacy route apply what a
 deactivation applies (an administrator's purge needs an account that was
 deactivated earlier): **the account's personal datasets are made private**,
 and so are the datasets of an organisation it was the last active member of.
 
-**Kept.** An erase removes or rewrites none of the following. The user ID is
-a random identifier; once the account is gone the instance can no longer turn
-it into a name, except where a record below holds both.
+**Kept.** An erase removes none of the following, and rewrites none except
+where `OTS_PURGE_ATTRIBUTION` says so below. The user ID is a random
+identifier; once the account is gone the instance can no longer turn it into
+a name, except where a record below holds both.
 
 - **The account's datasets.** A dataset the account owned stays in the store
   with its graphs, versions and other accounts' files, private, under an
@@ -471,8 +475,12 @@ it into a name, except where a record below holds both.
   "email change requested" and "email changed"; and the username on the
   deletion event of an administrator's purge. The deletion events of the
   user's own purge and of the legacy route carry the user ID and the route.
-- **The change log** (§4.9) and **the commit trail and statement
-  provenance** (§4.10), as those sections say.
+  Under `deleted-user`, each of the three also says how many commits and
+  statement changes it attributed to "Deleted user".
+- **The change log** (§4.9), and **the commit trail and statement
+  provenance** (§4.10), which keep the account's IRI unless
+  `OTS_PURGE_ATTRIBUTION=deleted-user` has the erase replace it there. That
+  setting reaches those two records and nothing else in this list.
 - **Who made what, in the server's own graphs.** These records name the
   account by its IRI (`{OTS_BASE_URL}/users/{user ID}`) or its user ID, and
   nothing removes them:

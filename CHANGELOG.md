@@ -27,8 +27,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{OTS_BASE_URL}/users/deleted`. Commit histories show it as "Deleted
   user". The commits and annotations stay, with their times, messages,
   graphs and statements. If the replacement fails the account is not erased
-  and the request answers `500`; an administrator's purge records in the
-  audit log how many commits and statement changes it re-attributed. The
+  and the request answers `500`; the erase records in the audit log how many
+  commits and statement changes it re-attributed. The
   setting covers those two records only: it does not rewrite accounts erased
   earlier, the change log, backups, or other records that name who made
   something. `PRIVACY.md` §4.10 and `docs/gdpr.md` (Art. 17) say when to
@@ -560,7 +560,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DELETE /api/users/{id}` now write one too, with the erased account's user
   ID as the resource and the route in `details.via` (`self_purge`,
   `delete_user`); they do not write the username, which the audit log could
-  never drop again. The legacy route takes an active account and went
+  never drop again. Under `OTS_PURGE_ATTRIBUTION=deleted-user` all three
+  events say how many commits and statement changes the erase re-attributed
+  (`details.history_attribution`). The legacy route takes an active account and went
   straight to the delete, so the account's personal datasets stayed
   published under an owner that no longer existed. It now does what the purge
   routes rely on a deactivation having done: the account's personal datasets

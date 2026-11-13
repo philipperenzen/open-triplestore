@@ -851,6 +851,24 @@ mod auth {
         }
     }
 
+    /// Set `OTS_PURGE_ATTRIBUTION=deleted-user`, as an administrator does:
+    /// an erase then attributes the account's history to "Deleted user".
+    async fn choose_deleted_user(state: &State, admin_token: &str) {
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/admin/settings/OTS_PURGE_ATTRIBUTION")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .body(Body::from(r#"{"value":"deleted-user"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the setting");
+    }
+
     /// Whether the object store still holds bytes under `key`.
     async fn stored(state: &State, key: &str) -> bool {
         state.object_store.download(key).await.is_ok()
@@ -986,14 +1004,41 @@ mod auth {
 
     /// An erase whose stored files cannot be deleted is refused, and nothing
     /// of the account has changed: it can be erased again once the store is
-    /// back.
+    /// back. That holds for the history too. Under
+    /// `OTS_PURGE_ATTRIBUTION=deleted-user` an erase replaces the account in
+    /// the commit trail, which cannot be put back, so the stored files are
+    /// deleted first and a refusal leaves the trail naming the account.
     #[tokio::test]
     async fn an_erase_is_refused_while_a_stored_file_cannot_be_deleted() {
         use open_triplestore::auth::models::{OwnerType, Visibility};
+        use oxigraph::sparql::QueryResults;
 
-        for route in [Erase::SelfPurge, Erase::LegacyDelete] {
+        let cases = [Erase::SelfPurge, Erase::LegacyDelete]
+            .into_iter()
+            .flat_map(|route| [(route, false), (route, true)]);
+        for (route, deleted_user) in cases {
             let (state, admin_token, dir) = state_with_objects();
             let mila = seed_mila(&state);
+            if deleted_user {
+                choose_deleted_user(&state, &admin_token).await;
+            }
+            // A commit of the account in the trail, as a write of its leaves.
+            let account = format!("{}/users/u-mila", state.base_url);
+            state
+                .store
+                .update(&format!(
+                    "INSERT DATA {{ GRAPH <urn:system:commit-log> {{ <urn:test:commit> \
+                     <http://www.w3.org/ns/prov#wasAssociatedWith> <{account}> }} }}"
+                ))
+                .unwrap();
+            let trail_names_mila = || {
+                let q = format!("ASK {{ GRAPH <urn:system:commit-log> {{ ?c ?p <{account}> }} }}");
+                match state.store.query(&q).unwrap() {
+                    QueryResults::Boolean(b) => b,
+                    _ => panic!("ASK must return a boolean"),
+                }
+            };
+            assert!(trail_names_mila(), "{route:?}: the commit before");
             state
                 .auth_db
                 .create_dataset(
@@ -1047,23 +1092,41 @@ mod auth {
                 Visibility::Public,
                 "{route:?}: no deactivation effect was applied"
             );
+            assert!(
+                trail_names_mila(),
+                "{route:?}, deleted-user {deleted_user}: a refused erase must leave \
+                 the account's commits attributed to it"
+            );
 
             std::fs::remove_dir(&path).unwrap();
             let status = erase_mila(&state, &admin_token, route).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{route:?}: the retry");
             assert!(state.auth_db.get_user_by_id("u-mila").unwrap().is_none());
+            assert_eq!(
+                trail_names_mila(),
+                !deleted_user,
+                "{route:?}: the completed erase keeps or replaces the account as chosen"
+            );
         }
     }
 
     /// Only the admin purge recorded that an account was erased. All three
     /// routes now write a `user_deleted` event that names the erased account
     /// by its id; the two that did not write one before name the route and
-    /// leave the username out.
+    /// leave the username out. Where `OTS_PURGE_ATTRIBUTION=deleted-user`
+    /// had the erase replace the account in the history, each of the three
+    /// says so in `details.history_attribution`.
     #[tokio::test]
     async fn every_erase_route_writes_an_audit_event() {
-        for route in ERASE_ROUTES {
+        let cases = ERASE_ROUTES
+            .into_iter()
+            .flat_map(|route| [(route, false), (route, true)]);
+        for (route, deleted_user) in cases {
             let (state, admin_token) = admin_state();
             seed_mila(&state);
+            if deleted_user {
+                choose_deleted_user(&state, &admin_token).await;
+            }
 
             let status = erase_mila(&state, &admin_token, route).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{route:?}: the erase");
@@ -1090,6 +1153,20 @@ mod auth {
                     !details.to_string().contains("mila"),
                     "{route:?}: the event must not carry the username: {details}"
                 );
+            }
+            // The account made no write, so there was nothing to replace:
+            // the detail is there under `deleted-user`, with zero counts.
+            let replaced = &details["history_attribution"];
+            if deleted_user {
+                assert_eq!(
+                    replaced["replaced_by"].as_str(),
+                    Some("deleted-user"),
+                    "{route:?}: {details}"
+                );
+                assert_eq!(replaced["commits"].as_u64(), Some(0), "{route:?}");
+                assert_eq!(replaced["statement_changes"].as_u64(), Some(0));
+            } else {
+                assert!(replaced.is_null(), "{route:?} under keep: {details}");
             }
         }
     }
