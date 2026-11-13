@@ -5,6 +5,11 @@
 //! Unlike `/api/catalog` (DCAT/Turtle, access-scoped) this is a stable JSON shape
 //! designed for a public "Releases" page: the client builds download URLs from
 //! `{id, version, format}` rather than parsing RDF.
+//!
+//! The owner of an entry is always named. The accounts that made its
+//! published versions (`published_by`, `publishers`) are named only when
+//! `OTS_ACTOR_VISIBILITY` is `readers`: the route has no caller to ask, so
+//! every reader must be in the audience for anyone to be.
 
 use axum::extract::State;
 use axum::Json;
@@ -157,6 +162,12 @@ fn build_entry(
 /// GET /api/public/catalog
 pub async fn serve_public_catalog(State(state): State<AppState>) -> Json<PublicCatalog> {
     let auth_db = state.auth_db.as_ref();
+    // Who made a version is for `OTS_ACTOR_VISIBILITY`'s audience, and this
+    // route answers anonymous callers: only `readers` admits them. On an
+    // error the names stay out.
+    let authors = crate::auth::policy::actor_audience(auth_db)
+        .admits_with(None, |_| Ok(false))
+        .unwrap_or(false);
 
     // One unified registry. The public JSON still splits entries by kind so a
     // "Releases" page can present ontologies and SKOS vocabularies separately.
@@ -176,7 +187,7 @@ pub async fn serve_public_catalog(State(state): State<AppState>) -> Json<PublicC
                     status: v.status.as_str().to_string(),
                     created_at: v.created_at,
                     notes: v.notes,
-                    created_by: v.created_by,
+                    created_by: v.created_by.filter(|_| authors),
                 })
                 .collect();
         let entry = build_entry(
