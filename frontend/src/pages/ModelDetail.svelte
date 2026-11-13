@@ -485,7 +485,8 @@
         <div class="ownership-body">
           <div class="members-list">
             {#each collaborators as c}
-              <span class="member-chip" title={`${c.email} · ${c.source}`}>
+              <!-- `email` is null for a reader outside the owner's side. -->
+              <span class="member-chip" title={[c.email, c.source].filter(Boolean).join(' · ')}>
                 {c.display_name || c.username} · {c.role}
               </span>
             {/each}

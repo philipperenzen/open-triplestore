@@ -334,13 +334,22 @@ and gets the same trail as PROV-O (`GET /api/datasets/{id}/provenance`).
 account exists, is on both only for the audience of `OTS_ACTOR_VISIBILITY`
 (§4.9): by default the accounts that may write the dataset, administrators
 included. The PROV-O document names the dataset's owner (a user, group or
-organisation) to every caller. **That setting does not reach the history of
-a model, vocabulary or shape graph**: anyone who may see a model or
-vocabulary reads its commits with each writer's account IRI, username and
-display name (`GET /api/models/{id}/commits`), and so does a signed-in user
-who may see a shape graph (`GET /api/shacl/shape-graphs/{id}/commits`). The
-web UI shows these histories. The DCAT catalogue names only each dataset's
-latest commit, without its account.
+organisation) to every caller. **The same setting covers the history of a
+model, vocabulary or shape graph**: anyone who may see a model or vocabulary
+reads its commits (`GET /api/models/{id}/commits`), and a signed-in user who
+may see a shape graph reads that graph's
+(`GET /api/shacl/shape-graphs/{id}/commits`), with each writer's account IRI,
+username and display name only for that audience: by default the accounts
+that may write the model or vocabulary (its owning user, an administrator of
+the owning organisation, administrators) or that manage the shape graph (its
+owning user, a member of the owning organisation, administrators). The model
+registry and the shape-graph library also keep, outside the commit graph,
+the account that registered an entry and the one that made each of its
+versions or revisions; those go to the same audience, and the public
+catalogue (`GET /api/public/catalog`) names them only when the setting is
+`readers`. The owning user or organisation of an entry is named to every
+reader. The web UI shows these histories. The DCAT catalogue names only each
+dataset's latest commit, without its account.
 
 **The statement-provenance graphs are graphs of the dataset.** Everyone who
 may read the dataset reads `urn:ots:statement-provenance:{id}`, over `/sparql`
@@ -370,14 +379,32 @@ graph named.
 - **Backups:** both are RDF in the store, so every backup's dump holds them
   and a restore brings them back (§4.6). A restored store's trail is the
   backup's, plus a commit recording the restore.
-- **Purging a user account touches neither.** The account's commits keep its
-  IRI, messages and graph names for good, and a statement-provenance graph
-  keeps its IRI, the times and the statements the account added or removed.
-  The instance can no longer turn that IRI into a username (the `/commits`
-  endpoints then show the IRI alone, to those they show it to), but the user
-  ID in it is the one the
-  audit log (§4.4) keeps with the username. The purge itself leaves no
-  commit; it deletes the profile graph directly.
+- **Purging a user account keeps its name in both, or replaces it, as you set
+  `OTS_PURGE_ATTRIBUTION`.** With `keep`, the default, a purge touches
+  neither. The account's commits keep its IRI, messages and graph names for
+  good, and a statement-provenance graph keeps its IRI, the times and the
+  statements the account added or removed. The instance can no longer turn
+  that IRI into a username (the `/commits` endpoints then show the IRI alone,
+  to those they show it to), but the user ID in it is the one the audit log
+  (§4.4) keeps with the username. With `deleted-user`, erasing an account (an
+  administrator's purge, the user's own, or `DELETE /api/users/{id}`) first
+  attributes the account's commits and, under `"full"`, its statement changes
+  to one shared agent, `{OTS_BASE_URL}/users/deleted`, shown as "Deleted
+  user". The commits and annotations stay, with their times, messages, graphs
+  and statements; which account made them is no longer in either record. If
+  the replacement fails, the account is not erased. The setting covers these
+  two records only. It does not rewrite an account erased earlier under
+  `keep`, the change log (§4.9 keeps the account on its rows, and the rows of
+  the replacement itself, until retention), backups taken before, a
+  replication follower's copy of the commit graph (the one it fetched at its
+  last full resynchronisation), a commit message that names the person, or
+  other records that say who made something, such as the creator of a
+  dataset or model version and the author of a datasource run or review.
+  Keeping the identifier of an erased account needs a ground of your own: a
+  legal duty to keep the record, or an interest in it that outweighs the
+  person's. Choose `deleted-user` if you have none, and say in your notice
+  which you chose. The purge itself leaves no commit; it deletes the profile
+  graph directly.
 - Both stay on your instance and the replication followers or cluster
   members you set up; nothing in them is sent anywhere else.
 
@@ -581,7 +608,8 @@ above are essential; document any others your customised deployment introduces.
   account IRI and the added and removed quads; `OTS_CHANGE_RETENTION_DAYS`,
   default 90 days, longer while a bookmark or delta-version pin holds the
   rows), the commit trail and, per dataset, statement provenance (incl. the
-  account IRI; nothing prunes them, see §4.10), backups]_
+  account IRI; nothing prunes them, and `OTS_PURGE_ATTRIBUTION` decides
+  whether a purge keeps it, see §4.10), backups]_
 - **Data-subject rights & how to exercise them:** _[your process; see
   [docs/gdpr.md](docs/gdpr.md) for the feature mapping]_
 - **Right to lodge a complaint:** _[your lead supervisory authority]_

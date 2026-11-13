@@ -77,11 +77,16 @@ services:
       - OTS_OIDC_PROVIDER_TOKEN_POLICY=${OTS_OIDC_PROVIDER_TOKEN_POLICY:-}
       - OTS_OIDC_PROVIDER_WRITE_SCOPES=${OTS_OIDC_PROVIDER_WRITE_SCOPES:-}
       - OTS_GUEST_CAPABILITIES=${OTS_GUEST_CAPABILITIES:-}
-      # Who sees the author of a dataset's changes, and who may fetch a change's
-      # quads from its change feed (writers | signed-in | readers; empty keeps
-      # the default, writers) — see .env.example.
+      # Who sees the author of a change to a dataset, a model or a shape graph,
+      # and who may fetch a change's quads from a dataset's change feed
+      # (writers | signed-in | readers; empty keeps the default, writers) —
+      # see .env.example.
       - OTS_ACTOR_VISIBILITY=${OTS_ACTOR_VISIBILITY:-}
       - OTS_CHANGE_PATCH_ACCESS=${OTS_CHANGE_PATCH_ACCESS:-}
+      # What erasing an account leaves of it on the commit trail and in statement
+      # provenance (keep | deleted-user; empty keeps the default, keep) — see
+      # .env.example.
+      - OTS_PURGE_ATTRIBUTION=${OTS_PURGE_ATTRIBUTION:-}
       # Outbound account email (verification, password reset, reminders). With
       # OTS_SMTP_HOST unset every message — including its action link — goes to the
       # server log instead (fine for dev). For real delivery either enable the

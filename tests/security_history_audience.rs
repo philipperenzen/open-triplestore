@@ -6,8 +6,8 @@
 //!
 //! * `OTS_ACTOR_VISIBILITY` — the author: `actor_iri` on change-feed rows,
 //!   the actor and its resolved names on the commit trail, the agents of the
-//!   PROV-O document, `created_by` on versions, `owner` on branches, `author`
-//!   on patch-log entries.
+//!   PROV-O document, `created_by` on versions and on stored validation
+//!   reports, `owner` on branches, `author` on patch-log entries.
 //! * `OTS_CHANGE_PATCH_ACCESS` — one change as an RDF Patch (or its inverse)
 //!   and a cursor on the feed.
 //!
@@ -22,7 +22,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
-use open_triplestore::auth::models::{ResourceRole, SystemRole};
+use open_triplestore::auth::models::{ResourceRole, SystemRole, ValidationReportRecord};
 use open_triplestore::server::AppState;
 use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::TripleStore;
@@ -261,6 +261,22 @@ async fn world() -> World {
         )
         .await;
         assert_eq!(st, StatusCode::CREATED, "cut: {body}");
+        // A stored validation report of that graph, run by the author.
+        state
+            .auth_db
+            .insert_validation_report(&ValidationReportRecord {
+                id: format!("report-{ds}"),
+                dataset_id: ds.to_string(),
+                version: None,
+                conforms: true,
+                report_ttl: "[] a <http://www.w3.org/ns/shacl#ValidationReport> .".to_string(),
+                data_ref: Some(graphs.to_string()),
+                shapes_ref: None,
+                source: "platform".to_string(),
+                created_by: Some(AUTHOR.to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .unwrap();
     }
 
     World {
@@ -294,6 +310,14 @@ fn actor_routes(ds: &str) -> Vec<(String, &'static str)> {
         ),
         (format!("/api/datasets/{ds}/branches"), "\"tip_version\""),
         (format!("/api/datasets/{ds}/log"), "\"entries\":[{"),
+        (
+            format!("/api/datasets/{ds}/validation-reports"),
+            "\"source\":\"platform\"",
+        ),
+        (
+            format!("/api/datasets/{ds}/validation-reports/report-{ds}"),
+            "\"source\":\"platform\"",
+        ),
     ]
 }
 

@@ -2052,7 +2052,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "List validation reports",
-                "The dataset's report history, newest first, without the report bodies: one record per run of the dataset's `shacl_on_write` gate (`source` `on-write`; `data_ref` is the graph written, `shapes_ref` the gate's shapes graph) and one per validate-and-commit (`source` `platform`; `data_ref` is `inline`, `version` the version the commit cut). A record names the graphs it is about, so a caller is listed the records they may read, by the rule of a stored validation run, asked at every read. Administrators get every record. Nobody else gets a record whose shapes graph some dataset holds as private and they may not read. A caller without write access to the dataset also needs to be able to read every graph the record validated, by the rule `/sparql` applies (for a commit: every graph its version was cut from; a commit whose version is gone goes to writers only). The other records are left out: a caller who cannot write the dataset, an anonymous caller of a public dataset included, is listed no record about one of its private graphs.",
+                "The dataset's report history, newest first, without the report bodies: one record per run of the dataset's `shacl_on_write` gate (`source` `on-write`; `data_ref` is the graph written, `shapes_ref` the gate's shapes graph) and one per validate-and-commit (`source` `platform`; `data_ref` is `inline`, `version` the version the commit cut). A record names the graphs it is about, so a caller is listed the records they may read, by the rule of a stored validation run, asked at every read. Administrators get every record. Nobody else gets a record whose shapes graph some dataset holds as private and they may not read. A caller without write access to the dataset also needs to be able to read every graph the record validated, by the rule `/sparql` applies (for a commit: every graph its version was cut from; a commit whose version is gone goes to writers only). The other records are left out: a caller who cannot write the dataset, an anonymous caller of a public dataset included, is listed no record about one of its private graphs. A record's `created_by` (the account that ran a validate-and-commit) is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the dataset).",
                 vec![],
                 vec![
                     ("200", "Array of the report records the caller may read"),
@@ -2070,7 +2070,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation report",
-                "One record of the dataset's report history with its body (`report_ttl`, Turtle): the gate's verdict and number of results for an `on-write` record, the validator's report for a `platform` record. A record the caller may not read (the rule is the listing's: a record about a private graph for a caller who may not read that graph) answers 404, as one that does not exist.",
+                "One record of the dataset's report history with its body (`report_ttl`, Turtle): the gate's verdict and number of results for an `on-write` record, the validator's report for a `platform` record. A record the caller may not read (the rule is the listing's: a record about a private graph for a caller who may not read that graph) answers 404, as one that does not exist. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience, as in the listing.",
                 vec![],
                 vec![
                     ("200", "The report record"),
@@ -2154,15 +2154,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
 
     // ── SHACL Studio: shape graphs, the validation layer, pipelines ──────────
     // Every route here requires a token; visibility follows the shape graph's
-    // owner and visibility, and writing needs manage access to it.
+    // owner and visibility, and writing needs manage access to it. Who made
+    // an entry, a revision or a commit is named to OTS_ACTOR_VISIBILITY's
+    // audience, where a writer is an account that manages the entry.
     mount(paths, "/api/shacl/shape-graphs", vec![
-        (M::Get, o("Validation", "List shape graphs", "The reusable shape graphs the caller may read: their own, their organisations' and the public ones.",
+        (M::Get, o("Validation", "List shape graphs", "The reusable shape graphs the caller may read: their own, their organisations' and the public ones. An entry's `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience for that entry (default `writers`: accounts that manage it — its owner, a member of the owning organisation, an administrator); `owner_type` and `owner_id` are always given. The same holds wherever the record is served: `/api/shacl/shape-graphs/{id}`, the shape graphs of `/api/shacl/bindings` and `/api/datasets/{id}/effective-shapes`.",
             vec![], vec![("200", "Array of shape graphs")], true)),
         (M::Post, o("Validation", "Create a shape graph", "Body: `{name, description?, visibility?, tags?, owner_type?, owner_id?, turtle?, source?}`. Without `turtle` the graph starts from an empty template. `owner_type` is `user` (default) or `organisation`.",
             vec![], vec![("201", "The shape graph"), ("400", "Invalid Turtle"), ("403", "Not a member of the owning organisation")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id", vec![
-        (M::Get, o("Validation", "Get a shape graph", "The record: name, description, visibility, tags, status, owner, backing graph IRI and facets.",
+        (M::Get, o("Validation", "Get a shape graph", "The record: name, description, visibility, tags, status, owner, backing graph IRI and facets. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that manage the entry).",
             vec![], vec![("200", "The shape graph"), ("403", "Not readable"), ("404", "Not found")], true)),
         (M::Put, o("Validation", "Update a shape graph's metadata", "Body: `{name, description?, visibility?, tags?}`. The content is written through `/turtle`. Changing the visibility of an entry whose graph the Studio did not mint needs the right to change that graph (see `/turtle`).",
             vec![], vec![("200", "The updated shape graph"), ("403", "Not manageable, or a visibility change of a graph the caller may not change"), ("404", "Not found")], true)),
@@ -2178,7 +2180,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
-        (M::Get, o("Validation", "List revisions", "Every stored revision of the shape graph, newest first: version, note, author, timestamp.",
+        (M::Get, o("Validation", "List revisions", "Every stored revision of the shape graph, newest first: version, note, author, timestamp. The author (`created_by`) is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that manage the entry).",
             vec![], vec![("200", "Array of revisions"), ("404", "Not found")], true)),
     ]);
     mount(
@@ -2189,7 +2191,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get a revision",
-                "One revision with its Turtle snapshot.",
+                "One revision with its Turtle snapshot. `created_by` is null unless the caller is in OTS_ACTOR_VISIBILITY's audience, as in the listing.",
                 vec![],
                 vec![
                     ("200", "The revision"),
@@ -2216,7 +2218,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("200", "A validation report"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/commits", vec![
-        (M::Get, o("Validation", "Commit history", "The shape graph's slice of the shared commit trail, newest first, with actor names resolved. Takes the commit-log paging parameters.",
+        (M::Get, o("Validation", "Commit history", "The shape graph's slice of the shared commit trail, newest first. `actor_iri`, `actor_username` and `actor_display_name` are present only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that manage the entry); messages, times and revisions are every reader's. Takes the commit-log paging parameters.",
             vec![], vec![("200", "Array of commits"), ("404", "Not found")], true)),
     ]);
     for (path, verb, to) in [
@@ -4161,7 +4163,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Catalog",
                 "Public catalogue",
-                "DCAT catalogue restricted to public resources (no authentication).",
+                "The public registry entries that have a published version, as JSON for a releases page (no authentication): `{models, vocabularies}`, each entry with its owner, its published and deprecated versions and their notes. The owner (`owner`: the organisation or user) is always named. The accounts that made the versions (`versions[].published_by`, `publishers`) are named only when OTS_ACTOR_VISIBILITY is `readers`: the route has no caller to ask, so under `writers` (the default) and `signed-in` `published_by` is null and `publishers` is empty.",
                 vec![],
                 vec![("200", "Catalogue JSON")],
                 false,
@@ -4524,6 +4526,11 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             )
             .build()
     }
+    const ACTOR_NOTE: &str = "`created_by` (the account that registered the entry or made the \
+        version) is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default \
+        `writers`: accounts that may write the entry — its owning user, an administrator of the \
+        owning organisation, an administrator). The entry's owner (`owner_type`, `owner_id`) is \
+        always given.";
     const ATTRIBUTION_NOTE: &str = "`attribution` is the licence record of the content: for the \
         bundled standard vocabularies the server seeds (and drafts copied from them), their \
         licence(s) with URIs, copyright, the notice the licence requires, the source document's \
@@ -4570,7 +4577,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("List ({tag})"),
-                        &format!("List registry entries visible to the caller. {ATTRIBUTION_NOTE}"),
+                        &format!("List registry entries visible to the caller. {ACTOR_NOTE} {ATTRIBUTION_NOTE}"),
                         vec![],
                         vec![],
                         false,
@@ -4606,7 +4613,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Get ({tag})"),
-                        &format!("Registry entry details. {ATTRIBUTION_NOTE}"),
+                        &format!("Registry entry details. {ACTOR_NOTE} {ATTRIBUTION_NOTE}"),
                         vec![],
                         vec![("404", "Not found")],
                         false,
@@ -4660,7 +4667,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     tag,
                     &format!("List collaborators ({tag})"),
-                    "Users with access to the entry.",
+                    "The accounts around the entry, as `{user_id, username, display_name, email, role, source}`: its owning user (`source` `owner`), the members of the owning organisation (`organisation`) and any other account that made a version (`draft`). The owning user is named to every reader. The organisation's members are listed to its members and to administrators only, as `/api/organisations/{id}/members` lists them. Who made a version is listed only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the entry). `email` is null unless the caller is the owning user, a member of the owning organisation or an administrator.",
                     vec![],
                     vec![("200", "Array of collaborators")],
                     false,
@@ -4698,7 +4705,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("List branches ({tag})"),
-                        "Branches of the entry's history.",
+                        "Branches of the entry's history. A branch's `owner` (the account that made its tip) is null unless the caller is in OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the entry).",
                         vec![],
                         vec![("200", "Array of branches")],
                         false,
@@ -4730,7 +4737,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     tag,
                     &format!("List commits ({tag})"),
-                    "Commit history for the entry.",
+                    "Commit history for the entry. `actor_iri`, `actor_username` and `actor_display_name` are present only for OTS_ACTOR_VISIBILITY's audience (default `writers`: accounts that may write the entry); messages, times and counts are every reader's.",
                     vec![],
                     vec![("200", "Array of commits")],
                     false,
@@ -4819,7 +4826,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("List versions ({tag})"),
-                        &format!("Version snapshots of the entry. {ATTRIBUTION_NOTE}"),
+                        &format!("Version snapshots of the entry. {ACTOR_NOTE} {ATTRIBUTION_NOTE}"),
                         vec![],
                         vec![],
                         false,
@@ -4855,7 +4862,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Get version ({tag})"),
-                        &format!("Metadata for one version. {ATTRIBUTION_NOTE}"),
+                        &format!("Metadata for one version. {ACTOR_NOTE} {ATTRIBUTION_NOTE}"),
                         vec![],
                         vec![("404", "Not found")],
                         false,
@@ -5577,7 +5584,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ob(
                 "Auth",
                 "Purge account",
-                "Permanently erase the current user's account and owned private data.",
+                "Permanently erase the current user's account and owned private data. The commit trail and `full` statement provenance keep the account's IRI on its writes unless OTS_PURGE_ATTRIBUTION is `deleted-user`, which first attributes them to the shared `Deleted user` agent (`{base}/users/deleted`) and answers `500`, erasing nothing, if that fails.",
                 vec![],
                 ref_body(
                     "AccountActionRequest",
@@ -6319,7 +6326,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Purge user (admin)",
-                "Permanently erase a user and their owned private data.",
+                "Permanently erase a user and their owned private data. The commit trail and `full` statement provenance keep the account's IRI on its writes unless OTS_PURGE_ATTRIBUTION is `deleted-user`, which first attributes them to the shared `Deleted user` agent (`{base}/users/deleted`) and answers `500`, erasing nothing, if that fails.",
                 vec![],
                 vec![("204", "Purged"), ("403", "Admin role required")],
                 true,

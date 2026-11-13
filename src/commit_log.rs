@@ -596,6 +596,13 @@ pub fn resolve_actors(auth_db: &crate::auth::db::AuthDb, commits: &mut [CommitRe
             continue;
         };
         let uid = iri.rsplit('/').next().unwrap_or(&iri).to_string();
+        // The agent that stands for purged accounts is nobody's account: it
+        // has a name to show and no username.
+        if uid == DELETED_USER_ID {
+            c.actor_username = None;
+            c.actor_display_name = Some(DELETED_USER_LABEL.to_string());
+            continue;
+        }
         let entry =
             cache
                 .entry(uid.clone())
@@ -606,6 +613,107 @@ pub fn resolve_actors(auth_db: &crate::auth::db::AuthDb, commits: &mut [CommitRe
         c.actor_username = entry.0.clone();
         c.actor_display_name = entry.1.clone();
     }
+}
+
+/// The last path segment of the agent that stands for purged accounts. An
+/// account id is minted by the server and never this word.
+pub const DELETED_USER_ID: &str = "deleted";
+
+/// What the trail and its readers call that agent.
+pub const DELETED_USER_LABEL: &str = "Deleted user";
+
+/// The agent IRI of an account, as [`record`] writes it:
+/// `{base}/users/{user id}`.
+pub fn account_iri(base_url: &str, user_id: &str) -> String {
+    format!("{}/users/{user_id}", base_url.trim_end_matches('/'))
+}
+
+/// The one agent every purged account's writes are attributed to where the
+/// operator chose `OTS_PURGE_ATTRIBUTION=deleted-user`:
+/// `{base}/users/deleted`. It says a person made the write and that their
+/// account is gone, and nothing about which account.
+pub fn deleted_user_iri(base_url: &str) -> String {
+    account_iri(base_url, DELETED_USER_ID)
+}
+
+/// Attribute everything the trail says about the agent `account` to
+/// [`deleted_user_iri`]: the `prov:wasAssociatedWith` of its commits and the
+/// `prov:wasAttributedTo` of the graphs they generated now name the
+/// placeholder, and the account's own description (`a prov:Agent`) is gone.
+/// The commits stay, with their times, messages, graphs and counts. One
+/// transaction; the change log never records the commit graph, so the write
+/// leaves no copy of the IRI there. Returns the commits re-attributed (zero,
+/// and nothing written, for an account that never committed).
+pub fn reattribute_to_deleted_user(
+    store: &TripleStore,
+    base_url: &str,
+    account: &str,
+) -> anyhow::Result<usize> {
+    use crate::store::engine::QuadOp;
+
+    let placeholder = NamedNode::new(deleted_user_iri(base_url))?;
+    let account = NamedNode::new(account)?;
+    if account == placeholder {
+        return Ok(0);
+    }
+    let trail = NamedNode::new_unchecked(COMMIT_GRAPH);
+    let in_trail = GraphNameRef::NamedNode(trail.as_ref());
+    let associated = NamedNode::new_unchecked(format!("{PROV}wasAssociatedWith"));
+    let quads = store.store();
+
+    let mut ops: Vec<QuadOp> = Vec::new();
+    let mut commits = 0usize;
+    // Wherever the account is named: the object of a commit's or a graph's
+    // attribution.
+    for q in quads.quads_for_pattern(
+        None,
+        None,
+        Some(TermRef::NamedNode(account.as_ref())),
+        Some(in_trail),
+    ) {
+        let q = q?;
+        if q.predicate == associated {
+            commits += 1;
+        }
+        ops.push(QuadOp::Add(Quad::new(
+            q.subject.clone(),
+            q.predicate.clone(),
+            placeholder.clone(),
+            q.graph_name.clone(),
+        )));
+        ops.push(QuadOp::Remove(q));
+    }
+    // What the trail says about the account itself.
+    for q in quads.quads_for_pattern(
+        Some(NamedOrBlankNodeRef::NamedNode(account.as_ref())),
+        None,
+        None,
+        Some(in_trail),
+    ) {
+        ops.push(QuadOp::Remove(q?));
+    }
+    if ops.is_empty() {
+        return Ok(0);
+    }
+    for (p, o) in [
+        (
+            NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+            Term::NamedNode(NamedNode::new_unchecked(format!("{PROV}Agent"))),
+        ),
+        (
+            NamedNode::new_unchecked(format!("{RDFS}label")),
+            Term::Literal(Literal::new_simple_literal(DELETED_USER_LABEL)),
+        ),
+    ] {
+        ops.push(QuadOp::Add(Quad::new(
+            placeholder.clone(),
+            p,
+            o,
+            trail.clone(),
+        )));
+    }
+    store.apply_quad_ops(&ops)?;
+    Ok(commits)
 }
 
 /// Take the actor off `commits`, for a caller the actor is not shown to
@@ -754,5 +862,106 @@ mod tests {
             oxigraph::sparql::QueryResults::Boolean(true)
         );
         assert!(!injected, "crafted actor IRI must be escaped, not injected");
+    }
+
+    fn ask(store: &TripleStore, q: &str) -> bool {
+        matches!(
+            store.query(q).unwrap(),
+            oxigraph::sparql::QueryResults::Boolean(true)
+        )
+    }
+
+    /// The account's commits stay and name the placeholder; the account's IRI
+    /// is in no quad of the trail any more; another account's commits are
+    /// untouched.
+    #[test]
+    fn a_purged_account_is_reattributed_to_the_deleted_user() {
+        let store = TripleStore::in_memory().unwrap();
+        let base = "http://x";
+        let gone = account_iri(base, "u1");
+        let stays = account_iri(base, "u2");
+        for (actor, graph, msg) in [
+            (Some(&gone), "http://x/g1", "first by u1"),
+            (Some(&gone), "http://x/g2", "second by u1"),
+            (Some(&stays), "http://x/g1", "by u2"),
+            (None, "http://x/g1", "by nobody"),
+        ] {
+            let mut r = CommitRecord::new(CommitKind::Sparql, msg);
+            r.actor_iri = actor.cloned();
+            r.affected_graphs = vec![graph.into()];
+            insert_commit(&store, base, &r).unwrap();
+        }
+        let named = |iri: &str| {
+            format!(
+                "ASK {{ GRAPH <{COMMIT_GRAPH}> {{ {{ <{iri}> ?p ?o }} UNION {{ ?s ?p <{iri}> }} }} }}"
+            )
+        };
+        assert!(ask(&store, &named(&gone)));
+
+        assert_eq!(reattribute_to_deleted_user(&store, base, &gone).unwrap(), 2);
+
+        assert!(!ask(&store, &named(&gone)), "the account is still named");
+        let placeholder = deleted_user_iri(base);
+        assert_eq!(placeholder, "http://x/users/deleted");
+        assert!(ask(
+            &store,
+            &format!(
+                "ASK {{ GRAPH <{COMMIT_GRAPH}> {{ <{placeholder}> a <{PROV}Agent> ; \
+                 <{RDFS}label> \"Deleted user\" }} }}"
+            )
+        ));
+        let all = list_commits(
+            &store,
+            &CommitScope::Graphs(vec!["http://x/g1".into(), "http://x/g2".into()]),
+            &CommitQuery::default(),
+        );
+        assert_eq!(all.len(), 4, "no commit is lost");
+        let by = |msg: &str| {
+            all.iter()
+                .find(|c| c.message == msg)
+                .unwrap()
+                .actor_iri
+                .clone()
+        };
+        assert_eq!(by("first by u1").as_deref(), Some(placeholder.as_str()));
+        assert_eq!(by("second by u1").as_deref(), Some(placeholder.as_str()));
+        assert_eq!(by("by u2").as_deref(), Some(stays.as_str()));
+        assert_eq!(by("by nobody"), None);
+
+        // The generated graphs follow: none is attributed to the account.
+        assert!(ask(
+            &store,
+            &format!(
+                "ASK {{ GRAPH <{COMMIT_GRAPH}> {{ <http://x/g2> <{PROV}wasAttributedTo> <{placeholder}> }} }}"
+            )
+        ));
+
+        // Nothing to do the second time, and for an account that never wrote.
+        assert_eq!(reattribute_to_deleted_user(&store, base, &gone).unwrap(), 0);
+        assert_eq!(
+            reattribute_to_deleted_user(&store, base, &account_iri(base, "u3")).unwrap(),
+            0
+        );
+        // The placeholder is never re-attributed to itself.
+        assert_eq!(
+            reattribute_to_deleted_user(&store, base, &placeholder).unwrap(),
+            0
+        );
+    }
+
+    /// The placeholder resolves to a name to show and to no username, without
+    /// a lookup: no account has that id.
+    #[test]
+    fn the_deleted_user_resolves_to_its_label() {
+        let db = crate::auth::db::AuthDb::in_memory().unwrap();
+        let mut c = CommitRecord::new(CommitKind::Sparql, "m");
+        c.actor_iri = Some(deleted_user_iri("http://x"));
+        let mut commits = vec![c];
+        resolve_actors(&db, &mut commits);
+        assert_eq!(commits[0].actor_username, None);
+        assert_eq!(
+            commits[0].actor_display_name.as_deref(),
+            Some(DELETED_USER_LABEL)
+        );
     }
 }

@@ -425,11 +425,15 @@ settings! {
         .doc("`assert`: send an identity assertion with SERVICE and LDES requests to peers.");
     ACTOR_VISIBILITY: String = Spec::new("OTS_ACTOR_VISIBILITY", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
         .default("writers")
-        .doc("Who sees the author of a dataset's changes (feed, commits, provenance, versions, patch log): writers, signed-in or readers.")
+        .doc("Who sees the author of a change to a dataset (feed, commits, provenance, versions, validation reports, patch log), a model or a shape graph (record, versions or revisions, commits): writers, signed-in or readers.")
         .runtime();
     CHANGE_PATCH_ACCESS: String = Spec::new("OTS_CHANGE_PATCH_ACCESS", Kind::Enum(&["writers", "signed-in", "readers"]), "auth")
         .default("writers")
         .doc("Who may fetch a change's quads from a dataset's change feed and hold a cursor on it: writers, signed-in or readers.")
+        .runtime();
+    PURGE_ATTRIBUTION: String = Spec::new("OTS_PURGE_ATTRIBUTION", Kind::Enum(&["keep", "deleted-user"]), "auth")
+        .default("keep")
+        .doc("What purging an account does to its name on the commit trail and in statement provenance: keep the account IRI, or deleted-user to replace it with one shared placeholder agent.")
         .runtime();
 
     // ── storage ──

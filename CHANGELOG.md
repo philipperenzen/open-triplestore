@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A purge can attribute an erased account's history to "Deleted user"
+  (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
+  provenance name the account behind each write
+  (`{OTS_BASE_URL}/users/{user ID}`), and a purge left that IRI there for
+  good. It still does by default (`keep`): the history keeps saying which
+  account made which write, which an operator may only do on a ground of its
+  own. With `OTS_PURGE_ATTRIBUTION=deleted-user`, a runtime setting, erasing
+  an account (an administrator's purge, the user's own, the legacy
+  `DELETE /api/users/{id}`) first attributes its commits and its statement
+  changes, in both of a dataset's provenance graphs, to one shared agent,
+  `{OTS_BASE_URL}/users/deleted`. Commit histories show it as "Deleted
+  user". The commits and annotations stay, with their times, messages,
+  graphs and statements. If the replacement fails the account is not erased
+  and the request answers `500`; an administrator's purge records in the
+  audit log how many commits and statement changes it re-attributed. The
+  setting covers those two records only: it does not rewrite accounts erased
+  earlier, the change log, backups, or other records that name who made
+  something. `PRIVACY.md` §4.10 and `docs/gdpr.md` (Art. 17) say when to
+  choose which.
 - **Spark draws query results in the visual their rows fit.** A new ` ```view `
   widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
   chart (label + number), a chronological timeline (date + number), a map on
@@ -274,6 +293,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither covers what a writer publishes on purpose: version data and diffs,
   patch-log entries, LDES members and the statement-provenance graph. See
   `docs/versioning.md`, "Who sees what of the history".
+- **Models, shape graphs and a dataset's validation reports no longer name
+  their authors to every reader (breaking for clients that read those
+  fields without write access).** `OTS_ACTOR_VISIBILITY` (default `writers`)
+  now decides this for them as it does for a dataset's history. Outside its
+  audience:
+  - a registry entry: `created_by` is `null` on `GET /api/models`,
+    `/api/models/{id}`, `…/versions` and `…/versions/{ver}`; a branch's
+    `owner` is `null` on `…/branches`; `actor_iri`, `actor_username` and
+    `actor_display_name` are left off `…/commits`; `…/collaborators` does
+    not list the accounts that made a version. A writer is an account that
+    may write the entry: its owning user, an administrator of the owning
+    organisation, an administrator.
+  - `GET /api/public/catalog`, which answers anonymous callers, gives
+    `published_by: null` and an empty `publishers` unless the setting is
+    `readers`. The owner of an entry is still named.
+  - a shape graph: `created_by` is `null` on the entry (`GET
+    /api/shacl/shape-graphs`, `…/{id}`, the shape graphs of
+    `/api/shacl/bindings` and `/api/datasets/{id}/effective-shapes`) and on
+    `…/revisions`; the actor fields are left off `…/commits`. A writer is an
+    account that manages the entry: its owning user, a member of the owning
+    organisation, an administrator.
+  - a dataset: `created_by` is `null` on `…/validation-reports` and
+    `…/validation-reports/{rid}`.
+
+  Before, each of these went to everyone who could read the entry: for a
+  public model, an anonymous caller got the account IRI, username and display
+  name of everyone who had uploaded or edited a version. **Upgrading:** to
+  keep naming authors to every reader, set `OTS_ACTOR_VISIBILITY` to
+  `readers` (or `signed-in`); it is one setting for datasets, models and
+  shape graphs. The owner of an entry (`owner_type`, `owner_id`) is always
+  given. See `docs/models.md`, "Who sees the authors".
+- **`GET /api/models/{id}/collaborators` no longer hands an organisation's
+  member list and e-mail addresses to every reader of its models.** The route
+  listed the owner, or every member of the owning organisation, and every
+  version author with `user_id`, `username`, `display_name` and `email`, to
+  anyone who could read the entry: an anonymous caller for a public one,
+  although `GET /api/organisations/{id}/members` is for members only. The
+  organisation's members are now listed to its members and to administrators
+  only, and `email` is `null` unless the caller is the owning user, a member
+  of the owning organisation or an administrator. The owning user is still
+  named to every reader.
 - **`GET /api/datasets/{id}/provenance` and `…/commits` no longer name a
   graph the caller may not read.** The PROV-O document listed every graph of
   the dataset and every commit on them, so a reader of a public dataset got
@@ -554,10 +614,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   naming it; anyone who may read a dataset reads its history, and each
   writer's account IRI, username and display name go to
   `OTS_ACTOR_VISIBILITY`'s audience (the dataset's writers by default);
-  anyone who may see a model or shape graph reads its history with every
-  writer named, since that setting does not reach it; a dataset's readers
-  read its statement-provenance graph, under `full` with the account behind
-  each change whatever that setting says, and its writers the private one.
+  the same holds for the history of a model or shape graph, whose audience
+  is by default the accounts that may write the model or manage the shape
+  graph; a dataset's readers read its statement-provenance graph, under
+  `full` with the account behind each change whatever that setting says,
+  and its writers the private one.
   It states that **neither has any retention and a user purge touches neither**
   (an administrator can empty the commit graph or strip one account's
   attribution from it; a statement-provenance graph goes only with its
