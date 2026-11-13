@@ -300,8 +300,11 @@ switches it on with `PUT /api/datasets/{id}/settings` (`"provenance":
 "minimal"` or `"full"`; off by default; it works only while the change log of
 §4.9 is on and in a build with the `rdf-12` feature, which the published image
 has). From then on a background consumer annotates every change to the
-dataset's statements, in RDF 1.2, in the dataset's graph
-`urn:ots:statement-provenance:{id}` (`src/statement_provenance.rs`):
+dataset's statements, in RDF 1.2, in one of two graphs of the dataset
+(`src/statement_provenance.rs`): `urn:ots:statement-provenance:{id}` for the
+changes to its graphs that are not private, and
+`urn:ots:statement-provenance:{id}:private` for the changes to the graphs it
+holds as private. An annotation holds:
 
 - **a copy of each changed statement** as a triple term (`rdf:reifies
   <<( s p o )>>`), **removed statements included**, with its graph, and for
@@ -322,24 +325,36 @@ by naming it (`FROM NAMED <urn:system:commit-log>`, or
 `GET /store?graph=urn:system:commit-log`), and so can list every write an
 account ever made. **Anyone who may read a dataset** (anonymous callers too,
 for a public dataset) lists the commits of the graphs they may read
-(`GET /api/datasets/{id}/commits`: time, kind, message, counts, graphs and
-**the writer's account IRI, with the username and display name** while the
-account exists) and gets the dataset's trail as PROV-O
-(`GET /api/datasets/{id}/provenance`, with each commit's account IRI). Anyone
-who may see a model or vocabulary reads its history the same way
-(`GET /api/models/{id}/commits`); a signed-in user who may see a shape graph,
-its (`GET /api/shacl/shape-graphs/{id}/commits`). The web UI shows these
-histories. The DCAT catalogue names only each dataset's latest commit, without
-its account. **The statement-provenance graph is one of the dataset's
-graphs**: everyone who may read the dataset reads it, over `/sparql`
+(`GET /api/datasets/{id}/commits`: time, kind, message, counts and graphs)
+and gets the same trail as PROV-O (`GET /api/datasets/{id}/provenance`).
+**The writer's account IRI, with the username and display name** while the
+account exists, is on both only for the audience of `OTS_ACTOR_VISIBILITY`
+(§4.9): by default the accounts that may write the dataset, administrators
+included. The PROV-O document names the dataset's owner (a user, group or
+organisation) to every caller. **That setting does not reach the history of
+a model, vocabulary or shape graph**: anyone who may see a model or
+vocabulary reads its commits with each writer's account IRI, username and
+display name (`GET /api/models/{id}/commits`), and so does a signed-in user
+who may see a shape graph (`GET /api/shacl/shape-graphs/{id}/commits`). The
+web UI shows these histories. The DCAT catalogue names only each dataset's
+latest commit, without its account.
+
+**The statement-provenance graphs are graphs of the dataset.** Everyone who
+may read the dataset reads `urn:ots:statement-provenance:{id}`, over `/sparql`
 (`GRAPH <urn:ots:statement-provenance:{id}>`), the Graph Store protocol and
-the browser (`graph=`). It is left out of versions, LDES feeds, reasoning,
-validation and the default browse view.
+the browser (`graph=`), **including, under `"full"`, the account behind each
+change: `OTS_ACTOR_VISIBILITY` does not filter a graph.** The private one is
+read as the dataset's private graphs are, by its writers and administrators.
+A graph made private takes its annotations along to the private graph; what
+was annotated while a graph was private stays there when the graph is made
+public again. Both are left out of LDES feeds, reasoning, validation and the
+default browse view, and out of a version unless the version is cut with the
+graph named.
 
 - **Retention: none.** Nothing in the software removes a commit or an
   annotation; there is no retention setting and no sweep. Setting
-  `"provenance": "off"` stops new annotations but keeps the graph. A dataset
-  delete removes the dataset's statement-provenance graph but **not its
+  `"provenance": "off"` stops new annotations but keeps the graphs. A dataset
+  delete removes the dataset's statement-provenance graphs but **not its
   commits**, which keep their graph names, messages and account IRIs. An
   administrator can empty the commit graph (`DROP GRAPH
   <urn:system:commit-log>` over SPARQL Update, or a Graph Store `DELETE` of
@@ -356,7 +371,8 @@ validation and the default browse view.
   IRI, messages and graph names for good, and a statement-provenance graph
   keeps its IRI, the times and the statements the account added or removed.
   The instance can no longer turn that IRI into a username (the `/commits`
-  endpoints then show the IRI alone), but the user ID in it is the one the
+  endpoints then show the IRI alone, to those they show it to), but the user
+  ID in it is the one the
   audit log (§4.4) keeps with the username. The purge itself leaves no
   commit; it deletes the profile graph directly.
 - Both stay on your instance and the replication followers or cluster

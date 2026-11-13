@@ -57,7 +57,11 @@ graphs); account/identity data lives in a local metadata database.
   <urn:system:commit-log>`) and filters on that IRI. A dataset recording
   `full` statement provenance names the account on each statement change in
   `urn:ots:statement-provenance:{id}`, which anyone who may read the dataset
-  can query the same way.
+  can query the same way, and for the graphs the dataset holds as private in
+  `urn:ots:statement-provenance:{id}:private`, which its writers and
+  administrators read. A dataset's own commit history
+  (`GET /api/datasets/{id}/commits`) names the writer only to
+  `OTS_ACTOR_VISIBILITY`'s audience, by default the dataset's writers.
 
 ### Art. 16 — Right to rectification
 
@@ -169,7 +173,9 @@ graphs); account/identity data lives in a local metadata database.
   (the default) on datasets that do not need a per-statement history:
   `minimal` keeps a copy of every statement changed, removed ones included,
   and `full` adds the account and time of each change, in a graph every
-  reader of the dataset can query; neither is ever pruned. A commit message
+  reader of the dataset can query whatever `OTS_ACTOR_VISIBILITY` says (the
+  changes to a private graph, in one its writers read); neither is ever
+  pruned. A commit message
   is stored as typed, so ask users to keep personal data out of them
   ([PRIVACY.md](../PRIVACY.md) §4.10).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
