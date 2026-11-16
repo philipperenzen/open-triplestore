@@ -344,7 +344,7 @@ pub fn insert_version(
         .notes
         .as_deref()
         .map(|n| {
-            let e = n.replace('\\', "\\\\").replace('"', "\\\"");
+            let e = crate::store::escape_sparql_literal(n);
             format!("    adms:versionNotes \"{e}\"@en ;\n")
         })
         .unwrap_or_default();
@@ -352,7 +352,7 @@ pub fn insert_version(
         .branch
         .as_deref()
         .map(|b| {
-            let e = b.replace('\\', "\\\\").replace('"', "\\\"");
+            let e = crate::store::escape_sparql_literal(b);
             format!("    ver:branch \"{e}\" ;\n")
         })
         .unwrap_or_default();
@@ -383,8 +383,8 @@ pub fn insert_version(
             .filter(|v| !v.is_empty()),
     ) {
         (Some(m), Some(v)) => {
-            let em = m.replace('\\', "\\\\").replace('"', "\\\"");
-            let ev = v.replace('\\', "\\\\").replace('"', "\\\"");
+            let em = crate::store::escape_sparql_literal(m);
+            let ev = crate::store::escape_sparql_literal(v);
             let mv = format!(
                 "{}/data-model/{m}/version/{v}",
                 base_url.trim_end_matches('/')
@@ -394,7 +394,7 @@ pub fn insert_version(
             )
         }
         (Some(m), None) => {
-            let em = m.replace('\\', "\\\\").replace('"', "\\\"");
+            let em = crate::store::escape_sparql_literal(m);
             format!("    ver:conformsToModel \"{em}\" ;\n")
         }
         _ => String::new(),
@@ -475,7 +475,7 @@ fn delta_field_lines(base_url: &str, record: &DatasetVersion) -> String {
         ));
     }
     if let Some(a) = &record.anchor {
-        let e = a.epoch.replace('\\', "\\\\").replace('"', "\\\"");
+        let e = crate::store::escape_sparql_literal(&a.epoch);
         out.push_str(&format!("    ver:patchEpoch \"{e}\" ;\n"));
         out.push_str(&format!(
             "    ver:patchToSeq \"{}\"^^<{XSD}integer> ;\n",
@@ -674,20 +674,21 @@ pub fn update_version_notes(
     notes: Option<&str>,
 ) -> Result<(), crate::store::engine::StoreError> {
     let ver_iri = version_iri(base_url, dataset_id, version);
-    let q_del = format!(
+    // One DELETE/INSERT: when the update is refused, the old notes stay.
+    let insert = notes
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            let e = crate::store::escape_sparql_literal(n);
+            format!(r#"INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes "{e}"@en }} }}"#)
+        })
+        .unwrap_or_default();
+    let q = format!(
         r#"PREFIX adms: <{ADMS}>
-        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes ?o }} }}"#
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes ?o }} }}
+        {insert}
+        WHERE {{ OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes ?o }} }} }}"#
     );
-    store.update(&q_del)?;
-    if let Some(n) = notes.filter(|n| !n.is_empty()) {
-        let e = n.replace('\\', "\\\\").replace('"', "\\\"");
-        let q_ins = format!(
-            r#"PREFIX adms: <{ADMS}>
-            INSERT DATA {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes "{e}"@en }} }}"#
-        );
-        store.update(&q_ins)?;
-    }
-    Ok(())
+    store.update(&q)
 }
 
 /// Read the dataset's `latestPublished` / `latestDraft` version labels.
@@ -726,4 +727,43 @@ pub fn version_exists(
     version: &str,
 ) -> bool {
     get_version(store, base_url, dataset_id, version).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "http://localhost:7878";
+
+    fn notes_of(store: &TripleStore, ver_iri: &str) -> Vec<String> {
+        let q = format!(
+            "SELECT ?n WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> <{ADMS}versionNotes> ?n }} }}"
+        );
+        match store.query(&q).unwrap() {
+            QueryResults::Solutions(rows) => rows
+                .filter_map(|r| r.ok())
+                .filter_map(|r| match r.get("n") {
+                    Some(Term::Literal(l)) => Some(l.value().to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A SPARQL string literal may not hold a raw line break: notes with one
+    /// were refused, after the old notes had already been deleted.
+    #[test]
+    fn version_notes_with_line_breaks_are_stored_and_replaced() {
+        let store = TripleStore::in_memory().unwrap();
+        let ver_iri = version_iri(BASE, "ds", "1.0.0");
+
+        update_version_notes(&store, BASE, "ds", "1.0.0", Some("Old notes")).unwrap();
+        let multi_line = "First line.\nSecond \"quoted\" line,\r\nwith a\ttab and a \\.";
+        update_version_notes(&store, BASE, "ds", "1.0.0", Some(multi_line)).unwrap();
+        assert_eq!(notes_of(&store, &ver_iri), vec![multi_line.to_string()]);
+
+        update_version_notes(&store, BASE, "ds", "1.0.0", None).unwrap();
+        assert!(notes_of(&store, &ver_iri).is_empty());
+    }
 }

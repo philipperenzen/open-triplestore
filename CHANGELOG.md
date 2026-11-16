@@ -153,6 +153,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could be found by its namespace or description. Each whitespace-separated
   word must now appear, in any order and ignoring case and accents, in one of
   those four fields, as in the store's other filter boxes.
+- **Version notes and model descriptions with a line break are saved, and
+  a refused change keeps the old text.** The model registry escaped only `\`
+  and `"` when it wrote free text into a SPARQL string literal, which may not
+  hold a raw line break. `PATCH /api/models/:id/versions/:ver` with notes
+  holding a line break answered `400` with a SPARQL syntax error. It had
+  already deleted the old notes in a separate update, so the version was left
+  without any. The same held for a model's description when it is created
+  (`POST /api/models`), its title, namespace and description when it is
+  edited (`PATCH /api/models/:id`), its owner fields, the notes and branch of
+  a new version, and a dataset version's notes
+  (`PATCH /api/datasets/:id/versions/:ver`). All of these now go through the
+  store's shared literal escaping (`\n`, `\r`, `\t`). Replacing notes or a
+  description is one update, so a refused change leaves the old value in
+  place.
 - **A version's agent in the PROV-O trail is the account's IRI.**
   `GET /api/datasets/{id}/provenance` attributed every version to
   `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
