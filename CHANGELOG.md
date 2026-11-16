@@ -147,6 +147,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data models. The concept scheme and the property sets (IMBOR, PAV, VANN,
   VS) stay vocabularies. An existing install keeps each entry's kind until a
   newly bundled version of it is seeded.
+- **The Model Registry's search box matches every word across id, title,
+  namespace and description.** It matched the whole query as one substring
+  of an entry's title or id, so "asset status" found nothing and no entry
+  could be found by its namespace or description. Each whitespace-separated
+  word must now appear, in any order and ignoring case and accents, in one of
+  those four fields, as in the store's other filter boxes.
 - **A version's agent in the PROV-O trail is the account's IRI.**
   `GET /api/datasets/{id}/provenance` attributed every version to
   `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
