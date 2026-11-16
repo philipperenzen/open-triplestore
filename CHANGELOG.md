@@ -148,7 +148,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists DCMI Type, DQV, the GML geometry types, SAREF, ccREL and VOAF, which
   were data models, and XML Schema Datatypes, which was instances, as
   vocabularies. An existing install keeps each entry's kind until the seeder
-  loads a newly bundled latest version of it.
+  loads a newly bundled latest version of it. A vocabulary installed from the
+  LOV corpus (`POST /api/vocab/install`) is listed as a vocabulary the same
+  way; one that declared a class used to be registered as a data model.
 - **The Model Registry's search box matches every word across id, title,
   namespace and description.** It matched the whole query as one substring
   of an entry's title or id, so "asset status" found nothing and no entry

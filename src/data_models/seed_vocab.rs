@@ -103,8 +103,10 @@ const DESC: &str = "Bundled standard vocabulary, seeded as a public reference.";
 /// reference vocabularies to reuse, so the seeder sets this kind instead of
 /// detecting one: OWL, RDFS, DCAT and the other ontologies among them, which
 /// [`crate::kind_detector`] files as data models, stay under the registry's
-/// vocabulary filter next to the concept schemes and property sets.
-const SEEDED_KIND: RegistryKind = RegistryKind::Vocabulary;
+/// vocabulary filter next to the concept schemes and property sets. A
+/// vocabulary installed from the LOV corpus gets the same kind
+/// ([`crate::vocab_search::install`]).
+pub(crate) const SEEDED_KIND: RegistryKind = RegistryKind::Vocabulary;
 
 /// The synthetic version every bundled vocabulary was seeded under before
 /// each got its real version(s) (releases before 0.4.0).
