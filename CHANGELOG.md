@@ -143,10 +143,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `evidence` gains `skos_relations` and `concept_classes`. The `kind` field of
   `POST /api/models/:id/versions` still overrides detection, and each upload
   records its kind on the entry, so a later version corrects a misfiled one.
-  A fresh install now seeds the bundled ontologies that declare classes as
-  data models. The concept scheme and the property sets (IMBOR, PAV, VANN,
-  VS) stay vocabularies. An existing install keeps each entry's kind until a
-  newly bundled version of it is seeded.
+  The bundled standards stay listed as vocabularies: the seeder now sets that
+  kind on each entry instead of detecting one. On a fresh install this also
+  lists DCMI Type, DQV, the GML geometry types, SAREF, ccREL and VOAF, which
+  were data models, and XML Schema Datatypes, which was instances, as
+  vocabularies. An existing install keeps each entry's kind until the seeder
+  loads a newly bundled latest version of it.
 - **The Model Registry's search box matches every word across id, title,
   namespace and description.** It matched the whole query as one substring
   of an entry's title or id, so "asset status" found nothing and no entry

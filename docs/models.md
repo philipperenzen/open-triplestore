@@ -6,6 +6,8 @@ The **Model Registry** (also called the **Model & Vocabulary Registry**) provide
 
 A fresh instance seeds the registry with the common W3C/OGC standards, each stamped with its **real, multiple versions** out of the box rather than a single placeholder — for example OWL `1.0.0` / `2.0.0` / `2.1.0`, RDF `1.0` / `1.1` / `1.2` (draft), DCAT `1` / `2` / `3`, GeoSPARQL `1.0` / `1.1`, and DCMI Terms dated `2008` / `2012` / `2020`. Some historical version records reuse another version's file — DCMI 2008 the 2012 file, DCAT 1 the DCAT 3 file, RDF 1.0/1.2, RDFS 1.0 and OWL 1 the current namespace documents — and their titles say so. Draft releases (e.g. RDF 1.2, SHACL 1.2, OWL-Time 1.1) are seeded with status **Draft** and are never returned as the "latest" published version.
 
+Every bundled standard is listed as a **vocabulary**. The seeder sets that kind on each entry instead of detecting one, so OWL, RDFS, DCAT and the other ontologies among the standards sit under the vocabulary filter, although an upload of the same file declares classes and is detected as a data model. An install that already holds a bundled entry keeps its kind until the seeder loads a newly bundled latest version of it.
+
 ### Licences of the bundled vocabularies
 
 The bundled vocabularies are third-party works. Each keeps its publisher's licence (W3C Document License, CC BY, CC BY-SA, Apache-2.0, BSD-3-Clause, the ISA Open Metadata Licence and others). The Open Triplestore licence does not apply to them. Every file is listed, with its holder, licence, source and changes, in [`/vocab/NOTICE.md`](/vocab/NOTICE.md), which the server serves itself, so the link works on an API-only instance too.

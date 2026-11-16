@@ -94,10 +94,17 @@ use oxigraph::model::{GraphName, NamedNode, Quad, Triple};
 use crate::data_models::models::{ContentAttribution, DataModelVersion, VersionStatus};
 use crate::data_models::vocab_files::{self as vf, BundledFile};
 use crate::data_models::{content_digest, registry, upload};
-use crate::kind_detector::{self, RegistryKind};
+use crate::kind_detector::RegistryKind;
 use crate::server::AppState;
 
 const DESC: &str = "Bundled standard vocabulary, seeded as a public reference.";
+
+/// The kind every seeded entry is listed under. The bundled standards are
+/// reference vocabularies to reuse, so the seeder sets this kind instead of
+/// detecting one: OWL, RDFS, DCAT and the other ontologies among them, which
+/// [`crate::kind_detector`] files as data models, stay under the registry's
+/// vocabulary filter next to the concept schemes and property sets.
+const SEEDED_KIND: RegistryKind = RegistryKind::Vocabulary;
 
 /// The synthetic version every bundled vocabulary was seeded under before
 /// each got its real version(s) (releases before 0.4.0).
@@ -2264,7 +2271,6 @@ fn seed_one(state: &AppState, v: &StdVocab) -> anyhow::Result<usize> {
     }
 
     let mut newly: Vec<&str> = Vec::new();
-    let mut kind: Option<RegistryKind> = None;
     for ver in v.versions {
         if snap.versions.contains_key(ver.version)
             || registry::version_exists(&state.store, &state.base_url, v.id, ver.version)
@@ -2290,11 +2296,6 @@ fn seed_one(state: &AppState, v: &StdVocab) -> anyhow::Result<usize> {
                 ver.file.path
             );
             continue;
-        }
-        // The registry stores one kind per entry; derive it from the canonical
-        // latest version's content (most representative).
-        if ver.latest {
-            kind = kind_detector::detect(&quads).primary;
         }
         if existing.is_empty() {
             // Verbatim: the graph gets exactly the file's triples (no added
@@ -2343,11 +2344,11 @@ fn seed_one(state: &AppState, v: &StdVocab) -> anyhow::Result<usize> {
     }
 
     // Only touch the per-entry kind + latest pointer when we actually created a
-    // version this run, so steady-state boots stay cheap (no re-parse). The kind
-    // is computed only when the latest version itself was (re)loaded.
+    // version this run, so steady-state boots stay cheap. The kind is set only
+    // when the latest version itself was (re)loaded, as when it was detected.
     if !newly.is_empty() {
-        if let Some(k) = kind {
-            registry::set_data_model_kind(&state.store, &state.base_url, v.id, k)?;
+        if latest.is_some_and(|ver| newly.contains(&ver.version)) {
+            registry::set_data_model_kind(&state.store, &state.base_url, v.id, SEEDED_KIND)?;
         }
         if let Some(lv) = latest.map(|ver| ver.version) {
             let current = registry::get_data_model(&state.store, &state.base_url, v.id)
@@ -2528,7 +2529,8 @@ mod tests {
 
     /// Every bundled vocabulary is published at its curated latest version (never
     /// a draft, never the synthetic `1.0.0`), and OWL/RDF/DCAT ship multiple
-    /// versions out of the box. Every record carries the seeder's marker.
+    /// versions out of the box. Every record carries the seeder's marker, and
+    /// every entry is listed as a vocabulary.
     #[test]
     fn seeds_every_vocabulary_with_all_versions() {
         let state = fresh();
@@ -2547,6 +2549,12 @@ mod tests {
                 rec.latest_published.as_deref(),
                 latest,
                 "vocabulary '{}' published at its curated latest version",
+                v.id
+            );
+            assert_eq!(
+                rec.kind,
+                RegistryKind::Vocabulary,
+                "vocabulary '{}' is listed as a vocabulary",
                 v.id
             );
             assert_eq!(
@@ -2586,6 +2594,14 @@ mod tests {
             rdf.latest_published.as_deref(),
             Some("1.1"),
             "a draft (RDF 1.2) must never be the latest published version"
+        );
+        // The kind is the seeder's, not the detector's: OWL declares classes,
+        // which the detector reads as a data model.
+        let owl = vocab("owl").versions.iter().find(|ver| ver.latest).unwrap();
+        let (quads, _) = file_triples(owl).unwrap();
+        assert_eq!(
+            crate::kind_detector::detect(&quads).primary,
+            Some(RegistryKind::DataModel)
         );
 
         // Idempotent: a second pass seeds nothing new.
