@@ -122,6 +122,55 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **An OWL model uploaded without a `kind` is registered as a data model.**
+  Kind detection weighed a graph's classes against its properties plus its
+  SKOS statements, and counted every `skos:` predicate on any subject
+  (`skos:prefLabel`, `skos:notation`, `skos:definition`, …) as a concept. A
+  typical OWL model (five classes, ten datatype and object properties, a value
+  list whose members carry a label and a notation) came out as `vocabulary`,
+  and so did 35 of the 46 bundled vocabulary files, OWL, RDFS, GeoSPARQL,
+  PROV and DCAT among them. A graph that declares a named class is now a
+  data model, with its properties counted on the classes' side. It is a vocabulary only as a SKOS concept scheme whose
+  dual-typed concepts (`a skos:Concept, owl:Class`, or subclasses of
+  `skos:Concept`) outnumber its other classes and properties. Only
+  `skos:Concept` and `skos:ConceptScheme` typing and structural links
+  (`skos:broader`, `skos:narrower`, `skos:related`, `skos:inScheme`,
+  `skos:hasTopConcept`, `skos:topConceptOf`, `skos:member`) count as SKOS
+  evidence. A concept that is also typed with a local class no longer counts
+  as an instance, and an anonymous class expression does not declare a class.
+  Graphs without classes are classified as before. The same detection gives
+  an imported dataset graph its inferred role. The upload response's
+  `evidence` gains `skos_relations` and `concept_classes`. The `kind` field of
+  `POST /api/models/:id/versions` still overrides detection, and each upload
+  records its kind on the entry, so a later version corrects a misfiled one.
+  The bundled standards stay listed as vocabularies: the seeder now sets that
+  kind on each entry instead of detecting one. On a fresh install this also
+  lists DCMI Type, DQV, the GML geometry types, SAREF, ccREL and VOAF, which
+  were data models, and XML Schema Datatypes, which was instances, as
+  vocabularies. An existing install keeps each entry's kind until the seeder
+  loads a newly bundled latest version of it. A vocabulary installed from the
+  LOV corpus (`POST /api/vocab/install`) is listed as a vocabulary the same
+  way; one that declared a class used to be registered as a data model.
+- **The Model Registry's search box matches every word across id, title,
+  namespace and description.** It matched the whole query as one substring
+  of an entry's title or id, so "asset status" found nothing and no entry
+  could be found by its namespace or description. Each whitespace-separated
+  word must now appear, in any order and ignoring case and accents, in one of
+  those four fields, as in the store's other filter boxes.
+- **Version notes and model descriptions with a line break are saved, and
+  a refused change keeps the old text.** The model registry escaped only `\`
+  and `"` when it wrote free text into a SPARQL string literal, which may not
+  hold a raw line break. `PATCH /api/models/:id/versions/:ver` with notes
+  holding a line break answered `400` with a SPARQL syntax error. It had
+  already deleted the old notes in a separate update, so the version was left
+  without any. The same held for a model's description when it is created
+  (`POST /api/models`), its title, namespace and description when it is
+  edited (`PATCH /api/models/:id`), its owner fields, the notes and branch of
+  a new version, and a dataset version's notes
+  (`PATCH /api/datasets/:id/versions/:ver`). All of these now go through the
+  store's shared literal escaping (`\n`, `\r`, `\t`). Replacing notes or a
+  description is one update, so a refused change leaves the old value in
+  place.
 - **A version's agent in the PROV-O trail is the account's IRI.**
   `GET /api/datasets/{id}/provenance` attributed every version to
   `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the

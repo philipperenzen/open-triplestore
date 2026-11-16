@@ -3,7 +3,9 @@
 //!
 //! Mirrors the standard-vocabulary seeder (`seed_vocab::seed_one`): registry
 //! header + one published version whose named graph holds the vocabulary's
-//! triples, kind auto-detected.  No network is involved — the triples come
+//! triples, listed as a vocabulary like the bundled standards
+//! (`seed_vocab::SEEDED_KIND`) whatever kind detection would read from
+//! its content.  No network is involved — the triples come
 //! from the local `lov.nq.gz`.  The version notes record the vocabulary's
 //! own licence (LOV's CC BY 4.0 does not cover it) and the notice that
 //! licence requires on copies.
@@ -35,8 +37,8 @@ use serde::Serialize;
 use crate::data_models::models::{
     ContentAttribution, DataModelRecord, DataModelVersion, LicenseRef, VersionStatus,
 };
+use crate::data_models::seed_vocab::SEEDED_KIND;
 use crate::data_models::{content_digest, registry, upload};
-use crate::kind_detector;
 use crate::store::TripleStore;
 
 use super::catalog::{CatalogSource, LicenseSource, LicenseStatus, LovVocab, VocabCatalog};
@@ -403,7 +405,6 @@ pub fn install_lov_vocab(
         InstallError::Internal(reason)
     };
 
-    let kind = kind_detector::detect(&quads).primary;
     // What the store holds once the quads are loaded: the same triples (it
     // keeps typed literals as written). The copy check compares with that.
     let raw = content_digest::quads_as_triples(&quads);
@@ -486,10 +487,8 @@ pub fn install_lov_vocab(
         }
     }
 
-    if let Some(k) = kind {
-        if let Err(e) = registry::set_data_model_kind(store, base_url, &model_id, k) {
-            return Err(rollback(&loaded_graphs, format!("kind update failed: {e}")));
-        }
+    if let Err(e) = registry::set_data_model_kind(store, base_url, &model_id, SEEDED_KIND) {
+        return Err(rollback(&loaded_graphs, format!("kind update failed: {e}")));
     }
     if let Err(e) = registry::update_latest_published(store, base_url, &model_id, &result.version) {
         return Err(rollback(
@@ -502,9 +501,7 @@ pub fn install_lov_vocab(
         model_id,
         version: result.version,
         triples,
-        kind: kind
-            .map(|k| format!("{k:?}").to_lowercase())
-            .unwrap_or_else(|| "unknown".to_string()),
+        kind: SEEDED_KIND.as_str().to_string(),
         license: vocab.license.clone(),
         license_status: vocab.license_status,
         license_source: vocab.license_source,

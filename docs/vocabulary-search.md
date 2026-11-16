@@ -194,7 +194,9 @@ ranked alternatives.
 `POST /api/vocab/install` with `{"vocab": "gr"}` copies the GoodRelations
 vocabulary from the local corpus into the model registry as a public,
 published entry — exactly like the bundled standard vocabularies, with the
-LOV version label and provenance notes. The new entry immediately joins term
+LOV version label and provenance notes. Like them it is listed as a
+`vocabulary` (`kind` in the response), even when it declares classes, which
+an upload would detect as a data model. The new entry immediately joins term
 search, prefix resolution and the DCAT catalog.
 
 The version notes and the response (`license`, `license_status`,

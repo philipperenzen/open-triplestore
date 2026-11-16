@@ -7,6 +7,7 @@
   import { BookOpen, Plus, Trash2, Search, Loader2, Tag, ChevronRight, Info, ChevronDown, Globe, Lock, CheckSquare, X, User, Building2, Library } from 'lucide-svelte';
   import { listDataModels, createDataModel, deleteDataModel, listPublicUsers, listOrganisations } from '../lib/api.js';
   import { isAdmin, isAuthenticated } from '../lib/stores.js';
+  import { entryKind, filterRegistryEntries } from '../lib/modelRegistryFilter';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import BulkActionBar from '../components/BulkActionBar.svelte';
   import Avatar from '../components/Avatar.svelte';
@@ -125,17 +126,11 @@
     await load();
   }
 
-  // An entry's kind is "vocabulary" (SKOS) or "data-model" (OWL/RDFS); the
-  // backend auto-detects it on upload and persists it on the record.
-  function entryKind(m) {
-    return m.kind === 'vocabulary' ? 'vocabulary' : 'data-model';
-  }
   $: modelCount = models.filter(m => entryKind(m) === 'data-model').length;
   $: vocabCount = models.filter(m => entryKind(m) === 'vocabulary').length;
-  $: filtered = models.filter(m =>
-    (kindFilter === 'all' || entryKind(m) === kindFilter)
-    && (!search || m.title.toLowerCase().includes(search.toLowerCase()) || m.id.toLowerCase().includes(search.toLowerCase()))
-  );
+  // Every word of the search must appear (any order, case and accents
+  // ignored) in the entry's id, title, namespace or description.
+  $: filtered = filterRegistryEntries(models, search, kindFilter);
 </script>
 
 <div class="space-y-6">

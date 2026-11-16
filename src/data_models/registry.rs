@@ -329,14 +329,14 @@ pub fn insert_data_model(
     let description_triple = description
         .filter(|d| !d.is_empty())
         .map(|d| {
-            let escaped = d.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = crate::store::escape_sparql_literal(d);
             format!("  dct:description \"{escaped}\"@en ;\n")
         })
         .unwrap_or_default();
     let owner_triples = match (owner_type, owner_id) {
         (Some(ot), Some(oid)) if !ot.is_empty() && !oid.is_empty() => {
-            let ot_e = ot.replace('"', "\\\"");
-            let oid_e = oid.replace('"', "\\\"");
+            let ot_e = crate::store::escape_sparql_literal(ot);
+            let oid_e = crate::store::escape_sparql_literal(oid);
             format!("  ver:ownerType \"{ot_e}\" ;\n  ver:ownerId \"{oid_e}\" ;\n")
         }
         _ => String::new(),
@@ -404,7 +404,7 @@ pub fn update_data_model(
     let ont_iri = format!("{}/data-model/{}", base_url, data_model_id);
 
     if let Some(t) = title {
-        let escaped = t.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = crate::store::escape_sparql_literal(t);
         let q = format!(
             r#"
             PREFIX dct: <{DCT}>
@@ -417,7 +417,7 @@ pub fn update_data_model(
     }
 
     if let Some(ns) = namespace {
-        let escaped = ns.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = crate::store::escape_sparql_literal(ns);
         let q = format!(
             r#"
             PREFIX ver: <{VER}>
@@ -431,23 +431,13 @@ pub fn update_data_model(
 
     // description: allow clearing by passing empty string
     if let Some(desc) = description {
-        let q_del = format!(
-            r#"
-            PREFIX dct: <{DCT}>
-            DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ont_iri}> dct:description ?old }} }}
-            "#
-        );
-        store.update(&q_del)?;
-        if !desc.is_empty() {
-            let escaped = desc.replace('\\', "\\\\").replace('"', "\\\"");
-            let q_ins = format!(
-                r#"
-                PREFIX dct: <{DCT}>
-                INSERT DATA {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ont_iri}> dct:description "{escaped}"@en }} }}
-                "#
-            );
-            store.update(&q_ins)?;
-        }
+        let value = (!desc.is_empty())
+            .then(|| format!("\"{}\"@en", crate::store::escape_sparql_literal(desc)));
+        store.update(&replace_registry_value(
+            &ont_iri,
+            &format!("<{DCT}description>"),
+            value.as_deref(),
+        ))?;
     }
 
     if let Some(pub_flag) = is_public {
@@ -464,7 +454,7 @@ pub fn update_data_model(
     }
 
     if let Some(ot) = owner_type {
-        let escaped = ot.replace('"', "\\\"");
+        let escaped = crate::store::escape_sparql_literal(ot);
         let q = format!(
             r#"
             PREFIX ver: <{VER}>
@@ -477,7 +467,7 @@ pub fn update_data_model(
     }
 
     if let Some(oid) = owner_id {
-        let escaped = oid.replace('"', "\\\"");
+        let escaped = crate::store::escape_sparql_literal(oid);
         let q = format!(
             r#"
             PREFIX ver: <{VER}>
@@ -504,25 +494,29 @@ pub fn update_version_notes(
         "{}/data-model/{}/version/{}",
         base_url, data_model_id, version
     );
-    // Always delete existing notes first
-    let q_del = format!(
-        r#"
-        PREFIX adms: <{ADMS}>
-        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes ?old }} }}
-        "#
-    );
-    store.update(&q_del)?;
-    if let Some(n) = notes.filter(|n| !n.is_empty()) {
-        let escaped = n.replace('\\', "\\\\").replace('"', "\\\"");
-        let q_ins = format!(
-            r#"
-            PREFIX adms: <{ADMS}>
-            INSERT DATA {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> adms:versionNotes "{escaped}"@en }} }}
-            "#
-        );
-        store.update(&q_ins)?;
-    }
-    Ok(())
+    let value = notes
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("\"{}\"@en", crate::store::escape_sparql_literal(n)));
+    store.update(&replace_registry_value(
+        &ver_iri,
+        &format!("<{ADMS}versionNotes>"),
+        value.as_deref(),
+    ))
+}
+
+/// One SPARQL update that replaces every value of `predicate` on `subject` in
+/// the registry graph with `value` (a SPARQL term, already escaped), or
+/// removes them for `None`. A single DELETE/INSERT: when the update is
+/// refused, the old value is still there.
+fn replace_registry_value(subject: &str, predicate: &str, value: Option<&str>) -> String {
+    let insert = value
+        .map(|v| format!("INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject}> {predicate} {v} }} }}"))
+        .unwrap_or_default();
+    format!(
+        "DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject}> {predicate} ?old }} }}\n\
+         {insert}\n\
+         WHERE {{ OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject}> {predicate} ?old }} }} }}"
+    )
 }
 
 /// Delete a data model record and all its version records from the registry.
@@ -970,7 +964,7 @@ pub fn insert_version(
         .notes
         .as_deref()
         .map(|n| {
-            let escaped = n.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = crate::store::escape_sparql_literal(n);
             format!("    adms:versionNotes \"{escaped}\"@en ;\n")
         })
         .unwrap_or_default();
@@ -979,7 +973,7 @@ pub fn insert_version(
         .branch
         .as_deref()
         .map(|b| {
-            let escaped = b.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = crate::store::escape_sparql_literal(b);
             format!("    ver:branch \"{escaped}\" ;\n")
         })
         .unwrap_or_default();
@@ -2047,6 +2041,97 @@ mod tests {
             created,
         )
         .unwrap();
+    }
+
+    fn version(id: &str, version: &str, notes: Option<&str>) -> DataModelVersion {
+        DataModelVersion {
+            data_model_id: id.into(),
+            version: version.into(),
+            status: VersionStatus::Draft,
+            graph_iri: format!("{BASE}/data-model/{id}/version/{version}"),
+            sub_graphs: Vec::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: notes.map(str::to_string),
+            branch: None,
+            sub_graph_status: Vec::new(),
+        }
+    }
+
+    /// Text with line breaks, quotes, backslashes, tabs and other control
+    /// characters round-trips through every registry write that takes free
+    /// text. A raw line break is not allowed in a SPARQL string literal, and
+    /// the registry wrote those unescaped: such a title, description or notes
+    /// was refused.
+    #[test]
+    fn multi_line_text_round_trips_through_the_registry() {
+        const TEXT: &str = "First line.\nSecond \"quoted\" line,\r\nwith a\ttab, a \\ and a \u{1}.";
+        let store = TripleStore::in_memory().unwrap();
+        insert_data_model(
+            &store,
+            BASE,
+            "m",
+            TEXT,
+            "http://example.org/m#",
+            Some(TEXT),
+            false,
+            Some("user"),
+            Some("u\"1"),
+            None,
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let m = get_data_model(&store, BASE, "m").expect("entry");
+        assert_eq!(m.title, TEXT);
+        assert_eq!(m.description.as_deref(), Some(TEXT));
+        assert_eq!(m.owner_id.as_deref(), Some("u\"1"));
+
+        let other = "Replaced\ntext";
+        update_data_model(
+            &store,
+            BASE,
+            "m",
+            Some(other),
+            None,
+            Some(other),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let m = get_data_model(&store, BASE, "m").expect("entry");
+        assert_eq!(m.title, other);
+        assert_eq!(m.description.as_deref(), Some(other));
+
+        insert_version(&store, BASE, &version("m", "1.0.0", Some(TEXT))).unwrap();
+        let notes = |s: &TripleStore| get_version(s, BASE, "m", "1.0.0").unwrap().notes;
+        assert_eq!(notes(&store).as_deref(), Some(TEXT));
+        update_version_notes(&store, BASE, "m", "1.0.0", Some("New\nnotes")).unwrap();
+        assert_eq!(notes(&store).as_deref(), Some("New\nnotes"));
+        update_version_notes(&store, BASE, "m", "1.0.0", None).unwrap();
+        assert_eq!(notes(&store), None);
+    }
+
+    /// The delete and the insert of a replacement are one update: when it is
+    /// refused, the old value is still there. (They were two, and a refused
+    /// insert left the version without notes.)
+    #[test]
+    fn a_refused_replacement_keeps_the_old_value() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, "gr", "2026-07-24T13:06:28Z");
+        insert_version(&store, BASE, &version("gr", "1.0.0", Some("Old notes"))).unwrap();
+        let ver_iri = format!("{BASE}/data-model/gr/version/1.0.0");
+
+        // A value that is no SPARQL term: the whole update is refused.
+        let refused = replace_registry_value(
+            &ver_iri,
+            &format!("<{ADMS}versionNotes>"),
+            Some("\"raw\nbreak\"@en"),
+        );
+        assert!(store.update(&refused).is_err());
+        let v = get_version(&store, BASE, "gr", "1.0.0").unwrap();
+        assert_eq!(v.notes.as_deref(), Some("Old notes"));
     }
 
     /// A registry entry carrying a second value for one of the OPTIONAL
