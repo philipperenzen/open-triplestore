@@ -29,6 +29,28 @@ const SH_NS: &str = "http://www.w3.org/ns/shacl#";
 const SKOS_CONCEPT_SCHEME: &str = "http://www.w3.org/2004/02/skos/core#ConceptScheme";
 const SKOS_CONCEPT: &str = "http://www.w3.org/2004/02/skos/core#Concept";
 const SKOS_NS: &str = "http://www.w3.org/2004/02/skos/core#";
+const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+/// SKOS predicates that give a concept scheme its structure: the semantic
+/// relations between concepts, scheme membership and collection membership.
+/// Only these count as concept-scheme evidence in [`detect`]. Labels
+/// (`skos:prefLabel`, …), `skos:notation`, documentation notes
+/// (`skos:definition`, …) and mapping relations (`skos:exactMatch`, …) are
+/// left out: they annotate or align resources of any kind — the members of a
+/// value list in an OWL model carry them as much as the concepts of a scheme.
+const SKOS_STRUCTURAL_PREDICATES: &[&str] = &[
+    "http://www.w3.org/2004/02/skos/core#semanticRelation",
+    "http://www.w3.org/2004/02/skos/core#broader",
+    "http://www.w3.org/2004/02/skos/core#narrower",
+    "http://www.w3.org/2004/02/skos/core#related",
+    "http://www.w3.org/2004/02/skos/core#broaderTransitive",
+    "http://www.w3.org/2004/02/skos/core#narrowerTransitive",
+    "http://www.w3.org/2004/02/skos/core#inScheme",
+    "http://www.w3.org/2004/02/skos/core#hasTopConcept",
+    "http://www.w3.org/2004/02/skos/core#topConceptOf",
+    "http://www.w3.org/2004/02/skos/core#member",
+    "http://www.w3.org/2004/02/skos/core#memberList",
+];
 
 const SWRL_IMP: &str = "http://www.w3.org/2003/11/swrl#Imp";
 const SPIN_RULE: &str = "http://spinrdf.org/spin#rule";
@@ -82,11 +104,14 @@ const SCHEMA_TYPE_OBJECTS: &[&str] = &[
 #[serde(rename_all = "kebab-case")]
 pub enum RegistryKind {
     /// Model (T-Box): class definitions and class axioms (`owl:Class`,
-    /// `rdfs:subClassOf`, restrictions). Dominant class signal.
+    /// `rdfs:subClassOf`, restrictions). Any graph that declares a named class,
+    /// whatever the number of properties next to it, unless it is a SKOS
+    /// concept scheme whose concepts are dual-typed as classes.
     DataModel,
     /// Vocabulary (R-Box): object/datatype/annotation properties and relations,
     /// plus SKOS concept schemes / controlled vocabularies. The terms that
-    /// describe how things relate, as opposed to the class structure.
+    /// describe how things relate, as opposed to the class structure: a graph
+    /// that declares no class, or a concept scheme.
     Vocabulary,
     /// SHACL shapes graph (no significant class definitions).
     Shapes,
@@ -140,17 +165,32 @@ impl Default for RegistryKind {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Evidence {
     pub owl_ontology: usize,
+    /// Named resources typed `owl:Class`. Anonymous class expressions
+    /// (`[ a owl:Class ; owl:unionOf (…) ]`) do not declare a class.
     pub owl_classes: usize,
     pub owl_properties: usize,
+    /// Named resources typed `rdfs:Class` and not also `owl:Class`.
     pub rdfs_classes: usize,
     /// Subjects with an explicit sh:NodeShape / sh:PropertyShape type,
     /// or predicates in the sh: namespace (implicit shape).
     pub shacl_shapes: usize,
     pub skos_concept_schemes: usize,
+    /// Resources typed `skos:Concept`.
     pub skos_concepts: usize,
+    /// Structural SKOS links (`skos:broader`, `skos:narrower`, `skos:related`,
+    /// `skos:inScheme`, `skos:hasTopConcept`, `skos:member`, …). Labels,
+    /// notations and notes are not counted.
+    #[serde(default)]
+    pub skos_relations: usize,
+    /// Declared classes that are SKOS concepts themselves: dual-typed
+    /// `a skos:Concept, owl:Class`, or `rdfs:subClassOf skos:Concept`. These
+    /// are the class side of a concept scheme rather than a class model.
+    #[serde(default)]
+    pub concept_classes: usize,
     /// SWRL / SPIN entailment rules.
     pub entailment_rules: usize,
-    /// Subjects typed with a non-schema class (heuristic instance count).
+    /// Subjects typed with a non-schema class (heuristic instance count). A
+    /// subject that is also a `skos:Concept` is a concept, not an instance.
     pub instance_subjects: usize,
 }
 
@@ -162,19 +202,45 @@ impl Evidence {
         self.owl_ontology + self.owl_classes + self.rdfs_classes
     }
 
+    /// Concept-scheme score: SKOS concept schemes, concepts and the structural
+    /// links between them.
+    fn concept_scheme_score(&self) -> usize {
+        self.skos_concept_schemes + self.skos_concepts + self.skos_relations
+    }
+
     /// Vocabulary score (R-Box): object/datatype/annotation properties and
-    /// relations, plus SKOS concept schemes and concepts. This is where the
-    /// "vocabulary" of a model — the terms that describe how things relate —
-    /// lives, as opposed to the class structure (Model) or the data (Instances).
+    /// relations, plus SKOS concept schemes. This is where the "vocabulary" of
+    /// a model — the terms that describe how things relate — lives, as opposed
+    /// to the class structure (Model) or the data (Instances). It decides the
+    /// kind of a graph that declares no class; next to real classes it never
+    /// outvotes them (see [`Evidence::is_concept_scheme`]).
     fn vocabulary_score(&self) -> usize {
-        self.owl_properties + self.skos_concept_schemes + self.skos_concepts
+        self.owl_properties + self.concept_scheme_score()
     }
 
     /// True when the graph declares at least one real class (not merely an
     /// `owl:Ontology` header). Used to decide whether a property/SKOS-heavy graph
-    /// is a pure Vocabulary (no class anchor) or a mixed Model.
+    /// is a pure Vocabulary (no class anchor) or a Model.
     fn has_real_classes(&self) -> bool {
         self.owl_classes + self.rdfs_classes > 0
+    }
+
+    /// Declared classes that are not SKOS concepts: the classes of a class
+    /// model.
+    fn model_classes(&self) -> usize {
+        (self.owl_classes + self.rdfs_classes).saturating_sub(self.concept_classes)
+    }
+
+    /// For a graph with real classes: true when it is still clearly a SKOS
+    /// concept scheme, i.e. its concept classes (dual typing) and the scheme's
+    /// structure each outweigh the class model: the classes that are not
+    /// concepts plus the properties. Properties sit with the classes they
+    /// describe, so they count on the model's side, and an OWL model whose
+    /// value list is a SKOS scheme of individuals stays a model however long
+    /// that list is.
+    fn is_concept_scheme(&self) -> bool {
+        let model = self.model_classes() + self.owl_properties;
+        self.concept_classes > model && self.concept_scheme_score() > model
     }
 
     fn shapes_score(&self) -> usize {
@@ -217,9 +283,55 @@ impl Detected {
 
 // ─── Detection ────────────────────────────────────────────────────────────────
 
+/// A set of subjects, named and blank kept apart (a blank node label and an
+/// IRI never denote the same resource).
+#[derive(Default)]
+struct Subjects<'a> {
+    named: std::collections::HashSet<&'a str>,
+    blank: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> Subjects<'a> {
+    fn insert(&mut self, s: &'a oxigraph::model::NamedOrBlankNode) {
+        use oxigraph::model::NamedOrBlankNode;
+        match s {
+            NamedOrBlankNode::NamedNode(n) => self.named.insert(n.as_str()),
+            NamedOrBlankNode::BlankNode(b) => self.blank.insert(b.as_str()),
+        };
+    }
+
+    fn len(&self) -> usize {
+        self.named.len() + self.blank.len()
+    }
+
+    /// Members of `self` that are not in `other`.
+    fn count_not_in(&self, other: &Subjects<'_>) -> usize {
+        self.named
+            .iter()
+            .filter(|s| !other.named.contains(*s))
+            .count()
+            + self
+                .blank
+                .iter()
+                .filter(|s| !other.blank.contains(*s))
+                .count()
+    }
+}
+
 /// Scan parsed quads and classify them into a [`Detected`] result.
 pub fn detect(quads: &[Quad]) -> Detected {
+    use oxigraph::model::NamedOrBlankNode;
+    use std::collections::HashSet;
+
     let mut ev = Evidence::default();
+    // Named class declarations, SKOS concepts, the classes declared a
+    // subclass of `skos:Concept`, and subjects typed with a non-schema class.
+    // Sets, so a resource typed twice — or in two graphs — counts once.
+    let mut owl_classes: HashSet<&str> = HashSet::new();
+    let mut rdfs_classes: HashSet<&str> = HashSet::new();
+    let mut concept_subclasses: HashSet<&str> = HashSet::new();
+    let mut concepts = Subjects::default();
+    let mut instances = Subjects::default();
 
     for q in quads {
         let p = q.predicate.as_str();
@@ -229,22 +341,29 @@ pub fn detect(quads: &[Quad]) -> Detected {
                 let obj_str = obj.as_str();
                 match obj_str {
                     OWL_ONTOLOGY => ev.owl_ontology += 1,
-                    OWL_CLASS => ev.owl_classes += 1,
+                    // Anonymous class expressions declare no class.
+                    OWL_CLASS | RDFS_CLASS => {
+                        if let NamedOrBlankNode::NamedNode(s) = &q.subject {
+                            if obj_str == OWL_CLASS {
+                                owl_classes.insert(s.as_str());
+                            } else {
+                                rdfs_classes.insert(s.as_str());
+                            }
+                        }
+                    }
                     OWL_OBJECT_PROPERTY
                     | OWL_DATATYPE_PROPERTY
                     | OWL_ANNOTATION_PROPERTY
                     | RDF_PROPERTY => ev.owl_properties += 1,
-                    RDFS_CLASS => ev.rdfs_classes += 1,
                     SH_NODE_SHAPE | SH_PROPERTY_SHAPE => ev.shacl_shapes += 1,
                     SKOS_CONCEPT_SCHEME => ev.skos_concept_schemes += 1,
-                    SKOS_CONCEPT => ev.skos_concepts += 1,
+                    SKOS_CONCEPT => concepts.insert(&q.subject),
                     SWRL_IMP => ev.entailment_rules += 1,
                     _ => {
-                        // Subject is typed with something that isn't a schema construct —
-                        // count as potential instance (deduplicated by subject below
-                        // would be ideal but single-pass approximation is sufficient).
+                        // Subject is typed with something that isn't a schema
+                        // construct: a potential instance.
                         if !SCHEMA_TYPE_OBJECTS.contains(&obj_str) {
-                            ev.instance_subjects += 1;
+                            instances.insert(&q.subject);
                         }
                     }
                 }
@@ -258,10 +377,32 @@ pub fn detect(quads: &[Quad]) -> Detected {
         } else if p == SPIN_RULE || p.starts_with(SP_NS) {
             ev.entailment_rules += 1;
         } else if p.starts_with(SKOS_NS) {
-            // Predicates like skos:broader, skos:narrower imply vocabulary content.
-            ev.skos_concepts += 1;
+            // Structural links (skos:broader, skos:inScheme, …) make a concept
+            // scheme; labels, notations and notes annotate anything.
+            if SKOS_STRUCTURAL_PREDICATES.contains(&p) {
+                ev.skos_relations += 1;
+            }
+        } else if p == RDFS_SUB_CLASS_OF {
+            if let (NamedOrBlankNode::NamedNode(s), Term::NamedNode(o)) = (&q.subject, &q.object) {
+                if o.as_str() == SKOS_CONCEPT {
+                    concept_subclasses.insert(s.as_str());
+                }
+            }
         }
     }
+
+    rdfs_classes.retain(|c| !owl_classes.contains(c));
+    ev.owl_classes = owl_classes.len();
+    ev.rdfs_classes = rdfs_classes.len();
+    ev.skos_concepts = concepts.len();
+    ev.concept_classes = owl_classes
+        .iter()
+        .chain(rdfs_classes.iter())
+        .filter(|c| concepts.named.contains(*c) || concept_subclasses.contains(*c))
+        .count();
+    // A concept typed with a local class as well (`a ex:Status, skos:Concept`)
+    // is vocabulary content, as in the subject-tree classifier below.
+    ev.instance_subjects = instances.count_not_in(&concepts);
 
     classify(ev)
 }
@@ -332,13 +473,31 @@ fn classify(ev: Evidence) -> Detected {
         };
     }
 
-    // Both class and vocabulary content may be present (a typical OWL file mixes
-    // classes and properties). Dominant signal wins; ties go to Model because the
-    // class hierarchy anchors the schema. `mixed` is set whenever more than one
-    // logical layer is present.
-    if class > 0 || vocab > 0 {
-        let both = class > 0 && vocab > 0;
-        let mixed = both || shapes > 0 || entail > 0 || abox > 0;
+    // Real classes are declared: a typical OWL file mixes classes, the
+    // properties that describe them and, often, a value list. It is a Model —
+    // property counts do not outvote the classes — unless it is clearly a SKOS
+    // concept scheme whose concepts are dual-typed as classes. Typed
+    // individuals next to the schema (value-list members, examples) keep that
+    // verdict until they outnumber the whole schema. `mixed` is set whenever
+    // more than one logical layer is present.
+    if has_classes {
+        if abox <= total_schema {
+            let mixed = vocab > 0 || shapes > 0 || entail > 0 || abox > 0;
+            let primary = if ev.is_concept_scheme() {
+                RegistryKind::Vocabulary
+            } else {
+                RegistryKind::DataModel
+            };
+            return Detected {
+                primary: Some(primary),
+                mixed,
+                evidence: ev,
+            };
+        }
+    } else if class > 0 || vocab > 0 {
+        // No real class (at most an `owl:Ontology` header) next to as much data
+        // as vocabulary: the dominant signal wins, ties go to Model.
+        let mixed = (class > 0 && vocab > 0) || shapes > 0 || entail > 0 || abox > 0;
         if class >= vocab {
             if abox <= class.max(shapes) {
                 return Detected {
@@ -356,6 +515,8 @@ fn classify(ev: Evidence) -> Detected {
         }
     }
 
+    // Schema and data in a balance no rule above settles: left for a human to
+    // label.
     Detected {
         primary: None,
         mixed: true,
@@ -934,6 +1095,252 @@ mod tests {
         let d = detect(&parse(ttl));
         assert_eq!(d.primary, Some(RegistryKind::DataModel));
         assert!(d.mixed);
+    }
+
+    /// A typical OWL model: an ontology header, five classes, ten datatype and
+    /// object properties, and a value list whose members are SKOS concepts in
+    /// a scheme, each with a label and a notation.
+    const OWL_MODEL_WITH_VALUE_LIST: &str = r#"
+        @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+        @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+        @prefix ex:   <http://example.org/asset#> .
+
+        ex: a owl:Ontology ; owl:versionInfo "1.0.0" .
+
+        ex:Asset     a owl:Class ; rdfs:label "Asset" .
+        ex:Component a owl:Class ; rdfs:subClassOf ex:Asset .
+        ex:Location  a owl:Class .
+        ex:Inspection a owl:Class .
+        ex:Status    a owl:Class ; rdfs:comment "The values of ex:StatusList." .
+
+        ex:name        a owl:DatatypeProperty ; rdfs:domain ex:Asset ; rdfs:range xsd:string .
+        ex:code        a owl:DatatypeProperty ; rdfs:domain ex:Asset ; rdfs:range xsd:string .
+        ex:builtIn     a owl:DatatypeProperty ; rdfs:domain ex:Asset ; rdfs:range xsd:gYear .
+        ex:length      a owl:DatatypeProperty ; rdfs:domain ex:Component ; rdfs:range xsd:decimal .
+        ex:inspectedOn a owl:DatatypeProperty ; rdfs:domain ex:Inspection ; rdfs:range xsd:date .
+        ex:remark      a owl:DatatypeProperty ; rdfs:domain ex:Inspection ; rdfs:range xsd:string .
+        ex:partOf      a owl:ObjectProperty ; rdfs:domain ex:Component ; rdfs:range ex:Asset .
+        ex:locatedAt   a owl:ObjectProperty ; rdfs:domain ex:Asset ; rdfs:range ex:Location .
+        ex:inspects    a owl:ObjectProperty ; rdfs:domain ex:Inspection ; rdfs:range ex:Asset .
+        ex:status      a owl:ObjectProperty ; rdfs:domain ex:Asset ; rdfs:range ex:Status .
+
+        ex:StatusList a skos:ConceptScheme ; skos:prefLabel "Status" .
+        ex:planned a ex:Status, skos:Concept ; skos:inScheme ex:StatusList ;
+            skos:prefLabel "Planned" ; skos:notation "P" ; skos:definition "Not built yet." .
+        ex:inUse a ex:Status, skos:Concept ; skos:inScheme ex:StatusList ;
+            skos:prefLabel "In use" ; skos:notation "U" ; skos:definition "In service." .
+        ex:closed a ex:Status, skos:Concept ; skos:inScheme ex:StatusList ;
+            skos:prefLabel "Closed" ; skos:notation "C" ; skos:definition "Out of service." .
+        ex:removed a ex:Status, skos:Concept ; skos:inScheme ex:StatusList ;
+            skos:prefLabel "Removed" ; skos:notation "R" ; skos:definition "Taken away." .
+    "#;
+
+    #[test]
+    fn owl_model_with_properties_and_a_value_list_is_a_data_model() {
+        let d = detect(&parse(OWL_MODEL_WITH_VALUE_LIST));
+        assert_eq!(d.primary, Some(RegistryKind::DataModel), "{:?}", d.evidence);
+        assert!(
+            d.mixed,
+            "classes, properties and a value list are several layers"
+        );
+
+        let ev = &d.evidence;
+        assert_eq!(ev.owl_classes, 5);
+        assert_eq!(ev.owl_properties, 10);
+        // Only the typing and the scheme membership are SKOS evidence; the
+        // labels, notations and definitions are not.
+        assert_eq!(ev.skos_concept_schemes, 1);
+        assert_eq!(ev.skos_concepts, 4);
+        assert_eq!(ev.skos_relations, 4);
+        assert_eq!(
+            ev.concept_classes, 0,
+            "the members are individuals, not classes"
+        );
+        assert_eq!(
+            ev.instance_subjects, 0,
+            "a member that is a concept is no instance"
+        );
+        // Properties and SKOS together outnumber the classes: comparing those
+        // two sides is what filed this file as a vocabulary.
+        assert!(ev.vocabulary_score() > ev.class_score());
+    }
+
+    /// The fixture's value list grown to `n` members, written the way `members`
+    /// renders one (`{i}` is the member's number).
+    fn owl_model_with_members(n: usize, member: &str) -> String {
+        let mut ttl = OWL_MODEL_WITH_VALUE_LIST.to_string();
+        for i in 0..n {
+            ttl.push_str(&member.replace("{i}", &i.to_string()));
+            ttl.push('\n');
+        }
+        ttl
+    }
+
+    #[test]
+    fn the_length_of_a_value_list_does_not_turn_a_model_into_a_vocabulary() {
+        // Members typed as concepts in the scheme: vocabulary content, never
+        // instances, however many there are.
+        let concepts = owl_model_with_members(
+            200,
+            r#"ex:v{i} a ex:Status, skos:Concept ; skos:inScheme ex:StatusList ;
+                 skos:prefLabel "Value {i}" ; skos:notation "{i}" ."#,
+        );
+        let d = detect(&parse(&concepts));
+        assert_eq!(d.primary, Some(RegistryKind::DataModel), "{:?}", d.evidence);
+        assert_eq!(d.evidence.instance_subjects, 0);
+
+        // Members that are plain individuals of the enumeration class and only
+        // carry a SKOS label and notation: individuals, and no SKOS evidence.
+        let individuals = owl_model_with_members(
+            12,
+            r#"ex:w{i} a ex:Status ; skos:prefLabel "Value {i}" ; skos:notation "{i}" ."#,
+        );
+        let d = detect(&parse(&individuals));
+        assert_eq!(d.primary, Some(RegistryKind::DataModel), "{:?}", d.evidence);
+        assert_eq!(d.evidence.instance_subjects, 12);
+        assert_eq!(d.evidence.skos_concepts, 4);
+        assert_eq!(d.evidence.skos_relations, 4);
+    }
+
+    #[test]
+    fn a_property_heavy_ontology_with_classes_is_a_data_model() {
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix ex: <http://example.org/> .
+            ex:Agent a owl:Class . ex:Document a owl:Class .
+            ex:p1 a owl:ObjectProperty . ex:p2 a owl:ObjectProperty .
+            ex:p3 a owl:ObjectProperty . ex:p4 a owl:DatatypeProperty .
+            ex:p5 a owl:DatatypeProperty . ex:p6 a owl:DatatypeProperty .
+            ex:p7 a owl:AnnotationProperty . ex:p8 a owl:AnnotationProperty .
+        "#;
+        let d = detect(&parse(ttl));
+        assert_eq!(d.primary, Some(RegistryKind::DataModel), "{:?}", d.evidence);
+        assert!(d.mixed);
+    }
+
+    #[test]
+    fn skos_labels_notations_and_notes_are_not_concept_evidence() {
+        let ttl = r#"
+            @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+            @prefix ex: <http://example.org/> .
+            ex:a skos:prefLabel "A" ; skos:altLabel "Alpha" ; skos:notation "1" ;
+                skos:definition "The first." ; skos:scopeNote "Use for A." ;
+                skos:exactMatch ex:other .
+            ex:b skos:broader ex:a ; skos:inScheme ex:scheme .
+        "#;
+        let ev = detect(&parse(ttl)).evidence;
+        assert_eq!(ev.skos_concepts, 0);
+        assert_eq!(ev.skos_concept_schemes, 0);
+        assert_eq!(ev.skos_relations, 2, "skos:broader and skos:inScheme only");
+    }
+
+    #[test]
+    fn dual_typed_concept_scheme_is_a_vocabulary() {
+        // Concepts that are classes as well (`a skos:Concept, owl:Class`): a
+        // concept scheme, even though every concept declares a class.
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+            @prefix ex: <http://example.org/kinds#> .
+            ex: a owl:Ontology .
+            ex:Kinds a skos:ConceptScheme ; skos:hasTopConcept ex:Structure .
+            ex:Thing a owl:Class .
+            ex:Structure a skos:Concept, owl:Class ; skos:inScheme ex:Kinds ;
+                skos:topConceptOf ex:Kinds ; skos:prefLabel "Structure" .
+            ex:Bridge a skos:Concept, owl:Class ; skos:inScheme ex:Kinds ;
+                skos:broader ex:Structure ; skos:prefLabel "Bridge" .
+            ex:Tunnel a skos:Concept, owl:Class ; skos:inScheme ex:Kinds ;
+                skos:broader ex:Structure ; skos:prefLabel "Tunnel" .
+            ex:Lock a skos:Concept, owl:Class ; skos:inScheme ex:Kinds ;
+                skos:broader ex:Structure ; skos:prefLabel "Lock" .
+        "#;
+        let d = detect(&parse(ttl));
+        assert_eq!(
+            d.primary,
+            Some(RegistryKind::Vocabulary),
+            "{:?}",
+            d.evidence
+        );
+        assert_eq!(d.evidence.owl_classes, 5);
+        assert_eq!(d.evidence.concept_classes, 4);
+    }
+
+    #[test]
+    fn concept_scheme_with_a_subclass_of_skos_concept_is_a_vocabulary() {
+        // The concepts are typed with a local subclass of skos:Concept, the
+        // only class the file declares.
+        let mut ttl = String::from(
+            r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+            @prefix ex: <http://example.org/colours#> .
+            ex:Colour a owl:Class ; rdfs:subClassOf skos:Concept .
+            ex:Colours a skos:ConceptScheme .
+            "#,
+        );
+        for c in ["red", "green", "blue", "cyan", "magenta", "yellow"] {
+            ttl.push_str(&format!(
+                "ex:{c} a ex:Colour ; skos:inScheme ex:Colours ; skos:prefLabel \"{c}\" .\n"
+            ));
+        }
+        let d = detect(&parse(&ttl));
+        assert_eq!(
+            d.primary,
+            Some(RegistryKind::Vocabulary),
+            "{:?}",
+            d.evidence
+        );
+        assert_eq!(d.evidence.concept_classes, 1);
+    }
+
+    #[test]
+    fn value_classes_dual_typed_inside_an_owl_model_keep_it_a_model() {
+        // An OWL model that models its value list as dual-typed classes: the
+        // properties and the other classes make it a model.
+        let mut ttl = OWL_MODEL_WITH_VALUE_LIST.to_string();
+        for v in ["Red", "Green", "Blue", "Black", "White", "Grey"] {
+            ttl.push_str(&format!(
+                "ex:{v} a owl:Class, skos:Concept ; rdfs:subClassOf ex:Status ; \
+                 skos:inScheme ex:StatusList ; skos:prefLabel \"{v}\" .\n"
+            ));
+        }
+        let d = detect(&parse(&ttl));
+        assert_eq!(d.primary, Some(RegistryKind::DataModel), "{:?}", d.evidence);
+        assert_eq!(d.evidence.concept_classes, 6);
+    }
+
+    #[test]
+    fn anonymous_class_expressions_and_repeated_typing_are_not_extra_classes() {
+        // A property-only file whose range is an anonymous union class is still
+        // a vocabulary: the union declares no class.
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex: <http://example.org/> .
+            ex:knows a owl:ObjectProperty ;
+                rdfs:range [ a owl:Class ; owl:unionOf ( ex:Person ex:Group ) ] .
+            ex:likes a owl:ObjectProperty .
+        "#;
+        let d = detect(&parse(ttl));
+        assert_eq!(d.evidence.owl_classes, 0);
+        assert_eq!(
+            d.primary,
+            Some(RegistryKind::Vocabulary),
+            "{:?}",
+            d.evidence
+        );
+
+        // A class typed both owl:Class and rdfs:Class is one class.
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            <http://example.org/A> a owl:Class, rdfs:Class .
+        "#;
+        let ev = detect(&parse(ttl)).evidence;
+        assert_eq!((ev.owl_classes, ev.rdfs_classes), (1, 0));
     }
 
     #[test]

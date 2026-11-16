@@ -122,6 +122,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **An OWL model uploaded without a `kind` is registered as a data model.**
+  Kind detection weighed a graph's classes against its properties plus its
+  SKOS statements, and counted every `skos:` predicate on any subject
+  (`skos:prefLabel`, `skos:notation`, `skos:definition`, …) as a concept. A
+  typical OWL model (five classes, ten datatype and object properties, a value
+  list whose members carry a label and a notation) came out as `vocabulary`,
+  and so did 35 of the 46 bundled vocabulary files, OWL, RDFS, GeoSPARQL,
+  PROV and DCAT among them. A graph that declares a named class is now a
+  data model, with its properties counted on the classes' side. It is a vocabulary only as a SKOS concept scheme whose
+  dual-typed concepts (`a skos:Concept, owl:Class`, or subclasses of
+  `skos:Concept`) outnumber its other classes and properties. Only
+  `skos:Concept` and `skos:ConceptScheme` typing and structural links
+  (`skos:broader`, `skos:narrower`, `skos:related`, `skos:inScheme`,
+  `skos:hasTopConcept`, `skos:topConceptOf`, `skos:member`) count as SKOS
+  evidence. A concept that is also typed with a local class no longer counts
+  as an instance, and an anonymous class expression does not declare a class.
+  Graphs without classes are classified as before. The same detection gives
+  an imported dataset graph its inferred role. The upload response's
+  `evidence` gains `skos_relations` and `concept_classes`. The `kind` field of
+  `POST /api/models/:id/versions` still overrides detection, and each upload
+  records its kind on the entry, so a later version corrects a misfiled one.
+  A fresh install now seeds the bundled ontologies that declare classes as
+  data models. The concept scheme and the property sets (IMBOR, PAV, VANN,
+  VS) stay vocabularies. An existing install keeps each entry's kind until a
+  newly bundled version of it is seeded.
 - **A version's agent in the PROV-O trail is the account's IRI.**
   `GET /api/datasets/{id}/provenance` attributed every version to
   `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the

@@ -113,17 +113,17 @@ When you upload RDF, the store classifies it in a single pass over the quads ([`
 |---|---|
 | `owl:Class`, `rdfs:Class` (and class axioms — `rdfs:subClassOf`, `owl:equivalentClass`, restrictions, disjointness) | `model` |
 | `owl:ObjectProperty`/`DatatypeProperty`/`AnnotationProperty`, `rdf:Property`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf` | `vocabulary` |
-| `skos:ConceptScheme`, `skos:Concept`, any `skos:` predicate | `vocabulary` |
+| `skos:ConceptScheme`, `skos:Concept`, structural SKOS links (`skos:broader`/`narrower`/`related`, `skos:inScheme`, `skos:hasTopConcept`/`topConceptOf`, `skos:member`) — not labels, notations or notes | `vocabulary` |
 | `sh:NodeShape`, `sh:PropertyShape`, `sh:targetClass`, any `sh:` predicate | `shapes` |
 | `swrl:Imp`, any `spin:`/`sp:` predicate | `entailment` |
 | a subject typed with a class that is **not** a schema construct | `instances` |
 
-The detector classifies the **whole upload by its dominant signal**: it compares the *class* count against the combined *(property + SKOS)* count. The larger side wins; an exact **tie breaks toward Model**. So a class-heavy standard (OWL, RDFS, GeoSPARQL) reads as **Model** and a property-heavy one (DCAT, PROV, FOAF) reads as **Vocabulary**. A file that carries a substantial amount of *both* classes and properties/concepts is flagged **mixed** (`mixed: true`) so the auto-split can route each part to its own role sub-graph (§2.1), and a balanced mix with no clear winner is left unclassified (`primary: None`) for a human to label. (`owl:Ontology` is recognised as a schema marker but is not itself a layer signal — it can sit in either a Model or a Vocabulary graph.)
+The detector classifies the **whole upload**. A graph that declares at least one **named class** is a **Model** — the properties that describe those classes count with them and never outvote them, and the members of a value list are concepts or individuals, not a reason to call the graph a vocabulary. So OWL, RDFS and GeoSPARQL read as **Model**, and so do property-rich ontologies such as DCAT, PROV and FOAF. The one exception is a **SKOS concept scheme with dual-typed concepts** (§2.3): when the classes that are SKOS concepts (`a skos:Concept, owl:Class`, or `rdfs:subClassOf skos:Concept`) outnumber the other classes and the properties together, and the scheme's structure does too, the graph is a **Vocabulary**. A graph with **no named class** is a **Vocabulary** when properties or SKOS concepts dominate it, and otherwise goes to the dominant signal. SKOS labels, notations and notes (`skos:prefLabel`, `skos:notation`, `skos:definition`, …) are not counted: they annotate resources of every kind. A file that carries *both* classes and properties/concepts is flagged **mixed** (`mixed: true`) so the auto-split can route each part to its own role sub-graph (§2.1), and a mix of schema and data with no clear winner is left unclassified (`primary: None`) for a human to label. (`owl:Ontology` is recognised as a schema marker but is not itself a layer signal — it can sit in either a Model or a Vocabulary graph.)
 
 **What this means for you:**
 
 - **Keep each graph single-purpose** so detection is unambiguous. This is the same rule as §2.1, stated operationally.
-- If you upload a mixed graph, either let the auto-split route classes → `model`, properties/concepts → `vocabulary` and individuals → `instances`, or **classify it explicitly** with the `?kind=` override (`model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`).
+- If you upload a mixed graph, either let the auto-split route classes → `model`, properties/concepts → `vocabulary` and individuals → `instances`, or **classify it explicitly** with the `?kind=` override (`model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`) — in the Model Registry, the `kind` form field of a version upload.
 - The detector is a safety net, not a substitute for clean modelling.
 
 ### 2.3 Dual-typing vs. role detection — important reconciliation
@@ -132,7 +132,7 @@ The schema pattern (§4) uses **dual typing**: a concept is declared `a skos:Con
 
 But dual typing makes a concept count as **both** Model evidence (the `owl:Class` side) and Vocabulary evidence (the SKOS side). Resolve it like this:
 
-- A dual-typed **concept scheme** is normally detected as `vocabulary` when SKOS hierarchy predicates (`skos:broader`, `skos:inScheme`, …) dominate — which they usually do, because every concept carries several, and the controlled-vocabulary side belongs to the R-Box. This is the intended outcome: **register a dual-typed concept scheme as a Vocabulary.**
+- A dual-typed **concept scheme** is detected as `vocabulary` when its dual-typed concepts outnumber the graph's other classes and properties, and its SKOS structure (concept typing, `skos:broader`, `skos:inScheme`, …) does too — which it usually does, because every concept carries several such links, and the controlled-vocabulary side belongs to the R-Box. This is the intended outcome: **register a dual-typed concept scheme as a Vocabulary.** An OWL model that keeps its value lists in the same graph stays a `model`: the list's members are individuals, or a minority of its classes.
 - Keep **class-only** axioms that have no SKOS counterpart (e.g. `owl:Restriction`, `owl:disjointWith`, `rdfs:subClassOf` chains) viable as a separate `model` graph if they grow large, or accept the `model` classification when those class axioms dominate.
 - Keep **property definitions** (`owl:ObjectProperty`/`DatatypeProperty`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf`) in the `vocabulary` graph — they are R-Box terms, alongside the concept schemes.
 - **Always keep SHACL shapes in their own `shapes` graph.** Never co-locate shapes with the concept scheme — that muddies both detection and the lifecycle.
@@ -1044,16 +1044,16 @@ The exact prefixes the triplestore emits. Use these spellings.
 
 | If a graph is dominated by… | Layer | It is detected as | Register it as |
 |---|---|---|---|
-| `owl:Class` / `rdfs:Class` / `rdfs:subClassOf` / restrictions / disjointness | T-Box | `model` | data model |
-| `owl:ObjectProperty` / `owl:DatatypeProperty` / `owl:AnnotationProperty` / `rdf:Property` / `rdfs:domain`/`range` / `rdfs:subPropertyOf` / `owl:inverseOf` | R-Box | `vocabulary` | vocabulary |
-| `skos:Concept` / `skos:ConceptScheme` / `skos:*` predicates | R-Box | `vocabulary` | vocabulary |
+| `owl:Class` / `rdfs:Class` / `rdfs:subClassOf` / restrictions / disjointness — any named class, with or without properties | T-Box | `model` | data model |
+| `owl:ObjectProperty` / `owl:DatatypeProperty` / `owl:AnnotationProperty` / `rdf:Property` / `rdfs:domain`/`range` / `rdfs:subPropertyOf` / `owl:inverseOf`, and no named class | R-Box | `vocabulary` | vocabulary |
+| `skos:Concept` / `skos:ConceptScheme` / structural `skos:` links, with no classes or with dual-typed concepts outnumbering the other classes and properties | R-Box | `vocabulary` | vocabulary |
 | `sh:NodeShape` / `sh:*` predicates / `sh:targetClass` | — | `shapes` | shapes (in registry) |
 | `swrl:Imp` / `spin:`/`sp:` | — | `entailment` | entailment |
 | subjects typed with non-schema classes | A-Box | `instances` | dataset |
 | a substantial mix of classes **and** properties/concepts | — | `mixed` → auto-split per role | (split into model / vocabulary / instances, plus catalog / provenance / domain-values / linkset where such records are present) |
 | a balanced mix with no clear winner | — | *ambiguous* → set `?kind=` | (your call) |
 
-The detector compares the **class** count against the combined **property + SKOS** count; the larger side wins and an exact tie breaks toward `model` (§2.2).
+A named class makes a graph a `model` unless it is a concept scheme with dual-typed concepts; without classes, properties and SKOS concepts make it a `vocabulary` (§2.2).
 
 Override values: `model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`.
 
