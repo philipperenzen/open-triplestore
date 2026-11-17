@@ -21,16 +21,16 @@ Every named graph carries a **graph role** that describes what kind of RDF conte
 | Shapes | SHACL node and property shapes — validation constraints against a model | Model Registry (typically alongside the model they validate) | — |
 | Instances | Individual facts and assertions — the actual data that conforms to a model | [Datasets](/docs/datasets) as named graphs with access control and SPARQL endpoints | A-Box |
 
-The wizard auto-detects the role of each uploaded file from its content, comparing the **class** signals against the combined **property + SKOS** signals and routing to the dominant side:
+The wizard auto-detects the role of each uploaded file from its content. A file that declares a named class is a **Model**, however many properties sit next to the classes, unless it is a SKOS concept scheme whose concepts are dual-typed as classes; a file without classes is a **Vocabulary** when its properties or SKOS concepts outweigh the rest:
 
 | Signal | Examples | Routes to | Notes |
 |---|---|---|---|
-| Class definitions / axioms | `a owl:Class`, `a rdfs:Class`<br>`rdfs:subClassOf`, `owl:equivalentClass`, restrictions, `owl:disjointWith` | **Model** | A class-heavy file (OWL, RDFS, GeoSPARQL) reads as Model. |
-| Property definitions / relations | `a owl:ObjectProperty` / `DatatypeProperty` / `AnnotationProperty`, `a rdf:Property`<br>`rdfs:domain`, `rdfs:range`, `rdfs:subPropertyOf`, `owl:inverseOf` | **Vocabulary** | A property-heavy file (DCAT, PROV, FOAF) reads as Vocabulary. |
-| SKOS concepts | `a skos:ConceptScheme`, `a skos:Concept`, any `skos:` predicate | **Vocabulary** | Concept schemes are part of the R-Box / Vocabulary layer. |
+| Class definitions / axioms | `a owl:Class`, `a rdfs:Class`<br>`rdfs:subClassOf`, `owl:equivalentClass`, restrictions, `owl:disjointWith` | **Model** | Any file that declares a named class reads as Model: OWL, RDFS, GeoSPARQL, and property-rich ontologies such as DCAT, PROV and FOAF. The server's own bundled copies of them are listed as vocabularies ([models](/docs/models)). An anonymous class expression (`[ a owl:Class ; owl:unionOf (…) ]`) declares no class. |
+| Property definitions / relations | `a owl:ObjectProperty` / `DatatypeProperty` / `AnnotationProperty`, `a rdf:Property`<br>`rdfs:domain`, `rdfs:range`, `rdfs:subPropertyOf`, `owl:inverseOf` | **Vocabulary** | A file of properties without classes reads as Vocabulary. Next to classes, the properties belong to the Model and never outvote it. |
+| SKOS concepts | `a skos:ConceptScheme`, `a skos:Concept`<br>`skos:broader` / `narrower` / `related`, `skos:inScheme`, `skos:hasTopConcept` / `topConceptOf`, `skos:member` | **Vocabulary** | Concept schemes are part of the R-Box / Vocabulary layer. Labels, notations and notes (`skos:prefLabel`, `skos:notation`, `skos:definition`, …) and mapping relations are not counted: they annotate anything, such as the members of a model's value list. A file with classes reads as Vocabulary only when its dual-typed concepts (`a skos:Concept, owl:Class`, or subclasses of `skos:Concept`) outnumber its other classes and properties together. |
 | SHACL shapes | `a sh:NodeShape`, `a sh:PropertyShape` | **Shapes** | Pure SHACL (no schema terms) → **Shapes** role. SHACL mixed with classes/properties is split out. |
 | `owl:Ontology` declaration | `<...> a owl:Ontology`<br>`"@type": "owl:Ontology"` | — | Recognised as a schema marker (also extracts the model IRI and `owl:versionInfo`); it is not itself a layer signal and can sit in either a Model or Vocabulary graph. |
-| File extension | `.owl` | Model | Fallback when no inline class/property signal is present; a tie between class and property counts also breaks toward **Model**. |
+| File extension | `.owl` | Model | Fallback when no inline class/property signal is present. |
 
 Files with no schema signals are classified as **Instances** and routed to a dataset named graph. When a file carries a substantial amount of more than one kind — classes **and** properties/concepts, or schema terms joined with instance data — a **Mixed content** badge appears, and the wizard offers to **auto-split** the file into separate named graphs, one per role: classes → a Model graph, properties and concept schemes → a Vocabulary graph, and individuals → an Instances graph.
 

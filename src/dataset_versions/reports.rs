@@ -104,6 +104,10 @@ fn require_read(
 /// left of it (that a write to some graph was checked, when, and how it came
 /// out) is about that graph too.
 ///
+/// Who ran it (`created_by`) is a separate matter: a report the caller reads
+/// names the account only to `OTS_ACTOR_VISIBILITY`'s audience
+/// ([`shows_actors`]).
+///
 /// Fails closed: when the private flags or the caller's graphs cannot be
 /// read, resolving is an error (`500`) and no report is served.
 struct ReportReader {
@@ -182,6 +186,13 @@ impl ReportReader {
     }
 }
 
+/// Whether `uid` sees who ran the dataset's validations (`created_by`):
+/// `OTS_ACTOR_VISIBILITY`'s audience, as for the rest of its history.
+fn shows_actors(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<bool, AppError> {
+    crate::auth::policy::shows_actors(&state.auth_db, ds, uid)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 /// The graphs `version` of the dataset was cut from, by its registry record;
 /// `None` when the registry holds no such version.
 fn version_sources(state: &AppState, dataset_id: &str, version: &str) -> Option<Vec<String>> {
@@ -195,7 +206,8 @@ fn version_sources(state: &AppState, dataset_id: &str, version: &str) -> Option<
 }
 
 /// GET /api/datasets/:dataset_id/validation-reports — the reports the caller
-/// may read ([`ReportReader`]), newest first, without their bodies.
+/// may read ([`ReportReader`]), newest first, without their bodies, and
+/// without `created_by` below `OTS_ACTOR_VISIBILITY`'s audience.
 pub async fn list_reports(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -217,6 +229,11 @@ pub async fn list_reports(
             .clone()
     };
     reports.retain(|r| reader.serves(r, &mut sources_of));
+    if !shows_actors(&state, &ds, uid)? {
+        for r in &mut reports {
+            r.created_by = None;
+        }
+    }
     Ok(Json(reports))
 }
 
@@ -232,7 +249,7 @@ pub async fn get_report(
     let ds = require_read(&state, &dataset_id, uid)?;
     let reader = ReportReader::resolve(&state, &ds, user.as_deref())?;
     let not_found = || AppError::NotFound(format!("Report '{rid}' not found"));
-    let report = state
+    let mut report = state
         .auth_db
         .get_validation_report(&dataset_id, &rid)
         .map_err(|e| AppError::Internal(e.to_string()))?
@@ -241,6 +258,9 @@ pub async fn get_report(
         version_sources(&state, &dataset_id, version)
     }) {
         return Err(not_found());
+    }
+    if !shows_actors(&state, &ds, uid)? {
+        report.created_by = None;
     }
     Ok(Json(report))
 }

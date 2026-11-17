@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A purge can attribute an erased account's history to "Deleted user"
+  (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
+  provenance name the account behind each write
+  (`{OTS_BASE_URL}/users/{user ID}`), and a purge left that IRI there for
+  good. It still does by default (`keep`): the history keeps saying which
+  account made which write, which an operator may only do on a ground of its
+  own. With `OTS_PURGE_ATTRIBUTION=deleted-user`, a runtime setting, erasing
+  an account (an administrator's purge, the user's own, the legacy
+  `DELETE /api/users/{id}`) first attributes its commits and its statement
+  changes, in both of a dataset's provenance graphs, to one shared agent,
+  `{OTS_BASE_URL}/users/deleted`. Commit histories show it as "Deleted
+  user". The commits and annotations stay, with their times, messages,
+  graphs and statements. If the replacement fails the account is not erased
+  and the request answers `500`; the erase records in the audit log how many
+  commits and statement changes it re-attributed. The
+  setting covers those two records only: it does not rewrite accounts erased
+  earlier, the change log, backups, or other records that name who made
+  something. `PRIVACY.md` §4.10 and `docs/gdpr.md` (Art. 17) say when to
+  choose which.
 - **Spark draws query results in the visual their rows fit.** A new ` ```view `
   widget (`{"source":"query","as":"auto"}`) shows a query of the turn as a bar
   chart (label + number), a chronological timeline (date + number), a map on
@@ -58,6 +77,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typo?)". The accounts-dashboard plugin declares its three
   (`OTS_ACCOUNTS_DASHBOARD_APP_GROUPS`, `…_GATEWAY_USAGE_URL`,
   `…_GATEWAY_KEY`).
+- **A draft edit can change and remove blank nodes.**
+  `PATCH /api/models/{id}/versions/{ver}/data` could add statements about a new
+  blank node, but not reach one the draft already had: a label in `add` is a
+  new node on every request, and a blank node in `remove` was refused
+  (`blank nodes are not allowed in DELETE DATA`). So an anonymous SHACL
+  property shape (`sh:property [ … ]`) or an RDF list (`sh:in ( … )`) could be
+  read from a draft and never changed or removed. A request can now declare
+  the blank nodes of the draft it means under `nodes`, each found by the
+  statement it is the object of, by the statements it has, or by the
+  identifier a read shows. `_:label` in `add` and `remove` is then that node,
+  and `remove_nodes` removes a node with everything below it: a whole property
+  shape, a whole list. A description that fits no blank node, or more than
+  one, answers `409` (`blank_node_not_found`, `blank_node_ambiguous`); such a
+  request is applied in one transaction or not at all, and the commit trail
+  records the statements it actually added and removed. Stored and exported
+  RDF is unchanged: blank nodes stay blank nodes. A request without `nodes`
+  works as before, except that `add` or `remove` may be left out and a blank
+  node in `remove` is refused with a message that says to declare it. See
+  `docs/api-reference.md#editing-a-model-draft`.
 
 ### Changed
 - With the accounts-dashboard plugin compiled in, a malformed
@@ -84,6 +122,55 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **An OWL model uploaded without a `kind` is registered as a data model.**
+  Kind detection weighed a graph's classes against its properties plus its
+  SKOS statements, and counted every `skos:` predicate on any subject
+  (`skos:prefLabel`, `skos:notation`, `skos:definition`, …) as a concept. A
+  typical OWL model (five classes, ten datatype and object properties, a value
+  list whose members carry a label and a notation) came out as `vocabulary`,
+  and so did 35 of the 46 bundled vocabulary files, OWL, RDFS, GeoSPARQL,
+  PROV and DCAT among them. A graph that declares a named class is now a
+  data model, with its properties counted on the classes' side. It is a vocabulary only as a SKOS concept scheme whose
+  dual-typed concepts (`a skos:Concept, owl:Class`, or subclasses of
+  `skos:Concept`) outnumber its other classes and properties. Only
+  `skos:Concept` and `skos:ConceptScheme` typing and structural links
+  (`skos:broader`, `skos:narrower`, `skos:related`, `skos:inScheme`,
+  `skos:hasTopConcept`, `skos:topConceptOf`, `skos:member`) count as SKOS
+  evidence. A concept that is also typed with a local class no longer counts
+  as an instance, and an anonymous class expression does not declare a class.
+  Graphs without classes are classified as before. The same detection gives
+  an imported dataset graph its inferred role. The upload response's
+  `evidence` gains `skos_relations` and `concept_classes`. The `kind` field of
+  `POST /api/models/:id/versions` still overrides detection, and each upload
+  records its kind on the entry, so a later version corrects a misfiled one.
+  The bundled standards stay listed as vocabularies: the seeder now sets that
+  kind on each entry instead of detecting one. On a fresh install this also
+  lists DCMI Type, DQV, the GML geometry types, SAREF, ccREL and VOAF, which
+  were data models, and XML Schema Datatypes, which was instances, as
+  vocabularies. An existing install keeps each entry's kind until the seeder
+  loads a newly bundled latest version of it. A vocabulary installed from the
+  LOV corpus (`POST /api/vocab/install`) is listed as a vocabulary the same
+  way; one that declared a class used to be registered as a data model.
+- **The Model Registry's search box matches every word across id, title,
+  namespace and description.** It matched the whole query as one substring
+  of an entry's title or id, so "asset status" found nothing and no entry
+  could be found by its namespace or description. Each whitespace-separated
+  word must now appear, in any order and ignoring case and accents, in one of
+  those four fields, as in the store's other filter boxes.
+- **Version notes and model descriptions with a line break are saved, and
+  a refused change keeps the old text.** The model registry escaped only `\`
+  and `"` when it wrote free text into a SPARQL string literal, which may not
+  hold a raw line break. `PATCH /api/models/:id/versions/:ver` with notes
+  holding a line break answered `400` with a SPARQL syntax error. It had
+  already deleted the old notes in a separate update, so the version was left
+  without any. The same held for a model's description when it is created
+  (`POST /api/models`), its title, namespace and description when it is
+  edited (`PATCH /api/models/:id`), its owner fields, the notes and branch of
+  a new version, and a dataset version's notes
+  (`PATCH /api/datasets/:id/versions/:ver`). All of these now go through the
+  store's shared literal escaping (`\n`, `\r`, `\t`). Replacing notes or a
+  description is one update, so a refused change leaves the old value in
+  place.
 - **A version's agent in the PROV-O trail is the account's IRI.**
   `GET /api/datasets/{id}/provenance` attributed every version to
   `<{base}/users/{base}/users/{id}>`: the record's `created_by` already is the
@@ -96,6 +183,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a public profile, their email, phone, organisation, bio and website, in the
   RDF store. It now deletes that graph before the row, as
   `POST /api/admin/users/{id}/purge` and `POST /api/auth/account/purge` do.
+- **A draft copies the graphs of its source version only.**
+  `POST /api/models/:id/versions/:ver/draft` and a new branch took every graph
+  whose IRI starts with the source version's as the source's own, so a version
+  whose name only starts the same came along: with versions `9.1` and `9.10`, a
+  draft `9.2` of `9.1` also held 9.10's triples, in a second graph named
+  `…/version/9.20`, and an existing version `9.20` had its graph cleared and
+  filled with them. A version's graphs are now its base graph and the
+  sub-graphs under it (`…/version/9.1/…`).
+- **The diff of two single-graph model versions shows what changed.**
+  `GET /api/models/:id/diff` paired the graphs of the two versions by the last
+  segment of their IRI, which for a version's base graph is the version's own
+  name: versions with one graph each never paired, and the diff listed every
+  triple of the older one as removed and every triple of the newer one as
+  added. Graphs are now paired by their place in the version, base graph with
+  base graph and sub-graph with the sub-graph of the same name. The `graph` of
+  a diff item is that place: a sub-graph's name as before, and `""` for the
+  base graph (it was the version's name), which is what
+  `PATCH /api/models/:id/versions/:ver/data` takes for the base graph too.
+  `?graph=shapes` no longer takes a sub-graph `core-shapes` for `shapes`, and a
+  filtered diff no longer leaves out a sub-graph that only one of the versions
+  has.
+- **A sub-graph of a model version is selected by its name, not by the end of
+  its IRI.** The `graph` of `GET /api/models/:id/versions/:ver/data`, of
+  `PATCH /api/models/:id/versions/:ver/data` (the request's and each
+  triple's) and of
+  `POST /api/models/:id/versions/:ver/subgraph/{stage,publish,deprecate}` was
+  matched against the end of each sub-graph's IRI, so `shapes` also matched a
+  sub-graph `core-shapes`: the download returned both, and an edit or a
+  status change went to whichever of the two the registry listed first, and
+  to `core-shapes` in a version with no `shapes` at all. A sub-graph now
+  answers to its name in the version (`shapes` for `…/version/1.0/shapes`,
+  with or without a leading `/`) and to its full IRI; a nested sub-graph
+  `a/b` also answers to `b`, as in the diff's `?graph=`. An edit or a status
+  change takes the sub-graph named exactly so first, and a name that several
+  nested sub-graphs end in and none bears is refused (`400`) before anything
+  is written. A version's base graph is selected by leaving `graph` out or by
+  its full IRI; the version's own name, the end of that IRI, no longer
+  selects it.
+- **The diff of two model versions reports every differing triple once.**
+  `GET /api/models/:id/diff` paired each removed triple with the first added
+  triple of the same subject and predicate, and then dropped every added and
+  removed triple of that subject and predicate from `added` and `removed`.
+  Where a subject has several values for a predicate, a value replaced by two
+  came out as one change with the second new value in no list, and two values
+  replaced by one as two changes to the same new value. A removed value now
+  pairs with at most one added value and an added value with at most one
+  removed value, in the order of the values, and the ones left over stay in
+  `removed` and `added`: the three lists together are the difference of the
+  two versions, and `summary` counts it. Within a graph the lists come in
+  subject, predicate, value order.
 - **A deep blank-node edit is published to LDES again.** With change capture
   on, a change to a blank node more than `OTS_LDES_BNODE_DEPTH` (8) levels
   below its entity was not published at all, since the walk up to its owner
@@ -224,6 +361,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither covers what a writer publishes on purpose: version data and diffs,
   patch-log entries, LDES members and the statement-provenance graph. See
   `docs/versioning.md`, "Who sees what of the history".
+- **Models, shape graphs and a dataset's validation reports no longer name
+  their authors to every reader (breaking for clients that read those
+  fields without write access).** `OTS_ACTOR_VISIBILITY` (default `writers`)
+  now decides this for them as it does for a dataset's history. Outside its
+  audience:
+  - a registry entry: `created_by` is `null` on `GET /api/models`,
+    `/api/models/{id}`, `…/versions` and `…/versions/{ver}`; a branch's
+    `owner` is `null` on `…/branches`; `actor_iri`, `actor_username` and
+    `actor_display_name` are left off `…/commits`; `…/collaborators` does
+    not list the accounts that made a version. A writer is an account that
+    may write the entry: its owning user, an administrator of the owning
+    organisation, an administrator.
+  - `GET /api/public/catalog`, which answers anonymous callers, gives
+    `published_by: null` and an empty `publishers` unless the setting is
+    `readers`. The owner of an entry is still named.
+  - a shape graph: `created_by` is `null` on the entry (`GET
+    /api/shacl/shape-graphs`, `…/{id}`, the shape graphs of
+    `/api/shacl/bindings` and `/api/datasets/{id}/effective-shapes`) and on
+    `…/revisions`; the actor fields are left off `…/commits`. A writer is an
+    account that manages the entry: its owning user, a member of the owning
+    organisation, an administrator.
+  - a dataset: `created_by` is `null` on `…/validation-reports` and
+    `…/validation-reports/{rid}`.
+
+  Before, each of these went to everyone who could read the entry: for a
+  public model, an anonymous caller got the account IRI, username and display
+  name of everyone who had uploaded or edited a version. **Upgrading:** to
+  keep naming authors to every reader, set `OTS_ACTOR_VISIBILITY` to
+  `readers` (or `signed-in`); it is one setting for datasets, models and
+  shape graphs. The owner of an entry (`owner_type`, `owner_id`) is always
+  given. See `docs/models.md`, "Who sees the authors".
+- **`GET /api/models/{id}/collaborators` no longer hands an organisation's
+  member list and e-mail addresses to every reader of its models.** The route
+  listed the owner, or every member of the owning organisation, and every
+  version author with `user_id`, `username`, `display_name` and `email`, to
+  anyone who could read the entry: an anonymous caller for a public one,
+  although `GET /api/organisations/{id}/members` is for members only. The
+  organisation's members are now listed to its members and to administrators
+  only, and `email` is `null` unless the caller is the owning user, a member
+  of the owning organisation or an administrator. The owning user is still
+  named to every reader.
 - **`GET /api/datasets/{id}/provenance` and `…/commits` no longer name a
   graph the caller may not read.** The PROV-O document listed every graph of
   the dataset and every commit on them, so a reader of a public dataset got
@@ -345,10 +523,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The AWS SDK crates and `openidconnect` 4.1 move to the patched
     `crypto-bigint` 0.7 (RUSTSEC-2026-0387) and drop the unmaintained
     `pin-utils` (RUSTSEC-2026-0441).
-  - RUSTSEC-2026-0387 is ignored in `deny.toml` for the two crates that still
-    use `crypto-bigint` 0.5 on their latest release. One is `jsonwebtoken`,
-    which signs the built-in OIDC provider's ES256 tokens; the other is `age`.
-    The comment there gives the exposure and the way out.
+  - `jsonwebtoken` moves from its pure-Rust crypto backend to `aws_lc_rs`.
+    The built-in OIDC provider signs its ES256 tokens with its private key
+    through this crate, and the pure-Rust backend did that arithmetic on
+    `crypto-bigint` 0.5, which leaks timing (RUSTSEC-2026-0387) and has no
+    fixed 0.5 release. Every build now compiles `aws-lc-sys` (C, through the
+    `cc` crate; Windows uses its prebuilt NASM objects). It is not a TLS
+    provider: rustls stays on ring. One visible difference: RS256/384/512
+    tokens from an external identity provider now verify only against RSA
+    keys of 2048 to 8192 bits. The old backend also accepted keys under 2048
+    bits and refused keys over 4096.
+  - RUSTSEC-2026-0387 stays ignored in `deny.toml` for `age` alone, the one
+    crate left on `crypto-bigint` 0.5. It reaches it only through P-256
+    recipients, which backups never use.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
@@ -413,6 +600,66 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rows left behind by earlier purges stay until retention removes the log
   rows; usage events of deleted users can be removed with
   `DELETE FROM dataset_usage_events WHERE user_id NOT IN (SELECT id FROM users)`.
+- **Erasing an account deletes its avatar and the files it uploaded.** An
+  admin purge, a self-service purge (`POST /api/auth/account/purge`) and the
+  legacy `DELETE /api/users/{id}` deleted the rows that name those objects
+  and left the objects in the object store, where nothing could find them
+  again: the avatar under `avatars/{user ID}.{type}` (and an earlier avatar of
+  another image type, which a re-upload never removed), and every file the
+  account had uploaded to a dataset. The description of each such file also
+  stayed in the dataset's assets graph, with a download URL that answered
+  404. All three routes now delete the objects first, then the rows, then
+  the descriptions, and a dataset left without files gives up its assets
+  graph as it does when its last file is deleted. A file another account
+  uploaded is not touched. **If the object store cannot delete an object the
+  request answers `500` and erases nothing**, so it can be repeated; before,
+  a purge never called the object store. Objects left by earlier purges are
+  still there: `avatars/{id}.*` for an ID that is no longer in `users`, and
+  any object under `datasets/{dataset}/{file ID}/` whose file ID has no row in
+  `assets`.
+- **Erasing an account deletes what this instance kept of it as an identity
+  provider, and its failed-login counter.** `oauth_auth_codes`,
+  `oauth_client_refresh_tokens` and `oauth_consents` carry the user ID
+  without a foreign key, so the account's authorization codes, client refresh
+  tokens and remembered consents outlived it (no token could be issued from
+  them: the token endpoint loads the account first). `login_attempts` is
+  keyed by the name typed into the login form and a row was cleared only by a
+  successful login, so the counter under the account's username, and under
+  its email address when someone had typed that, stayed for good. The erase
+  now deletes all four in the same transaction as the account; a counter
+  that is another account's username is left alone. Rows left by earlier
+  purges can be removed with
+  `DELETE FROM <table> WHERE user_id NOT IN (SELECT id FROM users)` for the
+  three provider tables.
+- **Every route that erases an account records it, and the legacy delete
+  applies the effects of a deactivation.** Only the admin purge wrote a
+  `user_deleted` audit event. The self-service purge and the legacy
+  `DELETE /api/users/{id}` now write one too, with the erased account's user
+  ID as the resource and the route in `details.via` (`self_purge`,
+  `delete_user`); they do not write the username, which the audit log could
+  never drop again. Under `OTS_PURGE_ATTRIBUTION=deleted-user` all three
+  events say how many commits and statement changes the erase re-attributed
+  (`details.history_attribution`). The legacy route takes an active account and went
+  straight to the delete, so the account's personal datasets stayed
+  published under an owner that no longer existed. It now does what the purge
+  routes rely on a deactivation having done: the account's personal datasets
+  become private, and so do the datasets of an organisation it was the last
+  active member of.
+- **The privacy-notice template says what erasing an account keeps.** The new
+  `PRIVACY.md` §4.11 lists what the three erase routes remove and what they
+  leave, each item checked against the code: the account's datasets (made
+  private, not deleted); the audit log, where pseudonymisation by age never
+  reaches `resource_id` and `details`, so the user ID stays on events about
+  the account, the email address on email-verification and email-change
+  events and the username on an admin purge's event; the creator of dataset
+  versions, models, vocabularies and saved queries and the author of
+  datasource runs, mappings and reviews in the server's own graphs; the
+  author of property states and the username on rule sets inside dataset
+  graphs; author and grantee columns in the metadata database; share links
+  the account created, which keep working; repair proposals; and backups.
+  `docs/gdpr.md` (Art. 17) and the audit section of `docs/administration.md`
+  say the same. Operators who published a notice from the earlier template
+  should update theirs.
 - **The privacy-notice template documents the change log.** The new
   `PRIVACY.md` §4.9 covers `changes.db`, which the template still left out.
   While change capture is on (off by default; always on for a replication
@@ -431,6 +678,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account IRI and quads until retention; the purge's deletion of the profile
   graph is recorded without the removed values. Operators
   who published a notice from the earlier template should update theirs.
+- **The privacy-notice template documents the commit trail and statement
+  provenance.** The new `PRIVACY.md` §4.10 covers the commit graph
+  `urn:system:commit-log`, which the template left out: SPARQL Update, Graph
+  Store, RDF Patch, import, version, editor, datasource, repair and restore
+  writes each leave a commit with the time, kind, graphs, counts and message
+  of the write and, for a signed-in caller, the account IRI
+  (`{OTS_BASE_URL}/users/{user ID}`); it cannot be switched off. It also
+  covers a dataset's opt-in statement-provenance graphs
+  (`urn:ots:statement-provenance:{id}` and, for its private graphs,
+  `…:{id}:private`), which keep a copy of every changed statement, removed
+  ones included, and under `full` the account and time of each change. The
+  section names the readers: an administrator reads the whole commit graph by
+  naming it; anyone who may read a dataset reads its history, and each
+  writer's account IRI, username and display name go to
+  `OTS_ACTOR_VISIBILITY`'s audience (the dataset's writers by default);
+  the same holds for the history of a model or shape graph, whose audience
+  is by default the accounts that may write the model or manage the shape
+  graph; a dataset's readers read its statement-provenance graph, under
+  `full` with the account behind each change whatever that setting says,
+  and its writers the private one.
+  It states that **neither has any retention and a user purge touches neither**
+  (an administrator can empty the commit graph or strip one account's
+  attribution from it; a statement-provenance graph goes only with its
+  dataset), and that backups carry both. `docs/gdpr.md` covers them under
+  access, erasure, data minimisation, storage limitation, security and the
+  retention checklist. Operators who published a notice from the earlier
+  template should update theirs.
 - **A private graph stays private in a dataset's versions after it is
   detached.** What a version shows a caller who may not write the dataset
   follows the `private` flag of the graph each snapshot was cut from, and that
@@ -474,6 +748,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one the entry above adds, so it has the same limits: it ends when the
   dataset is deleted, and graphs detached while private before this release
   have none.
+- **A private graph stays private after its dataset is deleted, for whatever
+  else names it.** Deleting a dataset, or the organisation that owns it,
+  keeps in the store every graph the dataset did not create and every graph
+  another dataset registers or links as its shapes graph. The delete took the
+  dataset's registrations with it, and so the `private` flag and the record of
+  a graph detached while private (the two entries above). From then on a SHACL
+  Studio Library entry that adopted such a graph, or another dataset that
+  links it as its shapes graph, served it to that entry's or dataset's
+  audience: a signed-in viewer, and an anonymous caller on a public dataset,
+  got its Turtle from `GET /api/datasets/{id}/shapes`, the form manifest, the
+  Library and stored validation reports. The delete now records, in the same
+  transaction and by the graph's name, every private graph it leaves in the
+  store, and the graph stays private on all of those paths. It is served only
+  to callers who may read it by the rule `/sparql` applies: administrators,
+  graph-ACL readers, and the readers of another dataset that registers it.
+  The deleted dataset's writers are no longer among them. The record names no
+  dataset, so a dataset that reuses the id inherits nothing from it. It ends
+  when a dataset registers the graph (the graph comes back private) or when a
+  writer of a dataset that holds it sets its `private` flag. `/sparql`, the
+  Graph Store and the browser were not affected. Datasets deleted before this
+  release left no record. One new table in the identity database, created on
+  start; nothing to migrate.
+- **A SHACL Studio pipeline no longer publishes a graph on record as private
+  when it attaches it.** A pipeline that writes its report or inferred
+  triples into a graph its owner names attaches that graph to the dataset
+  holding the data it ran over, and then set the registration's `private`
+  flag from the run's scope: off when nothing in scope was private. A graph
+  on record as private (detached while private, or kept by the delete of the
+  dataset that held it as private; the entries above) gets the flag back
+  when a dataset registers it, and the pipeline cleared it again at once. The
+  graph's data, including what it held while private, was then served to
+  that dataset's readers. The pipeline now only sets the flag, never clears
+  it. Writing into a graph its owner names needs write access to that graph,
+  so only administrators and graph-ACL writers could reach this.
+- **A deleted dataset's SHACL bindings no longer pass to the next dataset of
+  its name.** Bindings (`POST /api/shacl/bindings`) are triples keyed by IRI:
+  a dataset's by `{base}/dataset/{id}`, a graph's by its name. A dataset id is
+  a slug of the dataset's name and is free again after a delete, and deleting
+  a dataset or its organisation left its bindings in place. So anyone who
+  then created a dataset of the same name got the deleted dataset's bindings,
+  and with them shape graphs its owner never chose and may not read, even
+  private Library entries: listed in effective shapes, with their Turtle in
+  the form manifest (to anonymous callers too on a public dataset), shaping
+  validation runs and gating writes. The same held for a graph of the deleted
+  dataset written again under the same name. A dataset delete now removes the
+  dataset's bindings and those of every graph it removes from the store,
+  before the dataset itself goes; a graph it keeps keeps its bindings.
+  `POST /api/admin/versions/sweep` now also removes the bindings that earlier
+  deletes left (`bindings_removed` in its report): run it once after
+  upgrading.
 
 ## [0.8.1] — 2026-10-22
 

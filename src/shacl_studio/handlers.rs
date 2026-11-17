@@ -393,7 +393,7 @@ pub async fn list_shape_graphs(
             can_access_set(s, Some(&user.user_id), &orgs) && !withheld.contains(&s.graph_iri)
         })
         .collect();
-    Ok(Json(sets))
+    Ok(Json(AuthorAudience::of(&state, &user).views(sets)?))
 }
 
 /// The graphs some dataset holds as private that `user` may not read
@@ -406,6 +406,56 @@ fn withheld_graphs(
     user: &AuthenticatedUser,
 ) -> Result<std::collections::HashSet<String>, ApiErr> {
     crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user)).map_err(e500)
+}
+
+/// Who sees the authors of a shape graph: `created_by` on the entry and on
+/// a revision, and the actor on its commit trail. That is
+/// `OTS_ACTOR_VISIBILITY`'s audience, as for a dataset's history; a writer
+/// here is an account that manages the entry ([`can_manage_set`]): its owner,
+/// a member of the owning organisation, an administrator. The owner
+/// (`owner_type`, `owner_id`) is not an author and stays named.
+struct AuthorAudience<'a> {
+    audience: crate::auth::policy::HistoryAudience,
+    user: &'a AuthenticatedUser,
+    /// The caller's organisations.
+    orgs: Vec<String>,
+}
+
+impl<'a> AuthorAudience<'a> {
+    fn of(state: &AppState, user: &'a AuthenticatedUser) -> Self {
+        Self {
+            audience: crate::auth::policy::actor_audience(&state.auth_db),
+            user,
+            orgs: org_ids(state, &user.user_id),
+        }
+    }
+
+    /// Whether the caller, who may read `set`, sees who made it.
+    fn admits(&self, set: &ShapeGraph) -> Result<bool, ApiErr> {
+        self.audience
+            .admits_with(Some(&self.user.user_id), |uid| {
+                Ok(can_manage_set(
+                    set,
+                    Some(uid),
+                    &self.orgs,
+                    self.user.is_admin(),
+                ))
+            })
+            .map_err(e500)
+    }
+
+    /// `set` as the caller reads it: without `created_by` below the audience.
+    fn view(&self, mut set: ShapeGraph) -> Result<ShapeGraph, ApiErr> {
+        if set.created_by.is_some() && !self.admits(&set)? {
+            set.created_by = None;
+        }
+        Ok(set)
+    }
+
+    /// [`Self::view`] of each of `sets`.
+    fn views(&self, sets: Vec<ShapeGraph>) -> Result<Vec<ShapeGraph>, ApiErr> {
+        sets.into_iter().map(|s| self.view(s)).collect()
+    }
 }
 
 async fn load_set_checked(
@@ -442,7 +492,7 @@ pub async fn get_shape_graph(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let set = load_set_checked(&state, &user, &id, false).await?;
-    Ok(Json(set))
+    Ok(Json(AuthorAudience::of(&state, &user).view(set)?))
 }
 
 #[derive(Deserialize)]
@@ -671,10 +721,16 @@ pub async fn list_shape_graph_revisions(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_set_checked(&state, &user, &id, false).await?;
-    let revs = studio(&state)
+    let set = load_set_checked(&state, &user, &id, false).await?;
+    let mut revs = studio(&state)
         .list_shape_graph_revisions(&id)
         .map_err(e500)?;
+    // Who saved a revision is for `OTS_ACTOR_VISIBILITY`'s audience.
+    if !AuthorAudience::of(&state, &user).admits(&set)? {
+        for r in &mut revs {
+            r.created_by = None;
+        }
+    }
     Ok(Json(revs))
 }
 
@@ -685,10 +741,13 @@ pub async fn get_shape_graph_revision(
 ) -> Result<impl IntoResponse, ApiErr> {
     let set = load_set_checked(&state, &user, &id, false).await?;
     ensure_studio_servable(&state, &user, &set.graph_iri, true)?;
-    let rev = studio(&state)
+    let mut rev = studio(&state)
         .get_shape_graph_revision(&id, rev)
         .map_err(e500)?
         .ok_or((StatusCode::NOT_FOUND, "Revision not found".into()))?;
+    if !AuthorAudience::of(&state, &user).admits(&set)? {
+        rev.created_by = None;
+    }
     Ok(Json(rev))
 }
 
@@ -858,18 +917,25 @@ pub async fn deprecate_shape_graph(
 }
 
 /// GET /api/shacl/shape-graphs/:id/commits — the shape graph's slice of the shared
-/// commit trail (kind = Shapes), newest first, with actor names resolved.
+/// commit trail (kind = Shapes), newest first. Who made a commit (the actor
+/// and its resolved names) is for `OTS_ACTOR_VISIBILITY`'s audience
+/// ([`AuthorAudience`]); below it the trail keeps its messages and times and
+/// names nobody.
 pub async fn list_shape_graph_commits(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<crate::commit_log::CommitsParams>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_set_checked(&state, &user, &id, false).await?;
+    let set = load_set_checked(&state, &user, &id, false).await?;
     let subject = shape_graph_subject_iri(&state.base_url, &id);
     let scope = crate::commit_log::CommitScope::Subject(subject);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
-    crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    if AuthorAudience::of(&state, &user).admits(&set)? {
+        crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    } else {
+        crate::commit_log::withhold_actors(&mut commits);
+    }
     Ok(Json(commits))
 }
 
@@ -1071,6 +1137,7 @@ pub async fn list_bindings(
         .filter_map(|giri| st.get_shape_graph_by_iri(&giri).ok().flatten())
         .filter(|s| can_access_set(s, Some(&user.user_id), &orgs))
         .collect();
+    let sets = AuthorAudience::of(&state, &user).views(sets)?;
     Ok(Json(
         serde_json::json!({ "target": target_iri, "shape_graphs": sets }),
     ))
@@ -1109,7 +1176,7 @@ pub async fn dataset_effective_shapes(
     .into_iter()
     .filter(|s| !withheld.contains(&s.graph_iri))
     .collect();
-    Ok(Json(sets))
+    Ok(Json(AuthorAudience::of(&state, &user).views(sets)?))
 }
 
 // ─── Shapes catalog & compose ────────────────────────────────────────────────
@@ -1323,6 +1390,7 @@ pub async fn register_shape_graph(
         {
             return Err((StatusCode::FORBIDDEN, "Access denied".into()));
         }
+        let existing = AuthorAudience::of(&state, &user).view(existing)?;
         return Ok((StatusCode::OK, Json(existing)));
     }
     let denied = || {

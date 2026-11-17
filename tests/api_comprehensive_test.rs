@@ -720,6 +720,510 @@ mod auth {
         );
     }
 
+    // ── What an erased account leaves outside its own row ─────────────────────
+
+    /// The three routes that erase an account.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Erase {
+        /// `POST /api/admin/users/{id}/purge`, after a deactivation.
+        AdminPurge,
+        /// `POST /api/auth/account/purge`, by the account itself.
+        SelfPurge,
+        /// The legacy `DELETE /api/users/{id}`.
+        LegacyDelete,
+    }
+
+    const ERASE_ROUTES: [Erase; 3] = [Erase::AdminPurge, Erase::SelfPurge, Erase::LegacyDelete];
+    const ERASED_PASSWORD: &str = "correct horse battery";
+
+    type State = open_triplestore::server::AppState;
+
+    /// An instance with an administrator (`adm`) and a directory of its own as
+    /// the object store; the directory goes when the guard drops.
+    fn state_with_objects() -> (State, String, tempfile::TempDir) {
+        let (mut state, admin_token) = admin_state();
+        let dir = tempfile::tempdir().unwrap();
+        state.object_store = std::sync::Arc::new(
+            open_triplestore::storage::ObjectStore::local(dir.path().to_path_buf()).unwrap(),
+        );
+        (state, admin_token, dir)
+    }
+
+    /// The account the tests erase: `u-mila`, username `mila`, with a
+    /// password so it can erase itself.
+    fn seed_mila(state: &State) -> String {
+        let hash = open_triplestore::auth::password::hash_password(ERASED_PASSWORD).unwrap();
+        state
+            .auth_db
+            .create_user("u-mila", "mila", "mila@erase.test", &hash, SystemRole::User)
+            .unwrap();
+        mint_token("u-mila", "mila", "user")
+    }
+
+    /// Send one file as a multipart upload; the status and the JSON answer.
+    async fn upload(
+        state: &State,
+        method: Method,
+        uri: &str,
+        token: &str,
+        content_type: &str,
+        filename: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let boundary = "BNDerase";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n\
+             bytes of {filename}\r\n--{boundary}--\r\n"
+        );
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp.into_body()).await)
+    }
+
+    /// Erase `u-mila` through `route`; the status of the erasing request.
+    async fn erase_mila(state: &State, admin_token: &str, route: Erase) -> StatusCode {
+        let send = |method: Method, uri: &str, token: &str, body: Body| {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(body)
+                .unwrap();
+            test_app(state.clone()).oneshot(req)
+        };
+        match route {
+            Erase::AdminPurge => {
+                let resp = send(
+                    Method::DELETE,
+                    "/api/admin/users/u-mila",
+                    admin_token,
+                    Body::empty(),
+                )
+                .await
+                .unwrap();
+                assert!(resp.status().is_success(), "deactivate before the purge");
+                send(
+                    Method::POST,
+                    "/api/admin/users/u-mila/purge",
+                    admin_token,
+                    Body::empty(),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+            Erase::SelfPurge => {
+                let body = serde_json::json!({ "password": ERASED_PASSWORD }).to_string();
+                send(
+                    Method::POST,
+                    "/api/auth/account/purge",
+                    &mint_token("u-mila", "mila", "user"),
+                    Body::from(body),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+            Erase::LegacyDelete => send(
+                Method::DELETE,
+                "/api/users/u-mila",
+                admin_token,
+                Body::empty(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        }
+    }
+
+    /// Set `OTS_PURGE_ATTRIBUTION=deleted-user`, as an administrator does:
+    /// an erase then attributes the account's history to "Deleted user".
+    async fn choose_deleted_user(state: &State, admin_token: &str) {
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/admin/settings/OTS_PURGE_ATTRIBUTION")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .body(Body::from(r#"{"value":"deleted-user"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the setting");
+    }
+
+    /// Whether the object store still holds bytes under `key`.
+    async fn stored(state: &State, key: &str) -> bool {
+        state.object_store.download(key).await.is_ok()
+    }
+
+    /// An erased account's avatar and the files it uploaded were left in the
+    /// object store: the erase deleted the rows that name them and nothing
+    /// else. Every route now deletes the bytes, and the description of each
+    /// file in its dataset's assets graph, and leaves other accounts' files
+    /// alone.
+    #[tokio::test]
+    async fn erasing_an_account_deletes_its_avatar_and_uploaded_files() {
+        use open_triplestore::auth::models::{OwnerType, ResourceRole, Visibility};
+        use oxigraph::sparql::QueryResults;
+
+        for route in ERASE_ROUTES {
+            let (state, admin_token, _dir) = state_with_objects();
+            let mila = seed_mila(&state);
+            // Two datasets of the administrator that mila may write: one
+            // ends up holding a file of each, one only a file of mila.
+            for ds in ["shared", "solo"] {
+                state
+                    .auth_db
+                    .create_dataset(
+                        ds,
+                        ds,
+                        None,
+                        OwnerType::User,
+                        "adm",
+                        Visibility::Private,
+                        None,
+                    )
+                    .unwrap();
+                state
+                    .auth_db
+                    .set_resource_grant(
+                        "dataset",
+                        ds,
+                        "user",
+                        "u-mila",
+                        ResourceRole::Editor,
+                        "adm",
+                    )
+                    .unwrap();
+            }
+
+            // An avatar, replaced by one of another image type: the first
+            // object stays in the store under its own key.
+            for kind in ["png", "jpeg"] {
+                let (status, _) = upload(
+                    &state,
+                    Method::PUT,
+                    "/api/users/me/avatar",
+                    &mila,
+                    &format!("image/{kind}"),
+                    &format!("me.{kind}"),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{route:?}: avatar upload");
+            }
+            for key in ["avatars/u-mila.png", "avatars/u-mila.jpeg"] {
+                assert!(stored(&state, key).await, "{route:?}: {key} before");
+            }
+
+            let mut files = Vec::new();
+            for (ds, token, name) in [
+                ("shared", &mila, "mila.txt"),
+                ("shared", &admin_token, "admin.txt"),
+                ("solo", &mila, "only.txt"),
+            ] {
+                let (status, json) = upload(
+                    &state,
+                    Method::POST,
+                    &format!("/api/datasets/{ds}/assets"),
+                    token,
+                    "text/plain",
+                    name,
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{route:?}: upload {name}");
+                let key = json["s3_key"].as_str().unwrap().to_string();
+                let iri = json["iri"].as_str().unwrap().to_string();
+                assert!(stored(&state, &key).await, "{route:?}: {name} before");
+                files.push((key, iri));
+            }
+            let described = |iri: &str| -> bool {
+                let q = format!("ASK {{ GRAPH ?g {{ <{iri}> ?p ?o }} }}");
+                match state.store.query(&q).unwrap() {
+                    QueryResults::Boolean(b) => b,
+                    _ => panic!("ASK must return a boolean"),
+                }
+            };
+            for (_, iri) in &files {
+                assert!(described(iri), "{route:?}: {iri} described before");
+            }
+            let assets_graph = |ds: &str| format!("{}/datasets/{ds}/assets", state.base_url);
+            let registered = |ds: &str| {
+                state
+                    .auth_db
+                    .list_dataset_graphs(ds)
+                    .unwrap()
+                    .contains(&assets_graph(ds))
+            };
+            assert!(registered("shared") && registered("solo"));
+
+            let status = erase_mila(&state, &admin_token, route).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{route:?}: the erase");
+            assert!(state.auth_db.get_user_by_id("u-mila").unwrap().is_none());
+
+            for key in ["avatars/u-mila.png", "avatars/u-mila.jpeg"] {
+                assert!(!stored(&state, key).await, "{route:?}: {key} must be gone");
+            }
+            let [(mila_key, mila_iri), (admin_key, admin_iri), (only_key, only_iri)] =
+                <[(String, String); 3]>::try_from(files).unwrap();
+            for (key, iri) in [(&mila_key, &mila_iri), (&only_key, &only_iri)] {
+                assert!(!stored(&state, key).await, "{route:?}: {key} must be gone");
+                assert!(!described(iri), "{route:?}: {iri} must not be described");
+            }
+            assert!(
+                stored(&state, &admin_key).await && described(&admin_iri),
+                "{route:?}: another account's file stays, bytes and description"
+            );
+            assert!(
+                registered("shared"),
+                "{route:?}: a dataset that still holds a file keeps its assets graph"
+            );
+            assert!(
+                !registered("solo"),
+                "{route:?}: a dataset left without files gives up its assets graph"
+            );
+        }
+    }
+
+    /// An erase whose stored files cannot be deleted is refused, and nothing
+    /// of the account has changed: it can be erased again once the store is
+    /// back. That holds for the history too. Under
+    /// `OTS_PURGE_ATTRIBUTION=deleted-user` an erase replaces the account in
+    /// the commit trail, which cannot be put back, so the stored files are
+    /// deleted first and a refusal leaves the trail naming the account.
+    #[tokio::test]
+    async fn an_erase_is_refused_while_a_stored_file_cannot_be_deleted() {
+        use open_triplestore::auth::models::{OwnerType, Visibility};
+        use oxigraph::sparql::QueryResults;
+
+        let cases = [Erase::SelfPurge, Erase::LegacyDelete]
+            .into_iter()
+            .flat_map(|route| [(route, false), (route, true)]);
+        for (route, deleted_user) in cases {
+            let (state, admin_token, dir) = state_with_objects();
+            let mila = seed_mila(&state);
+            if deleted_user {
+                choose_deleted_user(&state, &admin_token).await;
+            }
+            // A commit of the account in the trail, as a write of its leaves.
+            let account = format!("{}/users/u-mila", state.base_url);
+            state
+                .store
+                .update(&format!(
+                    "INSERT DATA {{ GRAPH <urn:system:commit-log> {{ <urn:test:commit> \
+                     <http://www.w3.org/ns/prov#wasAssociatedWith> <{account}> }} }}"
+                ))
+                .unwrap();
+            let trail_names_mila = || {
+                let q = format!("ASK {{ GRAPH <urn:system:commit-log> {{ ?c ?p <{account}> }} }}");
+                match state.store.query(&q).unwrap() {
+                    QueryResults::Boolean(b) => b,
+                    _ => panic!("ASK must return a boolean"),
+                }
+            };
+            assert!(trail_names_mila(), "{route:?}: the commit before");
+            state
+                .auth_db
+                .create_dataset(
+                    "mine",
+                    "mine",
+                    None,
+                    OwnerType::User,
+                    "u-mila",
+                    Visibility::Public,
+                    None,
+                )
+                .unwrap();
+            let (status, json) = upload(
+                &state,
+                Method::POST,
+                "/api/datasets/mine/assets",
+                &mila,
+                "text/plain",
+                "kept.txt",
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            let key = json["s3_key"].as_str().unwrap().to_string();
+
+            // A directory where the file was: the store cannot remove it as
+            // a file, which is what a failing object store looks like.
+            let path = dir.path().join(&key);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+
+            let status = erase_mila(&state, &admin_token, route).await;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{route:?}: the erase is refused"
+            );
+            let user = state.auth_db.get_user_by_id("u-mila").unwrap();
+            assert!(user.is_some_and(|u| u.is_active), "{route:?}: still there");
+            assert_eq!(
+                state
+                    .auth_db
+                    .list_assets_uploaded_by("u-mila")
+                    .unwrap()
+                    .len(),
+                1,
+                "{route:?}: the file row is kept with the account"
+            );
+            let dataset = state.auth_db.get_dataset("mine").unwrap().unwrap();
+            assert_eq!(
+                dataset.visibility,
+                Visibility::Public,
+                "{route:?}: no deactivation effect was applied"
+            );
+            assert!(
+                trail_names_mila(),
+                "{route:?}, deleted-user {deleted_user}: a refused erase must leave \
+                 the account's commits attributed to it"
+            );
+
+            std::fs::remove_dir(&path).unwrap();
+            let status = erase_mila(&state, &admin_token, route).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{route:?}: the retry");
+            assert!(state.auth_db.get_user_by_id("u-mila").unwrap().is_none());
+            assert_eq!(
+                trail_names_mila(),
+                !deleted_user,
+                "{route:?}: the completed erase keeps or replaces the account as chosen"
+            );
+        }
+    }
+
+    /// Only the admin purge recorded that an account was erased. All three
+    /// routes now write a `user_deleted` event that names the erased account
+    /// by its id; the two that did not write one before name the route and
+    /// leave the username out. Where `OTS_PURGE_ATTRIBUTION=deleted-user`
+    /// had the erase replace the account in the history, each of the three
+    /// says so in `details.history_attribution`.
+    #[tokio::test]
+    async fn every_erase_route_writes_an_audit_event() {
+        let cases = ERASE_ROUTES
+            .into_iter()
+            .flat_map(|route| [(route, false), (route, true)]);
+        for (route, deleted_user) in cases {
+            let (state, admin_token) = admin_state();
+            seed_mila(&state);
+            if deleted_user {
+                choose_deleted_user(&state, &admin_token).await;
+            }
+
+            let status = erase_mila(&state, &admin_token, route).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{route:?}: the erase");
+
+            let events = state
+                .audit
+                .list(10, 0, Some("user_deleted"), None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1, "{route:?}: one event, got {events:?}");
+            let event = &events[0];
+            assert_eq!(event.outcome, "success");
+            assert_eq!(event.resource_type.as_deref(), Some("user"));
+            assert_eq!(event.resource_id.as_deref(), Some("u-mila"));
+            let (actor, via) = match route {
+                Erase::AdminPurge => ("adm", None),
+                Erase::SelfPurge => ("u-mila", Some("self_purge")),
+                Erase::LegacyDelete => ("adm", Some("delete_user")),
+            };
+            assert_eq!(event.actor_id.as_deref(), Some(actor), "{route:?}");
+            let details = event.details.clone().unwrap_or_default();
+            assert_eq!(details["via"].as_str(), via, "{route:?}: {details}");
+            if route != Erase::AdminPurge {
+                assert!(
+                    !details.to_string().contains("mila"),
+                    "{route:?}: the event must not carry the username: {details}"
+                );
+            }
+            // The account made no write, so there was nothing to replace:
+            // the detail is there under `deleted-user`, with zero counts.
+            let replaced = &details["history_attribution"];
+            if deleted_user {
+                assert_eq!(
+                    replaced["replaced_by"].as_str(),
+                    Some("deleted-user"),
+                    "{route:?}: {details}"
+                );
+                assert_eq!(replaced["commits"].as_u64(), Some(0), "{route:?}");
+                assert_eq!(replaced["statement_changes"].as_u64(), Some(0));
+            } else {
+                assert!(replaced.is_null(), "{route:?} under keep: {details}");
+            }
+        }
+    }
+
+    /// The legacy delete takes an active account, and left its personal
+    /// datasets as they were: published, under an owner that no longer
+    /// exists. It now applies what a deactivation applies, as the purge
+    /// routes rely on: personal datasets go private, and so do the datasets
+    /// of an organisation the account was the last active member of.
+    #[tokio::test]
+    async fn legacy_delete_user_applies_the_deactivation_effects() {
+        use open_triplestore::auth::models::{OwnerType, Role, Visibility};
+
+        let (state, admin_token) = admin_state();
+        seed_mila(&state);
+        let db = &state.auth_db;
+        db.create_organisation("org-solo", "Solo", "solo", None, None)
+            .unwrap();
+        db.add_org_member("u-mila", "org-solo", Role::Admin)
+            .unwrap();
+        db.create_organisation("org-team", "Team", "team", None, None)
+            .unwrap();
+        db.add_org_member("u-mila", "org-team", Role::Member)
+            .unwrap();
+        db.add_org_member("adm", "org-team", Role::Member).unwrap();
+        for (id, owner_type, owner) in [
+            ("personal", OwnerType::User, "u-mila"),
+            ("of-solo", OwnerType::Organisation, "org-solo"),
+            ("of-team", OwnerType::Organisation, "org-team"),
+            ("of-admin", OwnerType::User, "adm"),
+        ] {
+            db.create_dataset(id, id, None, owner_type, owner, Visibility::Public, None)
+                .unwrap();
+        }
+
+        let status = erase_mila(&state, &admin_token, Erase::LegacyDelete).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let visibility = |id: &str| db.get_dataset(id).unwrap().unwrap().visibility;
+        assert_eq!(
+            visibility("personal"),
+            Visibility::Private,
+            "a personal dataset must not stay published without its owner"
+        );
+        assert_eq!(
+            visibility("of-solo"),
+            Visibility::Private,
+            "an organisation left without an active member goes private"
+        );
+        assert_eq!(
+            visibility("of-team"),
+            Visibility::Public,
+            "an organisation with another active member is untouched"
+        );
+        assert_eq!(visibility("of-admin"), Visibility::Public);
+    }
+
     #[tokio::test]
     async fn no_token_on_protected_endpoint() {
         let resp = test_app(test_state())

@@ -106,6 +106,20 @@ async fn lov_installs_carry_their_licence_and_no_derivatives_is_enforced() {
         let out = body_json(resp.into_body()).await;
         assert_eq!(out["is_public"], true, "{prefix}");
         assert_eq!(out["no_derivatives"], prefix == "pna", "{prefix}");
+        // Listed as a vocabulary, like the bundled standards, although the
+        // corpus graph declares a class, which detection reads as a model.
+        assert_eq!(out["kind"], "vocabulary", "{prefix}");
+        assert_eq!(
+            open_triplestore::data_models::registry::get_data_model(
+                &state.store,
+                &state.base_url,
+                prefix
+            )
+            .expect("installed")
+            .kind,
+            open_triplestore::kind_detector::RegistryKind::Vocabulary,
+            "{prefix}"
+        );
         versions.insert(prefix, out["version"].as_str().unwrap().to_string());
     }
     let pna_ver = &versions["pna"];

@@ -209,6 +209,87 @@ pub fn follow_private_graphs(state: &AppState) -> anyhow::Result<usize> {
     Ok(moved)
 }
 
+/// Attribute the statement changes of the agent `account`, in every
+/// statement-provenance graph of every dataset (the private ones too), to the
+/// agent that stands for purged accounts
+/// ([`crate::commit_log::deleted_user_iri`]): each change event's
+/// `prov:wasAssociatedWith` names the placeholder from here on. The
+/// annotations stay, with their statements and times. Only the `full` profile
+/// writes that quad, so there is nothing to do for a dataset that never used
+/// it. Batches of [`MOVE_BATCH`] events, one transaction each: an event names
+/// the account or the placeholder, and a call that fails part-way is
+/// completed by the next one. Returns the events re-attributed.
+///
+/// Where the change log is on it records these writes like any other to a
+/// statement-provenance graph, so the replaced quads are in its rows until
+/// retention removes them, beside the rows of the account's own writes.
+pub fn reattribute_to_deleted_user(
+    store: &crate::store::TripleStore,
+    base_url: &str,
+    account: &str,
+) -> anyhow::Result<usize> {
+    let placeholder = NamedNode::new(crate::commit_log::deleted_user_iri(base_url))?;
+    let account = NamedNode::new(account)?;
+    if account == placeholder {
+        return Ok(0);
+    }
+    let associated = nn(&format!("{PROV}wasAssociatedWith"));
+    let by_account = TermRef::NamedNode(account.as_ref());
+    let quads = store.store();
+    // The statement-provenance graphs that name the account: one index scan
+    // over the account's quads, of which only the graph names are kept.
+    let mut graphs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for q in quads.quads_for_pattern(None, Some(associated.as_ref()), Some(by_account), None) {
+        if let GraphName::NamedNode(g) = q?.graph_name {
+            if crate::provenance::is_any_statement_provenance_graph(g.as_str()) {
+                graphs.insert(g.into_string());
+            }
+        }
+    }
+    let mut changed = 0usize;
+    for g in graphs {
+        let g = nn(&g);
+        let in_graph = GraphNameRef::NamedNode(g.as_ref());
+        loop {
+            let batch = quads
+                .quads_for_pattern(
+                    None,
+                    Some(associated.as_ref()),
+                    Some(by_account),
+                    Some(in_graph),
+                )
+                .take(MOVE_BATCH)
+                .collect::<Result<Vec<Quad>, _>>()?;
+            if batch.is_empty() {
+                break;
+            }
+            let ops: Vec<QuadOp> = batch
+                .into_iter()
+                .flat_map(|q| {
+                    let there = Quad::new(
+                        q.subject.clone(),
+                        q.predicate.clone(),
+                        placeholder.clone(),
+                        q.graph_name.clone(),
+                    );
+                    [QuadOp::Add(there), QuadOp::Remove(q)]
+                })
+                .collect();
+            // Every event of the batch stops naming the account here, so the
+            // next read starts behind it.
+            let (_, removed) = store.apply_quad_ops(&ops)?;
+            if removed.is_empty() {
+                anyhow::bail!(
+                    "statement provenance of <{}> could not be rewritten",
+                    g.as_str()
+                );
+            }
+            changed += removed.len();
+        }
+    }
+    Ok(changed)
+}
+
 /// Whether [`split_existing_annotations`] has completed on this identity
 /// database (a lookup error counts as not yet).
 pub fn existing_annotations_split(db: &crate::auth::db::AuthDb) -> bool {

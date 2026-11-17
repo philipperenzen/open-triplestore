@@ -1448,3 +1448,292 @@ async fn assert_private_annotations_are_the_writers_of_hidden(
         }
     }
 }
+
+// ─── A purged account in the history (`OTS_PURGE_ATTRIBUTION`) ───────────────
+
+/// What a purge leaves of the account where the store says who made a write.
+/// Out of the box (`keep`) the account's IRI stays on its commits and on the
+/// `full` annotations of its statement changes. With `deleted-user` each of
+/// the three routes that erase an account — an admin's purge, the user's own,
+/// the legacy delete — attributes them to the one agent that stands for
+/// purged accounts: every commit and every annotation is still there, and
+/// none names the account, in the dataset's private provenance graph either.
+#[tokio::test]
+async fn a_purge_keeps_or_replaces_the_account_in_the_history_as_the_operator_chose() {
+    use open_triplestore::auth::models::ResourceRole;
+
+    std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
+    let (state, admin) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let id = dataset(&state, &app, &admin).await;
+    const HELD: &str = "urn:sp:held";
+    for body in [
+        json!({ "graph_iri": HELD }),
+        json!({ "graph_iri": HELD, "private": true }),
+    ] {
+        let method = if body.get("private").is_some() {
+            Method::PATCH
+        } else {
+            Method::POST
+        };
+        let (st, v) = json_req(
+            &app,
+            method,
+            &format!("/api/datasets/{id}/graphs"),
+            Some(&admin),
+            body,
+        )
+        .await;
+        assert!(st.is_success(), "{v}");
+    }
+    let (st, v) = json_req(
+        &app,
+        Method::PUT,
+        &format!("/api/datasets/{id}/settings"),
+        Some(&admin),
+        json!({ "provenance": "full" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // Four writers of the dataset, one per way an account ends.
+    let password = "a long enough passphrase";
+    let accounts = ["u-kept", "u-swapped", "u-self", "u-legacy"];
+    for uid in accounts {
+        let hash = if uid == "u-self" {
+            open_triplestore::auth::password::hash_password(password).unwrap()
+        } else {
+            "hash".to_string()
+        };
+        state
+            .auth_db
+            .create_user(
+                uid,
+                uid,
+                &format!("{uid}@purge.test"),
+                &hash,
+                SystemRole::User,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .set_resource_grant("dataset", &id, "user", uid, ResourceRole::Editor, "adm")
+            .unwrap();
+        // A dataset role does not write through the Graph Store by itself:
+        // that asks for a write grant on the graph.
+        for (n, graph) in [G, HELD].into_iter().enumerate() {
+            state
+                .auth_db
+                .grant_graph_permission(
+                    &format!("purge-w-{uid}-{n}"),
+                    graph,
+                    "user",
+                    uid,
+                    "write",
+                    "adm",
+                )
+                .unwrap();
+        }
+    }
+    state.auth_db.invalidate_accessible_graphs_cache();
+    let token = |uid: &str| mint_token(uid, uid, "user");
+
+    let tick = || open_triplestore::statement_provenance::tick(&state);
+    assert_eq!(tick(), 0, "the first tick starts from the head");
+    // Each writes one statement to the open graph and one to the private one.
+    for uid in accounts {
+        for graph in [G, HELD] {
+            let (st, txt) = req(
+                &app,
+                Method::POST,
+                &format!("/store?graph={}", url_encode(graph)),
+                Some(&token(uid)),
+                Some("text/turtle"),
+                &format!("<urn:sp:{uid}> <urn:sp:wrote> \"{uid} in {graph}\" ."),
+            )
+            .await;
+            assert!(st.is_success(), "{uid} to {graph}: {txt}");
+        }
+    }
+    assert!(tick() > 0);
+
+    let base = state.base_url.trim_end_matches('/').to_string();
+    let iri = |uid: &str| format!("{base}/users/{uid}");
+    let trail = "urn:system:commit-log";
+    let open_pg = format!("urn:ots:statement-provenance:{id}");
+    let held_pg = format!("urn:ots:statement-provenance:{id}:private");
+    // Whether `graph` names `agent` at all, as a subject or as an object.
+    let names = |graph: &str, agent: &str| {
+        ask(
+            &state,
+            &format!(
+                "ASK {{ GRAPH <{graph}> {{ {{ <{agent}> ?p ?o }} UNION {{ ?s ?p <{agent}> }} }} }}"
+            ),
+        )
+    };
+    let everywhere = [trail, open_pg.as_str(), held_pg.as_str()];
+    for uid in accounts {
+        for graph in everywhere {
+            assert!(names(graph, &iri(uid)), "{uid} is not named in <{graph}>");
+        }
+    }
+    // The annotated change events of both provenance graphs.
+    let events = || {
+        let q = "SELECT (COUNT(?e) AS ?n) WHERE { GRAPH ?g { \
+                 ?e <https://opentriplestore.org/ns#op> ?op } }";
+        match state.store.query(q).unwrap() {
+            QueryResults::Solutions(mut s) => {
+                s.next().unwrap().unwrap().get("n").unwrap().to_string()
+            }
+            _ => panic!(),
+        }
+    };
+    let events_before = events();
+    let commits = || async {
+        let (st, v) = json_req(
+            &app,
+            Method::GET,
+            &format!("/api/datasets/{id}/commits"),
+            Some(&admin),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        v.as_array().unwrap().clone()
+    };
+    let commits_before = commits().await.len();
+    assert!(
+        commits_before >= 8,
+        "one commit per write: {commits_before}"
+    );
+
+    let admin_purge = |uid: &'static str| {
+        let (app, admin) = (&app, &admin);
+        async move {
+            for (method, uri) in [
+                (Method::DELETE, format!("/api/admin/users/{uid}")),
+                (Method::POST, format!("/api/admin/users/{uid}/purge")),
+            ] {
+                let (st, txt) = req(app, method, &uri, Some(admin), None, "").await;
+                assert!(st.is_success(), "{uri}: {st} {txt}");
+            }
+        }
+    };
+
+    // Out of the box a purge keeps the attribution.
+    admin_purge("u-kept").await;
+    assert!(state.auth_db.get_user_by_id("u-kept").unwrap().is_none());
+    for graph in everywhere {
+        assert!(names(graph, &iri("u-kept")), "keep: <{graph}>");
+    }
+
+    // It is a runtime setting with two values.
+    let set = |value: &'static str| {
+        json_req(
+            &app,
+            Method::PUT,
+            "/api/admin/settings/OTS_PURGE_ATTRIBUTION",
+            Some(&admin),
+            json!({ "value": value }),
+        )
+    };
+    let (st, v) = set("anonymise").await;
+    assert!(st.is_client_error(), "an unknown value: {st} {v}");
+    let (st, v) = set("deleted-user").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    admin_purge("u-swapped").await;
+    let (st, txt) = req(
+        &app,
+        Method::POST,
+        "/api/auth/account/purge",
+        Some(&token("u-self")),
+        Some("application/json"),
+        &json!({ "password": password }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let (st, txt) = req(
+        &app,
+        Method::DELETE,
+        "/api/users/u-legacy",
+        Some(&admin),
+        None,
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+
+    let placeholder = iri("deleted");
+    for uid in ["u-swapped", "u-self", "u-legacy"] {
+        assert!(state.auth_db.get_user_by_id(uid).unwrap().is_none());
+        for graph in everywhere {
+            assert!(
+                !names(graph, &iri(uid)),
+                "{uid} is still named in <{graph}>"
+            );
+        }
+        // Nor anywhere else in the store.
+        assert!(
+            !ask(
+                &state,
+                &format!(
+                    "ASK {{ GRAPH ?g {{ {{ <{0}> ?p ?o }} UNION {{ ?s ?p <{0}> }} }} }}",
+                    iri(uid)
+                )
+            ),
+            "{uid} is still named somewhere"
+        );
+    }
+    for graph in everywhere {
+        assert!(
+            names(graph, &placeholder),
+            "<{graph}> names no deleted user"
+        );
+        // The account purged under `keep` is not swept along afterwards.
+        assert!(
+            names(graph, &iri("u-kept")),
+            "<{graph}> lost the kept account"
+        );
+    }
+
+    // Nothing of the history went: the same commits, the same annotations.
+    assert_eq!(events(), events_before);
+    let after = commits().await;
+    assert_eq!(after.len(), commits_before);
+    let by = |agent: &str| {
+        after
+            .iter()
+            .filter(|c| c["actor_iri"].as_str() == Some(agent))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let replaced = by(&placeholder);
+    assert_eq!(
+        replaced.len(),
+        6,
+        "two writes each of three accounts: {after:?}"
+    );
+    for c in &replaced {
+        assert_eq!(c["actor_display_name"], "Deleted user", "{c}");
+        assert!(c["actor_username"].is_null(), "{c}");
+    }
+    let kept = by(&iri("u-kept"));
+    assert_eq!(kept.len(), 2, "{after:?}");
+    for c in &kept {
+        assert!(c["actor_username"].is_null(), "the account is gone: {c}");
+    }
+    // Under `full` the events say who and when; who is now the placeholder.
+    for pg in [&open_pg, &held_pg] {
+        assert!(ask(
+            &state,
+            &format!(
+                "ASK {{ GRAPH <{pg}> {{ ?e <http://www.w3.org/ns/prov#wasAssociatedWith> <{placeholder}> ; \
+                 <http://www.w3.org/ns/prov#atTime> ?t }} }}"
+            )
+        ));
+    }
+    // The consumer keeps running over what the purge wrote.
+    tick();
+    assert_eq!(events(), events_before, "a purge is not a statement change");
+}

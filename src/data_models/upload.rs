@@ -323,8 +323,14 @@ fn load_parsed_inner(
     })
 }
 
-/// Copy all quads from source sub-graphs to draft sub-graphs.
+/// Copy all quads from the source version's graphs to draft graphs.
 /// Source graph IRIs have `source_version` replaced with `target_version` to produce draft IRIs.
+///
+/// The source version's graphs are its base graph and the sub-graphs under it
+/// (`{base graph}/…`), never the graphs of a version whose name only starts
+/// with the source's (`9.10` or `9.1-rc1` next to `9.1`): those would be
+/// copied into the draft, and into a graph named after another version
+/// (`9.20` for a draft `9.2`), which is cleared first.
 pub fn clone_graphs_as_draft(
     store: &TripleStore,
     base_url: &str,
@@ -335,12 +341,12 @@ pub fn clone_graphs_as_draft(
     let source_prefix = format!("{base_url}/data-model/{data_model_id}/version/{source_version}");
     let target_prefix = format!("{base_url}/data-model/{data_model_id}/version/{target_version}");
 
-    // List all named graphs whose IRI starts with source_prefix
+    // The named graphs of the source version: its base graph and its sub-graphs.
     let all_graphs = store.named_graphs()?;
     let source_graphs: Vec<String> = all_graphs
         .iter()
         .map(|nn| nn.as_str().to_string())
-        .filter(|iri| iri.starts_with(&source_prefix))
+        .filter(|iri| super::registry::version_graph_suffix(&source_prefix, iri).is_some())
         .collect();
 
     // Determine all (draft_iri, src_iri) pairs.

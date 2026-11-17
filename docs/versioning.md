@@ -119,7 +119,10 @@ Deleting a dataset deletes its versions too (they used to stay behind, and a
 new dataset reusing the id saw them). `POST /api/admin/versions/sweep`
 (admin) cleans up what a deletion before this left: versions of datasets that
 no longer exist, version graphs no record names, pins of versions that are
-gone, expired builds.
+gone, expired builds, and the SHACL Studio bindings of a dataset that no
+longer exists (`bindings_removed`): its own, and those of graphs in its
+namespace that hold no data and no dataset holds. A graph in that namespace
+that another dataset still holds keeps its bindings.
 
 In the web UI, the dataset page's version list has **Compare** and a **Diff** per
 version (from that version to the live graphs, or between two versions): the
@@ -150,6 +153,14 @@ Whether a copy is withheld follows the graph it was cut from:
 The record is the dataset's own: another dataset that holds the same graph is
 not affected. It ends when the graph is attached to the dataset again (its
 registration carries the flag from then on) or when the dataset is deleted.
+
+Deleting the dataset deletes its versions, and its records go with it. A
+private graph the delete leaves in the store (one the dataset did not create,
+one another dataset uses) does not become public: the delete records it under
+the graph's own name, and it stays private for whatever else names it until a
+dataset holds it under its own flag again. A dataset that reuses the id
+inherits nothing. See
+[Who reads a graph that stays in the store](/docs/datasets#who-reads-a-graph-that-stays-in-the-store).
 
 The same record keeps the graph's live data private when the detach leaves it
 in the store: see
@@ -562,7 +573,7 @@ dataset too), and both default to `writers`:
 
 | Setting | Decides who gets | Below it |
 |---|---|---|
-| `OTS_ACTOR_VISIBILITY` | the author of a change: `actor_iri` on feed rows; `actor_iri`, `actor_username` and `actor_display_name` on `…/commits`; the agents of commits and versions in `…/provenance`; `created_by` on `…/versions`; `owner` on `…/branches`; `author` on `…/log` entries | the field is `null` or absent; times, messages, counts and commit IRIs stay |
+| `OTS_ACTOR_VISIBILITY` | the author of a change: `actor_iri` on feed rows; `actor_iri`, `actor_username` and `actor_display_name` on `…/commits`; the agents of commits and versions in `…/provenance`; `created_by` on `…/versions` and on `…/validation-reports`; `owner` on `…/branches`; `author` on `…/log` entries | the field is `null` or absent; times, messages, counts and commit IRIs stay |
 | `OTS_CHANGE_PATCH_ACCESS` | `…/changes/<seq>`, `…/changes/<seq>/inverse` and `PUT …/changes/cursors/<name>` | **401** without an account, **403** with one; the listing still says which graph changed at which sequence number, so a consumer can refetch the graph |
 
 Both are [runtime settings](administration.md#runtime-settings): an
@@ -572,6 +583,25 @@ scope: a read-only API token of an account that may write the dataset is in
 the `writers` audience, so a mirror can read authors and fetch patches with a
 credential that cannot write. Setting a cursor is a `PUT`, which needs a
 token with write scope, as every write does.
+
+`OTS_ACTOR_VISIBILITY` covers the model registry and the SHACL Library by the
+same rule. A writer there is an account that may write the entry:
+
+| Where | The author is | A writer is |
+|---|---|---|
+| A registry entry (`/api/models/<id>`) | `created_by` on the entry and on `…/versions`; `owner` on `…/branches`; `actor_iri`, `actor_username` and `actor_display_name` on `…/commits`; the accounts that made a version on `…/collaborators`; `published_by` and `publishers` in `GET /api/public/catalog` | its owning user, an administrator of the owning organisation, an administrator |
+| A shape graph (`/api/shacl/shape-graphs/<id>`) | `created_by` on the entry, also where it is listed under `/api/shacl/bindings` and `…/effective-shapes`, and on `…/revisions`; the three actor fields on `…/commits` | an account that manages the entry: its owning user, a member of the owning organisation, an administrator |
+
+The public catalogue answers anonymous callers and has nobody to ask, so it
+names the accounts behind a published version only under `readers`. The owner
+of an entry (`owner_type` and `owner_id`, the catalogue's `owner`) is not an
+author and is always named, as a dataset's owner is. To publish a vocabulary
+under a person's name, say so in its content (`dct:creator`) or set
+`OTS_ACTOR_VISIBILITY` to `readers`; the setting is one for datasets, models
+and shape graphs alike. A model's `…/collaborators` route follows two more
+rules that no setting widens: the members of the owning organisation are
+listed to its members and to administrators only, and an e-mail address is
+given only to them and to the owning user ([models.md](models.md#who-sees-the-authors)).
 
 Why `writers`: who edited what and when is personal data, and a patch holds
 deleted data on both sides — the quads a change removed, and the quads it
@@ -600,6 +630,16 @@ order to publish history:
   `/sparql` by every reader of the dataset. A private graph's annotations are
   in the private provenance graph, which the dataset's writers read
   ([statement provenance](/docs/datasets#statement-provenance-opt-in)).
+
+`OTS_ACTOR_VISIBILITY` does not reach every field that names an account. A
+reader of a dataset still gets the account id on a stored validation run
+(`triggered_by` on `…/validation/latest`, `…/validation/history` and
+`…/validation/runs/<id>`), on a prefix (`updated_by` on `…/prefixes`), on an
+asset (`uploaded_by`) and on a saved query (`created_by`), the username on a
+rule set (`updated_by` on `…/rules`), and the account IRI on a property state
+(`attributed_to` on `…/properties`, also a `prov:wasAttributedTo` triple in
+the dataset's property-states graph). A reader of a validation pipeline gets
+`created_by` on it and `actor` on its runs.
 
 Neither setting erases anything: writers and administrators read the rows
 until retention sweeps them, and a patch a consumer fetched earlier is the

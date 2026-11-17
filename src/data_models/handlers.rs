@@ -15,6 +15,7 @@ use crate::server::routes::run_store_write;
 use crate::server::AppState;
 use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 
+use super::blank_nodes;
 use super::diff::{collect_triples, compute_diff, triple_delta, version_revision};
 use super::merge;
 use super::models::{
@@ -95,6 +96,46 @@ fn version_response(state: &AppState, version: DataModelVersion) -> DataModelVer
         version,
         attribution,
     }
+}
+
+// ─── Who sees the authors of an entry ─────────────────────────────────────────
+
+/// Whether `uid` (`None`: anonymous), who may read entry `record`, sees who
+/// made it, its versions and its commits: `created_by` on the entry and on a
+/// version, a branch's `owner`, a commit's actor, the version authors among
+/// the collaborators. That is `OTS_ACTOR_VISIBILITY`'s audience, as for a
+/// dataset's history; a writer here is an account that may write the entry
+/// (`can_write_ontology`). The owner (`owner_type`, `owner_id`) is not an
+/// author and stays named.
+fn shows_actors(
+    state: &AppState,
+    record: &DataModelRecord,
+    uid: Option<&str>,
+) -> Result<bool, AppError> {
+    actor_audience_admits(
+        state,
+        crate::auth::policy::actor_audience(&state.auth_db),
+        record,
+        uid,
+    )
+}
+
+/// [`shows_actors`] with the audience already read, for a listing.
+fn actor_audience_admits(
+    state: &AppState,
+    audience: crate::auth::policy::HistoryAudience,
+    record: &DataModelRecord,
+    uid: Option<&str>,
+) -> Result<bool, AppError> {
+    audience
+        .admits_with(uid, |uid| {
+            state.auth_db.can_write_ontology(
+                uid,
+                record.owner_type.as_deref(),
+                record.owner_id.as_deref(),
+            )
+        })
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 // ─── Content whose licence allows no altered copies ───────────────────────────
@@ -324,9 +365,15 @@ pub async fn list_data_models(
         .collect();
     let mut attributions = registry::model_attributions(&state.store);
     let mut latest = registry::latest_published_attributions(&state.store);
-    let body: Vec<DataModelResponse> = filtered
-        .into_iter()
-        .map(|record| DataModelResponse {
+    // Who registered an entry is for `OTS_ACTOR_VISIBILITY`'s audience, entry
+    // by entry: the caller may write some of them and not others.
+    let audience = crate::auth::policy::actor_audience(&state.auth_db);
+    let mut body: Vec<DataModelResponse> = Vec::with_capacity(filtered.len());
+    for mut record in filtered {
+        if record.created_by.is_some() && !actor_audience_admits(&state, audience, &record, uid)? {
+            record.created_by = None;
+        }
+        body.push(DataModelResponse {
             attribution: entry_attribution(
                 &record,
                 attributions.remove(&record.id),
@@ -334,8 +381,8 @@ pub async fn list_data_models(
             )
             .map(|a| served_attribution(&state, a)),
             record,
-        })
-        .collect();
+        });
+    }
     Ok(Json(body))
 }
 
@@ -437,7 +484,7 @@ pub async fn get_data_model(
     user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let record = registry::get_data_model(&state.store, &state.base_url, &id)
+    let mut record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
     let uid = user.as_deref().map(|u| u.user_id.as_str());
     if !state
@@ -451,6 +498,9 @@ pub async fn get_data_model(
         .map_err(|e| AppError::Internal(e.to_string()))?
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
+    }
+    if !shows_actors(&state, &record, uid)? {
+        record.created_by = None;
     }
     Ok(Json(model_response(&state, record)))
 }
@@ -579,7 +629,12 @@ pub async fn list_versions(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let versions = registry::list_versions(&state.store, &state.base_url, &id);
+    let mut versions = registry::list_versions(&state.store, &state.base_url, &id);
+    if !shows_actors(&state, &ontology, uid)? {
+        for v in &mut versions {
+            v.created_by = None;
+        }
+    }
     let mut attributions = registry::version_attributions(&state.store, &state.base_url, &id);
     let body: Vec<DataModelVersionResponse> = versions
         .into_iter()
@@ -614,15 +669,29 @@ pub async fn get_version(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+    let mut record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    if !shows_actors(&state, &ontology, uid)? {
+        record.created_by = None;
+    }
     Ok(Json(version_response(&state, record)))
 }
 
 /// GET /api/models/:id/collaborators
 ///
-/// Lists who can see/edit this model: the owner (user) or org members, plus any
-/// users who authored a version (draft holders). Deduplicated, owner/org first.
+/// The accounts around this entry: its owner (a user) or the members of the
+/// owning organisation, plus any other account that made a version (draft
+/// holders). Deduplicated, owner/org first. A list of accounts is not every
+/// reader's in full:
+///
+/// * the members of the owning organisation are listed to its members and to
+///   administrators, as `GET /api/organisations/:id/members` lists them;
+/// * who made a version is for `OTS_ACTOR_VISIBILITY`'s audience
+///   ([`shows_actors`]);
+/// * an e-mail address is given only to the owner's side (the owning user,
+///   a member of the owning organisation) and to administrators.
+///
+/// The owning user is named to every reader: the entry's record names them.
 pub async fn list_collaborators(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -643,15 +712,27 @@ pub async fn list_collaborators(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    let created_by: Vec<String> = registry::list_versions(&state.store, &state.base_url, &id)
-        .into_iter()
-        .filter_map(|v| v.created_by)
-        .collect();
+    let owners_side = on_owners_side(
+        state.auth_db.as_ref(),
+        user.as_deref(),
+        record.owner_type.as_deref(),
+        record.owner_id.as_deref(),
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let created_by: Vec<String> = if shows_actors(&state, &record, uid)? {
+        registry::list_versions(&state.store, &state.base_url, &id)
+            .into_iter()
+            .filter_map(|v| v.created_by)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let list = collaborators_for(
         state.auth_db.as_ref(),
         record.owner_type.as_deref(),
         record.owner_id.as_deref(),
         &created_by,
+        owners_side,
     );
     Ok(Json(list))
 }
@@ -681,7 +762,13 @@ pub async fn list_commits(
     let subject = format!("{}/data-model/{}", state.base_url, id);
     let scope = crate::commit_log::CommitScope::Subject(subject);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
-    crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    // Who made a commit is for `OTS_ACTOR_VISIBILITY`'s audience; below it the
+    // trail keeps its messages, times and counts and names nobody.
+    if shows_actors(&state, &record, uid)? {
+        crate::commit_log::resolve_actors(state.auth_db.as_ref(), &mut commits);
+    } else {
+        crate::commit_log::withhold_actors(&mut commits);
+    }
     Ok(Json(commits))
 }
 
@@ -768,20 +855,15 @@ pub async fn get_version_data(
         _ => "application/octet-stream",
     };
 
-    // Determine which graphs to dump
-    let graphs_to_dump: Vec<String> = if let Some(suffix) = &params.graph {
-        if suffix == "all" {
-            record.sub_graphs.clone()
-        } else {
-            record
-                .sub_graphs
-                .iter()
-                .filter(|g| g.ends_with(suffix.as_str()))
-                .cloned()
-                .collect()
-        }
-    } else {
-        record.sub_graphs.clone()
+    // Determine which graphs to dump: all of them, or the sub-graphs that
+    // answer to the name given.
+    let graphs_to_dump: Vec<String> = match params.graph.as_deref() {
+        None | Some("all") => record.sub_graphs.clone(),
+        Some(wanted) if wanted.trim_start_matches('/').is_empty() => record.sub_graphs.clone(),
+        Some(wanted) => sub_graphs_named(&record, wanted)
+            .into_iter()
+            .cloned()
+            .collect(),
     };
 
     // For a single graph (Turtle/NTriples), dump just that graph.
@@ -1256,51 +1338,59 @@ pub async fn patch_version_data(
     }
 
     // Determine default target graph (used when a triple has no graph override)
-    let default_graph = {
-        let suffix = body.graph.as_deref().unwrap_or("");
-        if suffix.is_empty() {
-            record.graph_iri.clone()
-        } else {
-            record
-                .sub_graphs
-                .iter()
-                .find(|g| g.ends_with(suffix))
-                .cloned()
-                .unwrap_or_else(|| format!("{}/{}", record.graph_iri, suffix))
-        }
+    let default_graph = match body.graph.as_deref().unwrap_or("") {
+        "" => record.graph_iri.clone(),
+        name => sub_graph_or_new(&record, name)?,
     };
 
     let mut affected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let (mut added, mut removed) = (body.add.len(), body.remove.len());
 
-    // Group removes by target graph (per-triple graph overrides the request-level default)
-    for (graph, triples) in group_by_graph(&body.remove, &default_graph, &record)? {
-        let block = sparql_triple_block(&triples)?;
-        if !block.is_empty() {
-            let q = format!(
-                "DELETE DATA {{ GRAPH <{}> {{ {block} }} }}",
-                escape_sparql_iri(&graph)
-            );
-            state
-                .store
-                .update(&q)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-            affected.insert(graph);
+    if blank_nodes::names_existing_nodes(&body) {
+        // The request names blank nodes the draft already has. SPARQL cannot
+        // (`DELETE DATA` refuses a blank node, `INSERT DATA` makes a new one
+        // of every label), so its statements are written as quads, all in
+        // one transaction.
+        let applied = blank_nodes::apply(&state.store, &record, &default_graph, &body)?;
+        affected = applied.graphs;
+        (added, removed) = (applied.added, applied.removed);
+    } else {
+        blank_nodes::refuse_undeclared_removals(&body.remove)?;
+
+        // Group the triples by target graph (per-triple graph overrides the
+        // request-level default), all of them before the first write: a graph
+        // the request may not name is refused with the draft as it was.
+        let removes = group_by_graph(&body.remove, &default_graph, &record)?;
+        let adds = group_by_graph(&body.add, &default_graph, &record)?;
+
+        for (graph, triples) in removes {
+            let block = sparql_triple_block(&triples)?;
+            if !block.is_empty() {
+                let q = format!(
+                    "DELETE DATA {{ GRAPH <{}> {{ {block} }} }}",
+                    escape_sparql_iri(&graph)
+                );
+                state
+                    .store
+                    .update(&q)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                affected.insert(graph);
+            }
         }
-    }
 
-    // Group adds by target graph
-    for (graph, triples) in group_by_graph(&body.add, &default_graph, &record)? {
-        let block = sparql_triple_block(&triples)?;
-        if !block.is_empty() {
-            let q = format!(
-                "INSERT DATA {{ GRAPH <{}> {{ {block} }} }}",
-                escape_sparql_iri(&graph)
-            );
-            state
-                .store
-                .update(&q)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-            affected.insert(graph);
+        for (graph, triples) in adds {
+            let block = sparql_triple_block(&triples)?;
+            if !block.is_empty() {
+                let q = format!(
+                    "INSERT DATA {{ GRAPH <{}> {{ {block} }} }}",
+                    escape_sparql_iri(&graph)
+                );
+                state
+                    .store
+                    .update(&q)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                affected.insert(graph);
+            }
         }
     }
 
@@ -1321,8 +1411,8 @@ pub async fn patch_version_data(
         &ver,
         record.branch.as_deref(),
         affected.into_iter().collect(),
-        body.add.len(),
-        body.remove.len(),
+        added,
+        removed,
         Some(current_revision),
         Some(new_revision.clone()),
         body.message.as_deref(),
@@ -1344,28 +1434,63 @@ pub async fn patch_version_data(
     Ok(resp)
 }
 
-/// JSON view of one collaborator on a model/vocabulary.
-fn collaborator_json(u: &crate::auth::models::User, role: &str, source: &str) -> serde_json::Value {
+/// JSON view of one collaborator on a model/vocabulary; `email` is `null`
+/// unless `with_email`.
+fn collaborator_json(
+    u: &crate::auth::models::User,
+    role: &str,
+    source: &str,
+    with_email: bool,
+) -> serde_json::Value {
     json!({
         "user_id": u.id,
         "username": u.username,
         "display_name": u.display_name,
-        "email": u.email,
+        "email": with_email.then_some(u.email.as_str()),
         "role": role,
         "source": source,
     })
 }
 
+/// Whether `user` is on the owner's side of an entry: the owning user, a
+/// member (any role) of the owning organisation, or an administrator. They
+/// are who the organisation's member list is served to, and who gets the
+/// e-mail addresses on the collaborators route.
+fn on_owners_side(
+    auth_db: &crate::auth::db::AuthDb,
+    user: Option<&AuthenticatedUser>,
+    owner_type: Option<&str>,
+    owner_id: Option<&str>,
+) -> anyhow::Result<bool> {
+    let Some(user) = user else {
+        return Ok(false);
+    };
+    if user.is_admin() {
+        return Ok(true);
+    }
+    Ok(match (owner_type, owner_id) {
+        (Some("user"), Some(oid)) => oid == user.user_id,
+        (Some("organisation"), Some(oid)) => {
+            auth_db.get_org_membership(&user.user_id, oid)?.is_some()
+        }
+        _ => false,
+    })
+}
+
 /// Build the collaborator list for a model/vocabulary given its owner and the
-/// set of version `created_by` IRIs (version/draft authors). Deduplicated by
-/// user; owner/org members are listed first, then any extra draft authors.
+/// `created_by` IRIs of the versions whose authors the caller may see (none
+/// below `OTS_ACTOR_VISIBILITY`'s audience). Deduplicated by user; owner/org
+/// members are listed first, then any extra draft authors.
 ///
-/// Shared by both the data-model and vocabulary collaborators endpoints.
+/// `owners_side` ([`on_owners_side`]) decides the rest: only then are the
+/// members of the owning organisation listed, and only then does an entry
+/// carry an e-mail address. The owning user is listed either way.
 pub fn collaborators_for(
     auth_db: &crate::auth::db::AuthDb,
     owner_type: Option<&str>,
     owner_id: Option<&str>,
     created_by_iris: &[String],
+    owners_side: bool,
 ) -> Vec<serde_json::Value> {
     use std::collections::HashSet;
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1375,14 +1500,19 @@ pub fn collaborators_for(
         (Some("user"), Some(oid)) => {
             if let Ok(Some(u)) = auth_db.get_user_by_id(oid) {
                 seen.insert(u.id.clone());
-                out.push(collaborator_json(&u, "owner", "owner"));
+                out.push(collaborator_json(&u, "owner", "owner", owners_side));
             }
         }
-        (Some("organisation"), Some(oid)) => {
+        (Some("organisation"), Some(oid)) if owners_side => {
             if let Ok(members) = auth_db.list_org_members(oid) {
                 for (u, role) in members {
                     if seen.insert(u.id.clone()) {
-                        out.push(collaborator_json(&u, role.as_str(), "organisation"));
+                        out.push(collaborator_json(
+                            &u,
+                            role.as_str(),
+                            "organisation",
+                            owners_side,
+                        ));
                     }
                 }
             }
@@ -1397,7 +1527,7 @@ pub fn collaborators_for(
         }
         if let Ok(Some(u)) = auth_db.get_user_by_id(uid) {
             seen.insert(u.id.clone());
-            out.push(collaborator_json(&u, "contributor", "draft"));
+            out.push(collaborator_json(&u, "contributor", "draft", owners_side));
         }
     }
 
@@ -1508,16 +1638,102 @@ fn version_graphs(record: &super::models::DataModelVersion) -> Vec<String> {
     }
 }
 
+/// The sub-graphs of a version that answer to `wanted`, the `graph` a caller
+/// names one by: the recorded sub-graph with that IRI, or else every one whose
+/// name in the version is `wanted` or, for a nested sub-graph, ends in it at a
+/// path boundary (see [`registry::sub_graph_answers_to`]). The tail of an IRI
+/// is no name: `shapes` does not select `…/core-shapes`.
+fn sub_graphs_named<'a>(
+    record: &'a super::models::DataModelVersion,
+    wanted: &str,
+) -> Vec<&'a String> {
+    if let Some(exact) = record.sub_graphs.iter().find(|g| g.as_str() == wanted) {
+        return vec![exact];
+    }
+    record
+        .sub_graphs
+        .iter()
+        .filter(|g| {
+            registry::sub_graph_answers_to(
+                registry::version_graph_name(&record.graph_iri, g),
+                wanted,
+            )
+        })
+        .collect()
+}
+
+/// The one sub-graph of a version that `wanted` names, for a write or a
+/// lifecycle change: of those that answer to it (see [`sub_graphs_named`]),
+/// the one named exactly so, else the only one. `Ok(None)` when none answers.
+/// A name several sub-graphs answer to and none bears is refused: taking one
+/// of them would put the change in a graph the caller may not have meant.
+fn sub_graph_named(
+    record: &super::models::DataModelVersion,
+    wanted: &str,
+) -> Result<Option<String>, AppError> {
+    let answering = sub_graphs_named(record, wanted);
+    let name = wanted.trim_start_matches('/');
+    let exact: Vec<&String> = answering
+        .iter()
+        .copied()
+        .filter(|g| registry::version_graph_name(&record.graph_iri, g) == name)
+        .collect();
+    let named = if exact.is_empty() { answering } else { exact };
+    match named.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).clone())),
+        several => Err(AppError::BadRequest(format!(
+            "Graph '{wanted}' names {} sub-graphs of this version ({}); give one by its whole name or IRI",
+            several.len(),
+            several
+                .iter()
+                .map(|g| g.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// The graph a write addressed to the sub-graph `wanted` goes to: the
+/// sub-graph of that name (see [`sub_graph_named`]) or, the version having
+/// none, the graph of that name under its base graph.
+fn sub_graph_or_new(
+    record: &super::models::DataModelVersion,
+    wanted: &str,
+) -> Result<String, AppError> {
+    Ok(match sub_graph_named(record, wanted)? {
+        Some(graph) => graph,
+        None => format!("{}/{}", record.graph_iri, wanted.trim_start_matches('/')),
+    })
+}
+
 /// Group a slice of `RdfTriple` by their effective target graph.
-/// A triple's `graph` field overrides the request-level `default_graph`; if the
-/// override is a suffix it is matched against `record.sub_graphs`.
+/// A triple's `graph` field overrides the request-level `default_graph`; a
+/// name rather than an IRI is resolved against the version's sub-graphs (see
+/// [`sub_graph_or_new`]).
 fn group_by_graph<'a>(
     triples: &'a [super::models::RdfTriple],
     default_graph: &str,
     record: &super::models::DataModelVersion,
 ) -> Result<Vec<(String, Vec<&'a super::models::RdfTriple>)>, AppError> {
     use std::collections::BTreeMap;
-    // A per-triple absolute graph override may only target THIS version's content:
+    let mut map: BTreeMap<String, Vec<&super::models::RdfTriple>> = BTreeMap::new();
+    for t in triples {
+        let graph = target_graph(t.graph.as_deref(), default_graph, record)?;
+        map.entry(graph).or_default().push(t);
+    }
+    Ok(map.into_iter().collect())
+}
+
+/// The graph a statement of a draft edit is aimed at: the request's
+/// `default_graph` unless the statement names one, as an absolute IRI or by
+/// the name of a sub-graph in the version (see [`sub_graph_or_new`]).
+pub(super) fn target_graph(
+    graph: Option<&str>,
+    default_graph: &str,
+    record: &super::models::DataModelVersion,
+) -> Result<String, AppError> {
+    // An absolute graph override may only target THIS version's content:
     // the base graph, one of its recorded sub-graphs, or a sub-path beneath the
     // base graph. Anything else would let a writer reach another model/tenant's
     // graph, so it is rejected.
@@ -1527,31 +1743,21 @@ fn group_by_graph<'a>(
             || g.starts_with(&sub_prefix)
             || record.sub_graphs.iter().any(|sg| sg.as_str() == g)
     };
-    let mut map: BTreeMap<String, Vec<&super::models::RdfTriple>> = BTreeMap::new();
-    for t in triples {
-        let graph = match t.graph.as_deref() {
-            None | Some("") => default_graph.to_string(),
-            Some(g) => {
-                if g.starts_with("http://") || g.starts_with("https://") || g.starts_with("urn:") {
-                    if !is_authorized_target(g) {
-                        return Err(AppError::BadRequest(format!(
-                            "Graph '{g}' is not part of this version"
-                        )));
-                    }
-                    g.to_string()
-                } else {
-                    record
-                        .sub_graphs
-                        .iter()
-                        .find(|sg| sg.ends_with(g))
-                        .cloned()
-                        .unwrap_or_else(|| format!("{}/{}", record.graph_iri, g))
+    match graph {
+        None | Some("") => Ok(default_graph.to_string()),
+        Some(g) => {
+            if g.starts_with("http://") || g.starts_with("https://") || g.starts_with("urn:") {
+                if !is_authorized_target(g) {
+                    return Err(AppError::BadRequest(format!(
+                        "Graph '{g}' is not part of this version"
+                    )));
                 }
+                Ok(g.to_string())
+            } else {
+                sub_graph_or_new(record, g)
             }
-        };
-        map.entry(graph).or_default().push(t);
+        }
     }
-    Ok(map.into_iter().collect())
 }
 
 fn sparql_triple_block(triples: &[&super::models::RdfTriple]) -> Result<String, AppError> {
@@ -1594,7 +1800,7 @@ fn term_to_sparql(t: &str) -> Result<String, AppError> {
 /// SPARQL token. Literal text is escaped with `escape_sparql_literal`; language
 /// tags are validated against `[A-Za-z0-9-]` and datatype IRIs with
 /// `NamedNode::new`. Invalid input is rejected as `400 Bad Request`.
-fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
+pub(super) fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
     match v {
         serde_json::Value::String(s) => term_to_sparql(s),
         serde_json::Value::Object(map) => {
@@ -1865,6 +2071,8 @@ pub async fn list_branches(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
+    // A branch's `owner` is who made its tip: `OTS_ACTOR_VISIBILITY`'s audience.
+    let actors = shows_actors(&state, &record, uid)?;
     let views: Vec<BranchVersionView> = registry::list_versions(&state.store, &state.base_url, &id)
         .into_iter()
         .map(|v| BranchVersionView {
@@ -1872,7 +2080,7 @@ pub async fn list_branches(
             version: v.version,
             status: v.status.as_str().to_string(),
             derived_from: v.derived_from,
-            created_by: v.created_by,
+            created_by: v.created_by.filter(|_| actors),
             created_at: v.created_at,
             sub_graphs: if v.sub_graphs.is_empty() {
                 vec![v.graph_iri]
@@ -2816,19 +3024,6 @@ pub async fn delete_version(
 
 // ─── Per-subgraph lifecycle (Phase 6) ──────────────────────────────────────────
 
-/// Resolve the body's `graph` (full IRI or trailing suffix) to one of the
-/// version's actual subgraph IRIs.
-fn resolve_sub_graph(record: &super::models::DataModelVersion, wanted: &str) -> Option<String> {
-    if record.sub_graphs.iter().any(|g| g == wanted) {
-        return Some(wanted.to_string());
-    }
-    record
-        .sub_graphs
-        .iter()
-        .find(|g| g.ends_with(wanted))
-        .cloned()
-}
-
 /// Shared implementation for subgraph stage/publish/deprecate.
 async fn transition_sub_graph(
     state: AppState,
@@ -2866,7 +3061,8 @@ async fn transition_sub_graph(
     if new_status == VersionStatus::Published {
         refuse_in_no_derivatives_entry(&state, &id, "Publishing a subgraph")?;
     }
-    let sub_graph_iri = resolve_sub_graph(&record, &graph).ok_or_else(|| {
+    // The body's `graph`: the sub-graph's full IRI, or its name in the version.
+    let sub_graph_iri = sub_graph_named(&record, &graph)?.ok_or_else(|| {
         AppError::BadRequest(format!("Subgraph '{graph}' not found in version '{ver}'"))
     })?;
 
@@ -2976,21 +3172,12 @@ pub async fn diff_versions(
     ensure_servable(&state, &id, &parent, &params.from, user.as_deref())?;
     ensure_servable(&state, &id, &parent, &params.to, user.as_deref())?;
 
-    let from_graphs = if from_record.sub_graphs.is_empty() {
-        vec![from_record.graph_iri]
-    } else {
-        from_record.sub_graphs
-    };
-    let to_graphs = if to_record.sub_graphs.is_empty() {
-        vec![to_record.graph_iri]
-    } else {
-        to_record.sub_graphs
-    };
-
     let result = compute_diff(
         &state.store,
-        &from_graphs,
-        &to_graphs,
+        &from_record.graph_iri,
+        &version_graphs(&from_record),
+        &to_record.graph_iri,
+        &version_graphs(&to_record),
         params.graph.as_deref(),
     );
 
