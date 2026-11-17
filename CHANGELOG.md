@@ -98,6 +98,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/api-reference.md#editing-a-model-draft`.
 
 ### Changed
+- **A rejected bearer token is answered `401`, no longer served as an
+  anonymous request.** On the routes that also serve anonymous callers
+  (`/sparql`, the Graph Store reads, `/api/datasets/…`, the linked-data
+  pages) a request whose `Authorization: Bearer` token had expired or was
+  revoked got the anonymous answer: `200` with the public view,
+  `"can_write": false` on a dataset the account owns, a query result without
+  the private graphs. A client could not tell a missing right from an expired
+  token. Such a request now gets `401` with `WWW-Authenticate: Bearer
+  error="invalid_token"` (RFC 6750 §3.1). Routes that require a credential
+  send the same challenge, and CORS exposes the header. **API clients:** on
+  that `401`, renew the token and repeat the request. Unchanged: a request
+  without credentials; a stale session cookie, which is ignored where
+  anonymous callers are served; `/health` and `/livez`; and a token issued
+  by a party this instance has no trust relationship with, so an identity
+  assertion from a peer that is not trusted here is still answered as
+  anonymous. One from a trusted peer that fails is refused, and the `SERVICE`
+  call that carried it fails where it used to match public data only. The
+  web interface renews its session when one of its calls meets the `401`.
+  `docs/auth.md`, "When a credential is rejected".
 - With the accounts-dashboard plugin compiled in, a malformed
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL`, or a raw
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops

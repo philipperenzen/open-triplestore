@@ -178,8 +178,13 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
             axum::http::header::IF_MATCH,
         ])
         // Expose the revision token so the browser can read it for optimistic
-        // concurrency (If-Match) on draft edits across origins.
-        .expose_headers([axum::http::header::ETAG]);
+        // concurrency (If-Match) on draft edits across origins, and the Bearer
+        // challenge so a page on another origin can tell a rejected token
+        // (renew it) from a refusal a fresh token would not change.
+        .expose_headers([
+            axum::http::header::ETAG,
+            axum::http::header::WWW_AUTHENTICATE,
+        ]);
 
     // `*` ⇒ permissive mirror mode. The literal `*` cannot be paired with
     // `Access-Control-Allow-Credentials: true` (the Fetch spec rejects it), so mirror

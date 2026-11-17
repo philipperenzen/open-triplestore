@@ -140,6 +140,15 @@ the peer through `SERVICE`, sees the peer's `waterschap-x` member-only
 datasets and nothing else, and the peer's audit trail records the federated
 user, not the portal.
 
+An assertion from a trusted peer that fails (another audience, expired, a key
+the peer no longer publishes) is refused with `401`, on `/sparql` too: the
+calling instance's `SERVICE` clause fails, where it would otherwise match the
+public data only and look complete. An assertion from an instance that is not
+on the list is not this instance's to judge, and the request is answered as
+an anonymous one. That is what an instance with `OTS_REMOTE_AUTH=assert`
+needs from an allowlisted endpoint that does not take part: it sends its
+assertion to every one of them.
+
 ## What this is not
 
 - Not single sign-on: users log in where their account lives.

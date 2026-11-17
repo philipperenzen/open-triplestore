@@ -244,7 +244,7 @@ Call `accessible_read_graphs` (`src/server/routes.rs:1003`, `pub(crate)`, "the e
 
 ### 7.3 `enforce_write_scope_for_mutation` and POST
 
-It runs inside both `optional_auth` (`src/auth/middleware.rs:562-564`) and `require_auth` (`:525`); `mutating` covers POST (`:605`); the only read exemption is a literal `path == "/sparql"` (`:610-611`). So a read-scoped API token POSTing to `/api/sql` gets `403 "This API token does not have write scope"` (`:618-624`) — JWT sessions are always `write_access: true` (`:192`), so exactly the tokens an analytics endpoint would be issued are locked out. GET is therefore primary; generalising the exemption is an `src/auth/middleware.rs` edit, **outside scope and a stop condition to raise before the phase starts**, and SQL in a query string lands in access logs, which is why POST should also exist.
+It runs inside both `optional_auth` (`src/auth/middleware.rs:691-693`) and `require_auth` (`:641`); `mutating` covers POST (`:745`); the only read exemption is a literal `path == "/sparql"` (`:750-751`). So a read-scoped API token POSTing to `/api/sql` gets `403 "This API token does not have write scope"` (`:765-771`) — JWT sessions are always `write_access: true` (`:276`), so exactly the tokens an analytics endpoint would be issued are locked out. GET is therefore primary; generalising the exemption is an `src/auth/middleware.rs` edit, **outside scope and a stop condition to raise before the phase starts**, and SQL in a query string lands in access logs, which is why POST should also exist.
 
 ### 7.4 Mounting, rate tier, status codes, audit, OpenAPI
 
@@ -309,7 +309,7 @@ The never-stale copy above cannot serve `/sql` over the cap on a busy store, and
 
 ≈ 12–15 weeks (14–17 with the optional class views; Phase 2b extra) against the programme's 6–8 for P2-1, before any SHACL work — a finding in itself.
 
-**Stop conditions touched by this note, to raise before any phase starts:** the read-only POST exemption in `src/auth/middleware.rs:610-617` (7.3); the endpoint-ACL default-allow and first-rule-wins behaviour in `src/auth/acl.rs:151-166` (7.4); any dependency (3.3).
+**Stop conditions touched by this note, to raise before any phase starts:** the read-only POST exemption in `src/auth/middleware.rs:750-757` (7.3); the endpoint-ACL default-allow and first-rule-wins behaviour in `src/auth/acl.rs:151-166` (7.4); any dependency (3.3).
 
 **Out of scope of this note:** a virtual knowledge graph (R2RML/OBDA over an external RDBMS); an authoritative columnar store, a DuckDB write path, time-travel or spatial SQL, QLever as a read backend — all **P5**, decidable only from Phase 2's measurements; persistent shards (`docs/performance.md:1020-1021`), a simpler roadmap item; a pluggable evaluator, which "would need an evaluator fork" (`:828-830`) — a stop condition.
 
