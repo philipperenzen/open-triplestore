@@ -95,10 +95,20 @@ impl AuthenticatedUser {
     }
 }
 
-/// Extract a bearer token from the request:
+/// How a request presented its credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialSource {
+    /// `Authorization: Bearer …`: the client chose to send it.
+    Header,
+    /// The `access_token` session cookie: the browser attaches it to every
+    /// request to this origin, plain navigations included.
+    Cookie,
+}
+
+/// Extract a bearer token from the request, and where it was found:
 /// 1. `Authorization: Bearer <token>` header (API tokens and backward-compat clients)
 /// 2. `access_token` cookie (browser sessions using HttpOnly cookies, M-2)
-fn extract_token(req: &Request) -> Option<String> {
+fn extract_token(req: &Request) -> Option<(String, CredentialSource)> {
     // 1. Authorization header
     if let Some(v) = req
         .headers()
@@ -106,7 +116,7 @@ fn extract_token(req: &Request) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        return Some(v.to_string());
+        return Some((v.to_string(), CredentialSource::Header));
     }
     // 2. HttpOnly cookie fallback
     if let Some(cookie_hdr) = req.headers().get("cookie").and_then(|v| v.to_str().ok()) {
@@ -114,12 +124,58 @@ fn extract_token(req: &Request) -> Option<String> {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("access_token=") {
                 if !val.is_empty() {
-                    return Some(val.to_string());
+                    return Some((val.to_string(), CredentialSource::Cookie));
                 }
             }
         }
     }
     None
+}
+
+/// The challenge a rejected bearer credential is answered with (RFC 6750 §3.1).
+const INVALID_TOKEN_CHALLENGE: &str = r#"Bearer error="invalid_token""#;
+
+/// Mark the `401` for a rejected credential with the Bearer challenge, so a
+/// client can tell "this token is no longer honoured" (renew it and retry)
+/// from a refusal a fresh token would not change. Any other status (a
+/// database error while resolving the token) passes as it is.
+fn with_bearer_challenge(mut resp: Response) -> Response {
+    if resp.status() == StatusCode::UNAUTHORIZED {
+        resp.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static(INVALID_TOKEN_CHALLENGE),
+        );
+    }
+    resp
+}
+
+/// Whether a bearer that failed authentication was this instance's to judge.
+///
+/// Everything is, except a JWT that names an issuer this instance has no
+/// trust relationship with: neither itself, nor the configured identity
+/// provider, nor a trusted peer. Such a token was minted for someone else.
+/// An instance that asserts its users' identity to its peers sends an
+/// assertion to every allowlisted one, also to a peer that does not take
+/// part, and that peer answers it as it answers anyone.
+///
+/// The issuer is read without verifying the token. That only ever decides
+/// between refusing the request and serving it as anonymous, which is what
+/// sending no token gets.
+fn addressed_to_this_instance(token: &str, auth_ext: &AuthExt, own_issuer: &str) -> bool {
+    let Some(iss) = crate::federation::unverified_issuer(token) else {
+        // API tokens, session tokens and anything unreadable.
+        return true;
+    };
+    let same = |known: &str| known.trim_end_matches('/') == iss;
+    same(own_issuer)
+        || auth_ext.oidc.as_ref().is_some_and(|v| same(v.issuer()))
+        || auth_ext.trusted_issuers.iter().any(|v| same(v.issuer()))
+}
+
+/// Liveness and health probes answer for the service, not for the caller: a
+/// stale credential on one must not read as the service being down.
+fn is_probe(path: &str) -> bool {
+    matches!(path, "/health" | "/livez")
 }
 
 /// The 401 for a deactivated account. Guests disabled by the admin's
@@ -551,7 +607,7 @@ pub async fn require_auth(
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let Some(token) = extract_token(&req) else {
+    let Some((token, _)) = extract_token(&req) else {
         // WAC: an LDP resource whose access control list grants `foaf:Agent`
         // `acl:Read` is readable without a token. The layer stays; only a
         // `GET`/`HEAD` under `/ldp/` that the ACL opens to everyone passes, with
@@ -579,7 +635,8 @@ pub async fn require_auth(
         &base_url.0,
         &token,
     )
-    .await?;
+    .await
+    .map_err(with_bearer_challenge)?;
     // M-8 (generalized): a read-scoped API token may not perform mutating requests.
     enforce_write_scope_for_mutation(&req, &user)?;
     req.extensions_mut().insert(user);
@@ -592,8 +649,19 @@ pub async fn require_auth(
     Ok(resp)
 }
 
-/// Middleware that optionally extracts auth. If present and valid, sets the
-/// authenticated user. If missing or invalid, continues without authentication.
+/// Middleware for routes that also serve anonymous callers. A valid credential
+/// sets the authenticated user; a request without one continues anonymous.
+///
+/// A bearer the client put in the `Authorization` header and that this
+/// instance does not honour (expired, revoked, malformed) is answered `401`
+/// with the Bearer challenge. Served as anonymous, the caller would read the
+/// public view of a resource as the answer for the account it believes it is
+/// signed in as: "you may not write" where the truth is "your token expired".
+///
+/// Two credentials that fail still leave the request anonymous: the session
+/// cookie, which the browser sends unasked and which the pages anyone may
+/// open must survive, and a token from an issuer this instance has nothing
+/// to do with (see [`addressed_to_this_instance`]). So do the probes.
 #[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
 pub async fn optional_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
@@ -606,8 +674,8 @@ pub async fn optional_auth(
     mut req: Request,
     next: Next,
 ) -> Response {
-    if let Some(token) = extract_token(&req) {
-        if let Ok(user) = authenticate(
+    if let Some((token, source)) = extract_token(&req) {
+        match authenticate(
             &jwt_config,
             &auth_db,
             &auth_ext,
@@ -617,12 +685,24 @@ pub async fn optional_auth(
         )
         .await
         {
-            // M-8 (generalized): a read-scoped API token may not mutate, even on
-            // optional-auth routes whose handlers self-gate on resource role.
-            if let Err(resp) = enforce_write_scope_for_mutation(&req, &user) {
-                return resp;
+            Ok(user) => {
+                // M-8 (generalized): a read-scoped API token may not mutate, even on
+                // optional-auth routes whose handlers self-gate on resource role.
+                if let Err(resp) = enforce_write_scope_for_mutation(&req, &user) {
+                    return resp;
+                }
+                req.extensions_mut().insert(user);
             }
-            req.extensions_mut().insert(user);
+            Err(resp)
+                if source == CredentialSource::Header
+                    && !is_probe(req.uri().path())
+                    && addressed_to_this_instance(&token, &auth_ext, &base_url.0) =>
+            {
+                return with_bearer_challenge(resp);
+            }
+            // A stale session cookie, a token minted for someone else, or a
+            // probe: the request goes on without a principal.
+            Err(_) => {}
         }
     }
 
@@ -835,5 +915,110 @@ mod role_policy_tests {
         let g = p.clamped_to_role_policy(&AuthDb::in_memory().unwrap());
         assert!(!g.write_access && !g.can_mint_api_tokens);
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    /// An unsigned token with the given payload: enough for everything that
+    /// runs before verification.
+    fn token_with(payload: serde_json::Value) -> String {
+        let b64 = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.sig",
+            b64(br#"{"alg":"ES256"}"#),
+            b64(payload.to_string().as_bytes())
+        )
+    }
+
+    fn request(headers: &[(&str, &str)]) -> Request {
+        let mut req = axum::http::Request::builder().uri("/");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        req.body(axum::body::Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn the_header_is_found_before_the_cookie() {
+        assert_eq!(extract_token(&request(&[])), None);
+        assert_eq!(
+            extract_token(&request(&[("cookie", "theme=dark; access_token=c")])),
+            Some(("c".to_string(), CredentialSource::Cookie))
+        );
+        assert_eq!(
+            extract_token(&request(&[
+                ("cookie", "access_token=c"),
+                ("authorization", "Bearer h"),
+            ])),
+            Some(("h".to_string(), CredentialSource::Header))
+        );
+        // Another scheme is no bearer: the cookie still counts.
+        assert_eq!(
+            extract_token(&request(&[
+                ("cookie", "access_token=c"),
+                ("authorization", "Basic dTpw"),
+            ])),
+            Some(("c".to_string(), CredentialSource::Cookie))
+        );
+    }
+
+    #[test]
+    fn a_failed_token_is_ours_to_judge_unless_it_names_another_issuer() {
+        let own = "https://store.example/";
+        let mut ext = AuthExt::disabled();
+        let ours = |ext: &AuthExt, token: &str| addressed_to_this_instance(token, ext, own);
+
+        // No readable issuer: API tokens, session tokens, anything else.
+        assert!(ours(&ext, "ots_abc"));
+        assert!(ours(&ext, "not-a-token"));
+        assert!(ours(&ext, &token_with(serde_json::json!({ "sub": "u1" }))));
+
+        // This instance's own tokens, whatever the trailing slash.
+        for iss in ["https://store.example", "https://store.example/"] {
+            assert!(ours(&ext, &token_with(serde_json::json!({ "iss": iss }))));
+        }
+
+        // Another issuer's token is not, until that issuer is the configured
+        // identity provider or a trusted peer.
+        let idp = token_with(serde_json::json!({ "iss": "https://idp.example/realms/main" }));
+        let peer = token_with(serde_json::json!({ "iss": "https://peer.example" }));
+        assert!(!ours(&ext, &idp));
+        assert!(!ours(&ext, &peer));
+        ext.oidc = Some(super::super::oidc_rs::OidcVerifier::new(
+            "https://idp.example/realms/main/".to_string(),
+            None,
+        ));
+        ext.trusted_issuers = vec![super::super::oidc_rs::OidcVerifier::new(
+            "https://peer.example".to_string(),
+            None,
+        )];
+        assert!(ours(&ext, &idp));
+        assert!(ours(&ext, &peer));
+        // A host that merely starts the same way is still someone else.
+        let lookalike = token_with(serde_json::json!({ "iss": "https://peer.example.evil.net" }));
+        assert!(!ours(&ext, &lookalike));
+    }
+
+    #[test]
+    fn only_a_401_gains_the_challenge() {
+        let refused = with_bearer_challenge((StatusCode::UNAUTHORIZED, "no").into_response());
+        assert_eq!(
+            refused
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some(r#"Bearer error="invalid_token""#)
+        );
+        let broken =
+            with_bearer_challenge((StatusCode::INTERNAL_SERVER_ERROR, "db").into_response());
+        assert_eq!(broken.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(broken
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .is_none());
     }
 }

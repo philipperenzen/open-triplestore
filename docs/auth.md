@@ -7,6 +7,52 @@
 - **OAuth 2.0 / OIDC** — Configured providers appear on the login page. After SSO, the user receives a normal session token. API tokens can then be issued for programmatic access.
 - **IdP access token** — Off by default. With [resource-server mode](#oidc-resource-server-mode-idp-access-tokens) configured, a client that already holds an access token from your identity provider sends it as `Authorization: Bearer <token>`, and the store verifies it against the provider's keys.
 
+## When a credential is rejected
+
+A request whose `Authorization: Bearer` token the store does not honour (it
+expired, was revoked, is malformed, or belongs to a deactivated account) is
+answered
+
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="invalid_token"
+```
+
+on every route, including the ones that also serve anonymous callers:
+`/sparql`, the Graph Store reads, `/api/datasets/…`, the linked-data pages.
+Such a route never answers a rejected token with the anonymous view of the
+resource. A client can rely on that:
+
+- `200` with `"can_write": false` means the account behind the token may not
+  write.
+- `401` with `error="invalid_token"` means the token is no longer good. Get a
+  new one (`POST /api/auth/refresh`, or sign in again) and repeat the request.
+- `401` without that challenge means the request carried no credential on a
+  route that needs one.
+
+CORS exposes the `WWW-Authenticate` header, so a page on another origin can
+read it.
+
+Three things are still answered as anonymous on the routes that serve
+anonymous callers:
+
+- **A stale session cookie.** The browser attaches the `access_token` cookie
+  by itself, also to a plain navigation, so an expired one is ignored. (A
+  route that requires sign-in answers it with the same `401` and challenge.)
+- **A token issued by a party this store has no trust relationship with**: a
+  JWT whose `iss` is not this store, not the identity provider of
+  [resource-server mode](#oidc-resource-server-mode-idp-access-tokens) and not
+  a trusted [federation](federation.md) peer. That token was minted for
+  someone else. Once its issuer is configured here, a token that fails is
+  refused like any other.
+- **`/health` and `/livez`.** A probe answers for the service, whatever
+  credential it carries.
+
+The header is what the client chose to present, so it decides: a rejected
+bearer next to a valid session cookie is still a `401`. A reverse proxy that
+adds a bearer credential of its own to the requests it forwards must strip it
+before the store, which reads that header as a credential presented to it.
+
 ## API token scopes
 
 Each API token carries one or more scopes. Requests to endpoints that require a scope not present on the token receive `403 Forbidden`. Scopes are additive — a token with both `read` and `write` can do everything both allow.
@@ -352,7 +398,8 @@ A bearer token is tried in this order: the store's own session or API token
 [OIDC provider](oidc-provider.md), a [federation](federation.md) assertion
 from a trusted peer, and only then the IdP. A token starting with `ots_` never
 reaches the IdP check. A token that fails verification gets
-`401 Invalid or expired token`.
+`401 Invalid or expired token`, on every route
+(see [When a credential is rejected](#when-a-credential-is-rejected)).
 
 ### Accounts
 

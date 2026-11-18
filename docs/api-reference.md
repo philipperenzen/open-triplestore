@@ -16,6 +16,10 @@ what the router demands before a handler runs. Three levels cover the whole API.
   hold, and the metadata that names them. A **none** endpoint is not a hole in
   access control — the handler scopes its answer to what is public, so an
   anonymous caller reaches nothing private through one.
+  A token that is sent along and that the store does not honour (expired,
+  revoked) gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`,
+  not the public answer: see
+  [When a credential is rejected](auth.md#when-a-credential-is-rejected).
 - **token** — any valid session or API token, sent as
   `Authorization: Bearer <token>` (mint one in **Settings → API Tokens**).
   Without one the answer is `401`. A token buys the caller *its own* access, not

@@ -707,6 +707,313 @@ mod tests {
         );
     }
 
+    // ─── A rejected bearer is refused, not served as an anonymous request ─────
+
+    const CHALLENGE: &str = r#"Bearer error="invalid_token""#;
+
+    /// A user who owns one public dataset, the resource every case below asks
+    /// for: anyone may read it, only its owner may write it.
+    fn public_dataset_state() -> AppState {
+        let state = test_state();
+        state
+            .auth_db
+            .create_user("owner", "owner", "owner@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "open",
+                "Open data",
+                None,
+                OwnerType::User,
+                "owner",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        state
+    }
+
+    /// `GET uri` with the given headers: the status, the Bearer challenge if
+    /// the answer carries one, and the body.
+    async fn get_with(
+        state: &AppState,
+        uri: &str,
+        headers: &[(header::HeaderName, String)],
+    ) -> (StatusCode, Option<String>, String) {
+        let mut req = Request::builder().method(Method::GET).uri(uri);
+        for (name, value) in headers {
+            req = req.header(name, value);
+        }
+        let resp = test_app(state.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let challenge = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        (status, challenge, body_text(resp.into_body()).await)
+    }
+
+    fn bearer(token: &str) -> (header::HeaderName, String) {
+        (header::AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    fn session_cookie(token: &str) -> (header::HeaderName, String) {
+        (header::COOKIE, format!("access_token={token}"))
+    }
+
+    /// A session token for `user_id` that expired an hour ago.
+    fn expired_token(user_id: &str) -> String {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let claims = crate::auth::jwt::Claims {
+            sub: user_id.to_string(),
+            username: user_id.to_string(),
+            role: "user".to_string(),
+            token_type: "access".to_string(),
+            iat: now - 7200,
+            exp: now - 3600,
+            jti: None,
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    /// A token that names `iss` as its issuer and that nobody here can verify.
+    fn token_issued_by(iss: &str) -> String {
+        let exp = chrono::Utc::now().timestamp() + 300;
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &serde_json::json!({ "iss": iss, "sub": "someone", "exp": exp }),
+            &jsonwebtoken::EncodingKey::from_secret(b"a key this instance never saw"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn optional_auth_serves_no_credential_as_anonymous() {
+        let state = public_dataset_state();
+        let (status, challenge, body) = get_with(&state, "/api/datasets/open", &[]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(challenge, None);
+        assert!(body.contains(r#""can_write":false"#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn optional_auth_authenticates_a_valid_bearer() {
+        let state = public_dataset_state();
+        let owner = token("owner", "owner", "user");
+        let (status, challenge, body) =
+            get_with(&state, "/api/datasets/open", &[bearer(&owner)]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(challenge, None);
+        assert!(body.contains(r#""can_write":true"#), "{body}");
+    }
+
+    /// The case this guards: with an expired token the owner used to read
+    /// `can_write: false` on their own dataset, as any anonymous caller does,
+    /// and could not tell that from a missing right.
+    #[tokio::test]
+    async fn optional_auth_refuses_a_rejected_bearer() {
+        let state = public_dataset_state();
+        let db = &state.auth_db;
+        db.create_user("gone", "gone", "gone@t.com", "h", SystemRole::User)
+            .unwrap();
+        db.set_user_active("gone", false).unwrap();
+        let revoked = read_scoped_token(&state, "owner");
+        db.revoke_api_token("tok-read").unwrap();
+        let other_key = issue_access_token(
+            &JwtConfig::new("completely_different_secret_here!".to_string(), 30, 30),
+            "owner",
+            "owner",
+            "user",
+        )
+        .unwrap();
+
+        let cases = [
+            ("an expired session token", expired_token("owner")),
+            ("a token signed with another key", other_key),
+            (
+                "a deactivated account's token",
+                token("gone", "gone", "user"),
+            ),
+            ("a revoked API token", revoked),
+            ("an unknown API token", "ots_0000000000000000".to_string()),
+            ("not a token at all", "not-a-token".to_string()),
+        ];
+        for (what, tok) in cases {
+            let (status, challenge, body) =
+                get_with(&state, "/api/datasets/open", &[bearer(&tok)]).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{what}: {body}");
+            assert_eq!(challenge.as_deref(), Some(CHALLENGE), "{what}");
+        }
+        // The same on the SPARQL endpoint: no partial, public-only answer.
+        let (status, challenge, _) = get_with(
+            &state,
+            "/sparql?query=ASK%20%7B%7D",
+            &[bearer(&expired_token("owner"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some(CHALLENGE));
+    }
+
+    /// The browser sends the session cookie unasked, also on a plain
+    /// navigation to a page anyone may open: a stale one is ignored.
+    #[tokio::test]
+    async fn optional_auth_ignores_a_stale_session_cookie() {
+        let state = public_dataset_state();
+        for stale in [expired_token("owner"), "not-a-token".to_string()] {
+            let (status, challenge, body) =
+                get_with(&state, "/api/datasets/open", &[session_cookie(&stale)]).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(challenge, None);
+            assert!(body.contains(r#""can_write":false"#), "{body}");
+        }
+
+        // The header is what the client chose to present, so it decides: a
+        // valid one authenticates next to a stale cookie, a rejected one is
+        // refused next to a valid cookie.
+        let owner = token("owner", "owner", "user");
+        let (status, _, body) = get_with(
+            &state,
+            "/api/datasets/open",
+            &[bearer(&owner), session_cookie(&expired_token("owner"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains(r#""can_write":true"#), "{body}");
+        let (status, challenge, _) = get_with(
+            &state,
+            "/api/datasets/open",
+            &[bearer(&expired_token("owner")), session_cookie(&owner)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some(CHALLENGE));
+    }
+
+    /// A read-scoped API token is a valid credential: its mutation is still a
+    /// `403` for the missing scope, not a rejected token.
+    #[tokio::test]
+    async fn optional_auth_read_scoped_mutation_is_still_forbidden() {
+        let state = public_dataset_state();
+        let tok = read_scoped_token(&state, "owner");
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/datasets/open")
+                    .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"Renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(resp.headers().get(header::WWW_AUTHENTICATE).is_none());
+    }
+
+    /// A token minted for someone else is not this instance's to judge: a
+    /// peer that asserts its users' identity sends one to every allowlisted
+    /// endpoint, also to an instance that does not trust it. One that names
+    /// this instance, or an issuer it does trust, is refused when it fails.
+    #[tokio::test]
+    async fn optional_auth_leaves_another_issuers_token_anonymous() {
+        let state = public_dataset_state();
+        let foreign = token_issued_by("https://elsewhere.example");
+        let (status, challenge, body) =
+            get_with(&state, "/api/datasets/open", &[bearer(&foreign)]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(challenge, None);
+        assert!(body.contains(r#""can_write":false"#), "{body}");
+
+        let own = token_issued_by("http://localhost:7878");
+        let (status, challenge, _) = get_with(&state, "/api/datasets/open", &[bearer(&own)]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some(CHALLENGE));
+
+        // Once the issuer is a trusted peer, its token is this instance's to
+        // judge. (A symmetric signature is refused before any key is fetched.)
+        let mut state = public_dataset_state();
+        let mut ext = crate::auth::oidc_rs::AuthExt::disabled();
+        ext.trusted_issuers = vec![crate::auth::oidc_rs::OidcVerifier::new(
+            "https://elsewhere.example".to_string(),
+            Some("http://localhost:7878".to_string()),
+        )];
+        state.auth_ext = Arc::new(ext);
+        let (status, challenge, _) =
+            get_with(&state, "/api/datasets/open", &[bearer(&foreign)]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some(CHALLENGE));
+    }
+
+    /// A probe answers for the service: a stale credential on it must not
+    /// read as the service being down.
+    #[tokio::test]
+    async fn probes_answer_whatever_the_credential() {
+        let state = public_dataset_state();
+        for probe in ["/health", "/livez"] {
+            let (anonymous, _, _) = get_with(&state, probe, &[]).await;
+            let (stale, challenge, body) =
+                get_with(&state, probe, &[bearer(&expired_token("owner"))]).await;
+            assert_eq!(stale, anonymous, "{probe}: {body}");
+            assert_ne!(stale, StatusCode::UNAUTHORIZED, "{probe}");
+            assert_eq!(challenge, None, "{probe}");
+        }
+    }
+
+    /// Routes that require a credential name the reason the same way, so a
+    /// client handles one signal everywhere. A request without a credential
+    /// has no token to call invalid.
+    #[tokio::test]
+    async fn require_auth_challenges_a_rejected_credential() {
+        let state = public_dataset_state();
+        let stale = expired_token("owner");
+        for credential in [bearer(&stale), session_cookie(&stale)] {
+            let (status, challenge, _) = get_with(&state, "/api/auth/me", &[credential]).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(challenge.as_deref(), Some(CHALLENGE));
+        }
+        let (status, challenge, _) = get_with(&state, "/api/auth/me", &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge, None);
+    }
+
+    /// A page on another origin can only read the challenge if CORS exposes it.
+    #[tokio::test]
+    async fn cors_exposes_the_bearer_challenge() {
+        let app = build_router(public_dataset_state(), "*", vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/datasets/open")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::AUTHORIZATION, "Bearer not-a-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let exposed = resp
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(exposed.contains("www-authenticate"), "{exposed:?}");
+    }
+
     // ─── Per-account login lockout ────────────────────────────────────────────
 
     #[test]
