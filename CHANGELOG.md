@@ -536,6 +536,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - RUSTSEC-2026-0387 stays ignored in `deny.toml` for `age` alone, the one
     crate left on `crypto-bigint` 0.5. It reaches it only through P-256
     recipients, which backups never use.
+- **`chrono` is reported unmaintained (RUSTSEC-2026-0543); recorded, not
+  replaced.** The advisory reports no vulnerability and there is no patched
+  release. `openidconnect`, `oauth2` and `openraft` require `chrono` in every
+  build, `lopdf` behind `asset-pdf` and `samael` behind `saml`, so it stays in
+  the dependency graph whatever the server's own code uses. The dependency
+  audit ignores the advisory in `deny.toml` until those crates move to another
+  time library.
+- **`@tailwindcss/vite` is a development dependency.** Only `vite.config.js`
+  imports it, so it belongs with the rest of the build tooling. Declared as a
+  runtime dependency, its `vite` peer dependency put `vite`, `tinyglobby`,
+  `fdir` and `picomatch` into the production tree that `npm audit --omit=dev`
+  checks, where `picomatch` (GHSA-fc5q-39xc-vjpf, a ReDoS in extglob parsing,
+  affects every release through 4.0.7 and has no fix yet) failed the
+  dependency audit. Nothing in the frontend's runtime bundle loads any of
+  them. The lock file changes only by marking those packages `dev`; the image
+  build installs dev dependencies already, so what it builds is unchanged.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
