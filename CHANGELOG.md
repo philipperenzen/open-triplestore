@@ -536,6 +536,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - RUSTSEC-2026-0387 stays ignored in `deny.toml` for `age` alone, the one
     crate left on `crypto-bigint` 0.5. It reaches it only through P-256
     recipients, which backups never use.
+- **`chrono` is reported unmaintained (RUSTSEC-2026-0543); recorded, not
+  replaced.** The advisory reports no vulnerability and there is no patched
+  release. `openidconnect`, `oauth2` and `openraft` require `chrono` in every
+  build, `lopdf` behind `asset-pdf` and `samael` behind `saml`, so it stays in
+  the dependency graph whatever the server's own code uses. The dependency
+  audit ignores the advisory in `deny.toml` until those crates move to another
+  time library.
 - **The privacy-notice template covers every store of personal data.**
   `PRIVACY.md` §2 now separates the three things the source calls telemetry:
   workload telemetry (`GET /api/admin/telemetry`: in memory only, no personal
