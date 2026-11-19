@@ -257,7 +257,7 @@ sha1 = "0.11"
 # WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
 # (no danger-allow-state-serialisation), only finished credentials are stored.
 # conditional-ui enables the discoverable-credential login flow (no username).
-webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
+webauthn-rs = { version = "0.6", features = ["conditional-ui"] }
 rand = "0.10"
 base64 = "0.23"
 flate2 = "1"
