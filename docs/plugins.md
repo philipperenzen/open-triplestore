@@ -129,8 +129,8 @@ namespace = "https://example.org/layered/def#"
 kind = "model"                       # model (default) | vocabulary | shapes
 version = "1.0.0"                    # one published version; default 1.0.0
 public = true                        # registry entry public (default true)
-[[data_models.graphs]]               # first graph = the version's base graph,
-iri = "https://example.org/layered/model"   #   the rest are its sub-graphs
+[[data_models.graphs]]               # first graph = the version's base graph;
+iri = "https://example.org/layered/model"   #   with several graphs, all are sub-graphs
 role = "model"
 file = "model.ttl"
 [data_models.license]                # optional: the model's content is a third party's work
@@ -147,6 +147,14 @@ shape_graphs = ["https://example.org/layered/shapes"]        # registered in the
                                                              # Studio library and
                                                              # bound to the dataset
 ```
+
+A model's version is recorded from its graphs in manifest order. The first is
+the version's base graph; with more than one graph, every graph, the first
+included, is also listed as a sub-graph, because the registry serves, hashes
+and deletes a version's sub-graphs as its content (and its base graph only
+when it has none). A start finds a version an earlier build recorded with the
+first graph missing from its sub-graphs and lists it, for the bundle's own
+versions only; the graphs' triples are not touched.
 
 Graph roles accept the whole convention: `instances`, `model` (alias
 `ontology`), `vocabulary`, `shapes`, `domain-values`, `linkset`, `provenance`,

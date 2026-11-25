@@ -175,8 +175,10 @@ struct ConformsToDoc {
 }
 
 /// A reference model shipped by the bundle: one registry entry with one
-/// published version whose first graph is the version's base graph and the
-/// rest its sub-graphs.
+/// published version whose first graph is the version's base graph. With more
+/// than one graph every graph, the first included, is recorded as a sub-graph:
+/// the registry serves, hashes and deletes the sub-graphs as the version's
+/// content.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DataModelDoc {

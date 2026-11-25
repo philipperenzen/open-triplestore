@@ -111,7 +111,9 @@ pub struct BundleDataModel {
     pub description: Option<String>,
     pub kind: crate::kind_detector::RegistryKind,
     pub version: String,
-    /// First graph = the version's base graph, the rest its sub-graphs.
+    /// The version's graphs. The first is its base graph; with more than one
+    /// graph every one of them, the first included, is recorded as a
+    /// sub-graph, which is what the registry serves as the version's content.
     pub graphs: Vec<BundleGraph>,
     /// The licence of the model's content, when it is a third party's work
     /// (`[data_models.license]`). Recorded on the model's registry entry and
@@ -451,20 +453,24 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
         }
         let version_iri =
             crate::data_models::registry::version_record_iri(base, &dm.id, &dm.version);
-        if crate::data_models::registry::get_version(&state.store, base, &dm.id, &dm.version)
-            .is_none()
-        {
-            let mut iris = dm
-                .graphs
-                .iter()
-                .map(|g| expand_base(&g.iri, base_url).into_owned());
-            let graph_iri = iris.next().expect("manifest guarantees at least one graph");
+        let graph_iris: Vec<String> = dm
+            .graphs
+            .iter()
+            .map(|g| expand_base(&g.iri, base_url).into_owned())
+            .collect();
+        let recorded =
+            crate::data_models::registry::get_version(&state.store, base, &dm.id, &dm.version);
+        if recorded.is_none() {
+            let graph_iri = graph_iris
+                .first()
+                .cloned()
+                .expect("manifest guarantees at least one graph");
             let version = crate::data_models::models::DataModelVersion {
                 data_model_id: dm.id.clone(),
                 version: dm.version.clone(),
                 status: crate::data_models::models::VersionStatus::Published,
                 graph_iri,
-                sub_graphs: iris.collect(),
+                sub_graphs: seeded_sub_graphs(&graph_iris),
                 created_at: now.clone(),
                 created_by: version_creator.clone(),
                 derived_from: None,
@@ -500,13 +506,36 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
             let (_, versions) =
                 crate::data_models::registry::record_provenance(&state.store, base, &dm.id);
             if let Some(p) = versions.get(&dm.version) {
-                if p.seeded_by.is_none() && version_registered_here(bundle, p) {
+                let ours = version_registered_here(bundle, p);
+                if ours && p.seeded_by.is_none() {
                     if let Err(e) = crate::data_models::registry::set_seeded_by(
                         &state.store,
                         &version_iri,
                         &version_marker(&bundle.id),
                     ) {
                         tracing::warn!(bundle = %bundle.id, model = %dm.id, error = %e, "the version's seed marker could not be written");
+                    }
+                }
+                // A version an earlier build registered from several graphs
+                // lists all but the first as sub-graphs, so the registry does
+                // not serve, hash or delete that one; list it now. Only the
+                // bundle's own record in exactly that layout is touched.
+                if let Some(record) = recorded.as_ref().filter(|_| ours) {
+                    if first_graph_unlisted(record, &graph_iris) {
+                        match crate::data_models::registry::add_version_sub_graph(
+                            &state.store,
+                            base,
+                            &dm.id,
+                            &dm.version,
+                            &graph_iris[0],
+                        ) {
+                            Ok(()) => {
+                                tracing::info!(bundle = %bundle.id, model = %dm.id, version = %dm.version, graph = %graph_iris[0], "version record repaired: its first graph is now listed among its sub-graphs")
+                            }
+                            Err(e) => {
+                                tracing::warn!(bundle = %bundle.id, model = %dm.id, error = %e, "the version record's first graph could not be listed among its sub-graphs")
+                            }
+                        }
                     }
                 }
             }
@@ -723,6 +752,40 @@ fn visibility_marker(bundle_id: &str, public: bool) -> String {
 /// (the bundle's account, when it has one) and not its notes.
 fn version_marker(bundle_id: &str) -> String {
     format!("seed-bundle:{bundle_id}")
+}
+
+/// The sub-graphs a seeded version records for the manifest's `graphs`
+/// (expanded; the first is the version's base graph).
+///
+/// A registry version serves, hashes and deletes its sub-graphs as its
+/// content, and the base graph only when there are none. So with several
+/// graphs every one is listed, the first included: the first graph holds
+/// content too, and recording it as the base graph alone left it out of the
+/// download, the revision and the delete. A single graph is recorded as the
+/// base graph with no sub-graphs.
+fn seeded_sub_graphs(graphs: &[String]) -> Vec<String> {
+    if graphs.len() > 1 {
+        graphs.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `record` is a version an earlier build registered from `graphs`
+/// (the manifest's, expanded): the first graph as the base graph and the rest
+/// as the sub-graphs, the first listed nowhere. Exactly that layout, so a
+/// record that differs in any other way is left alone.
+fn first_graph_unlisted(
+    record: &crate::data_models::models::DataModelVersion,
+    graphs: &[String],
+) -> bool {
+    let [first, rest @ ..] = graphs else {
+        return false;
+    };
+    !rest.is_empty()
+        && record.graph_iri == *first
+        && record.sub_graphs.len() == rest.len()
+        && rest.iter().all(|g| record.sub_graphs.contains(g))
 }
 
 /// The `adms:versionNotes` a bundle writes on the versions it registers.
@@ -1968,6 +2031,75 @@ mod tests {
         // Another bundle's version is nobody else's.
         let other = model_bundle("other", "other-model", None);
         assert!(!version_registered_here(&other, &p));
+    }
+
+    fn iris(graphs: &[&str]) -> Vec<String> {
+        graphs.iter().map(|g| g.to_string()).collect()
+    }
+
+    /// A version of several graphs lists every one as a sub-graph, the first
+    /// (its base graph) included; one graph is the base graph alone.
+    #[test]
+    fn a_seeded_version_lists_all_its_graphs_when_there_are_several() {
+        assert_eq!(
+            seeded_sub_graphs(&iris(&["urn:g:a", "urn:g:b", "urn:g:c"])),
+            iris(&["urn:g:a", "urn:g:b", "urn:g:c"])
+        );
+        assert!(seeded_sub_graphs(&iris(&["urn:g:a"])).is_empty());
+    }
+
+    /// Only the layout an earlier build wrote is repaired: first graph as the
+    /// base graph, exactly the others as sub-graphs, the first listed nowhere.
+    #[test]
+    fn only_the_old_layout_of_the_manifests_graphs_is_repaired() {
+        let version =
+            |graph_iri: &str, subs: &[&str]| crate::data_models::models::DataModelVersion {
+                data_model_id: "m".into(),
+                version: "1".into(),
+                status: crate::data_models::models::VersionStatus::Published,
+                graph_iri: graph_iri.into(),
+                sub_graphs: iris(subs),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                created_by: None,
+                derived_from: None,
+                notes: None,
+                branch: None,
+                sub_graph_status: vec![],
+            };
+        let manifest = iris(&["urn:g:a", "urn:g:b", "urn:g:c"]);
+
+        assert!(first_graph_unlisted(
+            &version("urn:g:a", &["urn:g:c", "urn:g:b"]),
+            &manifest
+        ));
+        // Already listed, or listed in the new layout.
+        assert!(!first_graph_unlisted(
+            &version("urn:g:a", &["urn:g:a", "urn:g:b", "urn:g:c"]),
+            &manifest
+        ));
+        // Not the manifest's graphs: another base graph, other sub-graphs,
+        // fewer or more of them.
+        assert!(!first_graph_unlisted(
+            &version("urn:g:x", &["urn:g:b", "urn:g:c"]),
+            &manifest
+        ));
+        assert!(!first_graph_unlisted(
+            &version("urn:g:a", &["urn:g:b", "urn:g:x"]),
+            &manifest
+        ));
+        assert!(!first_graph_unlisted(
+            &version("urn:g:a", &["urn:g:b"]),
+            &manifest
+        ));
+        assert!(!first_graph_unlisted(
+            &version("urn:g:a", &["urn:g:b", "urn:g:c", "urn:g:d"]),
+            &manifest
+        ));
+        // A single graph has nothing to repair, whatever the record says.
+        assert!(!first_graph_unlisted(
+            &version("urn:g:a", &[]),
+            &iris(&["urn:g:a"])
+        ));
     }
 
     fn model_bundle(id: &str, model_id: &str, license: Option<BundleLicense>) -> Bundle {

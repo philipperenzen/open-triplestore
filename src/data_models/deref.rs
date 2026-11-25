@@ -65,11 +65,7 @@ pub async fn describe_term(
     // Content that allows no altered copies is described from its checked copy only.
     super::handlers::ensure_servable(&state, &id, &data_model, &record.version, user.as_deref())?;
 
-    let graphs: Vec<String> = if record.sub_graphs.is_empty() {
-        vec![record.graph_iri.clone()]
-    } else {
-        record.sub_graphs.clone()
-    };
+    let graphs: Vec<String> = record.content_graphs();
 
     let from_clauses: String = graphs
         .iter()
