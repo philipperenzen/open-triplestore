@@ -1,6 +1,6 @@
 # One kind of registry entry: derived content facets and an optional "standard" flag instead of data-model / vocabulary
 
-> **Status: proposal for review (2026-11-25). No code is written for it.** It answers one question: should the model registry stop sorting its entries into *data models* and *vocabularies* (`kind`)? The recommendation is yes, in three independent steps, keeping `kind` in the API as a derived, deprecated alias (§5). §3 says honestly which of the frictions that prompted this the change does **not** fix. Anchors are `path:line` against `develop` at `28696df2` (0.8.1 plus the unreleased PR #641).
+> **Status: proposal, with the maintainer's decisions recorded in §9 (2026-11-25). No code is written for it.** It answers one question: should the model registry stop sorting its entries into *data models* and *vocabularies* (`kind`)? The recommendation is yes, in three independent steps, keeping `kind` in the API as a derived, deprecated alias (§5). §3 says honestly which of the frictions that prompted this the change does **not** fix. Anchors are `path:line` against `develop` at `28696df2` (0.8.1 plus the unreleased PR #641).
 
 ## 1. The question
 
@@ -51,7 +51,7 @@ Per **version**, counts of: `classes`, `properties`, `concepts` (with `concept_s
 
 ### 6.2 The optional "standard" flag
 
-An entry may carry `standard: { issuing_body, url }`, absent by default. It is set by an owner or admin (`PATCH /api/models/{id}`) or by a seed bundle (`[data_models.standard]`), and shown as a badge and a filter. It is curation, not detection: nothing infers it from content or from a licence record. A normative status ("mandatory", "recommended") is left out until someone needs to filter on it, because its values are a policy choice of the operator (§9, Q2).
+An entry may carry `standard: { issuing_body, url }`, absent by default. It is set by an owner or admin (`PATCH /api/models/{id}`) or by a seed bundle (`[data_models.standard]`), and shown as a badge and a filter. It is curation, not detection: nothing infers it from content or from a licence record. A normative status ("mandatory", "recommended") is left out until someone needs to filter on it, because its values are a policy choice of the operator (§9, decision 2).
 
 ### 6.3 `kind` as a derived, deprecated alias
 
@@ -98,10 +98,12 @@ A dataset that wants "the model inside it" is asking to *include* a registry ver
 
 Separately, and not waiting for any of it: a seed bundle's multi-graph version was recorded with its first graph as base graph and left out of the sub-graphs, so that graph was not served, hashed or deleted. That is a bug fix with its own PR.
 
-## 9. Questions for the maintainer
+## 9. Decisions
 
-1. **Name.** Keep "Model & Vocabulary Registry" in the UI, or just "Registry"? The proposal avoids "Standards" as an entity name (§4 B); the badge carries it.
-2. **Standard status.** Is `issuing_body` + `url` enough, or does the first operator who needs it want a normative / recommended / informative status? If so, who owns that list?
-3. **Banners.** Is dropping the SKOS-only banner for datasets right, or should it stay as an informational note?
-4. **Deprecation window.** Is "not before 1.0" the right promise for `kind`?
-5. **One PR or three.** The staging in §8 assumes three; PR 1 alone already settles F1-F3.
+The maintainer answered the five questions this note first asked (2026-11-25):
+
+1. **Name.** The UI says **Registry**, not "Model & Vocabulary Registry". "Standards" stays out as the name of an entity (§4 B); the `standard` badge carries it.
+2. **Standard status.** `issuing_body` plus `url` is enough. There is no normative status until an operator needs to filter on it; its values are that operator's policy.
+3. **Banners.** The SKOS-only banner is dropped for datasets. A dataset that holds classes, properties, shapes or rules keeps its note and its *Convert* action.
+4. **Deprecation window.** `kind` is not removed before 1.0.
+5. **Staging.** Three PRs as in §8. The seeder fix stays its own PR.
