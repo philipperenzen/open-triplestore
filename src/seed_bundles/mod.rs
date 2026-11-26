@@ -540,6 +540,15 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
                 }
             }
         }
+        // What the version holds, counted now that its graphs are loaded.
+        if let Some(version) =
+            crate::data_models::registry::get_version(&state.store, base, &dm.id, &dm.version)
+        {
+            use crate::data_models::facets;
+            if facets::stored_if_fresh(&state.store, base, &version).is_none() {
+                facets::refresh(&state.store, base, &version, facets::MAX_TRIPLES);
+            }
+        }
         if let Some(license) = &dm.license {
             if let Err(e) = record_bundle_licence(state, bundle, dm, license) {
                 tracing::warn!(bundle = %bundle.id, model = %dm.id, error = %e, "licence record not written");

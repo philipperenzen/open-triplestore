@@ -94,6 +94,12 @@ published version 1.0.0 (forced)") and in the audit log (`graph_deleted`, action
 A version of a bundled vocabulary that the seeder owns is seeded again at the next start
 while `OTS_SEED_STANDARD_VOCABS_ENABLED` is on.
 
+## What an entry holds
+
+An entry's `kind` is a label guessed from its content, and most real content is several things at once: an ontology declares classes and properties, a thesaurus a concept scheme and its concepts, a quality profile individuals of a vocabulary class. So every version also carries **facets**, counts of what its graphs hold: `classes`, `properties`, `concepts` (and `concept_schemes`), `individuals`, `shapes`, `rules`, the `triples` they were counted over, and `capped` (true when the content was too large to scan, with no counts). They are the same tallies the kind detector makes. `GET /api/models` serves an entry's latest published version's facets (its latest draft's when none is published), and `GET /api/models/{id}/versions` and `…/versions/{ver}` each version's; they are `null` until counted. The registry page shows the non-zero ones as chips, so an entry of 140 concepts says so instead of "0 classes".
+
+A version is counted when it is uploaded (from the scan the upload already makes) or seeded, by a pass at start for the versions that have none, and when it is opened after its content changed: the stored counts record how many triples they were made over and are served only while the content still holds that many, so a change that keeps the triple count the same is not noticed until the next start. The list serves what is stored. Content above two million triples is not scanned (`capped`); opening a version counts it inline only up to 250,000 triples and leaves a larger one to the start-up pass.
+
 ## Storage
 
 - **Version graph IRI** — `{base-url}/data-model/{id}/version/{version}`. Models and vocabularies share this scheme; the entry's `kind` distinguishes them.

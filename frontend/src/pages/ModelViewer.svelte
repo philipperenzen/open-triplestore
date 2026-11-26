@@ -5,7 +5,7 @@
   import { ArrowLeft, Loader2 } from 'lucide-svelte';
   import { getDataModel, listDataModelVersions, getDataModelVersionDataUrl } from '../lib/api.js';
   import OntologyBrowserPanel from '../components/OntologyBrowserPanel.svelte';
-  import ContentKindWarning from '../components/ContentKindWarning.svelte';
+  import FacetChips from '../components/FacetChips.svelte';
   import Select from '../components/Select.svelte';
   import ModelAttributionCard from '../components/ModelAttributionCard.svelte';
 
@@ -73,11 +73,7 @@
     {#if selectedVersion.attribution}
       <ModelAttributionCard attribution={selectedVersion.attribution} variant="compact" />
     {/if}
-    <ContentKindWarning
-      graphs={[selectedVersion.graph_iri, ...(selectedVersion.sub_graphs || [])]}
-      expected="model"
-      contextName={model?.title}
-    />
+    <FacetChips facets={selectedVersion.facets} />
     <OntologyBrowserPanel
       graphIri={selectedVersion.graph_iri}
       subGraphs={selectedVersion.sub_graphs || []}

@@ -23,7 +23,7 @@
   import UploadVersionDialog from '../components/UploadVersionDialog.svelte';
   import PublishConfirmDialog from '../components/PublishConfirmDialog.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
-  import ContentKindWarning from '../components/ContentKindWarning.svelte';
+  import FacetChips from '../components/FacetChips.svelte';
   import OntologyBrowserPanel from '../components/OntologyBrowserPanel.svelte';
   import BranchPanel from '../components/BranchPanel.svelte';
   import CommitHistory from '../components/CommitHistory.svelte';
@@ -538,6 +538,7 @@
                     <ChevronDown size={14} class="ml-1 text-[var(--ink-300)]" />
                   {/if}
                 </button>
+                <FacetChips facets={ver.facets} />
 
                 <!-- Right: action toolbar -->
                 <div class="ver-actions">
@@ -726,11 +727,6 @@
               <!-- Inline browser -->
               {#if browserVersion === ver.version}
                 <div class="browser-panel">
-                  <ContentKindWarning
-                    graphs={[ver.graph_iri, ...(ver.sub_graphs || [])]}
-                    expected="model"
-                    contextName={model?.title}
-                  />
                   <OntologyBrowserPanel
                     graphIri={ver.graph_iri}
                     subGraphs={ver.sub_graphs || []}

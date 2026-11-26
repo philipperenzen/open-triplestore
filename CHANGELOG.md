@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A registry entry says what it holds.** Each version of a model-registry
+  entry now carries counts of its classes, properties, concepts, individuals,
+  shapes and rules (`facets` on `GET /api/models` and on the version routes,
+  with the `triples` they were counted over and a `capped` flag for content
+  above two million triples). They are the kind detector's own tallies, taken
+  when a version is uploaded or seeded, by a pass at start for versions that
+  have none, and again when a version is opened after its content changed.
+  The registry page and a version's row show the non-zero ones as chips, so a
+  concept scheme says "143 concepts" and a quality profile "74 individuals"
+  instead of reading as an entry with no classes. `kind` is unchanged. See
+  `docs/notes/registry-entry-kinds.md`.
 - **A purge can attribute an erased account's history to "Deleted user"
   (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
   provenance name the account behind each write
@@ -98,6 +109,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/api-reference.md#editing-a-model-draft`.
 
 ### Changed
+- **A SKOS concept scheme in a dataset no longer raises the "vocabulary in a
+  dataset" banner, and a model's page no longer shows the "instance data in a
+  registry" banner on every visit.** A thesaurus is data, so concepts and
+  schemes alone are not schema; the banner stays for properties, classes,
+  shapes and rules kept in a dataset, with its *Convert* action. An entry's
+  chips replace the banner on the registry pages. The Vocabulary Search page
+  now searches all four term types by default (class, property, datatype and
+  instance), so the concepts of a scheme and the individuals of a profile are
+  found without switching the Instance filter on; the API's own default stays
+  `class,property`, as in LOV.
 - With the accounts-dashboard plugin compiled in, a malformed
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL`, or a raw
   `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` under `OTS_ENV=production`, now stops

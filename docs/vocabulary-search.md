@@ -31,7 +31,7 @@ Open the UI at **Manage → Vocabulary Search** (`/vocabularies`).
 `GET /api/vocab/terms/search?q=person&type=class,property`
 
 Parameters follow the LOV API v2: `q`, `type` (comma-separated:
-`class,property,datatype,instance`; default `class,property`), `vocab`
+`class,property,datatype,instance`; default `class,property`, as in LOV; the Vocabulary Search page asks for all four, so a scheme's concepts and a profile's individuals, which are `instance` terms, are found), `vocab`
 (restrict to one prefix), `tag`, `page`, `page_size`, plus the OTS extension
 `source` (`platform` | `lov`). The response envelope carries
 `total_results`, `results` and `aggregations` (type / vocabulary / tag facet

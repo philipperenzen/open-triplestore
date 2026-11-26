@@ -11,6 +11,7 @@
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import BulkActionBar from '../components/BulkActionBar.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import FacetChips from '../components/FacetChips.svelte';
   import Select from '../components/Select.svelte';
 
   let models = [];
@@ -279,6 +280,7 @@
                 {/if}
               </div>
               <code class="text-xs text-[var(--ink-400)] break-all">{model.id}</code>
+              <div><FacetChips facets={model.facets} /></div>
             </div>
             {#if $isAdmin}
               <button

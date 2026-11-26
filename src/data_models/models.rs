@@ -197,6 +197,10 @@ pub struct DataModelResponse {
     #[serde(flatten)]
     pub record: DataModelRecord,
     pub attribution: Option<ContentAttribution>,
+    /// What the latest published version (the latest draft when none is
+    /// published) holds, counted from its content; `null` while not counted
+    /// yet.
+    pub facets: Option<super::facets::ContentFacets>,
 }
 
 /// A version as the API returns it: the version record plus the licence and
@@ -206,6 +210,9 @@ pub struct DataModelVersionResponse {
     #[serde(flatten)]
     pub version: DataModelVersion,
     pub attribution: Option<ContentAttribution>,
+    /// What the version holds, counted from its content; `null` while not
+    /// counted yet.
+    pub facets: Option<super::facets::ContentFacets>,
 }
 
 /// Version response with RDF kind detection metadata.

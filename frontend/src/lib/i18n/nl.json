@@ -4024,6 +4024,16 @@
       "kindInstances": "Instantiegegevens",
       "kindMixed": "Gemengde inhoud"
     },
+    "facetChips": {
+      "label": "Wat dit bevat",
+      "classes": "{count, plural, one {# klasse} other {# klassen}}",
+      "properties": "{count, plural, one {# eigenschap} other {# eigenschappen}}",
+      "concepts": "{count, plural, one {# concept} other {# concepten}}",
+      "individuals": "{count, plural, one {# individu} other {# individuen}}",
+      "shapes": "{count, plural, one {# shape} other {# shapes}}",
+      "rules": "{count, plural, one {# regel} other {# regels}}",
+      "tooLarge": "Te groot om te tellen"
+    },
     "contentKindWarning": {
       "noStatus": "geen status",
       "convertFailed": "Converteren van datasetrol mislukt.",
