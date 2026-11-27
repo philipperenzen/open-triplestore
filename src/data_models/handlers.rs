@@ -527,11 +527,7 @@ pub async fn delete_data_model(
         let versions = registry::list_versions(&store, &base, &model_id);
         let mut all_iris: Vec<String> = Vec::new();
         for ver in &versions {
-            if ver.sub_graphs.is_empty() {
-                all_iris.push(ver.graph_iri.clone());
-            } else {
-                all_iris.extend(ver.sub_graphs.iter().cloned());
-            }
+            all_iris.extend(ver.content_graphs());
         }
         let iri_refs: Vec<&str> = all_iris.iter().map(|s| s.as_str()).collect();
         store.bulk_delete_graphs(&iri_refs)?;
@@ -858,8 +854,8 @@ pub async fn get_version_data(
     // Determine which graphs to dump: all of them, or the sub-graphs that
     // answer to the name given.
     let graphs_to_dump: Vec<String> = match params.graph.as_deref() {
-        None | Some("all") => record.sub_graphs.clone(),
-        Some(wanted) if wanted.trim_start_matches('/').is_empty() => record.sub_graphs.clone(),
+        None | Some("all") => record.content_graphs(),
+        Some(wanted) if wanted.trim_start_matches('/').is_empty() => record.content_graphs(),
         Some(wanted) => sub_graphs_named(&record, wanted)
             .into_iter()
             .cloned()
@@ -1629,13 +1625,11 @@ pub fn build_branches(
 }
 
 /// The named graphs that make up a version's content (sub-graphs, or the base
-/// graph when none are recorded). Used for revision hashing.
+/// graph when none are recorded; see
+/// [`DataModelVersion::content_graphs`](super::models::DataModelVersion::content_graphs)).
+/// Used for revision hashing, merges and diffs.
 fn version_graphs(record: &super::models::DataModelVersion) -> Vec<String> {
-    if record.sub_graphs.is_empty() {
-        vec![record.graph_iri.clone()]
-    } else {
-        record.sub_graphs.clone()
-    }
+    record.content_graphs()
 }
 
 /// The sub-graphs of a version that answer to `wanted`, the `graph` a caller
@@ -2076,17 +2070,13 @@ pub async fn list_branches(
     let views: Vec<BranchVersionView> = registry::list_versions(&state.store, &state.base_url, &id)
         .into_iter()
         .map(|v| BranchVersionView {
+            sub_graphs: v.content_graphs(),
             branch: v.branch,
             version: v.version,
             status: v.status.as_str().to_string(),
             derived_from: v.derived_from,
             created_by: v.created_by.filter(|_| actors),
             created_at: v.created_at,
-            sub_graphs: if v.sub_graphs.is_empty() {
-                vec![v.graph_iri]
-            } else {
-                v.sub_graphs
-            },
         })
         .collect();
     Ok(Json(build_branches(&state.store, &views)))

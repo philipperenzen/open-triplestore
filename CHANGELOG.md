@@ -122,6 +122,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **A seed bundle's model of several graphs is served, hashed and deleted
+  whole.** The seeder recorded the first graph of a `[[data_models]]` version
+  as its base graph and the others as its sub-graphs, but the version download,
+  the content revision (`ETag`), the term lookup and the delete of an entry
+  take the sub-graphs as the version's content, so the first graph was missing
+  from all of them (and survived `DELETE /api/models/{id}`), while the content
+  digest and the conformance layer, which read base graph and sub-graphs, did
+  include it. A version of several graphs now records every graph, the first
+  included, as a sub-graph; a version of one graph is recorded as before. A
+  start repairs the records an earlier build wrote: a version the bundle
+  registered, whose base graph is the manifest's first graph and whose
+  sub-graphs are exactly the others, gets the first graph listed, and nothing
+  else is touched. `DataModelVersion::content_graphs` now answers "which graphs
+  hold this version's triples" for the download, the revision hash, the delete,
+  the branch view, merges and the term lookup alike.
 - **An OWL model uploaded without a `kind` is registered as a data model.**
   Kind detection weighed a graph's classes against its properties plus its
   SKOS statements, and counted every `skos:` predicate on any subject

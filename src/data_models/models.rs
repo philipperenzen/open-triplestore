@@ -66,9 +66,15 @@ pub struct DataModelVersion {
     pub data_model_id: String,
     pub version: String,
     pub status: VersionStatus,
-    /// IRI of the primary (or merged) named graph for this version.
+    /// IRI of the version's base graph: the primary (or merged) named graph.
+    /// An upload names it after the version and keeps the content in the
+    /// sub-graphs under it (or in the base graph itself when merged); a
+    /// seed bundle names its first graph.
     pub graph_iri: String,
-    /// IRIs of all sub-graphs under this version.
+    /// IRIs of every graph that holds the version's content, the base graph
+    /// included when it is one of them. Empty for a version recorded without
+    /// sub-graphs, whose content is the base graph. See
+    /// [`DataModelVersion::content_graphs`].
     pub sub_graphs: Vec<String>,
     pub created_at: String,
     pub created_by: Option<String>,
@@ -84,6 +90,26 @@ pub struct DataModelVersion {
     /// Empty means every subgraph inherits the version status.
     #[serde(default)]
     pub sub_graph_status: Vec<SubGraphStatus>,
+}
+
+impl DataModelVersion {
+    /// The graphs that hold this version's triples: its sub-graphs, or, for a
+    /// version recorded with none, its base graph. This is what a download
+    /// serves, a revision hash covers and a delete drops.
+    ///
+    /// The base graph is *not* added to a non-empty list: for an upload it is
+    /// only the name the sub-graphs sit under and holds nothing, and a graph
+    /// that does hold content is listed among the sub-graphs (a merged upload
+    /// lists itself, and so does a seed bundle's first graph). Code that asks
+    /// which graphs a record *names*, to guard or authorise them, wants the
+    /// wider set of [`super::content_digest::version_graphs`].
+    pub fn content_graphs(&self) -> Vec<String> {
+        if self.sub_graphs.is_empty() {
+            vec![self.graph_iri.clone()]
+        } else {
+            self.sub_graphs.clone()
+        }
+    }
 }
 
 /// Lifecycle status of a single subgraph within a version (Phase 6 —
@@ -400,4 +426,40 @@ pub struct DiffSummary {
     pub added: usize,
     pub removed: usize,
     pub changed: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(graph_iri: &str, sub_graphs: &[&str]) -> DataModelVersion {
+        DataModelVersion {
+            data_model_id: "m".into(),
+            version: "1".into(),
+            status: VersionStatus::Published,
+            graph_iri: graph_iri.into(),
+            sub_graphs: sub_graphs.iter().map(|g| g.to_string()).collect(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: vec![],
+        }
+    }
+
+    #[test]
+    fn content_graphs_are_the_sub_graphs_or_else_the_base_graph() {
+        assert_eq!(version("urn:g:base", &[]).content_graphs(), ["urn:g:base"]);
+        assert_eq!(
+            version("urn:g:base", &["urn:g:a", "urn:g:b"]).content_graphs(),
+            ["urn:g:a", "urn:g:b"],
+            "an upload's base graph is a name, not content"
+        );
+        assert_eq!(
+            version("urn:g:a", &["urn:g:a", "urn:g:b"]).content_graphs(),
+            ["urn:g:a", "urn:g:b"],
+            "a base graph that holds content lists itself"
+        );
+    }
 }

@@ -860,6 +860,31 @@ pub fn set_sub_graph_status(
     Ok(())
 }
 
+/// List `graph_iri` among the sub-graphs of an existing version record. A
+/// graph the record already lists stays listed once, so a repeat is a no-op.
+/// The graph's content is not touched.
+pub fn add_version_sub_graph(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version: &str,
+    graph_iri: &str,
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(graph_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid graph IRI {graph_iri}: {e}")))?;
+    let ver_iri = version_record_iri(base_url, data_model_id, version);
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        INSERT DATA {{
+          GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> ver:subGraph <{graph_iri}> }}
+        }}
+        "#
+    );
+    store.update(&q)
+}
+
 /// Get a single version record.
 pub fn get_version(
     store: &TripleStore,
