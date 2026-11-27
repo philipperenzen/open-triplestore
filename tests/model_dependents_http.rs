@@ -292,6 +292,16 @@ async fn dependents_are_visibility_scoped() {
         json!({ "name": "secret", "visibility": "private", "conforms_to_model": "m2", "conforms_to_version": "1.0.0" })).await;
     assert!(st.is_success(), "{st} {txt}");
     // Another (plain) user sees the public model but not the private dataset behind it.
+    state
+        .auth_db
+        .create_user(
+            "u2",
+            "someone",
+            "someone@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
     let other = mint_token("u2", "someone", "user");
     let (st, deps, txt) = req(
         &app,

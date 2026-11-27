@@ -152,6 +152,42 @@ export async function fetchRetry429(
   return res;
 }
 
+/**
+ * fetch() for the calls that present the in-memory access token as a Bearer
+ * header. The server answers a bearer it no longer honours with 401, also on
+ * the routes anyone may read (a stale session cookie is ignored there, a stale
+ * header is not). So when a call that carried the token comes back 401, the
+ * session is renewed from the refresh cookie and the call made once more.
+ * When it cannot be renewed the session is over: the token is dropped,
+ * `auth-expired` tells the app, and the call goes out as the anonymous
+ * visitor the user now is, so what anyone may see still shows.
+ *
+ * `init.headers` is a plain object; the Authorization header is added here.
+ */
+export async function fetchWithToken(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  doFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetchRetry429,
+): Promise<Response> {
+  const send = (token: string | null) => {
+    const headers: Record<string, string> = { ...((init.headers as Record<string, string>) || {}) };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return doFetch(input, { ...init, headers });
+  };
+  const sent = getAccessToken();
+  let res = await send(sent);
+  if (res.status === 401 && sent) {
+    if (await tryRefreshToken()) {
+      res = await send(getAccessToken());
+    } else {
+      clearTokens();
+      window.dispatchEvent(new CustomEvent('auth-expired'));
+      res = await send(null);
+    }
+  }
+  return res;
+}
+
 // `init.signal` is optional and defaulted, so no existing call site changes: it
 // exists so callers that can be superseded mid-flight (the dataset viewer's
 // inspector windows switch resource on every click) can cancel the request
@@ -699,18 +735,16 @@ function isGraphQuery(query) {
 }
 
 async function executeSparql(url, query, init: RequestInit = {}) {
-  const token = getAccessToken();
   const graphQ = isGraphQuery(query);
   const headers = {
     'Content-Type': 'application/sparql-query',
     'Accept': graphQ ? 'application/n-triples' : 'application/sparql-results+json',
   };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
   // /sparql is rate-limited per IP; retry 429s with the server-suggested delay
   // so legitimate UI query bursts never surface "Too Many Requests" errors.
   // `init` carries an optional `{ signal }` so a caller can abort a long probe
   // (e.g. the content-kind scan) when it unmounts.
-  const res = await fetchRetry429(url, { method: 'POST', headers, body: query, ...init });
+  const res = await fetchWithToken(url, { method: 'POST', headers, body: query, ...init });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -741,10 +775,8 @@ export const datasetSparqlQuery = (datasetId, serviceSlug, query, version = null
 // Generation only: the returned query is run through the normal scoped SPARQL endpoint,
 // so it passes the same authorization boundary as any user-typed query.
 export async function nlToSparql(question, schemaHint, currentQuery = null) {
-  const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetchRetry429(`${API_BASE}/api/llm/sparql`, {
+  const res = await fetchWithToken(`${API_BASE}/api/llm/sparql`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -812,9 +844,7 @@ export interface LlmHealth {
 // Used to show LLM availability in service health; never throws.
 export async function llmHealth(): Promise<LlmHealth> {
   try {
-    const token = getAccessToken();
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const res = await fetchRetry429(`${API_BASE}/api/llm/health`, { headers });
+    const res = await fetchWithToken(`${API_BASE}/api/llm/health`);
     if (!res.ok) return { reachable: false, error: true };
     // Awaited here so a body that is not JSON lands in the catch below.
     return await res.json(); // LlmHealth
@@ -827,10 +857,8 @@ export async function llmHealth(): Promise<LlmHealth> {
 // Forwarded by the backend to the gateway's /v1/signals; never throws.
 export async function sendLlmFeedback(signal) {
   try {
-    const token = getAccessToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    await fetchRetry429(`${API_BASE}/api/llm/feedback`, {
+    await fetchWithToken(`${API_BASE}/api/llm/feedback`, {
       method: 'POST',
       headers,
       body: JSON.stringify(signal),
@@ -846,10 +874,8 @@ export async function sendLlmFeedback(signal) {
 // and may run a scoped SPARQL query to answer. Returns the assistant turn:
 //   { answer, model, ran_query, sparql?, columns?, rows?, truncated }
 export async function llmChat(messages, model = null) {
-  const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetchRetry429(`${API_BASE}/api/llm/chat`, {
+  const res = await fetchWithToken(`${API_BASE}/api/llm/chat`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -879,16 +905,14 @@ export async function llmChatStream(
     onEvent,
   }: { model?: string | null; signal?: AbortSignal; onEvent?: (event: unknown) => void } = {}
 ) {
-  const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/chat/stream`, {
+  const res = await fetchWithToken(`${API_BASE}/api/llm/chat/stream`, {
     method: 'POST',
     headers,
     credentials: 'include',
     body: JSON.stringify({ messages, model }),
     signal,
-  });
+  }, fetch);
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -1273,10 +1297,8 @@ export async function aiShacl({ task, description, turtle, modelContext, model }
   modelContext?: unknown;
   model?: string;
 }) {
-  const token = getAccessToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetchRetry429(`${API_BASE}/api/llm/shacl`, {
+  const res = await fetchWithToken(`${API_BASE}/api/llm/shacl`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -1398,10 +1420,8 @@ export async function bulkImport(
 }
 
 export function exportGraph(graphIri) {
-  const token = getAccessToken();
   const headers = { 'Accept': 'text/turtle' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetchRetry429(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'GET', headers }).then(async (res) => {
+  return fetchWithToken(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'GET', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   });
@@ -1564,10 +1584,7 @@ export const assetMetadata = (datasetId, assetId) =>
 
 // Fetch raw asset content with auth headers via the API endpoint. Returns a Response.
 export function fetchAssetContent(datasetId, assetId) {
-  const token = getAccessToken();
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`${API_BASE}/api/datasets/${datasetId}/assets/${assetId}`, { headers });
+  return fetchWithToken(`${API_BASE}/api/datasets/${datasetId}/assets/${assetId}`, {}, fetch);
 }
 
 // Auth state
