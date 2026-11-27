@@ -30,7 +30,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/svelte": "^5.4.2",
-    "@types/n3": "^1.26.4",
+    "@types/n3": "^1.26.6",
     "@typescript-eslint/parser": "^8.72.2",
     "eslint": "^10.13.0",
     "eslint-plugin-svelte": "^3.23.1",
