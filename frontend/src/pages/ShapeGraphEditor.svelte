@@ -8,6 +8,7 @@
     getShapeGraphTurtle, listDatasets } from '../lib/api.js';
   import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
   import { formatShaclPath } from '../lib/validationReport.js';
+  import { formatBytes } from '../lib/format.ts';
   import { ArrowLeft, History, Lock, Users, Globe, Save, Edit3, X, RotateCcw, Loader2, Sparkles, Database, ShieldCheck, Send, Archive, Check, Plus, Link2, ExternalLink } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
@@ -122,14 +123,24 @@
 
   // The revision's Turtle, shown inside the history dialog (it used to open as
   // raw text in a blank browser window).
-  let preview = null; // { rev, turtle } | null
+  // A large revision is cut short: a <pre> holding tens of megabytes of text
+  // takes the browser seconds to lay out, and the dialog with it.
+  const PREVIEW_MAX_CHARS = 200_000;
+  let preview = null; // { rev, turtle, shown } | null
   let previewLoading = null; // the revision being fetched
+  function previewHead(turtle) {
+    if (turtle.length <= PREVIEW_MAX_CHARS) return turtle;
+    // End on a whole line, so the cut never splits a statement mid-token.
+    const nl = turtle.lastIndexOf('\n', PREVIEW_MAX_CHARS);
+    return turtle.slice(0, nl > 0 ? nl + 1 : PREVIEW_MAX_CHARS);
+  }
   async function previewRevision(rev) {
     if (preview?.rev === rev) { preview = null; return; }
     previewLoading = rev;
     try {
       const r = await getShapeGraphRevision(id, rev);
-      preview = { rev, turtle: r.turtle || '' };
+      const turtle = r.turtle || '';
+      preview = { rev, turtle, shown: previewHead(turtle) };
     } catch (e) { toastError(e.message); }
     finally { previewLoading = null; }
   }
@@ -291,7 +302,8 @@
             </div>
             {#if (set.target_classes || []).length}
               <div class="targets">
-                {#each set.target_classes as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
+                {#each set.target_classes.slice(0, 24) as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
+                {#if set.target_classes.length > 24}<span class="chip" title={set.target_classes.slice(24, 124).join('\n')}>+{set.target_classes.length - 24}</span>{/if}
               </div>
             {/if}
             {#if impact.length}
@@ -435,7 +447,13 @@
                   <strong>{$i18nT('pages.shapeGraphEditor.revisionTitle', { values: { rev: preview.rev } })}</strong>
                   <button class="icon-btn" title={$i18nT('system.close')} aria-label={$i18nT('system.close')} on:click={() => (preview = null)}><X size={13} /></button>
                 </header>
-                <pre class="rev-turtle">{preview.turtle}</pre>
+                {#if preview.shown.length < preview.turtle.length}
+                  <p class="rev-cut">
+                    {$i18nT('pages.shapeGraphEditor.previewTruncated', { values: { shown: formatBytes(preview.shown.length), total: formatBytes(preview.turtle.length) } })}
+                    <button class="btn btn-xs btn-ghost" on:click={() => (preview = { ...preview, shown: preview.turtle })}>{$i18nT('pages.shapeGraphEditor.previewShowAll')}</button>
+                  </p>
+                {/if}
+                <pre class="rev-turtle">{preview.shown}</pre>
               </section>
             {/if}
           {/if}
@@ -526,6 +544,7 @@
   .rev-preview-head { display: flex; align-items: center; justify-content: space-between; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line-soft); font-size: 0.85rem; }
   .rev-turtle { margin: 0; padding: 0.6rem; max-height: 50vh; overflow: auto; font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; line-height: 1.45; white-space: pre; }
   .dim { color: #94a3b8; }
+  .rev-cut { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 0; padding: 0.35rem 0.6rem; font-size: 0.76rem; color: #64748b; border-bottom: 1px solid var(--line-soft); }
 
   /* Phone. Every `.btn` is full width below this breakpoint, which turned the
      header's seven small actions into seven stacked bars and left the edit

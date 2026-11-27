@@ -233,33 +233,52 @@ export function parseShapesGraph(ttl: string): ShapesGraph {
     return { prefixes, shapes: [], canRoundTrip: false, parseError: (e as Error)?.message || 'Invalid Turtle' };
   }
 
-  // De-duplicate identical triples (RDF set semantics) so quad-level
-  // used-tracking can work by object identity.
+  // Index subject-key → predicate → quads, de-duplicating identical triples
+  // (RDF set semantics) so quad-level used-tracking can work by object
+  // identity, and count blank-node references. Duplicates are found within one
+  // subject/predicate bucket by object key alone: a whole-triple key string per
+  // quad cost more than the rest of the parse on a multi-megabyte graph.
   const quads: Q[] = [];
-  {
-    const seen = new Set<string>();
-    for (const q of parsed) {
-      const k = `${termKey(q.subject)}>${q.predicate.value}>${termKey(q.object)}`;
-      if (!seen.has(k)) {
-        seen.add(k);
-        quads.push(q);
-      }
-    }
-  }
-
-  // Index subject-key → predicate → quads, and count blank-node references.
   const idx = new Map<string, Map<string, Q[]>>();
   const bRefs = new Map<string, number>();
-  for (const q of quads) {
+  // Buckets past a handful of objects get a key set, so a predicate with
+  // thousands of values stays linear.
+  const bucketKeys = new Map<Q[], Set<string>>();
+  for (const q of parsed) {
     const sk = termKey(q.subject);
     let m = idx.get(sk);
     if (!m) {
       m = new Map();
       idx.set(sk, m);
     }
-    const arr = m.get(q.predicate.value);
-    if (arr) arr.push(q);
-    else m.set(q.predicate.value, [q]);
+    const ok = termKey(q.object);
+    let arr = m.get(q.predicate.value);
+    if (!arr) {
+      arr = [];
+      m.set(q.predicate.value, arr);
+    } else {
+      let keys = bucketKeys.get(arr);
+      if (keys) {
+        if (keys.has(ok)) continue;
+        keys.add(ok);
+      } else {
+        let dup = false;
+        for (const x of arr) {
+          if (termKey(x.object) === ok) {
+            dup = true;
+            break;
+          }
+        }
+        if (dup) continue;
+        if (arr.length >= 8) {
+          keys = new Set(arr.map((x) => termKey(x.object)));
+          keys.add(ok);
+          bucketKeys.set(arr, keys);
+        }
+      }
+    }
+    arr.push(q);
+    quads.push(q);
     if (q.object.termType === 'BlankNode') bRefs.set(q.object.value, (bRefs.get(q.object.value) || 0) + 1);
   }
   // A blank node referenced from more than one place can't be restructured

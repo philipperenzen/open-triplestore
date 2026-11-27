@@ -122,6 +122,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The shape graph editor opens and stays usable on large shape graphs.**
+  On a shape graph of about 20 MB (thousands of node shapes, every blank node
+  a labelled subject, long `sh:in` and `sh:or` lists, SPARQL-based targets)
+  `/shacl/shapes/:id` froze the browser tab for good. The Turtle was parsed
+  twice on the main thread, every shape card and property row was rendered at
+  once (hundreds of thousands of elements), every edit re-serialised the
+  whole document and re-parsed it, and the source view handed all of it to
+  CodeMirror up front. The text is now parsed once per change, in a Web Worker
+  when it is half a megabyte or more, with a loading state shown first. Past
+  100 shapes (or that half megabyte) the builder shows a filter on shape name,
+  IRI, target and property path, a "N of M shapes" line and 25 shapes at a
+  time with "Show more"; a shape with over 30 properties shows 20 behind
+  "Show all". A shape added with "Add shape" is shown and focused whatever the
+  filter or page. On a large document an edit is marked unsaved at once and
+  written to Turtle after a short pause, and before a save or a switch to the
+  source view. The source editor is created when the source view is first
+  opened; from 2 MB it runs without completion, folding and line wrapping, and
+  from 8 MB it asks before opening. The revision preview shows the first
+  200 KB of a large revision with a "Show everything" button, the target class
+  chips stop at 24, and an opened graph in the add-shapes catalog lists 200
+  shapes at a time. Graphs of up to 100 shapes look and behave as before.
 - **An OWL model uploaded without a `kind` is registered as a data model.**
   Kind detection weighed a graph's classes against its properties plus its
   SKOS statements, and counted every `skos:` predicate on any subject

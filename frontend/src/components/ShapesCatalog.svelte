@@ -46,6 +46,12 @@
   // catalog's per-shape `kind` ('node' | 'property') and per-graph counts.
   let kindFilter = 'all'; // 'all' | 'node' | 'property'
 
+  // An opened graph can hold thousands of shapes; render them a page at a
+  // time. Select-all still covers every match, shown or not.
+  const SHAPE_PAGE = 200;
+  let shapeLimit = {}; // graph IRI → rows shown
+  $: search, kindFilter, (shapeLimit = {});
+
   // Per-graph "Open in graph viewer" loading state (keyed by graph IRI).
   let openingViewer = new Set();
 
@@ -300,7 +306,7 @@
                 </button>
               </div>
               <ul class="shape-list">
-                {#each vis as s (s.shape)}
+                {#each vis.slice(0, shapeLimit[g.graph] || SHAPE_PAGE) as s (s.shape)}
                   <li class="shape-row" class:sel={selected.has(key(g.graph, s.shape))} on:click={() => toggle(g.graph, s.shape)} role="presentation">
                     <span class="box" class:on={selected.has(key(g.graph, s.shape))}>{#if selected.has(key(g.graph, s.shape))}<Check size={11} />{/if}</span>
                     <span class="kind kind-{s.kind}">{s.kind === 'property' ? 'P' : 'N'}</span>
@@ -310,6 +316,12 @@
                   </li>
                 {/each}
               </ul>
+              {#if vis.length > (shapeLimit[g.graph] || SHAPE_PAGE)}
+                {@const shown = shapeLimit[g.graph] || SHAPE_PAGE}
+                <button class="link-btn more-shapes" on:click={() => (shapeLimit = { ...shapeLimit, [g.graph]: shown + SHAPE_PAGE })}>
+                  {$t('components.shapesCatalog.showMoreShapes', { values: { count: Math.min(SHAPE_PAGE, vis.length - shown), remaining: vis.length - shown } })}
+                </button>
+              {/if}
             {/if}
           {/if}
         {/if}
@@ -352,6 +364,7 @@
   .grp-loading { padding: 0.5rem 0.8rem; font-size: 0.8rem; color: #64748b; display: flex; align-items: center; gap: 0.4rem; border-top: 1px solid var(--line-soft); }
   .grp-tools { padding: 0.35rem 0.8rem; border-top: 1px solid var(--line-soft); }
   .link-btn { background: none; border: none; color: #0e7490; font-size: 0.76rem; font-weight: 600; cursor: pointer; padding: 0; }
+  .more-shapes { display: block; margin: 0.4rem 0.8rem 0.5rem; }
 
   .shape-list { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; }
   .shape-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.7rem; border-top: 1px solid #f1f5f9; cursor: pointer; }
