@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount, createEventDispatcher } from 'svelte';
+  import { onMount, createEventDispatcher, tick } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
     Layers, Shapes, Puzzle, AlertTriangle, Network, RefreshCw, Tag, Globe2, GitBranch
   } from 'lucide-svelte';
   import { navigate } from '../lib/router/index.js';
   import { shortenIRI } from '../lib/rdf-utils';
+  import { renderPath } from '../lib/shaclModel';
   import { extractSchema } from '../lib/ontology/schema-model';
   import type { SchemaModel } from '../lib/ontology/schema-model';
   import { loadOntologyGraph } from '../lib/ontology/loader';
@@ -38,6 +39,13 @@
 
   type Tab = 'classes' | 'properties' | 'axioms' | 'shapes' | 'skos' | 'namespaces' | 'diagnostics';
   export let initialTab: Tab = 'classes';
+  /**
+   * A term of the model to open on: a class is selected in the hierarchy, a
+   * property opens in the properties tab, a shape in the SHACL tab. Applied
+   * once per term, when the model is there; a term the model does not hold
+   * leaves the view as it is.
+   */
+  export let initialTerm: string = '';
   let activeTab: Tab = initialTab;
   $: if (initialTab) activeTab = initialTab;
 
@@ -156,6 +164,45 @@
   $: issueCount = diagnostics.filter(d => d.severity === 'error' || d.severity === 'warning').length;
 
   $: shapesArr = model ? [...model.shapes.values()] : [];
+
+  // Cross-tab links from the class detail pane.
+  let selectedProperty = '';
+  let focusedShape = '';
+  let shapesEl: HTMLElement;
+
+  function openProperty(iri: string) {
+    // A filter that hides the property would leave the properties tab with
+    // nothing selected, so clear it.
+    if (view && !view.properties.some(p => p.iri === iri)) filter = emptyFilter();
+    selectedProperty = iri;
+    activeTab = 'properties';
+  }
+
+  async function openShape(iri: string) {
+    focusedShape = iri;
+    activeTab = 'shapes';
+    await tick();
+    const card = [...(shapesEl?.querySelectorAll<HTMLElement>('[data-shape-iri]') ?? [])]
+      .find(el => el.dataset.shapeIri === iri);
+    card?.scrollIntoView?.({ block: 'start' });
+    card?.focus({ preventScroll: true });
+  }
+
+  // The term the page was linked with (see `initialTerm`).
+  let openedTerm = '';
+  let initialClass = '';
+  $: if (model && initialTerm && initialTerm !== openedTerm) openTerm(initialTerm);
+  function openTerm(iri: string) {
+    openedTerm = iri;
+    if (!model) return;
+    if (model.classes.has(iri)) {
+      // A filter that hides the class would leave it out of the tree.
+      if (view && !view.classes.some(c => c.iri === iri)) filter = emptyFilter();
+      activeTab = 'classes';
+      initialClass = iri;
+    } else if (model.properties.has(iri)) openProperty(iri);
+    else if (model.shapes.has(iri)) openShape(iri);
+  }
 </script>
 
 <div class="omv">
@@ -210,23 +257,29 @@
     {#if activeTab === 'classes'}
       <ClassAxiomPanel
         classes={view.classes}
+        {model}
         onOpen={viewResource}
+        onOpenProperty={openProperty}
+        onOpenShape={openShape}
+        resourceGraph={graphIri}
+        initialSelected={initialClass}
       />
     {:else if activeTab === 'properties' || activeTab === 'axioms'}
-      <PropertyAxiomPanel properties={view.properties} onOpen={viewResource} />
+      <PropertyAxiomPanel properties={view.properties} onOpen={viewResource} bind:selectedIri={selectedProperty} />
       {#if activeTab === 'axioms'}
         <div class="ax-classes">
           <h3 class="ax-h">{$t('components.ontologyModelViewer.classAxioms')}</h3>
-          <ClassAxiomPanel classes={view.classes} onOpen={viewResource} />
+          <ClassAxiomPanel classes={view.classes} {model} onOpen={viewResource}
+            onOpenProperty={openProperty} onOpenShape={openShape} resourceGraph={graphIri} />
         </div>
       {/if}
     {:else if activeTab === 'shapes'}
       {#if shapesArr.length === 0}
         <div class="omv-empty">{$t('components.ontologyModelViewer.noNodeShapes')}</div>
       {:else}
-        <div class="shapes-list">
+        <div class="shapes-list" bind:this={shapesEl}>
           {#each shapesArr as s}
-            <div class="shape-card">
+            <div class="shape-card" class:focused={s.iri === focusedShape} data-shape-iri={s.iri} tabindex="-1">
               <div class="shape-head">
                 <button class="linky" on:click={() => viewResource(s.iri)} title={s.iri}>
                   <strong>{shortenIRI(s.iri)}</strong>
@@ -234,6 +287,7 @@
                 <div class="shape-targets">
                   {#each s.targetClass as tc}<span class="target-chip">targetClass: {shortenIRI(tc)}</span>{/each}
                   {#each s.targetNode as tn}<span class="target-chip">targetNode: {shortenIRI(tn)}</span>{/each}
+                  {#if s.implicitTarget}<span class="target-chip">{$t('components.ontologyModelViewer.implicitTarget')}</span>{/if}
                 </div>
               </div>
               {#if s.properties.length > 0}
@@ -242,7 +296,7 @@
                   <tbody>
                     {#each s.properties as pp}
                       <tr>
-                        <td><code>{shortenIRI(pp.path)}</code>{#if pp.name}<span class="muted small"> — {pp.name}</span>{/if}</td>
+                        <td><code>{renderPath(pp.pathExpr ?? pp.path, shortenIRI)}</code>{#if pp.name}<span class="muted small"> — {pp.name}</span>{/if}</td>
                         <td class="mono small">{pp.minCount ?? '0'}…{pp.maxCount ?? '*'}</td>
                         <td>
                           {#if pp.datatype}<span class="chip">{shortenIRI(pp.datatype)}</span>{/if}
@@ -291,6 +345,8 @@
 
   .shapes-list { display: flex; flex-direction: column; gap: 0.75rem; }
   .shape-card { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+  .shape-card.focused { border-color: #8b5cf6; box-shadow: 0 0 0 2px rgba(139,92,246,0.25); }
+  .shape-card:focus { outline: none; }
   .shape-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.55rem 0.75rem; background: #f8fafc; border-bottom: 1px solid #e2e8f0; flex-wrap: wrap; }
   .shape-targets { display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .target-chip { font-size: 0.72rem; padding: 1px 8px; border-radius: 999px; background: #ede9fe; color: #6d28d9; border: 1px solid #ddd6fe; }

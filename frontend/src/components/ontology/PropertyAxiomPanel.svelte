@@ -3,25 +3,36 @@
   import { renderChain } from '../../lib/ontology/dl-render';
   import { shortenIRI } from '../../lib/rdf-utils';
   import { t } from 'svelte-i18n';
+  import { tick } from 'svelte';
   import TermDefinitionCard from './TermDefinitionCard.svelte';
 
   export let properties: PropertyEntry[] = [];
   export let onOpen: (_iri: string) => void = () => {};
+  /** Bindable, so another tab can open a property here. */
+  export let selectedIri = '';
 
-  let selectedIri = '';
+  let listEl: HTMLElement;
   $: byIri = new Map(properties.map(p => [p.iri, p]));
+  // Bring a row selected from elsewhere into view.
+  $: if (selectedIri && listEl) {
+    const iri = selectedIri;
+    tick().then(() => {
+      const row = [...listEl.querySelectorAll<HTMLElement>('tr[data-prop-iri]')].find(el => el.dataset.propIri === iri);
+      row?.scrollIntoView?.({ block: 'nearest' });
+    });
+  }
   $: selected = selectedIri ? byIri.get(selectedIri) || null : null;
 </script>
 
 <div class="pap">
-  <div class="pap-list">
+  <div class="pap-list" bind:this={listEl}>
     <table class="pp-table">
       <thead><tr>
         <th>{$t('components.propertyAxiomPanel.colProperty')}</th><th>{$t('components.propertyAxiomPanel.colKind')}</th><th>{$t('components.propertyAxiomPanel.colCharacteristics')}</th>
       </tr></thead>
       <tbody>
         {#each properties as p (p.iri)}
-          <tr class:active={p.iri === selectedIri} on:click={() => (selectedIri = p.iri)}>
+          <tr class:active={p.iri === selectedIri} data-prop-iri={p.iri} on:click={() => (selectedIri = p.iri)}>
             <td><strong>{p.label || shortenIRI(p.iri)}</strong>
               <div class="muted">{shortenIRI(p.iri)}</div>
             </td>
