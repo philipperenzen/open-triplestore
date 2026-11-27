@@ -768,6 +768,24 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/browse/resource/context",
+        vec![(
+            M::Get,
+            o(
+                "Browse",
+                "Resource context",
+                "Where a resource belongs: the models that define it, the classes it is an instance of and their models, the datasets holding it and the model each conforms to, and where its instances are.",
+                vec![
+                    qp("iri", true, "Resource IRI"),
+                    qp("graph", false, "Graph IRI the page is scoped to"),
+                ],
+                vec![("200", "Models, classes, datasets and instance counts for the resource")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/browse/stats",
         vec![(
             M::Get,

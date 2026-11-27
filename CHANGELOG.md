@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The resource page says where a resource belongs.** A "Model and data"
+  card names the model that defines a term, the classes an instance is typed
+  with and the model that defines each, the dataset that holds it and the
+  model that dataset declares it conforms to, and, for a class, how many
+  instances it has in which dataset and which datasets conform to its model.
+  Every line is a link: to the model viewer on the version (on the term, with
+  `?term=`), to the dataset, to the class. The card is answered by the new
+  `GET /api/browse/resource/context?iri=…[&graph=…]`, which reads only graphs
+  the caller may read, so a model, a dataset or an instance count behind a
+  graph the caller cannot read is left out. A model held in several versions
+  is named once, by the version the page is scoped to, else its latest
+  published one.
 - **A purge can attribute an erased account's history to "Deleted user"
   (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
   provenance name the account behind each write
@@ -122,6 +134,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 ### Fixed
+- **The resource page of a term of a model is no longer empty.** The model
+  viewer's "Open" link scopes the resource page to the version's base graph.
+  A version stored as several graphs keeps its triples in its sub-graphs, so
+  for such a model `GET /api/browse/resource?graph=<base graph>` answered with
+  no statement, no label and nothing to follow. Asked for the base graph of a
+  version that lists sub-graphs, the endpoint now reads the version's graphs
+  (those the caller may read). Any other graph is read as itself, as before.
 - **An OWL model uploaded without a `kind` is registered as a data model.**
   Kind detection weighed a graph's classes against its properties plus its
   SKOS statements, and counted every `skos:` predicate on any subject

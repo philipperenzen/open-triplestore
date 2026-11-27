@@ -5476,6 +5476,23 @@
       "viewN": "Patch {n} tonen",
       "downloadN": "Patch {n} downloaden",
       "loadMore": "Meer laden"
+    },
+    "resourceContext": {
+      "title": "Model en data",
+      "definedIn": "Gedefinieerd in",
+      "instanceOf": "Instantie van",
+      "classDefinedIn": "gedefinieerd in",
+      "classNotInAModel": "niet gedefinieerd in een model dat u kunt lezen",
+      "inDataset": "In dataset",
+      "conformsTo": "conformeert aan",
+      "noModelDeclared": "verklaart geen model waaraan hij conformeert",
+      "instances": "Instanties",
+      "instancesIn": "in",
+      "instancesElsewhere": "in grafen buiten een dataset of model",
+      "showInstances": "Toon wat hiermee getypeerd is",
+      "conformingDatasets": "Datasets die aan dit model conformeren",
+      "conformsToVersion": "versie {version}",
+      "otherVersions": "ook in {count, plural, one {# andere versie} other {# andere versies}}"
     }
   },
   "viewer": {

@@ -19,6 +19,7 @@ import { location } from '../locationStore';
 
 const api = vi.hoisted(() => ({
   browseResource: vi.fn(),
+  browseResourceContext: vi.fn(),
 }));
 vi.mock('../api.js', () => api);
 
@@ -54,6 +55,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   api.browseResource.mockResolvedValue(RESOURCE);
+  api.browseResourceContext.mockResolvedValue({});
   clipboard.copyOrWarn.mockResolvedValue(true);
   clipboard.copyToClipboard.mockResolvedValue(true);
 });
@@ -129,5 +131,31 @@ describe('resource page IRI copy control', () => {
     expect(clipboard.copyOrWarn).toHaveBeenCalledWith(fileIri);
     // A file path is rendered, never resolved as RDF.
     expect(api.browseResource).not.toHaveBeenCalled();
+    expect(api.browseResourceContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('where the resource belongs', () => {
+  const MODEL = { model_id: 'bridges', title: 'Bridges', version: '2.0', status: 'published', other_versions: 0 };
+
+  it('is asked for next to the resource and shown with links', async () => {
+    api.browseResourceContext.mockResolvedValue({ defined_in: [MODEL] });
+    const { findByText, container } = mount(IRI);
+
+    expect(await findByText('Defined in')).toBeTruthy();
+    expect(api.browseResourceContext).toHaveBeenCalledTimes(1);
+    expect(api.browseResourceContext.mock.calls[0][0]).toBe(IRI);
+    const link = container.querySelector('section.rc a')!;
+    expect(link.getAttribute('href')).toBe(`/models/bridges/viewer/2.0?term=${encodeURIComponent(IRI)}`);
+  });
+
+  it('a lookup that fails leaves the page as it is, without the card', async () => {
+    api.browseResourceContext.mockRejectedValue(new Error('unavailable'));
+    const { findByRole, container } = mount(IRI);
+
+    expect(await findByRole('button', { name: /copy iri/i })).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(container.querySelector('section.rc')).toBeNull();
+    expect(container.textContent).not.toContain('unavailable');
   });
 });

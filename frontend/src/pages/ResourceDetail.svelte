@@ -1,6 +1,6 @@
 <script>
   import { withBase } from '../lib/basePath';
-  import { browseResource } from '../lib/api.js';
+  import { browseResource, browseResourceContext } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { location } from '../lib/locationStore.js';
   import { shortenIRI, graphResultsToElements } from '../lib/rdf-utils.js';
@@ -11,6 +11,7 @@
   // page — cytoscape is off the initial/landing download.
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
+  import ResourceContext from '../components/ResourceContext.svelte';
   import AnnotationText from '../components/ontology/AnnotationText.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import { pickByLang } from '../lib/ontology/termDisplay.js';
@@ -193,6 +194,26 @@
   let data = null;
   let error = '';
   let loading = false;
+  // Where the resource belongs (its model, its classes' models, its dataset and
+  // what that conforms to). Asked for next to the resource itself and never
+  // waited for: the page shows without it, and a failure leaves the card out.
+  let context = null;
+  let contextCtrl = null;
+  function fetchContext() {
+    contextCtrl?.abort();
+    context = null;
+    if (!iri || iri.startsWith('_:')) return;
+    const forIri = iri;
+    const forGraph = graphScope;
+    const ctrl = new AbortController();
+    contextCtrl = ctrl;
+    // Inside the chain, so that nothing this lookup does (a rejection, or a
+    // throw before it returns) can stop the resource itself from loading.
+    Promise.resolve()
+      .then(() => browseResourceContext(forIri, forGraph || undefined, { signal: ctrl.signal }))
+      .then((c) => { if (forIri === iri && forGraph === graphScope) context = c; })
+      .catch(() => { /* the card is left out */ });
+  }
   // When the ?iri= is actually a file (a samples/asset path or an http(s) URL
   // ending in a known extension), we render a FileViewer instead of resolving it
   // as an RDF resource — browseResource would otherwise throw "IRI must be
@@ -264,8 +285,10 @@
     fileResource = fileResourceKind(iri);
     if (fileResource) {
       loading = false;
+      context = null;
       return;
     }
+    fetchContext();
     try {
       data = await browseResource(iri, graphScope || undefined);
       buildGraph();
@@ -806,6 +829,12 @@
         <TermDefinitionCard {iri} meta={vocabMeta} variant="rich" />
       </div>
     {/if}
+    <ResourceContext
+      {context}
+      {iri}
+      onOpenResource={viewResource}
+      onShowInstances={incoming.length > 0 ? () => (activeTab = 'linkedFrom') : null}
+    />
     <!-- Tabs -->
     <div class="tabs">
       <button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => (activeTab = 'overview')}>

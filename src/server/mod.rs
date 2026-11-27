@@ -18,6 +18,7 @@ pub mod openapi;
 mod passkey_tests;
 /// Background reasoning jobs (`?async=true`).
 pub mod reasoning_jobs;
+pub mod resource_context;
 #[cfg(test)]
 mod role_visibility_tests;
 pub mod routes;
@@ -1783,6 +1784,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route("/api/browse/triples", get(routes::browse_triples))
         .route("/api/browse/facets", get(routes::browse_facets))
         .route("/api/browse/resource", get(routes::browse_resource))
+        .route(
+            "/api/browse/resource/context",
+            get(resource_context::browse_resource_context),
+        )
         .route("/api/browse/stats", get(routes::browse_stats))
         .route("/api/browse/suggest", get(routes::browse_suggest))
         // endpoint_acl_guard is the inner layer (runs after optional_auth sets the user)

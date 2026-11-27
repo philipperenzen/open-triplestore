@@ -633,6 +633,15 @@ export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = 
   }
   return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
 };
+// Where a resource belongs: the models that define it, the classes it is an
+// instance of with their models, the datasets holding it and what each
+// conforms to, and where a class's instances are. Scoped by the server to what
+// the caller may read. `graph` is the graph the page is scoped to, if any.
+export const browseResourceContext = (iri: string, graph?: string, init: { signal?: AbortSignal } = {}) => {
+  const qs = new URLSearchParams({ iri });
+  if (graph) qs.set('graph', graph);
+  return request('GET', `/api/browse/resource/context?${qs.toString()}`, null, init);
+};
 export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
 // references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
