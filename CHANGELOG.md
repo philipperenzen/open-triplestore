@@ -326,6 +326,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retention checklist.
 
 ### Security
+- **`lettre` and `url` updated for seven published advisories.** `lettre`
+  0.11.23 to 0.11.24 clears RUSTSEC-2026-0560 to 0565: a STARTTLS response
+  injection that lets a man in the middle forge SMTP replies, missing
+  dot-stuffing after a bare LF or CR (SMTP command injection), a panic on an
+  `EHLO` reply line of only white space, a panic on a mailbox display name
+  with CR or LF, messages for an address with a quoted local part going to a
+  different address, and unbounded buffering of an SMTP reply. `url` 2.5.8 to
+  2.5.9 clears RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on
+  deeply nested `blob:` URLs. `Cargo.lock` only (their small companions
+  `email-encoding` and `form_urlencoded` move with them); no API or setting
+  changes. A deployment that sends mail over SMTP should take this update.
 - **A dataset's history no longer shows every reader who changed it, or the
   quads it no longer holds (breaking for unprivileged feed consumers).** Two
   runtime settings, both `writers` by default, with `signed-in` and `readers`
