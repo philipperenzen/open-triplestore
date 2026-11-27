@@ -885,6 +885,90 @@ pub fn add_version_sub_graph(
     store.update(&q)
 }
 
+/// Record the content facets of a version (replacing any earlier record), as
+/// one JSON value on the version record. See [`super::facets`].
+pub fn set_version_facets(
+    store: &TripleStore,
+    version_iri: &str,
+    facets: &super::facets::ContentFacets,
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(version_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid registry IRI {version_iri}: {e}")))?;
+    let json = serde_json::to_string(facets)
+        .map_err(|e| StoreError::Parse(format!("facets JSON: {e}")))?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:facets ?f }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:facets "{json}" }} }}
+        WHERE {{ OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:facets ?f }} }} }}
+        "#,
+        json = crate::store::escape_sparql_literal(&json),
+    );
+    store.update(&q)
+}
+
+/// The content facets recorded for a version, if any.
+pub fn get_version_facets(
+    store: &TripleStore,
+    version_iri: &str,
+) -> Option<super::facets::ContentFacets> {
+    NamedNode::new(version_iri).ok()?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?f WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:facets ?f }} }}
+        LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            return var_str(&vals, 0).and_then(|j| serde_json::from_str(&j).ok());
+        }
+    }
+    None
+}
+
+/// The facets of every entry's latest published version (its latest draft when
+/// none is published), keyed by model id: one query for the whole list view.
+/// What is stored is served as it is; the list does not check it against the
+/// content.
+pub fn latest_facets(
+    store: &TripleStore,
+) -> std::collections::HashMap<String, super::facets::ContentFacets> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?m ?f WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?m a ver:DataModel .
+          OPTIONAL {{ ?m ver:latestPublished ?p }}
+          OPTIONAL {{ ?m ver:latestDraft ?d }}
+          BIND(COALESCE(?p, ?d) AS ?v)
+          ?v ver:facets ?f .
+        }} }}
+        "#
+    );
+    let mut out = std::collections::HashMap::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(m), Some(json)) = (var_str(&vals, 0), var_str(&vals, 1)) else {
+                continue;
+            };
+            let id = m.rsplit('/').next().unwrap_or(&m).to_string();
+            if out.contains_key(&id) {
+                continue;
+            }
+            if let Ok(f) = serde_json::from_str(&json) {
+                out.insert(id, f);
+            }
+        }
+    }
+    out
+}
+
 /// Get a single version record.
 pub fn get_version(
     store: &TripleStore,

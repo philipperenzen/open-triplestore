@@ -2871,6 +2871,17 @@ pub async fn run(
             let vocab_data_dir = data_dir.clone();
             tokio::spawn(async move {
                 let _ = seed_handle.await;
+                // 6a. Count what each registry version holds, for the versions
+                //     that were seeded or uploaded before the counts existed.
+                //     Its own background task: it never holds the vocabulary
+                //     search boot back, and a follower, whose registry arrives
+                //     from the leader, leaves it to the leader.
+                if !vocab_state.store.replication().read_only() {
+                    let facet_state = vocab_state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::data_models::facets::backfill(&facet_state);
+                    });
+                }
                 // 6b. Full-text index build. The index is a derived cache that
                 //     can be absent, wiped or restored from a backup out of
                 //     sync with the store, and `AppState` therefore boots

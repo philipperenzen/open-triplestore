@@ -4024,6 +4024,16 @@
       "kindInstances": "Instance data",
       "kindMixed": "Mixed content"
     },
+    "facetChips": {
+      "label": "What this holds",
+      "classes": "{count, plural, one {# class} other {# classes}}",
+      "properties": "{count, plural, one {# property} other {# properties}}",
+      "concepts": "{count, plural, one {# concept} other {# concepts}}",
+      "individuals": "{count, plural, one {# individual} other {# individuals}}",
+      "shapes": "{count, plural, one {# shape} other {# shapes}}",
+      "rules": "{count, plural, one {# rule} other {# rules}}",
+      "tooLarge": "Too large to count"
+    },
     "contentKindWarning": {
       "noStatus": "no status",
       "convertFailed": "Failed to convert dataset role.",

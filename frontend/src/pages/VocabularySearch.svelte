@@ -38,7 +38,9 @@
 
   // ── Term search ───────────────────────────────────────────────────────────
   let termQuery = '';
-  let termTypes = new Set(['class', 'property']);
+  // Every term type by default: a concept scheme's concepts and a profile's
+  // individuals are `instance` terms and would otherwise look missing.
+  let termTypes = new Set(['class', 'property', 'datatype', 'instance']);
   let termSource = '';
   let termVocab = '';
   let termLoading = false;

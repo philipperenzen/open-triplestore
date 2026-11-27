@@ -17,6 +17,7 @@ use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 
 use super::blank_nodes;
 use super::diff::{collect_triples, compute_diff, triple_delta, version_revision};
+use super::facets::{self, ContentFacets};
 use super::merge;
 use super::models::{
     ContentAttribution, CreateDataModelRequest, CreateDraftRequest, DataModelRecord,
@@ -53,10 +54,23 @@ fn model_response(state: &AppState, record: DataModelRecord) -> DataModelRespons
     });
     let attribution =
         entry_attribution(&record, stored, latest).map(|a| served_attribution(state, a));
+    let facets = entry_facets(state, &record);
     DataModelResponse {
         record,
         attribution,
+        facets,
     }
+}
+
+/// The stored facets of an entry's latest published version (its latest draft
+/// when none is published), when they still describe its content.
+fn entry_facets(state: &AppState, record: &DataModelRecord) -> Option<ContentFacets> {
+    let latest = record
+        .latest_published
+        .as_deref()
+        .or(record.latest_draft.as_deref())?;
+    let version = registry::get_version(&state.store, &state.base_url, &record.id, latest)?;
+    facets::stored_if_fresh(&state.store, &state.base_url, &version)
 }
 
 /// The licence record an entry is served with. It describes the content the
@@ -92,9 +106,11 @@ fn version_response(state: &AppState, version: DataModelVersion) -> DataModelVer
         &registry::version_record_iri(&state.base_url, &version.data_model_id, &version.version),
     )
     .map(|a| served_attribution(state, a));
+    let facets = facets::stored_if_fresh(&state.store, &state.base_url, &version);
     DataModelVersionResponse {
         version,
         attribution,
+        facets,
     }
 }
 
@@ -365,6 +381,7 @@ pub async fn list_data_models(
         .collect();
     let mut attributions = registry::model_attributions(&state.store);
     let mut latest = registry::latest_published_attributions(&state.store);
+    let mut entry_facets = registry::latest_facets(&state.store);
     // Who registered an entry is for `OTS_ACTOR_VISIBILITY`'s audience, entry
     // by entry: the caller may write some of them and not others.
     let audience = crate::auth::policy::actor_audience(&state.auth_db);
@@ -380,6 +397,7 @@ pub async fn list_data_models(
                 latest.remove(&record.id),
             )
             .map(|a| served_attribution(&state, a)),
+            facets: entry_facets.remove(&record.id),
             record,
         });
     }
@@ -638,6 +656,7 @@ pub async fn list_versions(
             attribution: attributions
                 .remove(&version.version)
                 .map(|a| served_attribution(&state, a)),
+            facets: facets::stored_if_fresh(&state.store, &state.base_url, &version),
             version,
         })
         .collect();
@@ -670,7 +689,21 @@ pub async fn get_version(
     if !shows_actors(&state, &ontology, uid)? {
         record.created_by = None;
     }
-    Ok(Json(version_response(&state, record)))
+    // Opening one version counts its content when that has not been done, or
+    // the content has changed since, and it is small enough to scan here.
+    let counted = {
+        let (store, base, version) = (
+            state.store.clone(),
+            state.base_url.to_string(),
+            record.clone(),
+        );
+        tokio::task::spawn_blocking(move || facets::ensure_inline(&store, &base, &version))
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+    let mut response = version_response(&state, record);
+    response.facets = counted.or(response.facets);
+    Ok(Json(response))
 }
 
 /// GET /api/models/:id/collaborators
@@ -1212,6 +1245,19 @@ pub async fn upload_version(
     };
 
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+
+    // What the upload holds, from the scan it was just given: no second pass.
+    let uploaded_facets = ContentFacets::from_evidence(
+        &detected.evidence,
+        facets::content_triples(&state.store, &record.content_graphs()),
+    );
+    if let Err(e) = registry::set_version_facets(
+        &state.store,
+        &registry::version_record_iri(&state.base_url, &id, &record.version),
+        &uploaded_facets,
+    ) {
+        tracing::warn!(model = %id, version = %record.version, error = %e, "facets: the counts of an upload could not be stored");
+    }
 
     // Persist the detected/declared kind on the entry so the registry can badge
     // and filter ontologies vs SKOS vocabularies.

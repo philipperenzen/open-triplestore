@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { probeContentKind } from '../lib/content-kind.js';
+  import { probeContentKind, contentKindMismatch } from '../lib/content-kind.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { AlertTriangle, X, MoveRight, ArrowRight, Loader2 } from 'lucide-svelte';
   import { navigate } from '../lib/router/index.js';
@@ -42,31 +42,7 @@
   onMount(run);
   onDestroy(() => probeAbort?.abort());
 
-  function computeMismatch(p, dis, exp, role) {
-    if (!p || dis) return null;
-    if (p.verdict === 'empty') return null;
-    const isModelRole = role === 'model';
-    const isVocabRole = role === 'vocabulary';
-    const isShapesRole = role === 'shapes';
-    const isEntailmentRole = role === 'entailment';
-    if ((exp === 'model' || exp === 'vocabulary') && (p.verdict === 'instances' || p.verdict === 'mixed') && p.instanceCount > 0) {
-      return 'instance-in-model';
-    }
-    if (exp === 'dataset' && p.verdict === 'model') return isModelRole ? null : 'model-in-dataset';
-    if (exp === 'dataset' && p.verdict === 'vocabulary') return isVocabRole ? null : 'vocabulary-in-dataset';
-    if (exp === 'dataset' && p.verdict === 'shapes') return isShapesRole ? null : 'shapes-in-dataset';
-    if (exp === 'dataset' && p.verdict === 'entailment') return isEntailmentRole ? null : 'entailment-in-dataset';
-    if (exp === 'dataset' && p.verdict === 'mixed'
-        && (p.classCount + p.propertyCount + p.shapeCount + (p.skosSchemeCount || 0) + (p.skosConceptCount || 0)) > 3) {
-      const skosSignal = (p.skosSchemeCount || 0) + (p.skosConceptCount || 0);
-      const schemaSignal = p.classCount + p.propertyCount + p.shapeCount;
-      if (skosSignal > schemaSignal) return isVocabRole ? null : 'vocabulary-in-dataset';
-      return isModelRole ? null : 'model-in-dataset';
-    }
-    return null;
-  }
-
-  let mismatch = $derived(computeMismatch(probe, dismissed, expected, declaredRole));
+  let mismatch = $derived(contentKindMismatch(probe, dismissed, expected, declaredRole));
 
   function openModal() { showModal = true; convertError = ''; }
   function closeModal() { showModal = false; }

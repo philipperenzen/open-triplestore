@@ -10,6 +10,7 @@ pub mod blank_nodes;
 pub mod content_digest;
 pub mod deref;
 pub mod diff;
+pub mod facets;
 pub mod handlers;
 pub mod merge;
 pub mod models;

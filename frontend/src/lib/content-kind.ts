@@ -46,6 +46,58 @@ export function classifyVerdict(s: ContentKindSignals): ContentKindVerdict {
   return 'mixed';
 }
 
+export type ContentKindMismatch =
+  | 'instance-in-model'
+  | 'model-in-dataset'
+  | 'vocabulary-in-dataset'
+  | 'shapes-in-dataset'
+  | 'entailment-in-dataset';
+
+/** The signals a mismatch is judged on: a probe, or a dataset's content summary. */
+export type ContentKindProbe = ContentKindSignals & { verdict: ContentKindVerdict };
+
+/**
+ * Which banner, if any, a graph set's content earns where it sits.
+ *
+ * `expected` is where the content was put: `model` / `vocabulary` (a registry
+ * entry) or `dataset`; `role` is the graph role the dataset declares.
+ *
+ * A SKOS concept scheme belongs in a dataset as much as anywhere: a thesaurus is
+ * data. So concepts and schemes never raise "vocabulary in a dataset" on their
+ * own, and do not count towards the amount of schema in mixed content; only
+ * classes, properties and shapes do.
+ */
+export function contentKindMismatch(
+  p: ContentKindProbe | null | undefined,
+  dismissed: boolean,
+  expected: string,
+  role: string | null | undefined,
+): ContentKindMismatch | null {
+  if (!p || dismissed) return null;
+  if (p.verdict === 'empty') return null;
+  const isModelRole = role === 'model';
+  const isVocabRole = role === 'vocabulary';
+  const isShapesRole = role === 'shapes';
+  const isEntailmentRole = role === 'entailment';
+  const skosOnly =
+    p.classCount === 0 && p.propertyCount === 0 && p.shapeCount === 0 && p.entailmentCount === 0;
+  if ((expected === 'model' || expected === 'vocabulary') && (p.verdict === 'instances' || p.verdict === 'mixed') && p.instanceCount > 0) {
+    return 'instance-in-model';
+  }
+  if (expected !== 'dataset') return null;
+  if (p.verdict === 'model') return isModelRole ? null : 'model-in-dataset';
+  if (p.verdict === 'vocabulary') {
+    if (skosOnly) return null;
+    return isVocabRole ? null : 'vocabulary-in-dataset';
+  }
+  if (p.verdict === 'shapes') return isShapesRole ? null : 'shapes-in-dataset';
+  if (p.verdict === 'entailment') return isEntailmentRole ? null : 'entailment-in-dataset';
+  if (p.verdict === 'mixed' && p.classCount + p.propertyCount + p.shapeCount > 3) {
+    return isModelRole ? null : 'model-in-dataset';
+  }
+  return null;
+}
+
 // ── Cheap, always-on content summary from the browse facets ──────────────────
 // The facet endpoint returns per-type `?s a ?cls` counts (COUNT(DISTINCT ?s))
 // straight from the store — index-backed for graphs, and a single concurrent
