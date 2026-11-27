@@ -59,7 +59,8 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/browse/graphs` | **none** | The graphs in scope for the caller. |
 | `GET` | `/api/browse/triples` | **none** | Browse rows, filtered by the caller's visibility and graph permissions. |
 | `GET` | `/api/browse/facets` | **none** | Facet counts over the same scope. |
-| `GET` | `/api/browse/resource` | **none** | One resource's triples, in scope. |
+| `GET` | `/api/browse/resource` | **none** | One resource's triples, in scope. A `graph` that is the base graph of a model version kept in sub-graphs reads that version's graphs. |
+| `GET` | `/api/browse/resource/context` | **none** | Where a resource belongs: the models that define it, the classes it is an instance of with their models, the datasets holding it and the model each conforms to, and where a class's instances are. Only from graphs the caller may read. |
 | `GET` | `/api/browse/stats` | **none** | Counts over the scope. |
 | `GET` | `/api/browse/suggest` | **none** | Type-ahead over the terms in scope. |
 | `GET` | `/api/datasets` | **none** | The datasets the caller may read; anonymously, the public ones. |

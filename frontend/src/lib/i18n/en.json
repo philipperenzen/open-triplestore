@@ -5476,6 +5476,23 @@
       "viewN": "Show patch {n}",
       "downloadN": "Download patch {n}",
       "loadMore": "Load more"
+    },
+    "resourceContext": {
+      "title": "Model and data",
+      "definedIn": "Defined in",
+      "instanceOf": "Instance of",
+      "classDefinedIn": "defined in",
+      "classNotInAModel": "not defined in a model you can read",
+      "inDataset": "In dataset",
+      "conformsTo": "conforms to",
+      "noModelDeclared": "declares no model it conforms to",
+      "instances": "Instances",
+      "instancesIn": "in",
+      "instancesElsewhere": "in graphs outside any dataset or model",
+      "showInstances": "Show what is typed with this",
+      "conformingDatasets": "Datasets conforming to this model",
+      "conformsToVersion": "version {version}",
+      "otherVersions": "also in {count, plural, one {# other version} other {# other versions}}"
     }
   },
   "viewer": {

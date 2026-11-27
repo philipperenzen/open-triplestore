@@ -3043,7 +3043,7 @@ fn check_graph_read_access(
 
 /// Validate a user-supplied IRI string to prevent SPARQL injection.
 /// Rejects any string containing characters that could break out of an IRI literal.
-fn validate_iri(iri: &str) -> Result<(), AppError> {
+pub(super) fn validate_iri(iri: &str) -> Result<(), AppError> {
     if iri.contains('>')
         || iri.contains('<')
         || iri.contains('"')
@@ -5344,8 +5344,27 @@ pub async fn browse_resource(
     // Graphs this request may read. Drives BOTH the SPARQL path (FROM clauses)
     // and the blank-node path (a low-level quad scan — SPARQL cannot address a
     // stored blank node by its label).
+    //
+    // A model version stored as several graphs keeps its triples in its
+    // sub-graphs; its base graph, the one the registry and every link to this
+    // page names the version by, may hold none. Asked for such a base graph,
+    // read the version's graphs (those the caller may read): scoped to the
+    // empty base graph alone, a term of the model came back with no statement,
+    // no label and nothing to follow.
+    let version_graphs: Option<Vec<String>> = params
+        .graph
+        .as_deref()
+        .and_then(|g| crate::data_models::registry::version_content_graphs(&state.store, g));
+    // The one graph to bind with `GRAPH <…>`, when the request names a graph
+    // that stands for itself.
+    let single_graph: Option<&str> = match version_graphs {
+        Some(_) => None,
+        None => params.graph.as_deref(),
+    };
     let mut search_graphs: Vec<String> = if let Some(ref graph) = params.graph {
-        if !is_admin {
+        let accessible = if is_admin {
+            None
+        } else {
             let cached_graphs = state
                 .auth_db
                 .get_accessible_graph_iris_cached(user_id)
@@ -5353,8 +5372,16 @@ pub async fn browse_resource(
             if !cached_graphs.0.contains(graph.as_str()) {
                 return Err(AppError::NotFound("Graph not found".to_string()));
             }
+            Some(cached_graphs)
+        };
+        match version_graphs {
+            Some(ref graphs) => graphs
+                .iter()
+                .filter(|g| accessible.as_ref().is_none_or(|a| a.0.contains(g.as_str())))
+                .cloned()
+                .collect(),
+            None => vec![graph.clone()],
         }
-        vec![graph.clone()]
     } else if let Some(ds_ids) = scope_dataset_ids(
         &state,
         params.dataset_id.as_deref(),
@@ -5452,7 +5479,7 @@ pub async fn browse_resource(
         }
     }
 
-    let from_clauses: Option<String> = if params.graph.is_some() {
+    let from_clauses: Option<String> = if single_graph.is_some() {
         None // specific graph injected via GRAPH <…> in the query template below
     } else {
         let mut clauses = String::new();
@@ -5479,7 +5506,7 @@ pub async fn browse_resource(
     const MAX_BNODE_DEPTH: usize = 5;
     let outgoing_query = build_query(&build_resource_closure_query(
         iri,
-        params.graph.as_deref(),
+        single_graph,
         MAX_BNODE_DEPTH,
     ));
 
@@ -5492,7 +5519,7 @@ pub async fn browse_resource(
     // sort was pure waste. LIMIT 501 lets us detect "more than 500" from the row
     // count without a second query.
     const INCOMING_CAP: usize = 500;
-    let incoming_query = build_query(&if let Some(ref graph) = params.graph {
+    let incoming_query = build_query(&if let Some(graph) = single_graph {
         format!(
             "SELECT ?s ?p WHERE {{ GRAPH <{}> {{ ?s ?p <{}> }} }} LIMIT {}",
             graph,

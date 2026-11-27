@@ -1983,6 +1983,126 @@ pub fn graph_held_by_version_checked(store: &TripleStore, graph_iri: &str) -> Op
     }
 }
 
+/// The graphs holding the content of the version whose base graph is
+/// `graph_iri`, base graph first: `Some` only when that version lists
+/// sub-graphs other than the base graph itself.
+///
+/// A version stored as several graphs keeps its triples in its sub-graphs; the
+/// base graph, the one the registry and every link names the version by, may
+/// hold none. A reader handed the base graph has to read these instead.
+/// `None` for any other graph (a sub-graph, a dataset graph, an unknown IRI)
+/// and when the registry query fails: the caller then reads the graph it was
+/// given, as before.
+pub fn version_content_graphs(store: &TripleStore, graph_iri: &str) -> Option<Vec<String>> {
+    NamedNode::new(graph_iri).ok()?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT DISTINCT ?g WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?v ver:graphIri <{graph_iri}> ; ver:subGraph ?g .
+        }} }}
+        "#
+    );
+    let QueryResults::Solutions(solutions) = store.query(&q).ok()? else {
+        return None;
+    };
+    let mut subs = Vec::new();
+    for row in solutions {
+        let vals: Vec<Option<Term>> = row.ok()?.values().to_vec();
+        if let Some(g) = var_str(&vals, 0) {
+            if g != graph_iri {
+                subs.push(g);
+            }
+        }
+    }
+    if subs.is_empty() {
+        return None;
+    }
+    subs.sort();
+    Some(super::content_digest::version_graphs(graph_iri, &subs))
+}
+
+/// A version of a registry entry, as the place a graph belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphVersion {
+    /// The graph asked about: the version's base graph or one of its sub-graphs.
+    pub graph: String,
+    pub model_id: String,
+    pub title: String,
+    pub kind: Option<String>,
+    pub version: String,
+    pub status: String,
+    /// Whether this is the entry's latest published version.
+    pub latest_published: bool,
+}
+
+/// The versions that name any of `graphs` as their base graph or a sub-graph:
+/// one registry query for the whole list. Graph names that are not valid IRIs
+/// are left out. `None` when the registry query fails.
+pub fn versions_of_graphs(store: &TripleStore, graphs: &[String]) -> Option<Vec<GraphVersion>> {
+    let values: Vec<String> = graphs
+        .iter()
+        .filter(|g| NamedNode::new(g.as_str()).is_ok())
+        .map(|g| format!("<{g}>"))
+        .collect();
+    if values.is_empty() {
+        return Some(Vec::new());
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        PREFIX owl: <{OWL}>
+        SELECT ?g ?m ?title ?kind ?semver ?status ?v ?latest WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          VALUES ?g {{ {values} }}
+          {{ ?v ver:graphIri ?g }} UNION {{ ?v ver:subGraph ?g }}
+          ?v ver:dataModel ?m ; owl:versionInfo ?semver ; ver:status ?status .
+          ?m dct:title ?title .
+          OPTIONAL {{ ?m ver:kind ?kind }}
+          OPTIONAL {{ ?m ver:latestPublished ?latest }}
+        }} }}
+        "#,
+        values = values.join(" "),
+    );
+    let QueryResults::Solutions(solutions) = store.query(&q).ok()? else {
+        return None;
+    };
+    let mut out: Vec<GraphVersion> = Vec::new();
+    for row in solutions {
+        let vals: Vec<Option<Term>> = row.ok()?.values().to_vec();
+        let (Some(graph), Some(model), Some(title), Some(version), Some(status)) = (
+            var_str(&vals, 0),
+            var_str(&vals, 1),
+            var_str(&vals, 2),
+            var_str(&vals, 4),
+            var_str(&vals, 5),
+        ) else {
+            continue;
+        };
+        let model_id = model.rsplit('/').next().unwrap_or(&model).to_string();
+        let latest_published = match (var_str(&vals, 6), var_str(&vals, 7)) {
+            (Some(v), Some(latest)) => v == latest,
+            _ => false,
+        };
+        let entry = GraphVersion {
+            graph,
+            model_id,
+            title,
+            kind: var_str(&vals, 3),
+            version,
+            status,
+            latest_published,
+        };
+        // A title in two languages fans the rows out; one per graph and version.
+        if !out.iter().any(|e| {
+            e.graph == entry.graph && e.model_id == entry.model_id && e.version == entry.version
+        }) {
+            out.push(entry);
+        }
+    }
+    Some(out)
+}
+
 /// The id of a registry entry holding `graph_iri`: the entry a version graph
 /// `{base}/data-model/{id}/version/{ver}` (or a graph under it) is named
 /// after, else the entry of a version record naming it as its base graph or
