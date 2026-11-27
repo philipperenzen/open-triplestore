@@ -9,6 +9,7 @@ import { loadOntologyGraph } from './loader';
 import { kindOf, splitIri, prefixForNamespace, type VocabKind } from './vocabularies';
 import { isBetterLang } from './termDisplay';
 import type { ClassExpr, Restriction } from './dl-render';
+import type { PathExpr } from '../shaclModel';
 
 const { namedNode } = DataFactory;
 
@@ -49,6 +50,8 @@ export type ClassEntry = {
   hasKey?: string[][];
   restrictions: Restriction[];
   instanceCount: number;
+  /** Distinct subjects typed with this class inside the loaded graph(s). */
+  instances: string[];
   hasShape: boolean;
 };
 
@@ -59,6 +62,10 @@ export type PropertyEntry = {
   comment: string;
   domain: string[];
   range: string[];
+  /** Named members of an `owl:unionOf` domain / range, kept apart from
+   *  `domain` / `range` so the property panel still shows what was stated. */
+  domainUnion: string[];
+  rangeUnion: string[];
   superProperties: string[];
   equivalentProperty: string[];
   inverseOf: string[];
@@ -91,20 +98,45 @@ export type NamespaceEntry = {
   kind: VocabKind;
 };
 
+export type ShapePropertyEntry = {
+  /** The predicate IRI for a plain path; the path node's id otherwise. */
+  path: string;
+  /** Set only when the path is not a single predicate (inverse, sequence, …). */
+  pathExpr?: PathExpr;
+  name?: string;
+  minCount?: string;
+  maxCount?: string;
+  datatype?: string;
+  cls?: string;
+  nodeKind?: string;
+  /** Number of members of the `sh:in` list, when there is one. */
+  inCount?: number;
+  pattern?: string;
+};
+
 export type ShapeEntry = {
   iri: string;
   label: string;
   targetClass: string[];
   targetNode: string[];
-  properties: Array<{
-    path: string;
-    name?: string;
-    minCount?: string;
-    maxCount?: string;
-    datatype?: string;
-    cls?: string;
-    pattern?: string;
-  }>;
+  /** The shape IRI is itself a class, so it targets that class implicitly. */
+  implicitTarget: boolean;
+  properties: ShapePropertyEntry[];
+};
+
+/**
+ * Lookup tables for the class detail pane, built once per model so that
+ * selecting a class costs only its own (and its ancestors') entries.
+ */
+export type SchemaIndex = {
+  /** class IRI -> properties whose rdfs:domain (or union domain) names it */
+  propsByDomain: Map<string, string[]>;
+  /** class IRI -> properties whose rdfs:range (or union range) names it */
+  propsByRange: Map<string, string[]>;
+  /** class IRI -> shapes that target it (sh:targetClass or implicitly) */
+  shapesByClass: Map<string, string[]>;
+  /** class IRI -> property shapes whose sh:class names it */
+  shapePropsByValueClass: Map<string, Array<{ shape: string; prop: ShapePropertyEntry }>>;
 };
 
 export type SchemaModel = {
@@ -118,6 +150,7 @@ export type SchemaModel = {
   imports: string[];
   labels: Map<string, string>;
   comments: Map<string, string>;
+  index: SchemaIndex;
 };
 
 // ---------------------------------------------------------------------------
@@ -229,6 +262,37 @@ function parseRestriction(store: Store, t: Term, depth = 0): Restriction | null 
   return null;
 }
 
+// SHACL property path (SHACL §2.3.1) as a PathExpr, or null when the node is
+// not a path this reader understands.
+function readPath(store: Store, t: Term, depth = 0): PathExpr | null {
+  if (depth > 8) return null;
+  if (t.termType === 'NamedNode') return { kind: 'predicate', iri: t.value };
+  if (t.termType !== 'BlankNode') return null;
+  const one = (p: string) => store.getObjects(t as any, namedNode(SH + p), null)[0];
+  const unary = (p: string, kind: 'inverse' | 'zeroOrMore' | 'oneOrMore' | 'zeroOrOne'): PathExpr | null => {
+    const o = one(p);
+    if (!o) return null;
+    const inner = readPath(store, o, depth + 1);
+    return inner ? { kind, path: inner } : null;
+  };
+  const u = unary('inversePath', 'inverse') || unary('zeroOrMorePath', 'zeroOrMore')
+    || unary('oneOrMorePath', 'oneOrMore') || unary('zeroOrOnePath', 'zeroOrOne');
+  if (u) return u;
+  const listOf = (head: Term | undefined): PathExpr[] | null => {
+    if (!head) return null;
+    const parts = readList(store, head).map(x => readPath(store, x, depth + 1));
+    return parts.length && parts.every(Boolean) ? parts as PathExpr[] : null;
+  };
+  const alt = listOf(one('alternativePath'));
+  if (alt) return { kind: 'alternative', paths: alt };
+  // A sequence path is the RDF list itself.
+  if (store.getObjects(t as any, namedNode(RDF + 'first'), null).length) {
+    const seq = listOf(t);
+    if (seq) return { kind: 'sequence', paths: seq };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 
 export async function buildSchemaModel(graphs: string[]): Promise<SchemaModel> {
@@ -250,6 +314,9 @@ export function extractSchema(store: Store): SchemaModel {
   const collections = new Map<string, CollectionEntry>();
   const shapes = new Map<string, ShapeEntry>();
   const imports: string[] = [];
+  // Subjects typed rdfs:Class / owl:Class. `classes` also holds IRIs that only
+  // appear as a superclass, which must not count for SHACL's implicit target.
+  const typedClasses = new Set<string>();
 
   const ensureClass = (iri: string): ClassEntry => {
     let c = classes.get(iri);
@@ -259,7 +326,7 @@ export function extractSchema(store: Store): SchemaModel {
         parents: [], children: [],
         equivalents: [], disjoints: [],
         restrictions: [],
-        instanceCount: 0, hasShape: false,
+        instanceCount: 0, instances: [], hasShape: false,
       };
       classes.set(iri, c);
     }
@@ -270,7 +337,7 @@ export function extractSchema(store: Store): SchemaModel {
     if (!p) {
       p = {
         iri, kind: 'property', label: '', comment: '',
-        domain: [], range: [],
+        domain: [], range: [], domainUnion: [], rangeUnion: [],
         superProperties: [], equivalentProperty: [], inverseOf: [], chains: [],
         characteristics: new Set(),
       };
@@ -298,7 +365,7 @@ export function extractSchema(store: Store): SchemaModel {
   };
   const ensureShape = (iri: string): ShapeEntry => {
     let s = shapes.get(iri);
-    if (!s) { s = { iri, label: '', targetClass: [], targetNode: [], properties: [] }; shapes.set(iri, s); }
+    if (!s) { s = { iri, label: '', targetClass: [], targetNode: [], implicitTarget: false, properties: [] }; shapes.set(iri, s); }
     return s;
   };
   const addUnique = (arr: string[], v: string) => { if (v && !arr.includes(v)) arr.push(v); };
@@ -325,7 +392,7 @@ export function extractSchema(store: Store): SchemaModel {
       }
     } else if (p === TYPE) {
       const t = o.value;
-      if (t === RDFS + 'Class' || t === OWL + 'Class') ensureClass(s);
+      if (t === RDFS + 'Class' || t === OWL + 'Class') { ensureClass(s); typedClasses.add(s); }
       else if (t === RDF + 'Property') { ensureProp(s); }
       else if (t === OWL + 'ObjectProperty') { ensureProp(s).kind = 'object'; }
       else if (t === OWL + 'DatatypeProperty') { ensureProp(s).kind = 'datatype'; }
@@ -425,14 +492,25 @@ export function extractSchema(store: Store): SchemaModel {
     e.hasKey.push(keys);
   }
 
-  // domain / range
+  // domain / range. A blank-node domain is usually `[ owl:unionOf (A B) ]`;
+  // its named members are kept so A and B both list the property.
+  const unionMembers = (t: Term): string[] => {
+    const u = store.getObjects(t as any, namedNode(OWL + 'unionOf'), null)[0];
+    return u ? readList(store, u).filter(x => x.termType === 'NamedNode').map(x => x.value) : [];
+  };
   for (const q of store.getQuads(null, namedNode(RDFS + 'domain'), null, null)) {
     if (q.subject.termType !== 'NamedNode') continue;
     if (q.object.termType === 'NamedNode') addUnique(ensureProp(q.subject.value).domain, q.object.value);
+    else if (q.object.termType === 'BlankNode') {
+      for (const m of unionMembers(q.object)) addUnique(ensureProp(q.subject.value).domainUnion, m);
+    }
   }
   for (const q of store.getQuads(null, namedNode(RDFS + 'range'), null, null)) {
     if (q.subject.termType !== 'NamedNode') continue;
     if (q.object.termType === 'NamedNode') addUnique(ensureProp(q.subject.value).range, q.object.value);
+    else if (q.object.termType === 'BlankNode') {
+      for (const m of unionMembers(q.object)) addUnique(ensureProp(q.subject.value).rangeUnion, m);
+    }
   }
   // subPropertyOf, equivalentProperty, inverseOf
   for (const q of store.getQuads(null, namedNode(RDFS + 'subPropertyOf'), null, null)) {
@@ -472,15 +550,29 @@ export function extractSchema(store: Store): SchemaModel {
     const pShape = q.object;
     const pick = (name: string) => store.getObjects(pShape as any, namedNode(SH + name), null)[0];
     const path = pick('path'); if (!path) continue;
-    sh.properties.push({
+    const entry: ShapePropertyEntry = {
       path: path.value,
       name: pick('name')?.value,
       minCount: pick('minCount')?.value,
       maxCount: pick('maxCount')?.value,
       datatype: pick('datatype')?.value,
       cls: pick('class')?.value,
+      nodeKind: pick('nodeKind')?.value,
       pattern: pick('pattern')?.value,
-    });
+    };
+    if (path.termType !== 'NamedNode') {
+      const expr = readPath(store, path);
+      if (expr) entry.pathExpr = expr;
+    }
+    const inList = pick('in');
+    if (inList) entry.inCount = readList(store, inList).length;
+    sh.properties.push(entry);
+  }
+  // SHACL §2.1.3.3: a shape that is also an rdfs:Class targets that class.
+  for (const sh of shapes.values()) {
+    if (!typedClasses.has(sh.iri)) continue;
+    sh.implicitTarget = true;
+    const c = classes.get(sh.iri); if (c) c.hasShape = true;
   }
 
   // ---- SKOS ----------------------------------------------------------------
@@ -548,9 +640,39 @@ export function extractSchema(store: Store): SchemaModel {
   }
   for (const sh of shapes.values()) sh.label = labels.get(sh.iri) || '';
 
+  const instanceSets = new Map<ClassEntry, Set<string>>();
   for (const q of store.getQuads(null, namedNode(TYPE), null, null)) {
     const c = classes.get(q.object.value);
-    if (c) c.instanceCount++;
+    if (!c) continue;
+    c.instanceCount++;
+    if (q.subject.termType !== 'NamedNode') continue;
+    let set = instanceSets.get(c);
+    if (!set) { set = new Set(); instanceSets.set(c, set); }
+    set.add(q.subject.value);
+  }
+  for (const [c, set] of instanceSets) c.instances = [...set];
+
+  // ---- per-class lookup tables (one pass over properties and shapes) -------
+  const push = <V>(m: Map<string, V[]>, k: string, v: V) => {
+    const arr = m.get(k);
+    if (arr) arr.push(v); else m.set(k, [v]);
+  };
+  const index: SchemaIndex = {
+    propsByDomain: new Map(), propsByRange: new Map(),
+    shapesByClass: new Map(), shapePropsByValueClass: new Map(),
+  };
+  for (const p of properties.values()) {
+    for (const d of p.domain) push(index.propsByDomain, d, p.iri);
+    for (const d of p.domainUnion) if (!p.domain.includes(d)) push(index.propsByDomain, d, p.iri);
+    for (const r of p.range) push(index.propsByRange, r, p.iri);
+    for (const r of p.rangeUnion) if (!p.range.includes(r)) push(index.propsByRange, r, p.iri);
+  }
+  for (const sh of shapes.values()) {
+    for (const tc of sh.targetClass) push(index.shapesByClass, tc, sh.iri);
+    if (sh.implicitTarget && !sh.targetClass.includes(sh.iri)) push(index.shapesByClass, sh.iri, sh.iri);
+    for (const pp of sh.properties) {
+      if (pp.cls && !pp.pathExpr) push(index.shapePropsByValueClass, pp.cls, { shape: sh.iri, prop: pp });
+    }
   }
 
   // ---- namespace summary ---------------------------------------------------
@@ -584,6 +706,6 @@ export function extractSchema(store: Store): SchemaModel {
 
   return {
     classes, properties, concepts, schemes, collections,
-    namespaces, shapes, imports, labels, comments,
+    namespaces, shapes, imports, labels, comments, index,
   };
 }

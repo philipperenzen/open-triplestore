@@ -14,6 +14,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The model viewer's class hierarchy shows what a class carries and what
+  is typed with it.** Selecting a class now lists, next to its axioms, its
+  attributes and its relations (outgoing and incoming), each property once:
+  what `rdfs:domain`/`rdfs:range` (also through an `owl:unionOf` domain) and
+  the applicable SHACL property shapes (`sh:targetClass`, or a shape that is
+  itself the class; blank-node property shapes included) say about it is
+  merged into one row with cardinality, datatype or target class, node kind,
+  `sh:in` size and pattern, and badges for where it is stated. Properties a
+  class inherits from its superclasses follow its own, grouped by ancestor.
+  Properties that only shapes describe are listed too, as relations when the
+  shape gives `sh:class`. Property shapes with a complex path appear under the
+  applicable shapes, each of which links to the SHACL tab; a declared
+  property opens in the properties tab, and a related class is selected in the
+  tree. An instances section lists the individuals typed with the class in the
+  model (optionally with those of its subclasses) and, looked up when the
+  class is selected, the count and first 50 of those in data the caller may
+  read over `/sparql`, which is scoped to the caller's graphs as for any query.
 - **A purge can attribute an erased account's history to "Deleted user"
   (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
   provenance name the account behind each write

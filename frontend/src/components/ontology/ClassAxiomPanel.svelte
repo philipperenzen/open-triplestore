@@ -1,22 +1,52 @@
 <script lang="ts">
-  import type { ClassEntry } from '../../lib/ontology/schema-model';
+  import { tick } from 'svelte';
+  import type { ClassEntry, SchemaModel } from '../../lib/ontology/schema-model';
+  import { classDetails, ancestorsOf } from '../../lib/ontology/class-details';
   import { renderClassExpr, renderRestriction } from '../../lib/ontology/dl-render';
   import { shortenIRI } from '../../lib/rdf-utils';
   import { ChevronRight, ChevronDown, Layers } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
   import TermDefinitionCard from './TermDefinitionCard.svelte';
+  import ClassFeatures from './ClassFeatures.svelte';
+  import ClassInstances from './ClassInstances.svelte';
 
   export let classes: ClassEntry[] = [];
   export let onOpen: (_iri: string) => void = () => {};
+  /** The full model; enables the properties, relations, shapes and instances sections. */
+  export let model: SchemaModel | null = null;
+  export let onOpenProperty: (_iri: string) => void = () => {};
+  export let onOpenShape: (_iri: string) => void = () => {};
+  /** Graph passed to the resource page when an instance from the model is opened. */
+  export let resourceGraph: string = '';
 
   let selectedIri = '';
   let expanded = new Set<string>();
+  let listEl: HTMLElement;
 
   $: byIri = new Map(classes.map(c => [c.iri, c]));
   $: roots = classes.filter(c =>
     c.parents.length === 0 || !c.parents.some(p => byIri.has(p))
   );
-  $: selected = selectedIri ? byIri.get(selectedIri) || null : null;
+  // A class reached from the detail pane may be hidden by the current filter;
+  // its details still come from the full model.
+  $: selected = selectedIri ? byIri.get(selectedIri) || model?.classes.get(selectedIri) || null : null;
+  // Computed for the selected class only, never per tree node.
+  $: details = selected && model ? classDetails(model, selected.iri) : null;
+
+  // Select a class from the detail pane: open its ancestors so the tree row
+  // exists, then bring it into view.
+  async function selectClass(iri: string) {
+    selectedIri = iri;
+    if (!model) return;
+    const next = new Set(expanded);
+    for (const a of ancestorsOf(model, iri)) next.add(a);
+    expanded = next;
+    await tick();
+    const row = [...(listEl?.querySelectorAll<HTMLElement>('[data-class-iri]') ?? [])]
+      .find(el => el.dataset.classIri === iri);
+    row?.scrollIntoView?.({ block: 'nearest' });
+    row?.querySelector<HTMLElement>('.cls-btn')?.focus({ preventScroll: true });
+  }
 
   function toggle(iri: string) {
     const next = new Set(expanded);
@@ -33,7 +63,7 @@
 </script>
 
 <div class="cap">
-  <div class="cap-list">
+  <div class="cap-list" bind:this={listEl}>
     <ul class="tree">
       {#each roots as r (r.iri)}
         {@render node(r, 0)}
@@ -133,6 +163,11 @@
           <div class="meta-line">{$t('components.classAxiomPanel.shaclTarget')}: <strong>{selected.hasShape ? $t('components.classAxiomPanel.yes') : $t('components.classAxiomPanel.no')}</strong></div>
         </section>
       </div>
+      {#if model && details}
+        <ClassFeatures {model} {details} classIri={selected.iri}
+          onSelectClass={selectClass} {onOpenProperty} {onOpenShape} {onOpen} />
+        <ClassInstances {model} classIri={selected.iri} {resourceGraph} />
+      {/if}
       <TermDefinitionCard iri={selected.iri} variant="rich" hideEmpty {onOpen} />
     {/if}
   </div>
@@ -141,7 +176,7 @@
 {#snippet node(c, depth)}
   {@const exp = expanded.has(c.iri)}
   <li class="node">
-    <div class="row" class:active={c.iri === selectedIri}>
+    <div class="row" class:active={c.iri === selectedIri} data-class-iri={c.iri}>
       {#if c.children.length > 0}
         <button class="t-toggle" on:click={() => toggle(c.iri)}>
           {#if exp}<ChevronDown size={11} />{:else}<ChevronRight size={11} />{/if}
@@ -149,7 +184,7 @@
       {:else}
         <span class="t-toggle spacer"></span>
       {/if}
-      <button class="cls-btn" on:click={() => (selectedIri = c.iri)} title={c.iri}>
+      <button class="cls-btn" on:click={() => (selectedIri = c.iri)} title={c.iri} aria-current={c.iri === selectedIri ? 'true' : undefined}>
         <span class="cls-label">{c.label || shortenIRI(c.iri)}</span>
         {#if hasAxioms(c)}<span class="ax-pill" title={$t('components.classAxiomPanel.hasAxioms')}>ax</span>{/if}
         {#if c.instanceCount > 0}<span class="inst-pill">{c.instanceCount}</span>{/if}
