@@ -1883,7 +1883,11 @@
       "insert": "invoegen",
       "sourceOnly": "alleen broncode",
       "noConstraintsMatch": "Geen constraints komen overeen met “{query}”.",
-      "aiAssistantTitle": "AI-assistent — opstellen, uitleggen, verbeteren"
+      "aiAssistantTitle": "AI-assistent — opstellen, uitleggen, verbeteren",
+      "largeSourceNotice": "Dit document is {size}. De broncode-editor houdt er een volledige kopie van bij en heeft even nodig om het te kleuren, dus hij opent niet vanzelf. De builder bewerkt dezelfde shapes.",
+      "openSourceAnyway": "Broncode toch openen",
+      "backToBuilder": "Terug naar de builder",
+      "largeSourceLite": "Groot document ({size}): aanvullen, invouwen en regelafbreking staan uit zodat typen vlot blijft."
     },
     "adminSecurity": {
       "heading": "Beveiliging en toegangsbeheer",
@@ -2749,7 +2753,9 @@
       "noRevisions": "Nog geen revisies.",
       "noNote": "(geen notitie)",
       "previewButton": "Voorbeeld",
-      "restoreButton": "Herstellen"
+      "restoreButton": "Herstellen",
+      "previewTruncated": "De eerste {shown} van {total} wordt getoond.",
+      "previewShowAll": "Alles tonen"
     },
     "shapeLibrary": {
       "ownerYou": "U",
@@ -4587,7 +4593,8 @@
       "addedWithVersion": "{count} {count, plural, one {shape} other {shapes}} toegevoegd (v{version})",
       "added": "{count} {count, plural, one {shape} other {shapes}} toegevoegd",
       "created": "\"{name}\" aangemaakt met {count} {count, plural, one {shape} other {shapes}}",
-      "registered": "\"{name}\" geregistreerd"
+      "registered": "\"{name}\" geregistreerd",
+      "showMoreShapes": "Toon {count} meer (nog {remaining})"
     },
     "shapeBuilder": {
       "nodeKind": {
@@ -4726,7 +4733,15 @@
       "chipSeverity": "ernst",
       "valueGroupLabel": "waarde",
       "cardinalityGroupLabel": "kardinaliteit",
-      "unsavedChanges": "Niet-opgeslagen wijzigingen"
+      "unsavedChanges": "Niet-opgeslagen wijzigingen",
+      "parsingLarge": "{size} aan shapes inlezen…",
+      "filterPlaceholder": "Filter shapes op naam, IRI, doel of eigenschapspad",
+      "clearFilter": "Filter wissen",
+      "shapesShown": "{shown} van {total} shapes",
+      "shapesShownFiltered": "{shown} van {matched} gevonden shapes ({total} in totaal)",
+      "noShapesMatch": "Geen shapes gevonden voor “{query}”.",
+      "showMoreShapes": "Toon {count} meer (nog {remaining})",
+      "showAllProperties": "Toon alle {count} properties"
     },
     "skosPanel": {
       "emptyNoConcepts": "Geen SKOS-concepten of -schema's gevonden.",

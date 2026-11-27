@@ -8,7 +8,7 @@
   import { Save, Zap, Loader2, Check, RefreshCw, Lightbulb, Plus, Search, X, Code, LayoutGrid, Sparkles, CornerDownLeft } from 'lucide-svelte';
   import { toastError } from '../lib/toast.ts';
   import { SHACL_CONSTRAINT_CARDS, CONSTRAINT_GROUPS } from '../lib/shaclConstraints.ts';
-  import { parseShapesGraph } from '../lib/shaclModel.ts';
+  import { formatBytes } from '../lib/format.ts';
   import { emptyShapesTemplate } from '../lib/turtle-mode.ts';
   import AiAssistPanel from './AiAssistPanel.svelte';
   import PartialRunNote from './PartialRunNote.svelte';
@@ -39,6 +39,7 @@
   export let usageTargets = [];
 
   let editorRef;
+  let builderRef;
   let shapesContent = '';
   /** Snapshot of the last loaded/saved Turtle — powers the dirty indicator. */
   let savedContent = '';
@@ -78,10 +79,48 @@
     return c.label.toLowerCase().includes(q) || c.what.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
   });
 
-  // Lightweight parse powering the toolbar's shape count + invalid-Turtle
-  // indicator. The builder runs its own (richer) parse for editing.
-  $: graph = parseShapesGraph(shapesContent);
-  $: parseError = graph.parseError || null;
+  // The toolbar's shape count and invalid-Turtle flag come from the builder,
+  // which parses the text once per change. This component used to run a
+  // second full parse of its own, which on a large graph doubled the time the
+  // page sat frozen.
+  let shapeCount = 0;
+  let parseError = null;
+  function onParsed(info) {
+    shapeCount = info.count;
+    parseError = info.parseError || null;
+  }
+  // An edit in the builder whose Turtle is not written yet (large documents
+  // write it after a pause). Counts as unsaved straight away.
+  let pendingEdit = false;
+
+  // ── Source view ────────────────────────────────────────────────────────────
+  // CodeMirror is only created once the source view is first opened, and kept
+  // after that so jump-to-source keeps working. Measured on generated shape
+  // graphs (Node, no DOM): a full syntax-highlighting pass takes about 230 ms
+  // at 1.7 MB, 350 ms at 5.6 MB and 1.3 s at 23 MB, and each extension that
+  // copies the document on every keystroke (completion, folding, linting, the
+  // value sync itself) adds a full copy of it per edit.
+  // From SOURCE_LITE_CHARS the editor runs without those extensions; from
+  // SOURCE_NOTICE_CHARS it waits for an explicit "Open source anyway".
+  const SOURCE_LITE_CHARS = 2 * 1024 * 1024;
+  const SOURCE_NOTICE_CHARS = 8 * 1024 * 1024;
+  let sourceOpened = false;
+  let largeSourceAccepted = false;
+  $: if (view === 'source') sourceOpened = true;
+  $: sourceLength = shapesContent.length;
+  // An editor already open stays open when the text grows past the line.
+  $: sourceNeedsConsent = sourceLength >= SOURCE_NOTICE_CHARS && !largeSourceAccepted && !editorRef;
+  // Fixed when the editor is created: the extensions are chosen at mount.
+  let sourceLite = false;
+  $: if (sourceOpened && !sourceNeedsConsent && !editorRef) sourceLite = sourceLength >= SOURCE_LITE_CHARS;
+
+  function setView(next) {
+    // The builder may still hold an edit it has not written; the source view
+    // must show it.
+    if (next === 'source') builderRef?.flush();
+    else editorRef?.flush?.();
+    view = next;
+  }
 
   const EMPTY_TEMPLATE = emptyShapesTemplate();
 
@@ -96,6 +135,10 @@
 
   async function loadShapes() {
     if (!targetKey) return;
+    // The reload replaces the text, and may bring back the same string, which
+    // the builder would not see as a change: drop its unwritten edit now.
+    builderRef?.discardPending();
+    pendingEdit = false;
     loading = true;
     error = '';
     inferResult = null;
@@ -112,13 +155,19 @@
     }
   }
 
-  $: dirty = !loading && shapesContent !== savedContent;
+  // Re-evaluated only when one of these changes, not on every tick, and the
+  // builder writes a large document's Turtle once per pause in editing rather
+  // than per keystroke; two strings of different length compare at once.
+  $: dirty = !loading && (pendingEdit || shapesContent !== savedContent);
 
   /** Optional note stored with the revision; empty means "let the server name it". */
   let commitMessage = '';
 
   async function saveShapes() {
     if (!targetKey || saving) return;
+    // Bring in edits still waiting for a pause before reading the text.
+    builderRef?.flush();
+    editorRef?.flush?.();
     saving = true;
     saveSuccess = false;
     error = '';
@@ -221,7 +270,9 @@
   }
 
   function insertCard(card) {
-    if (view !== 'source') view = 'source';
+    // Inserting is an explicit request for the source view, size notice or not.
+    largeSourceAccepted = true;
+    if (view !== 'source') setView('source');
     paletteOpen = false;
     paletteSearch = '';
     tick().then(() => editorRef?.insertAtCursor(card.template));
@@ -231,11 +282,11 @@
 <div class="shapes-editor">
   <div class="editor-toolbar">
     <div class="tb-left">
-      <span class="section-label">{$t('pages.shaclShapes.shapes')} ({graph.shapes.length})</span>
+      <span class="section-label">{$t('pages.shaclShapes.shapes')} ({shapeCount ?? '…'})</span>
       {#if parseError}<span class="parse-bad" title={parseError}><X size={12} /> {$t('pages.shaclShapes.invalidTurtle')}</span>{/if}
       <div class="view-toggle">
-        <button class="vt" class:active={view === 'visual'} on:click={() => (view = 'visual')} title={$t('pages.shaclShapes.visualBuilderTitle')}><LayoutGrid size={13} /> {$t('pages.shaclShapes.build')}</button>
-        <button class="vt" class:active={view === 'source'} on:click={() => (view = 'source')} title={$t('pages.shaclShapes.turtleSourceTitle')}><Code size={13} /> {$t('pages.shaclShapes.source')}</button>
+        <button class="vt" class:active={view === 'visual'} on:click={() => setView('visual')} title={$t('pages.shaclShapes.visualBuilderTitle')}><LayoutGrid size={13} /> {$t('pages.shaclShapes.build')}</button>
+        <button class="vt" class:active={view === 'source'} on:click={() => setView('source')} title={$t('pages.shaclShapes.turtleSourceTitle')}><Code size={13} /> {$t('pages.shaclShapes.source')}</button>
       </div>
     </div>
     <div class="toolbar-actions">
@@ -322,11 +373,14 @@
     <!-- Visual builder -->
     <div class="cards" class:hidden={view !== 'visual'}>
       <ShapeBuilder
+        bind:this={builderRef}
         turtle={shapesContent}
         {modelContext}
         {loading}
         {usageTargets}
-        onChange={(ttl) => (shapesContent = ttl)}
+        onChange={(ttl) => { shapesContent = ttl; pendingEdit = false; }}
+        onEdit={() => (pendingEdit = true)}
+        {onParsed}
       />
     </div>
 
@@ -334,11 +388,23 @@
     <div class="source" class:hidden={view !== 'source'}>
       {#if loading}
         <div class="editor-loading">{$t('system.loading')}</div>
-      {:else}
+      {:else if sourceNeedsConsent}
+        <div class="editor-loading source-notice" role="status">
+          <p>{$t('pages.shaclShapes.largeSourceNotice', { values: { size: formatBytes(sourceLength) } })}</p>
+          <div class="source-notice-actions">
+            <button class="btn btn-sm" on:click={() => (largeSourceAccepted = true)}><Code size={13} /> {$t('pages.shaclShapes.openSourceAnyway')}</button>
+            <button class="btn btn-sm btn-ghost" on:click={() => setView('visual')}><LayoutGrid size={13} /> {$t('pages.shaclShapes.backToBuilder')}</button>
+          </div>
+        </div>
+      {:else if sourceOpened}
+        {#if sourceLite}
+          <p class="source-lite-note">{$t('pages.shaclShapes.largeSourceLite', { values: { size: formatBytes(sourceLength) } })}</p>
+        {/if}
         <SparqlEditorCM
           bind:this={editorRef}
           bind:query={shapesContent}
           mode="turtle"
+          large={sourceLite}
           {height}
           {parseError}
           on:save={saveShapes}
@@ -356,8 +422,8 @@
         <AiAssistPanel
           turtle={shapesContent}
           scopeDatasetId={datasetId}
-          onInsert={(text) => { view = 'source'; tick().then(() => editorRef?.insertAtCursor('\n' + text + '\n')); }}
-          onReplace={(text) => { view = 'source'; shapesContent = text; }}
+          onInsert={(text) => { largeSourceAccepted = true; setView('source'); tick().then(() => editorRef?.insertAtCursor('\n' + text + '\n')); }}
+          onReplace={(text) => { setView('source'); shapesContent = text; }}
         />
       </aside>
     {/if}
@@ -426,6 +492,10 @@
 
   .source { display: flex; flex-direction: column; }
   .editor-loading { display: flex; align-items: center; justify-content: center; color: #94a3b8; border: 1px solid var(--line-soft); border-radius: 10px; padding: 2rem; }
+  .source-notice { flex-direction: column; gap: 0.6rem; text-align: center; }
+  .source-notice p { margin: 0; max-width: 34rem; color: var(--ink-500); font-size: 0.85rem; line-height: 1.45; }
+  .source-notice-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+  .source-lite-note { margin: 0 0 0.4rem; font-size: 0.75rem; color: #94a3b8; }
   .editor-footer { margin-top: 0.4rem; font-size: 0.75rem; color: #94a3b8; }
   .editor-hint { display: inline-flex; align-items: center; gap: 0.3rem; }
   :global(.spin) { animation: spin 0.9s linear infinite; }

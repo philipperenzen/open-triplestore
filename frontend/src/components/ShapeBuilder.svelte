@@ -37,19 +37,37 @@
     Database,
     HelpCircle,
     ChevronDown,
+    Search,
+    X,
   } from 'lucide-svelte';
   import Select from './Select.svelte';
   import Combobox from './Combobox.svelte';
   import { shortenIRI, expandPrefix, prefixesVersion } from '../lib/rdf-utils.js';
   import { Link } from '../lib/router/index.js';
   import { t as i18nT } from 'svelte-i18n';
+  import { tick, onDestroy } from 'svelte';
+  import { createShapesParser, isLargeShapesDocument } from '../lib/shapesParse.ts';
+  import { formatBytes } from '../lib/format.ts';
 
   /** Turtle source (two-way: parent binds shapesContent here). */
   export let turtle = '';
   /** @type {{ classes: Array<{iri: string, label?: string, count?: number}>, properties: Array<{iri: string, label?: string, count?: number}> } | null} */
   export let modelContext = null;
-  /** Called with regenerated Turtle whenever the model is edited. */
+  /**
+   * Called with regenerated Turtle whenever the model is edited. On a large
+   * document that happens after a short pause rather than on every edit (see
+   * flush()); `onEdit` reports the edit itself straight away.
+   */
   export let onChange = (_ttl) => {};
+  /** Called on every edit, before its Turtle exists, so a dirty flag can show at once. */
+  export let onEdit = () => {};
+  /**
+   * Called with `{ count, parseError }` whenever the model is replaced or its
+   * shape list changes; `count` is null while a large document is still being
+   * parsed. This is the page's only parse of the text, so the toolbar count
+   * and the invalid-Turtle flag come from here too.
+   */
+  export let onParsed = (_info) => {};
   export let loading = false;
   /**
    * Binding targets the containing shape graph is applied to (datasets / named
@@ -82,10 +100,68 @@
   let _lastTurtle = null;
   let _seq = 0;
 
-  // Re-parse only when the Turtle changed outside this component.
-  $: if (turtle !== _lastTurtle) {
-    model = withIds(parseShapesGraph(turtle));
-    _lastTurtle = turtle;
+  // ── Loading the model ──────────────────────────────────────────────────────
+  // Re-parse only when the Turtle changed outside this component. Called as a
+  // function so that `turtle` alone is the dependency: listing _lastTurtle as
+  // well re-ran the parse on the OLD text whenever commit() moved it ahead of
+  // a parent that had not passed the new text down yet.
+  $: syncFromTurtle(turtle);
+
+  const parser = createShapesParser();
+  /** A large document is being parsed off the main thread. */
+  let parsing = false;
+  let parsingSize = 0;
+  let _parseSeq = 0;
+  /**
+   * Whether the loaded document is large enough that commits are deferred and
+   * the shape list is windowed. Fixed per load, so a model does not switch
+   * behaviour halfway through an editing session.
+   */
+  let largeDoc = false;
+
+  function syncFromTurtle(ttl) {
+    if (ttl === _lastTurtle) return;
+    _lastTurtle = ttl;
+    // Text from outside replaces whatever edit was still waiting to be written.
+    cancelCommit();
+    const seq = ++_parseSeq;
+    if (!isLargeShapesDocument(ttl)) {
+      parser.cancel();
+      parsing = false;
+      largeDoc = false;
+      setModel(parseShapesGraph(ttl));
+      return;
+    }
+    largeDoc = true;
+    parsing = true;
+    parsingSize = ttl.length;
+    onParsed({ count: null, parseError: null });
+    parser.parse(ttl).then(
+      (g) => {
+        if (!g || seq !== _parseSeq) return;
+        parsing = false;
+        setModel(g);
+      },
+      (e) => {
+        if (seq !== _parseSeq) return;
+        parsing = false;
+        setModel({ prefixes: {}, shapes: [], canRoundTrip: false, parseError: e?.message || 'Invalid Turtle' });
+      },
+    );
+  }
+
+  function setModel(g) {
+    model = withIds(g);
+    // A new document starts with a fresh list view.
+    pinnedIds = new Set();
+    showAllPropsFor = {};
+    shapeLimit = SHAPE_PAGE;
+    listVersion++;
+    report();
+  }
+
+  function report() {
+    onParsed({ count: model.shapes.length, parseError: model.parseError || null });
   }
   // makeCurie also falls back to the well-known / prefix-service tables, which
   // are plain module state: without naming $prefixesVersion here, every CURIE
@@ -110,14 +186,144 @@
     return g;
   }
 
-  function commit() {
+  // ── Writing the model back ─────────────────────────────────────────────────
+  // Serialising a 20 MB model takes a few hundred milliseconds, so on a large
+  // document each edit only schedules it; the Turtle is written once the edits
+  // pause, and at once whenever the parent calls flush() (save, switching to
+  // the source view) or this component goes away.
+  const COMMIT_DELAY_MS = 400;
+  let commitTimer = null;
+
+  function writeTurtle() {
     const ttl = serializeShapesGraph(model);
     _lastTurtle = ttl; // set before onChange so the parent's echo won't re-parse
     onChange(ttl);
   }
+  function commit() {
+    _haystacks = null;
+    if (!largeDoc) {
+      writeTurtle();
+      return;
+    }
+    onEdit();
+    clearTimeout(commitTimer);
+    commitTimer = setTimeout(() => {
+      commitTimer = null;
+      writeTurtle();
+    }, COMMIT_DELAY_MS);
+  }
+  function cancelCommit() {
+    clearTimeout(commitTimer);
+    commitTimer = null;
+  }
+  /** Write an edit still waiting for the pause to the parent now. */
+  export function flush() {
+    if (commitTimer == null) return;
+    cancelCommit();
+    writeTurtle();
+  }
+  /**
+   * Drop an edit still waiting for the pause and rebuild the model from the
+   * current text, for a reload that may bring back the very same text.
+   */
+  export function discardPending() {
+    if (commitTimer == null) return;
+    cancelCommit();
+    _lastTurtle = null;
+    syncFromTurtle(turtle);
+  }
+  onDestroy(() => {
+    flush();
+    parser.cancel();
+  });
+
   function touch() {
     model = model;
     commit();
+  }
+
+  // ── Windowed shape list ────────────────────────────────────────────────────
+  // A large graph holds thousands of shapes, each card a dozen inputs and
+  // pickers; rendering them all at once never finished. Past one page the list
+  // shows a filter and one page at a time. Small graphs render as before.
+  const SHAPE_PAGE = 25;
+  // Up to this many shapes (in a document below the large-document size) the
+  // list renders whole, exactly as it did before windowing existed.
+  const WINDOW_MIN_SHAPES = 100;
+  // In a windowed list, a shape with more properties than this shows the first
+  // PROP_PREVIEW behind a "Show all" button.
+  const PROP_CAP = 30;
+  const PROP_PREVIEW = 20;
+  let shapeLimit = SHAPE_PAGE;
+  let filterInput = '';
+  let shapeFilter = '';
+  let filterTimer = null;
+  /** Shapes added here: shown whatever the filter or page, until the next load. */
+  let pinnedIds = new Set();
+  let showAllPropsFor = {};
+  /** Bumped when shapes are loaded, added or removed: what the filter runs over. */
+  let listVersion = 0;
+  let builderEl;
+
+  function onFilterInput() {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => {
+      shapeFilter = filterInput;
+      shapeLimit = SHAPE_PAGE;
+    }, 150);
+  }
+  function clearFilter() {
+    clearTimeout(filterTimer);
+    filterInput = '';
+    shapeFilter = '';
+    shapeLimit = SHAPE_PAGE;
+  }
+
+  // Lower-cased search text per shape: its name, IRI and CURIE, targets and
+  // property paths. Built on the first filtered search and dropped on every
+  // edit, so a renamed shape is found under its new name.
+  let _haystacks = null;
+  function haystackOf(s, show) {
+    if (!_haystacks) _haystacks = new Map();
+    let h = _haystacks.get(s);
+    if (h == null) {
+      const parts = [s.iri, show(s.iri), s.name || ''];
+      for (const t of s.targets || []) parts.push(t.value, show(t.value));
+      for (const p of s.properties || []) {
+        if (p.path) parts.push(p.path, show(p.path));
+        if (p.pathExpr) parts.push(renderPath(p.pathExpr, curie));
+        if (p.iri) parts.push(p.iri, show(p.iri));
+      }
+      h = parts.join('\n').toLowerCase();
+      _haystacks.set(s, h);
+    }
+    return h;
+  }
+  // Arguments, not closure reads, so the block re-runs when they change; the
+  // model itself is read inside on purpose, so editing one field does not
+  // re-run the filter over every shape (an edited card stays on screen even if
+  // it stops matching, which is also what one wants while typing in it).
+  function matchShapes(_version, query, show) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return model.shapes;
+    return model.shapes.filter((s) => haystackOf(s, show).includes(q));
+  }
+  $: windowed = largeDoc || model.shapes.length > WINDOW_MIN_SHAPES;
+  $: matched = matchShapes(listVersion, shapeFilter, disp);
+  $: filterActive = shapeFilter.trim() !== '';
+  // `model` is named so every edit hands the each-block a fresh list: the
+  // cards are mutated in place, and this is what makes them re-render.
+  $: visibleShapes = (model, windowed ? pageOf(matched, shapeLimit, pinnedIds) : model.shapes);
+  function pageOf(list, limit, pinned) {
+    const page = list.slice(0, limit);
+    if (!pinned.size) return page;
+    const onPage = new Set(page.map((s) => s._id));
+    for (const s of model.shapes) if (pinned.has(s._id) && !onPage.has(s._id)) page.push(s);
+    return page;
+  }
+  function shownProps(shape, all, capped) {
+    const props = shape.properties;
+    return capped && props.length > PROP_CAP && !all[shape._id] ? props.slice(0, PROP_PREVIEW) : props;
   }
 
   // ── IRI display / expansion ────────────────────────────────────────────────
@@ -242,23 +448,42 @@
     model.prefixes = { ...model.prefixes, ex: 'http://example.org/' };
     return 'http://example.org/';
   }
-  function addShape() {
+  async function addShape() {
     const ns = baseNs();
+    const taken = new Set(model.shapes.map((s) => s.iri));
     let n = 1;
     let iri;
     do {
       iri = `${ns}Shape${n > 1 ? n : ''}`;
       n++;
-    } while (model.shapes.some((s) => s.iri === iri));
+    } while (taken.has(iri));
+    const id = ++_seq;
     model.shapes = [
       ...model.shapes,
-      { _id: ++_seq, iri, declared: true, targets: [{ kind: 'class', value: '' }], properties: [] },
+      { _id: id, iri, declared: true, targets: [{ kind: 'class', value: '' }], properties: [] },
     ];
+    // In a paged or filtered list the new shape could land off screen; pin it
+    // so it is shown regardless, then bring it into view for naming.
+    pinnedIds = new Set([...pinnedIds, id]);
+    listVersion++;
     touch();
+    report();
+    await tick();
+    const card = builderEl?.querySelector(`[data-shape-id="${id}"]`);
+    card?.scrollIntoView?.({ block: 'nearest' });
+    card?.querySelector('.name-input')?.focus();
   }
-  function deleteShape(i) {
+  function deleteShape(shape) {
+    const i = model.shapes.indexOf(shape);
+    if (i < 0) return;
     model.shapes.splice(i, 1);
+    if (pinnedIds.has(shape._id)) {
+      pinnedIds.delete(shape._id);
+      pinnedIds = new Set(pinnedIds);
+    }
+    listVersion++;
     touch();
+    report();
   }
   function addTarget(shape) {
     shape.targets = [...shape.targets, { kind: 'class', value: '' }];
@@ -282,6 +507,8 @@
 
   function addProperty(shape, tpl) {
     const t = tpl || PROPERTY_TEMPLATES[0];
+    // The new row goes at the end, which a collapsed list would hide.
+    if (!showAllPropsFor[shape._id]) showAllPropsFor = { ...showAllPropsFor, [shape._id]: true };
     shape.properties = [
       ...shape.properties,
       { _id: ++_seq, _vt: t._vt, path: '', c: t.make() },
@@ -465,9 +692,11 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- svelte-ignore a11y_click_events_have_key_events -->
-<div class="builder" on:click={() => (addMenuFor = null)}>
+<div class="builder" bind:this={builderEl} on:click={() => (addMenuFor = null)}>
   {#if loading}
     <div class="state"><FileCode size={20} /> {$i18nT('system.loading')}</div>
+  {:else if parsing}
+    <div class="state" role="status"><FileCode size={20} /> {$i18nT('components.shapeBuilder.parsingLarge', { values: { size: formatBytes(parsingSize) } })}</div>
   {:else if model.parseError}
     <div class="state state-warn">
       <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
@@ -531,8 +760,36 @@
       </div>
     {/if}
 
-    {#each model.shapes as shape, si (shape._id)}
-      <article class="shape" class:ro={!editable}>
+    {#if windowed && model.shapes.length > 0}
+      <div class="list-tools">
+        <div class="filter-box">
+          <Search size={13} />
+          <input
+            type="search"
+            class="filter-input"
+            bind:value={filterInput}
+            on:input={onFilterInput}
+            on:keydown={(e) => { if (e.key === 'Escape' && filterInput) { e.preventDefault(); clearFilter(); } }}
+            placeholder={$i18nT('components.shapeBuilder.filterPlaceholder')}
+            aria-label={$i18nT('components.shapeBuilder.filterPlaceholder')}
+          />
+          {#if filterInput}<button class="icon-btn" on:click={clearFilter} title={$i18nT('components.shapeBuilder.clearFilter')} aria-label={$i18nT('components.shapeBuilder.clearFilter')}><X size={12} /></button>{/if}
+        </div>
+        <span class="list-count" aria-live="polite">
+          {#if filterActive}
+            {$i18nT('components.shapeBuilder.shapesShownFiltered', { values: { shown: visibleShapes.length, matched: matched.length, total: model.shapes.length } })}
+          {:else}
+            {$i18nT('components.shapeBuilder.shapesShown', { values: { shown: visibleShapes.length, total: model.shapes.length } })}
+          {/if}
+        </span>
+      </div>
+      {#if filterActive && matched.length === 0}
+        <div class="state">{$i18nT('components.shapeBuilder.noShapesMatch', { values: { query: shapeFilter.trim() } })}</div>
+      {/if}
+    {/if}
+
+    {#each visibleShapes as shape (shape._id)}
+      <article class="shape" class:ro={!editable} data-shape-id={shape._id}>
         <header class="shape-head">
           <div class="shape-title-row">
             <span class="kind-tag" title={$i18nT('components.shapeBuilder.nodeShapeBadge')}>
@@ -568,7 +825,7 @@
                 <input type="checkbox" checked={!!shape.closed} on:change={(e) => { if (e.currentTarget.checked) shape.closed = true; else delete shape.closed; touch(); }} />
                 <Lock size={11} /> {$i18nT('components.shapeBuilder.closed')}
               </label>
-              <button class="icon-btn danger" on:click={() => deleteShape(si)} title={$i18nT('components.shapeBuilder.deleteShape')}><Trash2 size={14} /></button>
+              <button class="icon-btn danger" on:click={() => deleteShape(shape)} title={$i18nT('components.shapeBuilder.deleteShape')}><Trash2 size={14} /></button>
             {/if}
           </div>
 
@@ -640,7 +897,7 @@
               <span class="micro-label">{$i18nT('components.shapeBuilder.propertiesLabel')} ({shape.properties.length})</span>
             </div>
           {/if}
-          {#each shape.properties as p, pi (p._id)}
+          {#each shownProps(shape, showAllPropsFor, windowed) as p, pi (p._id)}
             {@const chips = constraintChips(p, !editable, $i18nT, disp)}
             <div class="prop" class:complex={p.hasUnsupported}>
               <!-- Line 1: path + name, cardinality summary right-aligned -->
@@ -767,6 +1024,13 @@
               {/if}
             </div>
           {/each}
+          {#if windowed && shape.properties.length > PROP_CAP && !showAllPropsFor[shape._id]}
+            <div class="props-more">
+              <button class="btn btn-xs btn-ghost" on:click={() => (showAllPropsFor = { ...showAllPropsFor, [shape._id]: true })}>
+                {$i18nT('components.shapeBuilder.showAllProperties', { values: { count: shape.properties.length } })}
+              </button>
+            </div>
+          {/if}
           {#if editable}
             <div class="props-foot">
               {#if shape.properties.length === 0}
@@ -797,6 +1061,14 @@
         </div>
       </article>
     {/each}
+
+    {#if windowed && matched.length > shapeLimit}
+      <div class="list-more">
+        <button class="btn btn-sm btn-ghost" on:click={() => (shapeLimit += SHAPE_PAGE)}>
+          {$i18nT('components.shapeBuilder.showMoreShapes', { values: { count: Math.min(SHAPE_PAGE, matched.length - shapeLimit), remaining: matched.length - shapeLimit } })}
+        </button>
+      </div>
+    {/if}
 
     {#if editable && model.shapes.length > 0}
       <button class="btn btn-sm btn-ghost add-shape" on:click={addShape}><Plus size={14} /> {$i18nT('components.shapeBuilder.addNodeShape')}</button>
@@ -844,6 +1116,12 @@
   .props { display: flex; flex-direction: column; }
   .props-head { padding: 0.55rem 0.85rem 0.1rem; }
   .props-foot { padding: 0.5rem 0.85rem 0.7rem; }
+  .props-more { padding: 0.35rem 0.85rem 0; border-top: 1px solid var(--line-soft); }
+  .list-tools { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .filter-box { display: flex; align-items: center; gap: 0.4rem; flex: 1 1 260px; max-width: 32rem; padding: 0.3rem 0.55rem; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg-strong); color: var(--ink-400); }
+  .filter-input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; font-size: 0.82rem; color: var(--ink-800); }
+  .list-count { font-size: 0.76rem; color: var(--ink-500); font-weight: 600; }
+  .list-more { display: flex; justify-content: center; }
   .prop { border-top: 1px solid var(--line-soft); padding: 0.55rem 0.85rem 0.6rem; display: flex; flex-direction: column; gap: 0.35rem; transition: background 0.12s; }
   .prop:first-of-type { border-top: none; }
   .prop:hover { background: color-mix(in srgb, var(--brand-100) 28%, transparent); }

@@ -44,6 +44,15 @@
   export let theme = 'auto';
   /** Show the floating in-editor "Format" button (SPARQL mode, editable only). */
   export let showFormat = true;
+  /**
+   * Turtle mode, for documents of several megabytes. Every extension that
+   * copies the whole document on each change (completion, folding, the
+   * always-on parse-error linter) is left out, long lines scroll instead of
+   * wrapping, and edits reach `query` after a short pause instead of on every
+   * keystroke. Read at mount; call flush() before reading `query` for a save.
+   */
+  export let large = false;
+  const LARGE_SYNC_DELAY_MS = 300;
 
   const dispatch = createEventDispatcher();
 
@@ -99,7 +108,7 @@
   }
 
   $: lintExt = mode === 'turtle'
-    ? turtleLintExt
+    ? (large && !parseError ? [] : turtleLintExt)
     : (mode === 'sparql' && lint)
       ? sparqlLinter({
           knownIris: new Set((ontologyTerms || []).map(t => t.iri)),
@@ -108,7 +117,7 @@
       : [];
 
   // Reconfigure compartments when the ontology changes
-  $: if (view) {
+  $: if (view && !large) {
     view.dispatch({ effects: completionCompartment.reconfigure(completionExt) });
   }
   $: if (view) {
@@ -241,6 +250,27 @@ WHERE {
     }[c]));
   }
 
+  // The text `query` was last brought in line with. Comparing against it
+  // instead of view.state.doc.toString() spares a large document a full copy
+  // whenever this component updates.
+  let syncedText = query;
+  let syncTimer = null;
+  function emitDoc() {
+    syncTimer = null;
+    const newVal = view.state.doc.toString();
+    syncedText = newVal;
+    if (newVal !== query) {
+      query = newVal;
+      dispatch('change', newVal);
+    }
+  }
+  /** Push an edit still waiting for the pause (large mode) into `query` now. */
+  export function flush() {
+    if (syncTimer == null || !view) return;
+    clearTimeout(syncTimer);
+    emitDoc();
+  }
+
   onMount(() => {
     const language = mode === 'turtle'
       ? [turtleLanguage]
@@ -259,7 +289,8 @@ WHERE {
       lineNumbers(),
       // A Turtle IRI is one unbreakable token, so a shapes file legitimately has
       // lines wider than the pane; without wrapping they scroll out of sight.
-      ...(mode === 'turtle' ? [EditorView.lineWrapping, lintGutter(), turtleFolding, foldGutter()] : []),
+      ...(mode === 'turtle' && !large ? [EditorView.lineWrapping, lintGutter(), turtleFolding, foldGutter()] : []),
+      ...(mode === 'turtle' && large ? [lintGutter()] : []),
       highlightActiveLine(),
       history(),
       drawSelection(),
@@ -279,16 +310,21 @@ WHERE {
       ]),
       executeKeymap,
       ...language,
-      completionCompartment.of(completionExt),
+      completionCompartment.of(large ? [] : completionExt),
       lintCompartment.of(lintExt),
       ...(mode === 'sparql' ? [iriHoverTooltip(ontologyTerms || [])] : []),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) {
-          const newVal = update.state.doc.toString();
-          if (newVal !== query) {
-            query = newVal;
-            dispatch('change', newVal);
-          }
+        if (!update.docChanged) return;
+        if (large) {
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(emitDoc, LARGE_SYNC_DELAY_MS);
+          return;
+        }
+        const newVal = update.state.doc.toString();
+        syncedText = newVal;
+        if (newVal !== query) {
+          query = newVal;
+          dispatch('change', newVal);
         }
       }),
       themeCompartment.of(buildEditorTheme(isDark, height)),
@@ -314,10 +350,15 @@ WHERE {
   onDestroy(() => {
     if (unsubTheme) unsubTheme();
     if (unsubNarrow) unsubNarrow();
+    flush();
     if (view) view.destroy();
   });
 
-  $: if (view && query !== view.state.doc.toString()) {
+  $: if (view && query !== (large ? syncedText : view.state.doc.toString())) {
+    // A replacement from outside wins over an edit still waiting to sync.
+    clearTimeout(syncTimer);
+    syncTimer = null;
+    syncedText = query;
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: query },
     });

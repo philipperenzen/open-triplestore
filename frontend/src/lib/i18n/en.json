@@ -1883,7 +1883,11 @@
       "insert": "insert",
       "sourceOnly": "source only",
       "noConstraintsMatch": "No constraints match “{query}”.",
-      "aiAssistantTitle": "AI assistant — draft, explain, improve"
+      "aiAssistantTitle": "AI assistant — draft, explain, improve",
+      "largeSourceNotice": "This document is {size}. The source editor keeps a full copy of it and takes a while to highlight it, so it does not open by itself. The builder edits the same shapes.",
+      "openSourceAnyway": "Open source anyway",
+      "backToBuilder": "Back to the builder",
+      "largeSourceLite": "Large document ({size}): completion, folding and line wrapping are off so typing stays responsive."
     },
     "adminSecurity": {
       "heading": "Security & Access Control",
@@ -2749,7 +2753,9 @@
       "noRevisions": "No revisions yet.",
       "noNote": "(no note)",
       "previewButton": "Preview",
-      "restoreButton": "Restore"
+      "restoreButton": "Restore",
+      "previewTruncated": "Showing the first {shown} of {total}.",
+      "previewShowAll": "Show everything"
     },
     "shapeLibrary": {
       "ownerYou": "You",
@@ -4587,7 +4593,8 @@
       "addedWithVersion": "Added {count} {count, plural, one {shape} other {shapes}} (v{version})",
       "added": "Added {count} {count, plural, one {shape} other {shapes}}",
       "created": "Created \"{name}\" with {count} {count, plural, one {shape} other {shapes}}",
-      "registered": "Registered \"{name}\""
+      "registered": "Registered \"{name}\"",
+      "showMoreShapes": "Show {count} more ({remaining} left)"
     },
     "shapeBuilder": {
       "nodeKind": {
@@ -4726,7 +4733,15 @@
       "chipSeverity": "severity",
       "valueGroupLabel": "value",
       "cardinalityGroupLabel": "cardinality",
-      "unsavedChanges": "Unsaved changes"
+      "unsavedChanges": "Unsaved changes",
+      "parsingLarge": "Reading {size} of shapes…",
+      "filterPlaceholder": "Filter shapes by name, IRI, target or property path",
+      "clearFilter": "Clear filter",
+      "shapesShown": "{shown} of {total} shapes",
+      "shapesShownFiltered": "{shown} of {matched} matching shapes ({total} in total)",
+      "noShapesMatch": "No shapes match “{query}”.",
+      "showMoreShapes": "Show {count} more ({remaining} left)",
+      "showAllProperties": "Show all {count} properties"
     },
     "skosPanel": {
       "emptyNoConcepts": "No SKOS concepts or schemes found.",
