@@ -31,6 +31,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   model (optionally with those of its subclasses) and, looked up when the
   class is selected, the count and first 50 of those in data the caller may
   read over `/sparql`, which is scoped to the caller's graphs as for any query.
+  The model viewer also opens on a term given as `?term=<iri>`: a class is
+  selected in the hierarchy, a property opens in the properties tab and a
+  shape in the SHACL tab, so another page can link straight to a term.
 - **A purge can attribute an erased account's history to "Deleted user"
   (`OTS_PURGE_ATTRIBUTION`).** The commit trail and `full` statement
   provenance name the account behind each write

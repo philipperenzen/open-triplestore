@@ -192,4 +192,38 @@ describe('class detail pane', () => {
     expect(within(inst).getByText('First bridge')).toBeTruthy();
     expect(section(container, 'Attributes')).toBeTruthy();
   });
+
+  describe('opened on a term', () => {
+    const open = async (initialTerm: string) => {
+      const r = render(OntologyModelViewer, { graphIri: '', subGraphs: [], preloadedStore: store(), initialTerm });
+      await flush();
+      return r;
+    };
+
+    it('a class is selected in the hierarchy, with its details shown', async () => {
+      mockedQuery.mockResolvedValue(answer(0));
+      const { container } = await open(`${EX}River`);
+      // No click: the detail pane is already on the class the link named.
+      expect(container.querySelector('.cap-detail .title')?.textContent).toBe('River');
+      expect(section(container, 'Instances')).toBeTruthy();
+      expect(mockedQuery).toHaveBeenCalledTimes(1);
+      expect(String(mockedQuery.mock.calls[0][0])).toContain(`<${EX}River>`);
+    });
+
+    it('a property opens in the properties tab, a shape in the SHACL tab', async () => {
+      const property = await open(`${EX}crosses`);
+      expect(property.container.querySelector('.omv-tab.active')?.textContent).toContain('Properties');
+      property.unmount();
+
+      const shape = await open(`${EX}BridgeShape`);
+      expect(shape.container.querySelector('.omv-tab.active')?.textContent).toContain('SHACL');
+    });
+
+    it('a term the model does not hold leaves the view as it opens', async () => {
+      const { container } = await open(`${EX}Nowhere`);
+      expect(container.querySelector('.omv-tab.active')?.textContent).toContain('Classes');
+      expect(container.querySelector('.cap-detail .title')).toBeNull();
+      expect(mockedQuery).not.toHaveBeenCalled();
+    });
+  });
 });

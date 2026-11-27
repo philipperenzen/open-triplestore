@@ -21,6 +21,8 @@
   export const title: string = '';
   export let versionLabel: string = '';
   export let rawDataUrl: string | null = null;
+  /** A term of the model to open the model view on (a deep link). */
+  export let initialTerm: string = '';
 
   type Mode = 'ontology' | 'graph' | 'tabular' | 'schema';
   let activeMode: Mode = 'ontology';
@@ -540,6 +542,7 @@
         <OntologyModelViewer
           {graphIri} {subGraphs} {versionLabel}
           initialTab="classes"
+          {initialTerm}
           preloadedStore={loadedStore}
           allowSparqlFallback={!rawDataUrl}
           on:reload={reloadStore}

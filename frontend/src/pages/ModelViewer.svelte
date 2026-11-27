@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../lib/router/index.js';
+  import { location } from '../lib/locationStore.js';
   import { ArrowLeft, Loader2 } from 'lucide-svelte';
   import { getDataModel, listDataModelVersions, getDataModelVersionDataUrl } from '../lib/api.js';
   import OntologyBrowserPanel from '../components/OntologyBrowserPanel.svelte';
@@ -11,6 +12,10 @@
 
   export let id;
   export let versionId = '';
+
+  // The term to open the model on (`?term=<iri>`): a class, a property or a
+  // shape of this version. Pages that name a term of a model link here with it.
+  $: initialTerm = new URLSearchParams($location.search).get('term') || '';
 
   let model = null;
   let versions = [];
@@ -83,6 +88,7 @@
       subGraphs={selectedVersion.sub_graphs || []}
       versionLabel={selectedVersion.version}
       rawDataUrl={getDataModelVersionDataUrl(id, selectedVersion.version, 'turtle', 'all')}
+      {initialTerm}
     />
   {/if}
 </div>

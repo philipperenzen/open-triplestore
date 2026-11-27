@@ -39,6 +39,13 @@
 
   type Tab = 'classes' | 'properties' | 'axioms' | 'shapes' | 'skos' | 'namespaces' | 'diagnostics';
   export let initialTab: Tab = 'classes';
+  /**
+   * A term of the model to open on: a class is selected in the hierarchy, a
+   * property opens in the properties tab, a shape in the SHACL tab. Applied
+   * once per term, when the model is there; a term the model does not hold
+   * leaves the view as it is.
+   */
+  export let initialTerm: string = '';
   let activeTab: Tab = initialTab;
   $: if (initialTab) activeTab = initialTab;
 
@@ -180,6 +187,22 @@
     card?.scrollIntoView?.({ block: 'start' });
     card?.focus({ preventScroll: true });
   }
+
+  // The term the page was linked with (see `initialTerm`).
+  let openedTerm = '';
+  let initialClass = '';
+  $: if (model && initialTerm && initialTerm !== openedTerm) openTerm(initialTerm);
+  function openTerm(iri: string) {
+    openedTerm = iri;
+    if (!model) return;
+    if (model.classes.has(iri)) {
+      // A filter that hides the class would leave it out of the tree.
+      if (view && !view.classes.some(c => c.iri === iri)) filter = emptyFilter();
+      activeTab = 'classes';
+      initialClass = iri;
+    } else if (model.properties.has(iri)) openProperty(iri);
+    else if (model.shapes.has(iri)) openShape(iri);
+  }
 </script>
 
 <div class="omv">
@@ -239,6 +262,7 @@
         onOpenProperty={openProperty}
         onOpenShape={openShape}
         resourceGraph={graphIri}
+        initialSelected={initialClass}
       />
     {:else if activeTab === 'properties' || activeTab === 'axioms'}
       <PropertyAxiomPanel properties={view.properties} onOpen={viewResource} bind:selectedIri={selectedProperty} />

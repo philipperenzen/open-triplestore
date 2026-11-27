@@ -18,6 +18,8 @@
   export let onOpenShape: (_iri: string) => void = () => {};
   /** Graph passed to the resource page when an instance from the model is opened. */
   export let resourceGraph: string = '';
+  /** The class to open on (a deep link): selected once, when it is known. */
+  export let initialSelected: string = '';
 
   let selectedIri = '';
   let expanded = new Set<string>();
@@ -46,6 +48,12 @@
       .find(el => el.dataset.classIri === iri);
     row?.scrollIntoView?.({ block: 'nearest' });
     row?.querySelector<HTMLElement>('.cls-btn')?.focus({ preventScroll: true });
+  }
+
+  let appliedInitial = '';
+  $: if (initialSelected && initialSelected !== appliedInitial && (byIri.has(initialSelected) || model?.classes.has(initialSelected))) {
+    appliedInitial = initialSelected;
+    selectClass(initialSelected);
   }
 
   function toggle(iri: string) {
