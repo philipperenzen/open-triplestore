@@ -38,6 +38,13 @@ ignore = [
     # use X25519 and passphrase recipients only, so no P-256 operation runs. Revisit when
     # age moves to elliptic-curve 0.14.
     "RUSTSEC-2026-0387",  # crypto-bigint 0.5 — timing variability (via age; path unused)
+    # chrono is reported unmaintained: the advisory points at "Soft-deprecating chrono and
+    # chrono-tz" (chronotope/chrono#1768) and names jiff and time as successors. It reports
+    # no vulnerability and there is no patched release. Besides our own use of it,
+    # openidconnect 4 / oauth2 5 and openraft 0.9 require chrono in every build, lopdf 0.47
+    # behind `asset-pdf` and samael behind `saml`. Moving our own code to another crate
+    # would therefore not take chrono out of the graph. Revisit when those crates move.
+    "RUSTSEC-2026-0543",  # chrono — unmaintained (direct, and via openidconnect / oauth2 / openraft / lopdf / samael)
 ]
 
 [bans]
