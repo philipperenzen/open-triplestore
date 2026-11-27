@@ -59,7 +59,7 @@
     "cytoscape": "^3.34.4",
     "cytoscape-cose-bilkent": "^4.1.0",
     "cytoscape-navigator": "^2.0.2",
-    "dompurify": "^3.4.17",
+    "dompurify": "^3.4.18",
     "leaflet": "^1.9.4",
     "lucide-svelte": "npm:@lucide/svelte@^1.57.0",
     "maplibre-gl": "^6.17.0",
